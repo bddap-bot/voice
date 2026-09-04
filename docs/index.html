@@ -55,7 +55,6 @@
 </div>
 <div id="modes" class="row hidden">
   <button id="live">Live call</button>
-  <span id="livestate"></span>
 </div>
 <audio id="remote" autoplay playsinline></audio>
 <div id="log"></div>
@@ -196,6 +195,8 @@ async function liveStart() {
     const ready = text(await request(enc.encode('live')));
     if (ready !== 'ready') throw new Error(ready);
   });
+  const sendFrame = (s) => send_only(enc.encode(s));
+  const report = (s, cls = 'ok') => { setStatus(`live: ${s}`, cls); sendFrame(`state\n${s}`).catch(() => {}); };
   const pc = new RTCPeerConnection();
   LIVE.pc = pc;
   const silence = LIVE.silence();
@@ -209,12 +210,13 @@ async function liveStart() {
     else if (m.type === 'error') setStatus(`live: ${m.error?.message || m.error?.code || 'error'}`, 'err');
   };
   pc.ontrack = (e) => { $('remote').srcObject = e.streams[0] ?? new MediaStream([e.track]); };
-  pc.onconnectionstatechange = () => { $('livestate').textContent = pc.connectionState; if (pc.connectionState === 'failed') liveStop('webrtc failed'); };
+  pc.onconnectionstatechange = () => { report(`media ${pc.connectionState}`); if (pc.connectionState === 'failed') liveStop('media failed'); };
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
   await new Promise((r) => { if (pc.iceGatheringState === 'complete') r(); else { pc.onicegatheringstatechange = () => pc.iceGatheringState === 'complete' && r(); setTimeout(r, 2000); } });
-  const sendFrame = (s) => send_only(enc.encode(s));
   await sendFrame(`offer\n${pc.localDescription.sdp}`);
+  const local = (pc.localDescription.sdp.match(/^a=candidate:.*/gm) ?? []).map((l) => l.replace(/^a=candidate:\S+ \d+ (\S+) .*typ (\S+).*$/, '$1 $2').toLowerCase());
+  report(`offer sent, ${local.length ? local.join(', ') : 'no candidates'}`);
   LIVE.loop = (async () => {
     try {
       for (;;) {
@@ -229,20 +231,19 @@ async function liveStart() {
       }
     } catch (e) { if (LIVE.on) liveStop(e.message || String(e)); }
   })();
-  LIVE.ptt = createLivePtt({ mediaDevices: navigator.mediaDevices, sender, silence, send: sendFrame, onState: (s) => setStatus(s, s.includes('refused') ? 'err' : 'ok') });
+  LIVE.ptt = createLivePtt({ mediaDevices: navigator.mediaDevices, sender, silence, send: sendFrame, onState: (s) => report(s, s.includes('refused') ? 'err' : 'ok') });
 }
 async function liveStop(why) {
   LIVE.on = false;
   $('live').classList.remove('on');
-  $('livestate').textContent = '';
   if (LIVE.ptt) await LIVE.ptt.release();
   LIVE.ptt = null;
   if (LIVE.pc) LIVE.pc.close();
   LIVE.pc = null;
-  try { await send_only(enc.encode('bye')); } catch {}
+  try { await send_only(enc.encode(why ? `bye\n${why}` : 'bye')); } catch {}
   await Promise.race([LIVE.loop, new Promise((r) => setTimeout(r, 3000))]);
   LIVE.loop = null;
-  setStatus(why ? `live ended: ${why}` : 'live ended', why ? 'err' : '');
+  if (why) say('hub', `live ended: ${why}`);
   start(localStorage.getItem(KEY));
 }
 $('live').addEventListener('click', async () => {

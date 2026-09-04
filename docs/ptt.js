@@ -94,7 +94,7 @@ export function createLivePtt({ mediaDevices, sender, silence, send, onState = (
       track = t;
       await sender.replaceTrack(t);
       await send('hold');
-      onState('live — talking');
+      onState('talking');
     },
     async release() {
       if (!held) return;
@@ -105,7 +105,7 @@ export function createLivePtt({ mediaDevices, sender, silence, send, onState = (
       await sender.replaceTrack(silence);
       await send('release');
       quiet = setTimer(() => { quiet = null; if (!held) sender.replaceTrack(null); }, quietMs);
-      onState('live — listening');
+      onState('listening');
     },
   };
 }

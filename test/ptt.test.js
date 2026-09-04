@@ -131,6 +131,35 @@ test('live: release reports the measured input peak', async () => {
   assert.ok(states.some((s) => s.startsWith('sender hold: audio:')));
 });
 
+test('live: failed diagnostics do not break capture cleanup or release', async () => {
+  const h = liveHarness();
+  const states = [];
+  const live = createLivePtt({
+    mediaDevices: { getUserMedia: async () => { const m = fakeMic(); h.mics.push(m); return m.stream; } },
+    sender: h.sender, silence: h.silence, send: async (f) => h.sent.push(f), onState: (s) => states.push(s),
+    makeMeter: () => { throw new Error('analyser unavailable'); },
+  });
+  await live.hold();
+  await live.release();
+  assert.equal(h.mics[0].track.stopped, true);
+  assert.deepEqual(h.sent, ['hold', 'release']);
+  assert.ok(states.includes('input meter failed: analyser unavailable'));
+});
+
+test('live: sender refusal stops the mic and sends no hold', async () => {
+  const mic = fakeMic();
+  const states = [];
+  const live = createLivePtt({
+    mediaDevices: { getUserMedia: async () => mic.stream },
+    sender: { replaceTrack: async () => { throw new Error('incompatible track'); } }, silence: {},
+    send: async () => assert.fail('hold must not be sent'), onState: (s) => states.push(s),
+  });
+  await live.hold();
+  assert.equal(mic.track.stopped, true);
+  assert.equal(live.held, false);
+  assert.ok(states.includes('sender hold failed: incompatible track'));
+});
+
 test('live: release racing getUserMedia stops the track and never installs it', async () => {
   const h = liveHarness({ gated: true });
   const holding = h.live.hold();

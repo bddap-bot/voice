@@ -99,8 +99,18 @@ export function createLivePtt({ mediaDevices, sender, silence, send, onState = (
       if (!held) { t.stop(); return; }
       track = t;
       onState(`mic granted: ${describeTrack(t)}`);
-      meter = makeMeter(s);
-      await sender.replaceTrack(t);
+      try { meter = makeMeter(s); }
+      catch (e) { onState(`input meter failed: ${e && e.message ? e.message : e}`); }
+      try { await sender.replaceTrack(t); }
+      catch (e) {
+        if (meter) meter.close();
+        meter = null;
+        track.stop();
+        track = null;
+        held = false;
+        onState(`sender hold failed: ${e && e.message ? e.message : e}`);
+        return;
+      }
       onState(`sender hold: ${describeTrack(sender.track || t)}`);
       await send('hold');
       onState('talking');
@@ -109,14 +119,18 @@ export function createLivePtt({ mediaDevices, sender, silence, send, onState = (
       if (!held) return;
       held = false;
       if (!track) return;
-      const level = meter ? meter.read() : null;
+      let level = null;
+      try { level = meter ? meter.read() : null; }
+      catch (e) { onState(`input meter failed: ${e && e.message ? e.message : e}`); }
       if (level !== null) onState(`input peak ${level.toFixed(4)}`);
       if (meter) meter.close();
       meter = null;
       track.stop();
       track = null;
-      await sender.replaceTrack(silence);
-      onState(`sender release: ${describeTrack(sender.track || silence)}`);
+      try {
+        await sender.replaceTrack(silence);
+        onState(`sender release: ${describeTrack(sender.track || silence)}`);
+      } catch (e) { onState(`sender release failed: ${e && e.message ? e.message : e}`); }
       await send('release');
       quiet = setTimer(() => {
         quiet = null;

@@ -288,7 +288,7 @@ $('live').addEventListener('click', async () => {
   LIVE.ctx ??= new AudioContext();
   const resume = LIVE.ctx.resume();
   const play = $('remote').play();
-  Promise.allSettled([resume, play]).then(([r, p]) => LIVE.report(`gesture audio: context=${LIVE.ctx.state} playback=${p.status}`));
+  Promise.allSettled([resume, play]).then(([, p]) => LIVE.report(`gesture audio: context=${LIVE.ctx.state} playback=${p.status}`));
   try { await liveStart(); } catch (e) { liveStop(e.message || String(e)); }
 });
 

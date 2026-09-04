@@ -75,6 +75,7 @@ function showSavedState(saved) { $('entry').classList.toggle('hidden', saved); $
 function say(cls, text) {
   const d = document.createElement('div'); d.className = cls; d.textContent = text;
   $('log').prepend(d);
+  return d;
 }
 
 function b64urlToText(s) {
@@ -203,9 +204,9 @@ async function liveStart() {
   let spoken = null;
   events.onmessage = (e) => {
     let m; try { m = JSON.parse(e.data); } catch { return; }
-    if (m.type === 'output_transcript.added') { if (!spoken) spoken = say('hub', '(voice)'); spoken.textContent += m.item.text; }
-    else if (m.type === 'turn.done' && m.turn.role === 'assistant') spoken = null;
-    else if (m.type === 'error') setStatus(`live: ${m.error.message || m.error.code}`, 'err');
+    if (m.type === 'output_transcript.added') { spoken ??= say('hub', '(voice)'); spoken.textContent += m.item?.text ?? ''; }
+    else if (m.type === 'turn.created' && m.turn?.role === 'assistant') spoken = null;
+    else if (m.type === 'error') setStatus(`live: ${m.error?.message || m.error?.code || 'error'}`, 'err');
   };
   pc.ontrack = (e) => { $('remote').srcObject = e.streams[0] ?? new MediaStream([e.track]); };
   pc.onconnectionstatechange = () => { $('livestate').textContent = pc.connectionState; if (pc.connectionState === 'failed') liveStop('webrtc failed'); };

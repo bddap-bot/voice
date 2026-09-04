@@ -213,3 +213,64 @@ test('live: the silent track is dropped ${quietMs} after release so the call hea
   assert.equal(timers[1].fn, null, 'a hold inside the window cancels the drop');
   assert.equal(replaced.filter((x) => x === null).length, 1);
 });
+
+import { createNudge } from '../docs/ptt.js';
+
+function nudgeRig() {
+  const timers = [];
+  const cleared = [];
+  const log = { nudges: 0, clears: 0 };
+  const nudge = createNudge({
+    onNudge: () => log.nudges++,
+    onClear: () => log.clears++,
+    setTimer: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+    clearTimer: (id) => { cleared.push(id); timers[id - 1].fn = null; },
+  });
+  return { nudge, timers, cleared, log, fire: () => { for (const t of timers) t.fn?.(); } };
+}
+
+test('nudge: media connected with no hold fires once after the window', () => {
+  const r = nudgeRig();
+  r.nudge.connected();
+  assert.equal(r.timers.length, 1);
+  assert.equal(r.timers[0].ms, 8000);
+  assert.equal(r.log.nudges, 0);
+  r.fire();
+  assert.equal(r.log.nudges, 1);
+});
+
+test('nudge: a hold inside the window clears the timer; the recorded callback is inert afterwards', () => {
+  const r = nudgeRig();
+  r.nudge.connected();
+  const { fn } = r.timers[0];
+  r.nudge.hold();
+  assert.deepEqual(r.cleared, [1]);
+  assert.equal(r.log.clears, 1);
+  fn();
+  assert.equal(r.log.nudges, 0);
+});
+
+test('nudge: stop clears a pending timer and calls onClear', () => {
+  const r = nudgeRig();
+  r.nudge.connected();
+  r.nudge.stop();
+  assert.deepEqual(r.cleared, [1]);
+  assert.equal(r.log.clears, 1);
+  r.fire();
+  assert.equal(r.log.nudges, 0);
+});
+
+test('nudge: a second connected() while pending arms no second timer', () => {
+  const r = nudgeRig();
+  r.nudge.connected();
+  r.nudge.connected();
+  assert.equal(r.timers.length, 1);
+});
+
+test('nudge: after a hold, connected() arms nothing', () => {
+  const r = nudgeRig();
+  r.nudge.hold();
+  r.nudge.connected();
+  assert.equal(r.timers.length, 0);
+  assert.equal(r.log.nudges, 0);
+});

@@ -140,3 +140,13 @@ export function createLivePtt({ mediaDevices, sender, silence, send, onState = (
     },
   };
 }
+
+export function createNudge({ afterMs = 8000, onNudge, onClear = () => {}, setTimer = setTimeout, clearTimer = clearTimeout }) {
+  let timer = null;
+  let held = false;
+  return {
+    connected() { if (held || timer !== null) return; timer = setTimer(() => { timer = null; if (!held) onNudge(); }, afterMs); },
+    hold() { held = true; if (timer !== null) { clearTimer(timer); timer = null; } onClear(); },
+    stop() { held = false; if (timer !== null) { clearTimer(timer); timer = null; } onClear(); },
+  };
+}

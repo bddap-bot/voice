@@ -24,6 +24,8 @@
   #hold { width: min(70vw, 320px); height: min(70vw, 320px); border-radius: 50%; font-size: 24px;
           background: #1d1d20; border: 3px solid #3a3a3f; touch-action: none; user-select: none; -webkit-user-select: none; }
   #hold.on { background: #b3261e; border-color: #ff6b6b; }
+  #hold.nudge { animation: nudge 1s ease-in-out infinite alternate; }
+  @keyframes nudge { from { border-color: #3a3a3f; } to { border-color: #ff6b6b; box-shadow: 0 0 24px #ff6b6b; } }
   #live.on { background: #1f6f3f; border-color: #6bd47a; }
   #log { padding: 0 16px 16px; font-size: 15px; white-space: pre-wrap; }
   #log .me { color: #9fb7ff; } #log .hub { color: #e6e6e6; }
@@ -61,7 +63,7 @@
 
 <script type="module">
 import wbgInit, { init as wasmInit, connect, send, send_only, recv } from 'https://bddap-bot.github.io/botq/botq_dash_wasm.js';
-import { createPtt, createLivePtt } from './ptt.js';
+import { createPtt, createLivePtt, createNudge } from './ptt.js';
 
 const KEY = 'voice.token';
 const ALPN = 'voice-web/1';
@@ -137,8 +139,9 @@ function capture(stream) {
 const ptt = createPtt({ mediaDevices: navigator.mediaDevices, capture, upload, onState: (s) => setStatus(s, s.startsWith('sent') ? 'ok' : s.includes('fail') || s.includes('refused') ? 'err' : '') });
 const hold = $('hold');
 const active = () => (LIVE.on ? LIVE.ptt : ptt);
-const down = (e) => { e.preventDefault(); hold.classList.add('on'); if (LIVE.on) LIVE.report(`gesture down: ${e.type} ${e.pointerType || 'unknown'}`); active()?.hold().catch((err) => setStatus(`hold failed: ${err.message || err}`, 'err')); };
-const up = (e) => { e.preventDefault(); hold.classList.remove('on'); if (LIVE.on) LIVE.report(`gesture up: ${e.type} ${e.pointerType || 'unknown'}`); active()?.release().catch((err) => setStatus(`release failed: ${err.message || err}`, 'err')); };
+const down = (e) => { e.preventDefault(); hold.classList.add('on'); if (LIVE.on) LIVE.nudge?.hold(); active()?.hold().catch((err) => setStatus(`hold failed: ${err.message || err}`, 'err')); };
+const up = (e) => { e.preventDefault(); hold.classList.remove('on'); active()?.release().catch((err) => setStatus(`release failed: ${err.message || err}`, 'err')); };
+for (const type of ['touchstart', 'touchend', 'touchcancel', 'pointerdown', 'pointerup', 'pointercancel', 'mousedown', 'mouseup']) hold.addEventListener(type, (e) => { if (LIVE.on) LIVE.report(`input ${e.type} ${e.pointerType ?? ''}`.trim()); }, { passive: true });
 hold.addEventListener('pointerdown', down);
 hold.addEventListener('pointerup', up);
 hold.addEventListener('pointercancel', up);
@@ -180,7 +183,7 @@ async function start(token) {
 let queue = Promise.resolve();
 const sendFrame = (s) => { const p = queue.then(() => send_only(enc.encode(s))); queue = p.catch(() => {}); return p; };
 const LIVE = {
-  on: false, pc: null, ptt: null, ctx: null, token: null, report: () => {},
+  on: false, pc: null, ptt: null, nudge: null, ctx: null, token: null, report: () => {},
   silence() {
     this.ctx ??= new AudioContext();
     const src = this.ctx.createConstantSource(); src.offset.value = 0;
@@ -217,6 +220,7 @@ async function liveStart() {
   });
   const liveStatus = (s, cls = 'ok') => { s = String(s).slice(0, 190); setStatus(`live: ${s}`, cls); sendFrame(`state\n${s}`).catch(() => {}); };
   LIVE.report = liveStatus;
+  LIVE.nudge = createNudge({ onNudge: () => { liveStatus('hold the button to talk', 'err'); hold.classList.add('nudge'); }, onClear: () => hold.classList.remove('nudge') });
   liveStatus(`audio context ${LIVE.ctx.state}; playback ${$('remote').paused ? 'paused' : 'started'}`);
   const pc = new RTCPeerConnection();
   LIVE.pc = pc;
@@ -238,6 +242,7 @@ async function liveStart() {
   pc.onconnectionstatechange = () => {
     const st = pc.connectionState;
     liveStatus(`media ${st}`, st === 'failed' || st === 'disconnected' ? 'err' : 'ok');
+    if (st === 'connected') LIVE.nudge?.connected();
     if (st === 'failed') liveStop('media failed');
   };
   const offer = await pc.createOffer();
@@ -273,6 +278,8 @@ async function liveStop(why) {
   $('live').classList.remove('on');
   if (LIVE.ptt) await LIVE.ptt.release().catch(() => {});
   LIVE.ptt = null;
+  LIVE.nudge?.stop();
+  LIVE.nudge = null;
   if (LIVE.pc) LIVE.pc.close();
   LIVE.pc = null;
   try { await Promise.race([sendFrame(why ? `bye\n${why}` : 'bye'), new Promise((r) => setTimeout(r, 3000))]); } catch {}

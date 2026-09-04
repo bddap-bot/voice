@@ -75,10 +75,15 @@ test('encodeWav resamples to 16 kHz mono 16-bit', () => {
   assert.equal(v.getInt16(44, true), Math.trunc(0.25 * 0x7fff));
 });
 
-import { createLivePtt } from '../docs/ptt.js';
+import { createLivePtt, describeTrack } from '../docs/ptt.js';
+
+test('live: track reports contain the capture state Firefox exposes', () => {
+  assert.equal(describeTrack({ kind: 'audio', readyState: 'live', enabled: true, muted: false }), 'audio:live enabled=true muted=false');
+  assert.equal(describeTrack(null), 'none');
+});
 
 function fakeMic() {
-  const track = { stopped: false, stop() { this.stopped = true; } };
+  const track = { kind: 'audio', readyState: 'live', enabled: true, muted: false, stopped: false, stop() { this.stopped = true; this.readyState = 'ended'; } };
   return { track, stream: { getAudioTracks: () => [track] } };
 }
 function liveHarness(opts = {}) {
@@ -109,6 +114,21 @@ test('live: mic track only installed while held; release stops it and restores s
   assert.equal(h.sender.track, h.silence, 'nothing but silence leaves the page outside a hold');
   assert.deepEqual(h.sent, ['hold', 'release']);
   assert.deepEqual(h.installed, [h.mics[0].track, h.silence]);
+});
+
+test('live: release reports the measured input peak', async () => {
+  const h = liveHarness();
+  const states = [];
+  const live = createLivePtt({
+    mediaDevices: { getUserMedia: async () => { const m = fakeMic(); h.mics.push(m); return m.stream; } },
+    sender: h.sender, silence: h.silence, send: async () => {}, onState: (s) => states.push(s),
+    makeMeter: () => ({ read: () => 0.125, close() {} }),
+  });
+  await live.hold();
+  await live.release();
+  assert.ok(states.includes('input peak 0.1250'));
+  assert.ok(states.some((s) => s.startsWith('mic granted: audio:')));
+  assert.ok(states.some((s) => s.startsWith('sender hold: audio:')));
 });
 
 test('live: release racing getUserMedia stops the track and never installs it', async () => {

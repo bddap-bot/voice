@@ -137,8 +137,8 @@ function capture(stream) {
 const ptt = createPtt({ mediaDevices: navigator.mediaDevices, capture, upload, onState: (s) => setStatus(s, s.startsWith('sent') ? 'ok' : s.includes('fail') || s.includes('refused') ? 'err' : '') });
 const hold = $('hold');
 const active = () => (LIVE.on ? LIVE.ptt : ptt);
-const down = (e) => { e.preventDefault(); hold.classList.add('on'); active()?.hold().catch((err) => setStatus(`hold failed: ${err.message || err}`, 'err')); };
-const up = (e) => { e.preventDefault(); hold.classList.remove('on'); active()?.release().catch((err) => setStatus(`release failed: ${err.message || err}`, 'err')); };
+const down = (e) => { e.preventDefault(); hold.classList.add('on'); if (LIVE.on) LIVE.report(`gesture down: ${e.type} ${e.pointerType || 'unknown'}`); active()?.hold().catch((err) => setStatus(`hold failed: ${err.message || err}`, 'err')); };
+const up = (e) => { e.preventDefault(); hold.classList.remove('on'); if (LIVE.on) LIVE.report(`gesture up: ${e.type} ${e.pointerType || 'unknown'}`); active()?.release().catch((err) => setStatus(`release failed: ${err.message || err}`, 'err')); };
 hold.addEventListener('pointerdown', down);
 hold.addEventListener('pointerup', up);
 hold.addEventListener('pointercancel', up);
@@ -180,7 +180,7 @@ async function start(token) {
 let queue = Promise.resolve();
 const sendFrame = (s) => { const p = queue.then(() => send_only(enc.encode(s))); queue = p.catch(() => {}); return p; };
 const LIVE = {
-  on: false, pc: null, ptt: null, ctx: null, token: null,
+  on: false, pc: null, ptt: null, ctx: null, token: null, report: () => {},
   silence() {
     this.ctx ??= new AudioContext();
     const src = this.ctx.createConstantSource(); src.offset.value = 0;
@@ -188,6 +188,23 @@ const LIVE = {
     return dst.stream.getAudioTracks()[0];
   },
 };
+function makeMeter(stream) {
+  const analyser = LIVE.ctx.createAnalyser();
+  analyser.fftSize = 1024;
+  const source = LIVE.ctx.createMediaStreamSource(stream);
+  source.connect(analyser);
+  const values = new Float32Array(analyser.fftSize);
+  let peak = 0;
+  const sample = () => {
+    analyser.getFloatTimeDomainData(values);
+    let sum = 0;
+    for (const value of values) sum += value * value;
+    peak = Math.max(peak, Math.sqrt(sum / values.length));
+  };
+  const timer = setInterval(sample, 100);
+  sample();
+  return { read: () => { sample(); return peak; }, close: () => { clearInterval(timer); source.disconnect(); analyser.disconnect(); } };
+}
 async function liveStart() {
   const t = LIVE.token;
   setStatus('live: reconnecting…');
@@ -198,7 +215,9 @@ async function liveStart() {
     const ready = text(await request(enc.encode('live')));
     if (ready !== 'ready') throw new Error(ready);
   });
-  const liveStatus = (s, cls = 'ok') => { setStatus(`live: ${s}`, cls); sendFrame(`state\n${s}`).catch(() => {}); };
+  const liveStatus = (s, cls = 'ok') => { s = String(s).slice(0, 190); setStatus(`live: ${s}`, cls); sendFrame(`state\n${s}`).catch(() => {}); };
+  LIVE.report = liveStatus;
+  liveStatus(`audio context ${LIVE.ctx.state}; playback ${$('remote').paused ? 'paused' : 'started'}`);
   const pc = new RTCPeerConnection();
   LIVE.pc = pc;
   const silence = LIVE.silence();
@@ -211,7 +230,11 @@ async function liveStart() {
     else if (m.type === 'turn.created' && m.turn?.role === 'assistant') spoken = null;
     else if (m.type === 'error') liveStatus(`data channel error: ${m.error?.message || m.error?.code || 'error'}`, 'err');
   };
-  pc.ontrack = (e) => { $('remote').srcObject = e.streams[0] ?? new MediaStream([e.track]); };
+  pc.ontrack = (e) => {
+    const remote = $('remote');
+    remote.srcObject = e.streams[0] ?? new MediaStream([e.track]);
+    remote.play().then(() => liveStatus(`playback started; audio context ${LIVE.ctx.state}`)).catch((x) => liveStatus(`playback blocked: ${x.message || x}`, 'err'));
+  };
   pc.onconnectionstatechange = () => {
     const st = pc.connectionState;
     liveStatus(`media ${st}`, st === 'failed' || st === 'disconnected' ? 'err' : 'ok');
@@ -242,7 +265,7 @@ async function liveStart() {
       }
     } catch (e) { if (LIVE.on) liveStop(e.message || String(e)); }
   })();
-  LIVE.ptt = createLivePtt({ mediaDevices: navigator.mediaDevices, sender, silence, send: sendFrame, onState: (s) => liveStatus(s, s.includes('refused') ? 'err' : 'ok') });
+  LIVE.ptt = createLivePtt({ mediaDevices: navigator.mediaDevices, sender, silence, send: sendFrame, makeMeter, onState: (s) => liveStatus(s, s.includes('refused') || s.includes('failed') ? 'err' : 'ok') });
 }
 async function liveStop(why) {
   if (!LIVE.on) return;
@@ -262,6 +285,10 @@ $('live').addEventListener('click', async () => {
   if (LIVE.on) return liveStop();
   LIVE.on = true;
   $('live').classList.add('on');
+  LIVE.ctx ??= new AudioContext();
+  const resume = LIVE.ctx.resume();
+  const play = $('remote').play();
+  Promise.allSettled([resume, play]).then(([r, p]) => LIVE.report(`gesture audio: context=${LIVE.ctx.state} playback=${p.status}`));
   try { await liveStart(); } catch (e) { liveStop(e.message || String(e)); }
 });
 

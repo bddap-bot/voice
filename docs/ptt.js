@@ -75,10 +75,15 @@ export function createPtt({ mediaDevices, capture, upload, onState = () => {} })
   };
 }
 
-export function createLivePtt({ mediaDevices, sender, silence, send, onState = () => {}, quietMs = 1500, setTimer = setTimeout, clearTimer = clearTimeout }) {
+export function describeTrack(track) {
+  return track ? `${track.kind || 'track'}:${track.readyState || '?'} enabled=${track.enabled !== false} muted=${track.muted === true}` : 'none';
+}
+
+export function createLivePtt({ mediaDevices, sender, silence, send, onState = () => {}, makeMeter = () => null, quietMs = 1500, setTimer = setTimeout, clearTimer = clearTimeout }) {
   let held = false;
   let track = null;
   let quiet = null;
+  let meter = null;
   return {
     get held() { return held; },
     async hold() {
@@ -90,9 +95,13 @@ export function createLivePtt({ mediaDevices, sender, silence, send, onState = (
       try { s = await mediaDevices.getUserMedia({ audio: true }); }
       catch (e) { held = false; onState(`mic refused: ${e && e.message ? e.message : e}`); return; }
       const t = s.getAudioTracks()[0];
+      if (!t) { held = false; for (const candidate of s.getTracks()) candidate.stop(); onState('mic granted: no audio track'); return; }
       if (!held) { t.stop(); return; }
       track = t;
+      onState(`mic granted: ${describeTrack(t)}`);
+      meter = makeMeter(s);
       await sender.replaceTrack(t);
+      onState(`sender hold: ${describeTrack(sender.track || t)}`);
       await send('hold');
       onState('talking');
     },
@@ -100,11 +109,19 @@ export function createLivePtt({ mediaDevices, sender, silence, send, onState = (
       if (!held) return;
       held = false;
       if (!track) return;
+      const level = meter ? meter.read() : null;
+      if (level !== null) onState(`input peak ${level.toFixed(4)}`);
+      if (meter) meter.close();
+      meter = null;
       track.stop();
       track = null;
       await sender.replaceTrack(silence);
+      onState(`sender release: ${describeTrack(sender.track || silence)}`);
       await send('release');
-      quiet = setTimer(() => { quiet = null; if (!held) sender.replaceTrack(null).catch(() => {}); }, quietMs);
+      quiet = setTimer(() => {
+        quiet = null;
+        if (!held) sender.replaceTrack(null).then(() => onState('sender quiet: none')).catch((e) => onState(`sender quiet failed: ${e && e.message ? e.message : e}`));
+      }, quietMs);
       onState('listening');
     },
   };

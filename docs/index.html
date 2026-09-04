@@ -109,12 +109,13 @@ async function pollOnce() {
     if (ack !== 'ok') throw new Error(`ack: ${ack}`);
     return out;
   });
-  if (!reply) return;
+  if (!reply) return false;
   say('hub', reply.text);
   const url = URL.createObjectURL(new Blob([reply.wav], { type: 'audio/wav' }));
   const audio = new Audio(url);
   audio.onended = () => URL.revokeObjectURL(url);
   audio.play().catch(() => setStatus('tap to enable audio', 'err'));
+  return true;
 }
 
 function capture(stream) {
@@ -158,8 +159,9 @@ async function start(token) {
     $('talk').classList.remove('hidden');
     setStatus('connected — hold the button to talk', 'ok');
     for (;;) {
-      try { await pollOnce(); } catch (e) { setStatus(`poll failed: ${e.message || e}`, 'err'); }
-      await new Promise((r) => setTimeout(r, 2000));
+      let served = false;
+      try { served = await pollOnce(); } catch (e) { setStatus(`poll failed: ${e.message || e}`, 'err'); }
+      if (!served) await new Promise((r) => setTimeout(r, 500));
     }
   } catch (e) {
     setStatus(`error: ${e && e.message ? e.message : e}`, 'err');

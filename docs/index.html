@@ -24,6 +24,7 @@
   #hold { width: min(70vw, 320px); height: min(70vw, 320px); border-radius: 50%; font-size: 24px;
           background: #1d1d20; border: 3px solid #3a3a3f; touch-action: none; user-select: none; -webkit-user-select: none; }
   #hold.on { background: #b3261e; border-color: #ff6b6b; }
+  #live.on { background: #1f6f3f; border-color: #6bd47a; }
   #log { padding: 0 16px 16px; font-size: 15px; white-space: pre-wrap; }
   #log .me { color: #9fb7ff; } #log .hub { color: #e6e6e6; }
 </style>
@@ -52,11 +53,16 @@
 <div id="talk" class="hidden">
   <button id="hold">hold to talk</button>
 </div>
+<div id="modes" class="row hidden">
+  <button id="live">Live call</button>
+  <span id="livestate"></span>
+</div>
+<audio id="remote" autoplay playsinline></audio>
 <div id="log"></div>
 
 <script type="module">
-import wbgInit, { init as wasmInit, connect, send } from 'https://bddap-bot.github.io/botq/botq_dash_wasm.js';
-import { createPtt } from './ptt.js';
+import wbgInit, { init as wasmInit, connect, send, send_only, recv } from 'https://bddap-bot.github.io/botq/botq_dash_wasm.js';
+import { createPtt, createLivePtt } from './ptt.js';
 
 const KEY = 'voice.token';
 const ALPN = 'voice-web/1';
@@ -130,12 +136,12 @@ function capture(stream) {
 
 const ptt = createPtt({ mediaDevices: navigator.mediaDevices, capture, upload, onState: (s) => setStatus(s, s.startsWith('sent') ? 'ok' : s.includes('fail') || s.includes('refused') ? 'err' : '') });
 const hold = $('hold');
-const down = (e) => { e.preventDefault(); hold.classList.add('on'); ptt.hold(); };
-const up = (e) => { e.preventDefault(); hold.classList.remove('on'); ptt.release(); };
+const down = (e) => { e.preventDefault(); hold.classList.add('on'); (LIVE.ptt ?? ptt).hold(); };
+const up = (e) => { e.preventDefault(); hold.classList.remove('on'); (LIVE.ptt ?? ptt).release(); };
 hold.addEventListener('pointerdown', down);
 hold.addEventListener('pointerup', up);
 hold.addEventListener('pointercancel', up);
-hold.addEventListener('pointerleave', (e) => { if (ptt.held) up(e); });
+hold.addEventListener('pointerleave', (e) => { if ((LIVE.ptt ?? ptt).held) up(e); });
 hold.addEventListener('contextmenu', (e) => e.preventDefault());
 
 async function start(token) {
@@ -157,8 +163,10 @@ async function start(token) {
     $('token').value = '';
     showSavedState(true);
     $('talk').classList.remove('hidden');
+    $('modes').classList.remove('hidden');
+    LIVE.token = t;
     setStatus('connected — hold the button to talk', 'ok');
-    for (;;) {
+    while (!LIVE.on) {
       let served = false;
       try { served = await pollOnce(); } catch (e) { setStatus(`poll failed: ${e.message || e}`, 'err'); }
       if (!served) await new Promise((r) => setTimeout(r, 500));
@@ -167,6 +175,75 @@ async function start(token) {
     setStatus(`error: ${e && e.message ? e.message : e}`, 'err');
   }
 }
+
+const LIVE = {
+  on: false, pc: null, ptt: null, ctx: null, token: null,
+  silence() {
+    this.ctx ??= new AudioContext();
+    const src = this.ctx.createConstantSource(); src.offset.value = 0;
+    const dst = this.ctx.createMediaStreamDestination(); src.connect(dst); src.start();
+    return dst.stream.getAudioTracks()[0];
+  },
+};
+async function liveStart() {
+  const t = LIVE.token;
+  setStatus('live: reconnecting…');
+  await withStream(async () => {
+    await connect(t.relay_url ? `${t.endpoint_id}@${t.relay_url}` : t.endpoint_id, ALPN);
+    const auth = JSON.parse(text(await request(enc.encode(JSON.stringify({ auth: t.secret })))));
+    if (!auth.ok) throw new Error('auth rejected');
+    const ready = text(await request(enc.encode('live')));
+    if (ready !== 'ready') throw new Error(ready);
+  });
+  const pc = new RTCPeerConnection();
+  LIVE.pc = pc;
+  const silence = LIVE.silence();
+  const sender = pc.addTrack(silence, new MediaStream([silence]));
+  pc.createDataChannel('oai-events');
+  pc.ontrack = (e) => { $('remote').srcObject = e.streams[0] ?? new MediaStream([e.track]); };
+  pc.onconnectionstatechange = () => { $('livestate').textContent = pc.connectionState; if (pc.connectionState === 'failed') liveStop('webrtc failed'); };
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await new Promise((r) => { if (pc.iceGatheringState === 'complete') r(); else { pc.onicegatheringstatechange = () => pc.iceGatheringState === 'complete' && r(); setTimeout(r, 2000); } });
+  const sendFrame = (s) => send_only(enc.encode(s));
+  await sendFrame(`offer\n${pc.localDescription.sdp}`);
+  LIVE.loop = (async () => {
+    try {
+      for (;;) {
+        const f = text(await recv());
+        const nl = f.indexOf('\n');
+        const verb = nl < 0 ? f : f.slice(0, nl), body = nl < 0 ? '' : f.slice(nl + 1);
+        if (verb === 'answer') await pc.setRemoteDescription({ type: 'answer', sdp: body });
+        else if (verb === 'status') setStatus(`live: ${body}`, 'ok');
+        else if (verb === 'you') say('me', `🎙 ${body}`);
+        else if (verb === 'hub') say('hub', body);
+        else if (verb === 'model') say('hub', `(voice) ${body}`);
+        else if (verb === 'error') throw new Error(body);
+      }
+    } catch (e) { if (LIVE.on) liveStop(e.message || String(e)); }
+  })();
+  LIVE.ptt = createLivePtt({ mediaDevices: navigator.mediaDevices, sender, silence, send: sendFrame, onState: (s) => setStatus(s, s.includes('refused') ? 'err' : 'ok') });
+}
+async function liveStop(why) {
+  LIVE.on = false;
+  $('live').classList.remove('on');
+  $('livestate').textContent = '';
+  if (LIVE.ptt) await LIVE.ptt.release();
+  LIVE.ptt = null;
+  if (LIVE.pc) LIVE.pc.close();
+  LIVE.pc = null;
+  try { await send_only(enc.encode('bye')); } catch {}
+  await Promise.race([LIVE.loop, new Promise((r) => setTimeout(r, 3000))]);
+  LIVE.loop = null;
+  setStatus(why ? `live ended: ${why}` : 'live ended', why ? 'err' : '');
+  start(localStorage.getItem(KEY));
+}
+$('live').addEventListener('click', async () => {
+  if (LIVE.on) return liveStop();
+  LIVE.on = true;
+  $('live').classList.add('on');
+  try { await liveStart(); } catch (e) { liveStop(e.message || String(e)); }
+});
 
 $('connect').addEventListener('click', () => start($('token').value));
 $('reenter').addEventListener('click', () => { $('token').value = ''; showSavedState(false); $('token').focus(); });

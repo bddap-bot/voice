@@ -74,3 +74,35 @@ export function createPtt({ mediaDevices, capture, upload, onState = () => {} })
     },
   };
 }
+
+export function createLivePtt({ mediaDevices, sender, silence, send, onState = () => {} }) {
+  let held = false;
+  let track = null;
+  return {
+    get held() { return held; },
+    async hold() {
+      if (held) return;
+      held = true;
+      onState('opening mic');
+      let s;
+      try { s = await mediaDevices.getUserMedia({ audio: true }); }
+      catch (e) { held = false; onState(`mic refused: ${e && e.message ? e.message : e}`); return; }
+      const t = s.getAudioTracks()[0];
+      if (!held) { t.stop(); return; }
+      track = t;
+      await sender.replaceTrack(t);
+      await send('hold');
+      onState('live — talking');
+    },
+    async release() {
+      if (!held) return;
+      held = false;
+      if (!track) return;
+      track.stop();
+      track = null;
+      await sender.replaceTrack(silence);
+      await send('release');
+      onState('live — listening');
+    },
+  };
+}

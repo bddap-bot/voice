@@ -195,8 +195,9 @@ async function liveStart() {
     const ready = text(await request(enc.encode('live')));
     if (ready !== 'ready') throw new Error(ready);
   });
-  const sendFrame = (s) => send_only(enc.encode(s));
-  const report = (s, cls = 'ok') => { setStatus(`live: ${s}`, cls); sendFrame(`state\n${s}`).catch(() => {}); };
+  let queue = Promise.resolve();
+  const sendFrame = (s) => (queue = queue.then(() => send_only(enc.encode(s))));
+  const liveStatus = (s, cls = 'ok') => { setStatus(`live: ${s}`, cls); sendFrame(`state\n${s}`).catch(() => {}); };
   const pc = new RTCPeerConnection();
   LIVE.pc = pc;
   const silence = LIVE.silence();
@@ -207,16 +208,25 @@ async function liveStart() {
     let m; try { m = JSON.parse(e.data); } catch { return; }
     if (m.type === 'output_transcript.added') { spoken ??= say('hub', '(voice)'); spoken.textContent += m.item?.text ?? ''; }
     else if (m.type === 'turn.created' && m.turn?.role === 'assistant') spoken = null;
-    else if (m.type === 'error') setStatus(`live: ${m.error?.message || m.error?.code || 'error'}`, 'err');
+    else if (m.type === 'error') liveStatus(`data channel error: ${m.error?.message || m.error?.code || 'error'}`, 'err');
   };
   pc.ontrack = (e) => { $('remote').srcObject = e.streams[0] ?? new MediaStream([e.track]); };
-  pc.onconnectionstatechange = () => { report(`media ${pc.connectionState}`); if (pc.connectionState === 'failed') liveStop('media failed'); };
+  pc.onconnectionstatechange = () => {
+    const st = pc.connectionState;
+    liveStatus(`media ${st}`, st === 'failed' || st === 'disconnected' ? 'err' : 'ok');
+    if (st === 'failed') liveStop('media failed');
+  };
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
   await new Promise((r) => { if (pc.iceGatheringState === 'complete') r(); else { pc.onicegatheringstatechange = () => pc.iceGatheringState === 'complete' && r(); setTimeout(r, 2000); } });
   await sendFrame(`offer\n${pc.localDescription.sdp}`);
-  const local = (pc.localDescription.sdp.match(/^a=candidate:.*/gm) ?? []).map((l) => l.replace(/^a=candidate:\S+ \d+ (\S+) .*typ (\S+).*$/, '$1 $2').toLowerCase());
-  report(`offer sent, ${local.length ? local.join(', ') : 'no candidates'}`);
+  const local = {};
+  for (const l of pc.localDescription.sdp.match(/^a=candidate:.*/gm) ?? []) {
+    const [, proto, addr, typ] = /^a=candidate:\S+ \d+ (\S+) \d+ (\S+) \d+ typ (\S+)/.exec(l) ?? [];
+    const kind = proto ? `${proto.toLowerCase()}${addr.includes(':') ? '6' : /^\d+(\.\d+){3}$/.test(addr) ? '4' : ''} ${typ}` : 'unparsed';
+    local[kind] = (local[kind] ?? 0) + 1;
+  }
+  liveStatus(`offer sent, ${Object.entries(local).map(([k, n]) => `${k}×${n}`).join(' ') || 'no candidates'}`);
   LIVE.loop = (async () => {
     try {
       for (;;) {
@@ -231,7 +241,7 @@ async function liveStart() {
       }
     } catch (e) { if (LIVE.on) liveStop(e.message || String(e)); }
   })();
-  LIVE.ptt = createLivePtt({ mediaDevices: navigator.mediaDevices, sender, silence, send: sendFrame, onState: (s) => report(s, s.includes('refused') ? 'err' : 'ok') });
+  LIVE.ptt = createLivePtt({ mediaDevices: navigator.mediaDevices, sender, silence, send: sendFrame, onState: (s) => liveStatus(s, s.includes('refused') ? 'err' : 'ok') });
 }
 async function liveStop(why) {
   LIVE.on = false;

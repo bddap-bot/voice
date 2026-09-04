@@ -136,12 +136,13 @@ function capture(stream) {
 
 const ptt = createPtt({ mediaDevices: navigator.mediaDevices, capture, upload, onState: (s) => setStatus(s, s.startsWith('sent') ? 'ok' : s.includes('fail') || s.includes('refused') ? 'err' : '') });
 const hold = $('hold');
-const down = (e) => { e.preventDefault(); hold.classList.add('on'); (LIVE.ptt ?? ptt).hold(); };
-const up = (e) => { e.preventDefault(); hold.classList.remove('on'); (LIVE.ptt ?? ptt).release(); };
+const active = () => (LIVE.on ? LIVE.ptt : ptt);
+const down = (e) => { e.preventDefault(); hold.classList.add('on'); active()?.hold().catch((err) => setStatus(`hold failed: ${err.message || err}`, 'err')); };
+const up = (e) => { e.preventDefault(); hold.classList.remove('on'); active()?.release().catch((err) => setStatus(`release failed: ${err.message || err}`, 'err')); };
 hold.addEventListener('pointerdown', down);
 hold.addEventListener('pointerup', up);
 hold.addEventListener('pointercancel', up);
-hold.addEventListener('pointerleave', (e) => { if ((LIVE.ptt ?? ptt).held) up(e); });
+hold.addEventListener('pointerleave', (e) => { if (active()?.held) up(e); });
 hold.addEventListener('contextmenu', (e) => e.preventDefault());
 
 async function start(token) {
@@ -176,6 +177,8 @@ async function start(token) {
   }
 }
 
+let queue = Promise.resolve();
+const sendFrame = (s) => { const p = queue.then(() => send_only(enc.encode(s))); queue = p.catch(() => {}); return p; };
 const LIVE = {
   on: false, pc: null, ptt: null, ctx: null, token: null,
   silence() {
@@ -195,8 +198,6 @@ async function liveStart() {
     const ready = text(await request(enc.encode('live')));
     if (ready !== 'ready') throw new Error(ready);
   });
-  let queue = Promise.resolve();
-  const sendFrame = (s) => (queue = queue.then(() => send_only(enc.encode(s))));
   const liveStatus = (s, cls = 'ok') => { setStatus(`live: ${s}`, cls); sendFrame(`state\n${s}`).catch(() => {}); };
   const pc = new RTCPeerConnection();
   LIVE.pc = pc;
@@ -244,13 +245,14 @@ async function liveStart() {
   LIVE.ptt = createLivePtt({ mediaDevices: navigator.mediaDevices, sender, silence, send: sendFrame, onState: (s) => liveStatus(s, s.includes('refused') ? 'err' : 'ok') });
 }
 async function liveStop(why) {
+  if (!LIVE.on) return;
   LIVE.on = false;
   $('live').classList.remove('on');
-  if (LIVE.ptt) await LIVE.ptt.release();
+  if (LIVE.ptt) await LIVE.ptt.release().catch(() => {});
   LIVE.ptt = null;
   if (LIVE.pc) LIVE.pc.close();
   LIVE.pc = null;
-  try { await send_only(enc.encode(why ? `bye\n${why}` : 'bye')); } catch {}
+  try { await sendFrame(why ? `bye\n${why}` : 'bye'); } catch {}
   await Promise.race([LIVE.loop, new Promise((r) => setTimeout(r, 3000))]);
   LIVE.loop = null;
   if (why) say('hub', `live ended: ${why}`);

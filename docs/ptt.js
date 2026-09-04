@@ -104,7 +104,7 @@ export function createLivePtt({ mediaDevices, sender, silence, send, onState = (
       track = null;
       await sender.replaceTrack(silence);
       await send('release');
-      quiet = setTimer(() => { quiet = null; if (!held) sender.replaceTrack(null); }, quietMs);
+      quiet = setTimer(() => { quiet = null; if (!held) sender.replaceTrack(null).catch(() => {}); }, quietMs);
       onState('listening');
     },
   };

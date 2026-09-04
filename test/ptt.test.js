@@ -140,3 +140,27 @@ test('live: a second hold while held is a no-op (one mic per hold)', async () =>
   await h.live.release();
   assert.deepEqual(h.sent, ['hold', 'release']);
 });
+
+test('live: the silent track is dropped ${quietMs} after release so the call hears no stream between holds; a new hold cancels that', async () => {
+  const timers = [];
+  const replaced = [];
+  const sender = { replaceTrack: async (tr) => { replaced.push(tr); } };
+  const mic = { stop() {} };
+  const live = createLivePtt({
+    mediaDevices: { getUserMedia: async () => ({ getAudioTracks: () => [mic] }) },
+    sender, silence: 'SILENCE', send: async () => {},
+    setTimer: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clearTimer: (id) => { if (id) timers[id - 1].fn = null; },
+  });
+  await live.hold();
+  await live.release();
+  assert.deepEqual(replaced, [mic, 'SILENCE']);
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].ms, 1500);
+  timers[0].fn();
+  assert.equal(replaced[2], null, 'no track at all once the quiet window passes');
+  await live.hold();
+  await live.release();
+  await live.hold();
+  assert.equal(timers[1].fn, null, 'a hold inside the window cancels the drop');
+  assert.equal(replaced.filter((x) => x === null).length, 1);
+});

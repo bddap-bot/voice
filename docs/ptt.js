@@ -46,7 +46,6 @@ export function createPtt({ mediaDevices, capture, upload, onState = () => {} })
     async hold() {
       if (held) return;
       held = true;
-      clearTimer(quiet); quiet = null;
       onState('opening mic');
       let s;
       try { s = await mediaDevices.getUserMedia({ audio: true }); }
@@ -85,6 +84,7 @@ export function createLivePtt({ mediaDevices, sender, silence, send, onState = (
     async hold() {
       if (held) return;
       held = true;
+      clearTimer(quiet); quiet = null;
       onState('opening mic');
       let s;
       try { s = await mediaDevices.getUserMedia({ audio: true }); }

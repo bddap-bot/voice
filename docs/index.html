@@ -252,7 +252,7 @@ async function liveStop(why) {
   LIVE.ptt = null;
   if (LIVE.pc) LIVE.pc.close();
   LIVE.pc = null;
-  try { await sendFrame(why ? `bye\n${why}` : 'bye'); } catch {}
+  try { await Promise.race([sendFrame(why ? `bye\n${why}` : 'bye'), new Promise((r) => setTimeout(r, 3000))]); } catch {}
   await Promise.race([LIVE.loop, new Promise((r) => setTimeout(r, 3000))]);
   LIVE.loop = null;
   if (why) say('hub', `live ended: ${why}`);

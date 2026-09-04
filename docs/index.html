@@ -97,10 +97,13 @@ async function upload(wav) {
 async function pollOnce() {
   const reply = await withStream(async () => {
     const r = await request(enc.encode('poll'));
-    if (text(r.subarray(0, 4)) === 'none') return null;
     const nl = r.indexOf(10);
-    const [, tlen, wlen] = text(r.subarray(0, nl)).split(' ').map(Number);
+    const head = text(nl < 0 ? r : r.subarray(0, nl));
+    if (head === 'none') return null;
+    const [tag, t, w] = head.split(' ');
+    const tlen = Number(t), wlen = Number(w);
     const body = r.subarray(nl + 1);
+    if (tag !== 'reply' || nl < 0 || body.length < tlen + wlen) throw new Error(head);
     const out = { text: text(body.subarray(0, tlen)), wav: body.subarray(tlen, tlen + wlen) };
     const ack = text(await request(enc.encode('ack')));
     if (ack !== 'ok') throw new Error(`ack: ${ack}`);

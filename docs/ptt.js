@@ -1,7 +1,3 @@
-// Push-to-talk core, pure so node can drive it (test/ptt.test.js): the mic exists
-// only between hold() and release(); release stops every track, ends the turn and
-// uploads the one wav of what was captured while held.
-
 export function encodeWav(samples, inRate, outRate = 16000) {
   const ratio = inRate / outRate;
   const n = ratio === 1 ? samples.length : Math.floor(samples.length / ratio);
@@ -50,7 +46,6 @@ export function createPtt({ mediaDevices, capture, upload, onState = () => {} })
     async hold() {
       if (held) return;
       held = true;
-      chunks = [];
       onState('opening mic');
       let s;
       try { s = await mediaDevices.getUserMedia({ audio: true }); }

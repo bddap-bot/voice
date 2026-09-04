@@ -1,0 +1,14 @@
+{
+  "name": "voice",
+  "short_name": "voice",
+  "description": "Push-to-talk to the bothouse hub over an end-to-end iroh stream.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0b0b0c",
+  "theme_color": "#0b0b0c",
+  "icons": [
+    { "src": "icons/icon.svg", "type": "image/svg+xml", "sizes": "any", "purpose": "any" }
+  ]
+}

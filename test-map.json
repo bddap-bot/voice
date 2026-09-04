@@ -1,0 +1,20 @@
+{
+  "about": "Touched-path → test-suite map, read by `botq test-map` (bddap/bothouse#236). First matching rule wins; `tests: []` means consciously untested and must carry its why.",
+  "rules": [
+    {
+      "paths": ["docs/ptt.js", "test/**", "test-map.json"],
+      "tests": ["node --test test/*.test.js"],
+      "why": "the push-to-talk core: mic only while held, one upload per hold, nothing sent outside a hold"
+    },
+    {
+      "paths": ["docs/**"],
+      "tests": [],
+      "why": "the GH-Pages page (token paste, iroh transport, audio graph) has no headless harness; the owner's live round-trip is its acceptance"
+    },
+    {
+      "paths": ["README.md", ".gitignore"],
+      "tests": [],
+      "why": "prose"
+    }
+  ]
+}

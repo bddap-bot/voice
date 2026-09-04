@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="img-src 'self' data: blob:; media-src blob:;">
+<title>voice</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0b0b0c; color: #e6e6e6; font: 16px/1.4 system-ui, sans-serif;
+         min-height: 100dvh; display: flex; flex-direction: column; }
+  header { display: flex; gap: 12px; align-items: baseline; padding: 12px 16px; }
+  h1 { font-size: 18px; margin: 0; }
+  #status { color: #9a9a9a; font-size: 14px; }
+  #status.err { color: #ff6b6b; } #status.ok { color: #6bd47a; }
+  .row { display: flex; gap: 8px; padding: 8px 16px; align-items: center; flex-wrap: wrap; }
+  textarea { width: 100%; min-height: 80px; background: #151517; color: inherit; border: 1px solid #333; border-radius: 6px; padding: 8px; }
+  button { background: #1d1d20; color: inherit; border: 1px solid #3a3a3f; border-radius: 6px; padding: 8px 14px; font: inherit; }
+  button.primary { background: #2c5cff; border-color: #2c5cff; }
+  .hidden { display: none !important; }
+  #talk { flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px; }
+  #hold { width: min(70vw, 320px); height: min(70vw, 320px); border-radius: 50%; font-size: 24px;
+          background: #1d1d20; border: 3px solid #3a3a3f; touch-action: none; user-select: none; -webkit-user-select: none; }
+  #hold.on { background: #b3261e; border-color: #ff6b6b; }
+  #log { padding: 0 16px 16px; font-size: 15px; white-space: pre-wrap; }
+  #log .me { color: #9fb7ff; } #log .hub { color: #e6e6e6; }
+</style>
+</head>
+<body>
+<header>
+  <h1>voice</h1>
+  <span id="status">paste token to connect</span>
+</header>
+
+<div id="entry">
+  <div class="row">
+    <textarea id="token" placeholder="paste your `voice-web token` here" autocomplete="off" spellcheck="false" inputmode="text"></textarea>
+  </div>
+  <div class="row">
+    <button id="connect" class="primary">Connect</button>
+  </div>
+</div>
+
+<div id="saved" class="row hidden">
+  <span>🔒 token saved on this device</span>
+  <button id="reenter">Use a different token</button>
+  <button id="forget">Forget token</button>
+</div>
+
+<div id="talk" class="hidden">
+  <button id="hold">hold to talk</button>
+</div>
+<div id="log"></div>
+
+<script type="module">
+import wbgInit, { init as wasmInit, connect, send } from 'https://bddap-bot.github.io/botq/botq_dash_wasm.js';
+import { createPtt } from './ptt.js';
+
+const KEY = 'voice.token';
+const ALPN = 'voice-web/1';
+const $ = (id) => document.getElementById(id);
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+
+function setStatus(text, cls = '') { $('status').textContent = text; $('status').className = cls; }
+function showSavedState(saved) { $('entry').classList.toggle('hidden', saved); $('saved').classList.toggle('hidden', !saved); }
+function say(cls, text) {
+  const d = document.createElement('div'); d.className = cls; d.textContent = text;
+  $('log').prepend(d);
+}
+
+function b64urlToText(s) {
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  return dec.decode(Uint8Array.from(atob(s), (c) => c.charCodeAt(0)));
+}
+const request = (bytes) => send(bytes);
+const text = (bytes) => dec.decode(bytes);
+
+let busy = false;
+async function withStream(fn) {
+  while (busy) await new Promise((r) => setTimeout(r, 50));
+  busy = true;
+  try { return await fn(); } finally { busy = false; }
+}
+
+async function upload(wav) {
+  const frame = new Uint8Array(6 + wav.length);
+  frame.set(enc.encode('utter\n')); frame.set(wav, 6);
+  const reply = text(await withStream(() => request(frame)));
+  if (reply !== 'ok') throw new Error(reply);
+  say('me', `🎙 sent ${(wav.length / 32000).toFixed(1)}s`);
+}
+
+async function pollOnce() {
+  const reply = await withStream(async () => {
+    const r = await request(enc.encode('poll'));
+    if (text(r.subarray(0, 4)) === 'none') return null;
+    const nl = r.indexOf(10);
+    const [, tlen, wlen] = text(r.subarray(0, nl)).split(' ').map(Number);
+    const body = r.subarray(nl + 1);
+    const out = { text: text(body.subarray(0, tlen)), wav: body.subarray(tlen, tlen + wlen) };
+    const ack = text(await request(enc.encode('ack')));
+    if (ack !== 'ok') throw new Error(`ack: ${ack}`);
+    return out;
+  });
+  if (!reply) return;
+  say('hub', reply.text);
+  const url = URL.createObjectURL(new Blob([reply.wav], { type: 'audio/wav' }));
+  const audio = new Audio(url);
+  audio.onended = () => URL.revokeObjectURL(url);
+  audio.play().catch(() => setStatus('tap to enable audio', 'err'));
+}
+
+function capture(stream) {
+  const ctx = new AudioContext();
+  const src = ctx.createMediaStreamSource(stream);
+  const proc = ctx.createScriptProcessor(4096, 1, 1);
+  let cb = () => {};
+  proc.onaudioprocess = (e) => cb(e.inputBuffer.getChannelData(0).slice());
+  src.connect(proc); proc.connect(ctx.destination);
+  return { rate: ctx.sampleRate, onChunk: (f) => { cb = f; }, close: () => { proc.disconnect(); src.disconnect(); ctx.close(); } };
+}
+
+const ptt = createPtt({ mediaDevices: navigator.mediaDevices, capture, upload, onState: (s) => setStatus(s, s.startsWith('sent') ? 'ok' : s.includes('fail') || s.includes('refused') ? 'err' : '') });
+const hold = $('hold');
+const down = (e) => { e.preventDefault(); hold.classList.add('on'); ptt.hold(); };
+const up = (e) => { e.preventDefault(); hold.classList.remove('on'); ptt.release(); };
+hold.addEventListener('pointerdown', down);
+hold.addEventListener('pointerup', up);
+hold.addEventListener('pointercancel', up);
+hold.addEventListener('pointerleave', (e) => { if (ptt.held) up(e); });
+hold.addEventListener('contextmenu', (e) => e.preventDefault());
+
+async function start(token) {
+  setStatus('decoding token…');
+  let t;
+  try { t = JSON.parse(b64urlToText(token.trim())); }
+  catch { return setStatus('token is not valid base64url JSON', 'err'); }
+  if (!t.endpoint_id || !t.secret) return setStatus('token missing endpoint_id/secret', 'err');
+  try {
+    setStatus('loading wasm…');
+    await wbgInit();
+    wasmInit();
+    setStatus('connecting over iroh…');
+    await connect(t.relay_url ? `${t.endpoint_id}@${t.relay_url}` : t.endpoint_id, ALPN);
+    setStatus('authenticating…');
+    const auth = JSON.parse(text(await request(enc.encode(JSON.stringify({ auth: t.secret })))));
+    if (!auth.ok) return setStatus('auth rejected — wrong secret', 'err');
+    localStorage.setItem(KEY, token.trim());
+    $('token').value = '';
+    showSavedState(true);
+    $('talk').classList.remove('hidden');
+    setStatus('connected — hold the button to talk', 'ok');
+    for (;;) {
+      try { await pollOnce(); } catch (e) { setStatus(`poll failed: ${e.message || e}`, 'err'); }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  } catch (e) {
+    setStatus(`error: ${e && e.message ? e.message : e}`, 'err');
+  }
+}
+
+$('connect').addEventListener('click', () => start($('token').value));
+$('reenter').addEventListener('click', () => { $('token').value = ''; showSavedState(false); $('token').focus(); });
+$('forget').addEventListener('click', () => { localStorage.removeItem(KEY); showSavedState(false); $('talk').classList.add('hidden'); setStatus('token forgotten'); });
+
+const saved = localStorage.getItem(KEY);
+if (saved) { showSavedState(true); start(saved); }
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+</script>
+</body>
+</html>

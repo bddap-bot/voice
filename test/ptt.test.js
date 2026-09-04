@@ -75,7 +75,7 @@ test('encodeWav resamples to 16 kHz mono 16-bit', () => {
   assert.equal(v.getInt16(44, true), Math.trunc(0.25 * 0x7fff));
 });
 
-import { createLivePtt, describeTrack } from '../docs/ptt.js';
+import { createLivePtt, createNudge, describeTrack } from '../docs/ptt.js';
 
 test('live: track reports contain the capture state Firefox exposes', () => {
   assert.equal(describeTrack({ kind: 'audio', readyState: 'live', enabled: true, muted: false }), 'audio:live enabled=true muted=false');
@@ -190,43 +190,16 @@ test('live: a second hold while held is a no-op (one mic per hold)', async () =>
   assert.deepEqual(h.sent, ['hold', 'release']);
 });
 
-test('live: the silent track is dropped ${quietMs} after release so the call hears no stream between holds; a new hold cancels that', async () => {
-  const timers = [];
-  const replaced = [];
-  const sender = { replaceTrack: async (tr) => { replaced.push(tr); } };
-  const mic = { stop() {} };
-  const live = createLivePtt({
-    mediaDevices: { getUserMedia: async () => ({ getAudioTracks: () => [mic] }) },
-    sender, silence: 'SILENCE', send: async () => {},
-    setTimer: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clearTimer: (id) => { if (id) timers[id - 1].fn = null; },
-  });
-  await live.hold();
-  await live.release();
-  assert.deepEqual(replaced, [mic, 'SILENCE']);
-  assert.equal(timers.length, 1);
-  assert.equal(timers[0].ms, 1500);
-  timers[0].fn();
-  assert.equal(replaced[2], null, 'no track at all once the quiet window passes');
-  await live.hold();
-  await live.release();
-  await live.hold();
-  assert.equal(timers[1].fn, null, 'a hold inside the window cancels the drop');
-  assert.equal(replaced.filter((x) => x === null).length, 1);
-});
-
-import { createNudge } from '../docs/ptt.js';
-
 function nudgeRig() {
-  const timers = [];
-  const cleared = [];
   const log = { nudges: 0, clears: 0 };
+  const timers = []; const cleared = [];
   const nudge = createNudge({
-    onNudge: () => log.nudges++,
-    onClear: () => log.clears++,
+    onNudge: () => { log.nudges++; },
+    onClear: () => { log.clears++; },
     setTimer: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
     clearTimer: (id) => { cleared.push(id); timers[id - 1].fn = null; },
   });
-  return { nudge, timers, cleared, log, fire: () => { for (const t of timers) t.fn?.(); } };
+  return { nudge, log, timers, cleared, fire: () => { for (const tm of timers) { const fn = tm.fn; tm.fn = null; if (fn) fn(); } } };
 }
 
 test('nudge: media connected with no hold fires once after the window', () => {
@@ -273,4 +246,13 @@ test('nudge: after a hold, connected() arms nothing', () => {
   r.nudge.connected();
   assert.equal(r.timers.length, 0);
   assert.equal(r.log.nudges, 0);
+});
+
+test('nudge: once fired, a reconnect arms nothing again', () => {
+  const r = nudgeRig();
+  r.nudge.connected();
+  r.fire();
+  r.nudge.connected();
+  assert.equal(r.timers.length, 1);
+  assert.equal(r.log.nudges, 1);
 });

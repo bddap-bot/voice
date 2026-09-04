@@ -141,7 +141,7 @@ const hold = $('hold');
 const active = () => (LIVE.on ? LIVE.ptt : ptt);
 const down = (e) => { e.preventDefault(); hold.classList.add('on'); if (LIVE.on) LIVE.nudge?.hold(); active()?.hold().catch((err) => setStatus(`hold failed: ${err.message || err}`, 'err')); };
 const up = (e) => { e.preventDefault(); hold.classList.remove('on'); active()?.release().catch((err) => setStatus(`release failed: ${err.message || err}`, 'err')); };
-for (const type of ['touchstart', 'touchend', 'touchcancel', 'pointerdown', 'pointerup', 'pointercancel', 'mousedown', 'mouseup']) hold.addEventListener(type, (e) => { if (LIVE.on) LIVE.report(`input ${e.type} ${e.pointerType ?? ''}`.trim()); }, { passive: true });
+for (const type of ['touchstart', 'touchend', 'touchcancel', 'pointerdown', 'pointerup', 'pointercancel', 'mousedown', 'mouseup']) hold.addEventListener(type, (e) => { if (LIVE.on) sendFrame(`trace\ninput ${e.type} ${e.pointerType ?? ''}`.trim()).catch(() => {}); }, { passive: true });
 hold.addEventListener('pointerdown', down);
 hold.addEventListener('pointerup', up);
 hold.addEventListener('pointercancel', up);
@@ -220,7 +220,6 @@ async function liveStart() {
   });
   const liveStatus = (s, cls = 'ok') => { s = String(s).slice(0, 190); setStatus(`live: ${s}`, cls); sendFrame(`state\n${s}`).catch(() => {}); };
   LIVE.report = liveStatus;
-  LIVE.nudge = createNudge({ onNudge: () => { liveStatus('hold the button to talk', 'err'); hold.classList.add('nudge'); }, onClear: () => hold.classList.remove('nudge') });
   liveStatus(`audio context ${LIVE.ctx.state}; playback ${$('remote').paused ? 'paused' : 'started'}`);
   const pc = new RTCPeerConnection();
   LIVE.pc = pc;
@@ -292,6 +291,7 @@ $('live').addEventListener('click', async () => {
   if (LIVE.on) return liveStop();
   LIVE.on = true;
   $('live').classList.add('on');
+  LIVE.nudge = createNudge({ onNudge: () => { LIVE.report('hold the button to talk', 'err'); hold.classList.add('nudge'); }, onClear: () => hold.classList.remove('nudge') });
   LIVE.ctx ??= new AudioContext();
   const resume = LIVE.ctx.resume();
   const play = $('remote').play();

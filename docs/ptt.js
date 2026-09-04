@@ -79,17 +79,15 @@ export function describeTrack(track) {
   return track ? `${track.kind || 'track'}:${track.readyState || '?'} enabled=${track.enabled !== false} muted=${track.muted === true}` : 'none';
 }
 
-export function createLivePtt({ mediaDevices, sender, silence, send, onState = () => {}, makeMeter = () => null, quietMs = 1500, setTimer = setTimeout, clearTimer = clearTimeout }) {
+export function createLivePtt({ mediaDevices, sender, silence, send, onState = () => {}, makeMeter = () => null }) {
   let held = false;
   let track = null;
-  let quiet = null;
   let meter = null;
   return {
     get held() { return held; },
     async hold() {
       if (held) return;
       held = true;
-      clearTimer(quiet); quiet = null;
       onState('opening mic');
       let s;
       try { s = await mediaDevices.getUserMedia({ audio: true }); }
@@ -132,10 +130,6 @@ export function createLivePtt({ mediaDevices, sender, silence, send, onState = (
         onState(`sender release: ${describeTrack(sender.track || silence)}`);
       } catch (e) { onState(`sender release failed: ${e && e.message ? e.message : e}`); }
       await send('release');
-      quiet = setTimer(() => {
-        quiet = null;
-        if (!held) sender.replaceTrack(null).then(() => onState('sender quiet: none')).catch((e) => onState(`sender quiet failed: ${e && e.message ? e.message : e}`));
-      }, quietMs);
       onState('listening');
     },
   };
@@ -143,10 +137,12 @@ export function createLivePtt({ mediaDevices, sender, silence, send, onState = (
 
 export function createNudge({ afterMs = 8000, onNudge, onClear = () => {}, setTimer = setTimeout, clearTimer = clearTimeout }) {
   let timer = null;
+  let armed = false;
   let held = false;
+  const clear = () => { if (timer !== null) clearTimer(timer); timer = null; };
   return {
-    connected() { if (held || timer !== null) return; timer = setTimer(() => { timer = null; if (!held) onNudge(); }, afterMs); },
-    hold() { held = true; if (timer !== null) { clearTimer(timer); timer = null; } onClear(); },
-    stop() { held = false; if (timer !== null) { clearTimer(timer); timer = null; } onClear(); },
+    connected() { if (held || armed) return; armed = true; timer = setTimer(() => { timer = null; if (!held) onNudge(); }, afterMs); },
+    hold() { held = true; clear(); onClear(); },
+    stop() { clear(); onClear(); },
   };
 }

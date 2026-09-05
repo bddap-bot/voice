@@ -256,3 +256,12 @@ test('nudge: once fired, a reconnect arms nothing again', () => {
   assert.equal(r.timers.length, 1);
   assert.equal(r.log.nudges, 1);
 });
+
+test('nudge: a fired timer is forgotten; stop does not clear it again', () => {
+  const r = nudgeRig();
+  r.nudge.connected();
+  r.fire();
+  r.nudge.stop();
+  assert.deepEqual(r.cleared, []);
+  assert.equal(r.log.clears, 1);
+});

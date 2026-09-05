@@ -48,6 +48,8 @@ export function createPtt({ mediaDevices, sink, onState = () => {} }) {
     get held() { return held; },
     async hold() {
       if (held) return;
+      if (holding) await holding;
+      if (held) return;
       held = true;
       holding = (async () => {
         onState('opening mic');
@@ -111,10 +113,16 @@ export function trackSink({ sender, silence, send, onState = () => {}, makeMeter
       onState(`mic granted: ${describeTrack(t)}`);
       try { meter = makeMeter(stream); }
       catch (e) { onState(`input meter failed: ${msg(e)}`); }
-      try { await sender.replaceTrack(t); }
-      catch (e) { if (meter) meter.close(); meter = null; throw e; }
-      onState(`sender hold: ${describeTrack(sender.track || t)}`);
-      await send('hold');
+      try {
+        await sender.replaceTrack(t);
+        onState(`sender hold: ${describeTrack(sender.track || t)}`);
+        await send('hold');
+      } catch (e) {
+        if (meter) meter.close();
+        meter = null;
+        await sender.replaceTrack(silence).catch(() => {});
+        throw e;
+      }
       return 'talking';
     },
     async close() {

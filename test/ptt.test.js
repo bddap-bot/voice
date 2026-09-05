@@ -206,6 +206,51 @@ test('live: release racing replaceTrack still sends hold then release, in that o
   assert.equal(h.live.held, false);
 });
 
+test('live: a hold frame that fails to send restores silence and reports the failure', async () => {
+  const h = liveRig();
+  const states = [];
+  const sink = trackSink({ sender: h.sender, silence: h.silence, send: async () => { throw new Error('stream gone'); }, onState: (s) => states.push(s) });
+  const live = createPtt({ mediaDevices: { getUserMedia: async () => { const m = fakeMic(); h.mics.push(m); return m.stream; } }, sink: () => sink, onState: (s) => states.push(s) });
+  await live.hold();
+  assert.equal(live.held, false);
+  assert.equal(h.sender.track, h.silence, 'the mic track does not stay on the sender');
+  assert.equal(h.mics[0].track.stopped, true);
+  assert.ok(states.includes('hold failed: stream gone'));
+});
+
+test('a second hold while the first is still opening waits for it; the first mic is stopped, not leaked', async () => {
+  const r = wavRig({ gated: true });
+  const first = r.ptt.hold();
+  await tick();
+  const releasing = r.ptt.release();
+  const second = r.ptt.hold();
+  await tick();
+  assert.equal(r.log.mics.length, 0, 'the second hold has not asked for a mic yet');
+  r.openGate();
+  await first; await releasing;
+  await tick();
+  assert.equal(r.log.mics.length, 1);
+  r.openGate();
+  await second;
+  assert.equal(r.log.mics.length, 2);
+  assert.equal(r.log.mics[0].track.stopped, true, 'the first mic was stopped');
+  assert.equal(r.log.mics[1].track.stopped, false, 'the second hold is live');
+  assert.equal(r.ptt.held, true);
+  await r.ptt.release();
+  assert.equal(r.log.mics[1].track.stopped, true);
+});
+
+test('live: awaiting release alone covers the in-flight hold', async () => {
+  const h = liveRig({ gated: true });
+  h.live.hold();
+  await tick();
+  const releasing = h.live.release();
+  h.openGate();
+  await releasing;
+  assert.equal(h.mics[0].track.stopped, true);
+  assert.equal(h.sender.track, h.silence);
+});
+
 test('live: mic refusal leaves it unheld and sends nothing', async () => {
   const h = liveRig({ refuse: true });
   await h.live.hold();

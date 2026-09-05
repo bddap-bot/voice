@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="img-src 'self' data: blob:; media-src blob:;">
+<meta http-equiv="Content-Security-Policy" content="img-src 'self'; media-src blob:;">
 <title>voice</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
@@ -89,8 +89,8 @@ let gen = 0;
 let listener = null;
 let live = null;
 let dialing = false;
-let blocked = null;
-let lastUploadSecs = 0;
+let lastError = null;
+const blocked = new Map();
 let audioCtx = null;
 const ctx = () => {
   audioCtx ??= new AudioContext();
@@ -110,9 +110,10 @@ async function hangUp() {
   const old = listener;
   if (!old) return;
   gen++;
-  sendFrame('bye').catch(() => {});
-  const gone = await Promise.race([old.then(() => true), sleep(5000).then(() => false)]);
-  if (!gone) throw new Error('the old stream is stuck; reload the page');
+  listener = null;
+  const settled = Promise.race([old.then(() => true), sleep(5000).then(() => false)]);
+  await Promise.race([sendFrame('bye').catch(() => {}), sleep(5000)]);
+  if (!await settled) throw new Error('the old stream is stuck; reload the page');
 }
 
 async function dial(liveMode) {
@@ -135,16 +136,18 @@ async function listen(my) {
       const body = nl < 0 ? new Uint8Array() : f.subarray(nl + 1);
       const [verb, ...args] = head.split(' ');
       if (verb === 'reply') onReply(args, body);
-      else if (verb === 'sent') { setStatus('sent', 'ok'); say('me', `🎙 sent ${lastUploadSecs.toFixed(1)}s`); }
+      else if (verb === 'sent') { setStatus('sent', 'ok'); say('me', `🎙 sent ${(Number(args[0]) / 32000).toFixed(1)}s`); }
       else if (verb === 'answer') await live?.pc.setRemoteDescription({ type: 'answer', sdp: dec.decode(body) });
       else if (verb === 'status') setStatus(`live: ${dec.decode(body)}`, 'ok');
       else if (verb === 'you') say('me', `🎙 ${dec.decode(body)}`);
-      else if (verb === 'error') throw new Error(dec.decode(body));
+      else if (verb === 'error') { lastError = dec.decode(body); setStatus(live || dialing ? `live: ${lastError}` : lastError, 'err'); }
     }
   } catch (e) {
     if (my !== gen) return;
-    if (live || dialing) return liveStop(msg(e));
-    setStatus(`connection lost: ${msg(e)} — reconnecting…`, 'err');
+    const why = lastError ?? msg(e);
+    lastError = null;
+    if (live || dialing) { liveStop(why); return; }
+    setStatus(`connection lost: ${why} — reconnecting…`, 'err');
     await sleep(3000);
     if (my === gen) session();
   }
@@ -153,14 +156,24 @@ async function listen(my) {
 function onReply([stamp, t, w], body) {
   const tlen = Number(t), wlen = Number(w);
   if (!stamp || body.length !== tlen + wlen) return setStatus(`bad reply frame ${stamp ?? ''}`, 'err');
-  sendFrame(`ack\n${stamp}`).catch(() => {});
-  say('hub', dec.decode(body.subarray(0, tlen)));
+  if (blocked.has(stamp)) return;
   const url = URL.createObjectURL(new Blob([body.subarray(tlen)], { type: 'audio/wav' }));
   const audio = new Audio(url);
   audio.onended = () => URL.revokeObjectURL(url);
-  audio.play().then(() => live?.report('reply playing')).catch(() => { blocked = audio; setStatus('tap to enable audio', 'err'); });
+  const text = dec.decode(body.subarray(0, tlen));
+  const played = () => { sendFrame(`ack\n${stamp}`).catch(() => {}); say('hub', text); live?.report('reply playing'); };
+  audio.play().then(played).catch(() => { blocked.set(stamp, { audio, played }); setStatus('tap to enable audio', 'err'); });
 }
-document.addEventListener('pointerdown', () => { if (blocked) { const a = blocked; blocked = null; a.play().catch(() => {}); } }, true);
+document.addEventListener('pointerdown', () => {
+  const queued = [...blocked.values()];
+  blocked.clear();
+  const chain = (i) => {
+    if (i >= queued.length) return;
+    const { audio, played } = queued[i];
+    audio.play().then(() => { played(); return new Promise((r) => { audio.onended = r; }); }).catch(() => {}).then(() => chain(i + 1));
+  };
+  chain(0);
+}, true);
 
 async function session() {
   setStatus('connecting over iroh…');
@@ -181,12 +194,11 @@ function capture(stream) {
   return { rate: c.sampleRate, onChunk: (f) => { cb = f; }, close: () => { proc.disconnect(); src.disconnect(); } };
 }
 async function upload(wav) {
-  lastUploadSecs = wav.length / 32000;
   const frame = new Uint8Array(6 + wav.length);
   frame.set(enc.encode('utter\n')); frame.set(wav, 6);
   await sendFrame(frame);
 }
-const level = (s) => (s.startsWith('sent') ? 'ok' : /fail|refused/.test(s) ? 'err' : '');
+const level = (s) => (/fail|refused/.test(s) ? 'err' : '');
 const onState = (s) => (live ? live.report(s, level(s) || 'ok') : setStatus(s, level(s)));
 const wav = wavSink({ capture, upload, onState });
 const ptt = createPtt({ mediaDevices: navigator.mediaDevices, sink: () => (live ? live.sink : wav), onState });
@@ -287,14 +299,14 @@ async function liveStart() {
     };
     await pc.setLocalDescription(await pc.createOffer());
     await gathered(pc);
-    if (my !== gen) return;
+    if (my !== gen || live?.pc !== pc) return;
     await sendFrame(`offer\n${pc.localDescription.sdp}`);
     report(`offer sent, ${candidates(pc.localDescription.sdp)}`);
   } catch (e) { return liveStop(msg(e)); }
   finally { dialing = false; }
 }
 let stopping = null;
-function liveStop(why) {
+function liveStop(why, reconnect = true) {
   stopping ??= (async () => {
     dialing = false;
     const l = live;
@@ -303,7 +315,7 @@ function liveStop(why) {
     await ptt.release().catch(() => {});
     if (l) { l.nudge.stop(); l.pc.close(); l.silence.close(); }
     if (why) { say('hub', `live ended: ${why}`); sendFrame(`bye\n${why}`).catch(() => {}); }
-    await session();
+    if (reconnect) await session();
   })().finally(() => { stopping = null; });
   return stopping;
 }
@@ -313,7 +325,7 @@ $('connect').addEventListener('click', () => start($('token').value));
 $('reenter').addEventListener('click', () => { $('token').value = ''; showSavedState(false); $('token').focus(); });
 $('forget').addEventListener('click', async () => {
   localStorage.removeItem(KEY);
-  if (live || dialing) { live = null; dialing = false; $('live').classList.remove('on'); await ptt.release().catch(() => {}); }
+  if (live || dialing) await liveStop(undefined, false);
   await hangUp().catch(() => {});
   showSavedState(false);
   $('talk').classList.add('hidden');

@@ -141,7 +141,7 @@ const hold = $('hold');
 const active = () => (LIVE.on ? LIVE.ptt : ptt);
 const down = (e) => { e.preventDefault(); hold.classList.add('on'); if (LIVE.on) LIVE.nudge?.hold(); active()?.hold().catch((err) => setStatus(`hold failed: ${err.message || err}`, 'err')); };
 const up = (e) => { e.preventDefault(); hold.classList.remove('on'); active()?.release().catch((err) => setStatus(`release failed: ${err.message || err}`, 'err')); };
-for (const type of ['touchstart', 'touchend', 'touchcancel', 'pointerdown', 'pointerup', 'pointercancel', 'mousedown', 'mouseup']) hold.addEventListener(type, (e) => { if (LIVE.on) sendFrame(`trace\ninput ${e.type} ${e.pointerType ?? ''}`.trim()).catch(() => {}); }, { passive: true });
+for (const type of ['touchstart', 'touchend', 'touchcancel', 'pointerdown', 'pointerup', 'pointercancel', 'mousedown', 'mouseup']) hold.addEventListener(type, (e) => { if (LIVE.ptt) sendFrame(`trace\ninput ${e.type} ${e.pointerType ?? ''}`.trim()).catch(() => {}); }, { passive: true });
 hold.addEventListener('pointerdown', down);
 hold.addEventListener('pointerup', up);
 hold.addEventListener('pointercancel', up);
@@ -277,6 +277,7 @@ async function liveStop(why) {
   $('live').classList.remove('on');
   if (LIVE.ptt) await LIVE.ptt.release().catch(() => {});
   LIVE.ptt = null;
+  LIVE.report = () => {};
   LIVE.nudge?.stop();
   LIVE.nudge = null;
   if (LIVE.pc) LIVE.pc.close();

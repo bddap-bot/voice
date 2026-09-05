@@ -147,8 +147,8 @@ function onReply([stamp, t, w], body) {
   const tlen = Number(t), wlen = Number(w);
   if (!stamp || body.length !== tlen + wlen) { console.warn('bad reply frame', stamp, body.length, tlen, wlen); return setStatus('garbled reply', 'err'); }
   if (blocked.has(stamp)) return;
-  label.reply();
   if (played.has(stamp)) { sendFrame(`ack\n${stamp}`).catch(() => {}); return; }
+  label.reply();
   const url = URL.createObjectURL(new Blob([body.subarray(tlen)], { type: 'audio/wav' }));
   const audio = new Audio(url);
   const text = dec.decode(body.subarray(0, tlen));
@@ -178,7 +178,7 @@ async function session() {
     try { await dial(); break; }
     catch (e) {
       console.warn('connect:', e);
-      if (e?.message === 'wrong token') { showSavedState(false); $('talk').classList.add('hidden'); return setStatus('wrong token, paste a new one', 'err'); }
+      if (e?.message === 'wrong token') { localStorage.removeItem(KEY); showSavedState(false); $('talk').classList.add('hidden'); return setStatus('wrong token, paste a new one', 'err'); }
       setStatus('cannot reach the hub, retrying…', 'err');
       await sleep(3000);
     }

@@ -57,7 +57,7 @@ export function createPtt({ mediaDevices, sink, onState = () => {} }) {
         try { s = await mediaDevices.getUserMedia({ audio: true }); }
         catch (e) { held = false; onState(`mic refused: ${msg(e)}`); return; }
         if (!held) { stopTracks(s); return; }
-        const k = sink();
+        const k = sink;
         let word;
         try { word = await k.open(s); }
         catch (e) { held = false; stopTracks(s); onState(`hold failed: ${msg(e)}`); return; }
@@ -92,7 +92,7 @@ export function wavSink({ capture, upload, onState = () => {} }) {
       cap.close(); cap = null;
       const samples = concat(chunks);
       chunks = [];
-      if (!samples.length) return 'nothing captured';
+      if (!samples.length) return 'nothing heard';
       onState('sending');
       try { await upload(encodeWav(samples, rate)); }
       catch (e) { return `send failed: ${msg(e)}`; }
@@ -105,13 +105,12 @@ export function labeller(show) {
   let awaiting = false;
   const paint = () => show(busy ?? (awaiting ? 'thinking…' : 'hold to talk'));
   paint();
+  const set = (b) => { busy = b; paint(); };
   return {
-    word(w) {
-      if (w === 'opening mic') return;
-      busy = w === 'listening' ? 'listening…' : w === 'sending' ? 'sending…' : null;
-      paint();
-    },
-    sent() { busy = null; awaiting = true; paint(); },
+    listening: () => set('listening…'),
+    sending: () => set('sending…'),
+    idle: () => set(null),
+    sent() { awaiting = true; set(null); },
     reply() { awaiting = false; paint(); },
   };
 }

@@ -131,12 +131,12 @@ async function listen(my) {
       const [verb, ...args] = head.split(' ');
       if (verb === 'reply') onReply(args, body);
       else if (verb === 'sent') { label.sent(); say('me', `🎙 sent ${(Number(args[0]) / 32000).toFixed(1)}s`); }
-      else if (verb === 'error') { console.warn('voice-web:', dec.decode(body)); label.word('error'); setStatus('server refused it', 'err'); }
+      else if (verb === 'error') { console.warn('voice-web:', dec.decode(body)); label.idle(); setStatus('the hub refused that note', 'err'); }
     }
   } catch (e) {
     if (my !== gen) return;
     console.warn('stream lost:', e);
-    label.word('lost');
+    label.idle();
     setStatus('connection lost, reconnecting…', 'err');
     await sleep(3000);
     if (my === gen) session();
@@ -145,9 +145,10 @@ async function listen(my) {
 
 function onReply([stamp, t, w], body) {
   const tlen = Number(t), wlen = Number(w);
-  if (!stamp || body.length !== tlen + wlen) { console.warn('bad reply frame', stamp, body.length, tlen, wlen); return setStatus('bad reply', 'err'); }
-  if (blocked.has(stamp) || played.has(stamp)) return;
+  if (!stamp || body.length !== tlen + wlen) { console.warn('bad reply frame', stamp, body.length, tlen, wlen); return setStatus('garbled reply', 'err'); }
+  if (blocked.has(stamp)) return;
   label.reply();
+  if (played.has(stamp)) { sendFrame(`ack\n${stamp}`).catch(() => {}); return; }
   const url = URL.createObjectURL(new Blob([body.subarray(tlen)], { type: 'audio/wav' }));
   const audio = new Audio(url);
   const text = dec.decode(body.subarray(0, tlen));
@@ -156,7 +157,7 @@ function onReply([stamp, t, w], body) {
   const entry = { audio, ack, ended };
   const failed = (e) => { ack(); console.warn('reply playback:', e); setStatus('reply failed to play', 'err'); };
   audio.play().then(ack).catch((e) => {
-    if (e?.name === 'NotAllowedError') { blocked.set(stamp, entry); setStatus('tap to enable audio', 'err'); }
+    if (e?.name === 'NotAllowedError') { blocked.set(stamp, entry); setStatus('tap to hear the reply', 'err'); }
     else failed(e);
   });
 }
@@ -177,7 +178,8 @@ async function session() {
     try { await dial(); break; }
     catch (e) {
       console.warn('connect:', e);
-      setStatus(e?.message === 'wrong token' ? 'wrong token, retrying…' : 'connect failed, retrying…', 'err');
+      if (e?.message === 'wrong token') { showSavedState(false); $('talk').classList.add('hidden'); return setStatus('wrong token, paste a new one', 'err'); }
+      setStatus('cannot reach the hub, retrying…', 'err');
       await sleep(3000);
     }
   }
@@ -200,20 +202,20 @@ async function upload(wav) {
 }
 const onState = (s) => {
   console.log('ptt:', s);
-  label.word(s);
-  if (s === 'listening') setStatus('connected', 'ok');
-  else if (s === 'nothing captured') setStatus(s);
-  else if (/fail|refused/.test(s)) setStatus(s.split(':')[0], 'err');
+  if (s === 'opening mic') return;
+  if (s === 'listening') { label.listening(); return setStatus('connected', 'ok'); }
+  if (s === 'sending') return label.sending();
+  label.idle();
+  setStatus(s.split(':')[0], /fail|refused/.test(s) ? 'err' : '');
 };
-const wav = wavSink({ capture, upload, onState });
-const ptt = createPtt({ mediaDevices: navigator.mediaDevices, sink: () => wav, onState });
+const ptt = createPtt({ mediaDevices: navigator.mediaDevices, sink: wavSink({ capture, upload, onState }), onState });
 const down = (e) => {
   e.preventDefault();
   ctx();
   hold.classList.add('on');
-  ptt.hold().catch((err) => { console.warn('hold:', err); onState('hold failed'); });
+  ptt.hold().catch((err) => onState(`hold failed: ${err}`));
 };
-const up = (e) => { e.preventDefault(); hold.classList.remove('on'); ptt.release().catch((err) => { console.warn('release:', err); onState('release failed'); }); };
+const up = (e) => { e.preventDefault(); hold.classList.remove('on'); ptt.release().catch((err) => onState(`release failed: ${err}`)); };
 hold.addEventListener('pointerdown', down);
 hold.addEventListener('pointerup', up);
 hold.addEventListener('pointercancel', up);
@@ -225,8 +227,8 @@ async function start(raw) {
   setStatus('decoding token…');
   let t;
   try { t = JSON.parse(b64urlToText(raw.trim())); }
-  catch { return setStatus('token is not valid base64url JSON', 'err'); }
-  if (!t.endpoint_id || !t.secret) return setStatus('token missing endpoint_id/secret', 'err');
+  catch { return setStatus('that does not look like a token', 'err'); }
+  if (!t.endpoint_id || !t.secret) return setStatus('that token is missing pieces', 'err');
   token = t;
   setStatus('loading wasm…');
   wasm ??= wbgInit().then(() => wasmInit());

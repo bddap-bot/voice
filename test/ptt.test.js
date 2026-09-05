@@ -26,7 +26,7 @@ function wavRig({ chunk = new Float32Array([0.1, -0.1, 0.5]), gated = false, ref
         const m = fakeMic(); log.mics.push(m); return m.stream;
       },
     },
-    sink: () => sink,
+    sink,
     onState: (s) => log.states.push(s),
   });
   return { ptt, log, emit: (c = chunk) => emit && emit(c), openGate: () => gate && gate() };
@@ -56,7 +56,7 @@ test('zero bytes leave outside a hold: chunks after release are dropped, no seco
   await r.ptt.hold();
   await r.ptt.release();
   assert.equal(r.log.uploads.length, 1, 'an empty hold uploads nothing');
-  assert.ok(r.log.states.includes('nothing captured'));
+  assert.ok(r.log.states.includes('nothing heard'));
   assert.equal(r.log.mics[1].track.stopped, true, 'the mic is still stopped after an empty hold');
 });
 
@@ -86,7 +86,7 @@ test('a refused mic leaves the button unheld with no upload', async () => {
 test('a failed upload is reported and leaves the button unheld', async () => {
   const states = [];
   const sink = wavSink({ capture: () => ({ rate: 16000, onChunk: (cb) => cb(new Float32Array([0.2])), close() {} }), upload: async () => { throw new Error('stream gone'); }, onState: (s) => states.push(s) });
-  const ptt = createPtt({ mediaDevices: { getUserMedia: async () => fakeMic().stream }, sink: () => sink, onState: (s) => states.push(s) });
+  const ptt = createPtt({ mediaDevices: { getUserMedia: async () => fakeMic().stream }, sink, onState: (s) => states.push(s) });
   await ptt.hold();
   await ptt.release();
   assert.ok(states.includes('send failed: stream gone'));
@@ -125,17 +125,6 @@ test('a second hold while the first is still opening waits for it; the first mic
   assert.equal(r.log.mics[1].track.stopped, true);
 });
 
-test('the sink chosen at hold time is the one closed at release, even if the mode switched meanwhile', async () => {
-  const closed = [];
-  const mk = (name) => ({ open: async () => name, close: async () => { closed.push(name); } });
-  let current = mk('a');
-  const ptt = createPtt({ mediaDevices: { getUserMedia: async () => fakeMic().stream }, sink: () => current });
-  await ptt.hold();
-  current = mk('b');
-  await ptt.release();
-  assert.deepEqual(closed, ['a']);
-});
-
 function labelRig() {
   const shown = [];
   const label = labeller((t) => shown.push(t));
@@ -145,9 +134,8 @@ function labelRig() {
 test('label: idle → listening… → sending… → thinking… → hold to talk, one label per step', () => {
   const r = labelRig();
   assert.equal(r.last(), 'hold to talk');
-  r.label.word('opening mic');
-  r.label.word('listening');
-  r.label.word('sending');
+  r.label.listening();
+  r.label.sending();
   r.label.sent();
   r.label.reply();
   assert.deepEqual(r.shown, ['hold to talk', 'listening…', 'sending…', 'thinking…', 'hold to talk']);
@@ -155,27 +143,24 @@ test('label: idle → listening… → sending… → thinking… → hold to ta
 
 test('label: a reply while held keeps listening…; a hold during thinking shows listening…, and thinking resumes after', () => {
   const r = labelRig();
-  r.label.word('listening'); r.label.word('sending'); r.label.sent();
+  r.label.listening(); r.label.sending(); r.label.sent();
   assert.equal(r.last(), 'thinking…');
-  r.label.word('listening');
+  r.label.listening();
   assert.equal(r.last(), 'listening…');
   r.label.reply();
   assert.equal(r.last(), 'listening…');
-  r.label.word('sending');
+  r.label.sending();
   assert.equal(r.last(), 'sending…');
   r.label.sent();
   assert.equal(r.last(), 'thinking…');
 });
 
-test('label: a failure or a lost stream clears the busy word; nothing captured returns to idle', () => {
+test('label: idle clears a busy word but not an unanswered note', () => {
   const r = labelRig();
-  r.label.word('listening'); r.label.word('sending');
-  r.label.word('send failed: stream gone');
+  r.label.listening(); r.label.sending();
+  r.label.idle();
   assert.equal(r.last(), 'hold to talk');
-  r.label.word('listening');
-  r.label.word('nothing captured');
-  assert.equal(r.last(), 'hold to talk');
-  r.label.word('listening'); r.label.word('sending'); r.label.sent();
-  r.label.word('lost');
-  assert.equal(r.last(), 'thinking…', 'an unanswered note stays thinking through a reconnect; the reply is re-served');
+  r.label.listening(); r.label.sending(); r.label.sent();
+  r.label.idle();
+  assert.equal(r.last(), 'thinking…', 'the reply is re-served after a reconnect, so thinking stands');
 });

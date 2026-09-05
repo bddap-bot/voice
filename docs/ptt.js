@@ -28,49 +28,72 @@ function concat(chunks) {
   return out;
 }
 
-export function createPtt({ mediaDevices, capture, upload, onState = () => {} }) {
+const msg = (e) => (e && e.message ? e.message : String(e));
+
+export function createPtt({ mediaDevices, sink, onState = () => {} }) {
   let held = false;
   let stream = null;
-  let cap = null;
-  let chunks = [];
-
-  const stopMic = () => {
-    if (stream) for (const t of stream.getTracks()) t.stop();
-    if (cap) cap.close();
-    stream = null;
-    cap = null;
+  let opened = null;
+  let holding = null;
+  const stopTracks = (s) => { for (const t of s.getTracks()) t.stop(); };
+  const teardown = async () => {
+    const s = stream, k = opened;
+    stream = null; opened = null;
+    stopTracks(s);
+    let word;
+    try { word = await k.close(); } catch (e) { word = `release failed: ${msg(e)}`; }
+    if (word) onState(word);
   };
-
   return {
     get held() { return held; },
     async hold() {
       if (held) return;
       held = true;
-      onState('opening mic');
-      let s;
-      try { s = await mediaDevices.getUserMedia({ audio: true }); }
-      catch (e) { held = false; onState(`mic refused: ${e && e.message ? e.message : e}`); return; }
-      if (!held) { for (const t of s.getTracks()) t.stop(); return; }
-      stream = s;
-      cap = capture(s);
-      cap.onChunk((c) => { if (held) chunks.push(c); });
-      onState('listening');
+      holding = (async () => {
+        onState('opening mic');
+        let s;
+        try { s = await mediaDevices.getUserMedia({ audio: true }); }
+        catch (e) { held = false; onState(`mic refused: ${msg(e)}`); return; }
+        if (!held) { stopTracks(s); return; }
+        const k = sink();
+        let word;
+        try { word = await k.open(s); }
+        catch (e) { held = false; stopTracks(s); onState(`hold failed: ${msg(e)}`); return; }
+        stream = s; opened = k;
+        if (word) onState(word);
+        if (!held) await teardown();
+      })();
+      await holding;
+      holding = null;
     },
     async release() {
       if (!held) return;
       held = false;
-      const rate = cap ? cap.rate : 0;
-      stopMic();
+      if (holding) return holding;
+      if (stream) await teardown();
+    },
+  };
+}
+
+export function wavSink({ capture, upload, onState = () => {} }) {
+  let cap = null;
+  let chunks = [];
+  return {
+    async open(stream) {
+      cap = capture(stream);
+      const mine = cap;
+      cap.onChunk((c) => { if (cap === mine) chunks.push(c); });
+      return 'listening';
+    },
+    async close() {
+      const { rate } = cap;
+      cap.close(); cap = null;
       const samples = concat(chunks);
       chunks = [];
-      if (!samples.length) { onState('nothing captured'); return; }
+      if (!samples.length) return 'nothing captured';
       onState('sending');
-      try {
-        await upload(encodeWav(samples, rate));
-        onState('sent');
-      } catch (e) {
-        onState(`send failed: ${e && e.message ? e.message : e}`);
-      }
+      try { await upload(encodeWav(samples, rate)); }
+      catch (e) { return `send failed: ${msg(e)}`; }
     },
   };
 }
@@ -79,69 +102,44 @@ export function describeTrack(track) {
   return track ? `${track.kind || 'track'}:${track.readyState || '?'} enabled=${track.enabled !== false} muted=${track.muted === true}` : 'none';
 }
 
-export function createLivePtt({ mediaDevices, sender, silence, send, onState = () => {}, makeMeter = () => null }) {
-  let held = false;
-  let track = null;
+export function trackSink({ sender, silence, send, onState = () => {}, makeMeter = () => null }) {
   let meter = null;
   return {
-    get held() { return held; },
-    async hold() {
-      if (held) return;
-      held = true;
-      onState('opening mic');
-      let s;
-      try { s = await mediaDevices.getUserMedia({ audio: true }); }
-      catch (e) { held = false; onState(`mic refused: ${e && e.message ? e.message : e}`); return; }
-      const t = s.getAudioTracks()[0];
-      if (!t) { held = false; for (const candidate of s.getTracks()) candidate.stop(); onState('mic granted: no audio track'); return; }
-      if (!held) { t.stop(); return; }
-      track = t;
+    async open(stream) {
+      const t = stream.getAudioTracks()[0];
+      if (!t) throw new Error('no audio track');
       onState(`mic granted: ${describeTrack(t)}`);
-      try { meter = makeMeter(s); }
-      catch (e) { onState(`input meter failed: ${e && e.message ? e.message : e}`); }
+      try { meter = makeMeter(stream); }
+      catch (e) { onState(`input meter failed: ${msg(e)}`); }
       try { await sender.replaceTrack(t); }
-      catch (e) {
-        if (meter) meter.close();
-        meter = null;
-        track.stop();
-        track = null;
-        held = false;
-        onState(`sender hold failed: ${e && e.message ? e.message : e}`);
-        return;
-      }
+      catch (e) { if (meter) meter.close(); meter = null; throw e; }
       onState(`sender hold: ${describeTrack(sender.track || t)}`);
       await send('hold');
-      onState('talking');
+      return 'talking';
     },
-    async release() {
-      if (!held) return;
-      held = false;
-      if (!track) return;
-      let level = null;
-      try { level = meter ? meter.read() : null; }
-      catch (e) { onState(`input meter failed: ${e && e.message ? e.message : e}`); }
-      if (level !== null) onState(`input peak ${level.toFixed(4)}`);
-      if (meter) meter.close();
-      meter = null;
-      track.stop();
-      track = null;
+    async close() {
+      if (meter) {
+        try { onState(`input peak ${meter.read().toFixed(4)}`); }
+        catch (e) { onState(`input meter failed: ${msg(e)}`); }
+        meter.close(); meter = null;
+      }
       try {
         await sender.replaceTrack(silence);
         onState(`sender release: ${describeTrack(sender.track || silence)}`);
-      } catch (e) { onState(`sender release failed: ${e && e.message ? e.message : e}`); }
+      } catch (e) { onState(`sender release failed: ${msg(e)}`); }
       await send('release');
-      onState('listening');
+      return 'listening';
     },
   };
 }
 
 export function createNudge({ afterMs = 8000, onNudge, onClear = () => {}, setTimer = setTimeout, clearTimer = clearTimeout }) {
   let timer = null;
-  let armed = false;
+  let fired = false;
   let held = false;
   const clear = () => { if (timer !== null) clearTimer(timer); timer = null; };
   return {
-    connected() { if (held || armed) return; armed = true; timer = setTimer(() => { timer = null; if (!held) onNudge(); }, afterMs); },
+    connected() { if (held || fired) return; fired = true; timer = setTimer(() => { timer = null; if (!held) onNudge(); }, afterMs); },
     hold() { held = true; clear(); onClear(); },
     stop() { clear(); onClear(); },
   };

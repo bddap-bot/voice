@@ -9,7 +9,7 @@
     {
       "paths": ["docs/**"],
       "tests": [],
-      "why": "the GH-Pages page (token paste, iroh transport, audio graph) is drilled from bothouse by voice-call-browser-drill.sh (headless Chromium against the deployed page, a real call) — run by hand after Pages deploys"
+      "why": "the GH-Pages page (token paste, iroh transport, audio graph) is drilled from bothouse by voice-call-browser-drill.sh (headless Chromium against the deployed page: VOICE_DRILL_PTT=1 for push-to-talk, default a real Live call) — run by hand after Pages deploys"
     },
     {
       "paths": ["README.md", ".gitignore"],

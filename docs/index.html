@@ -90,7 +90,9 @@ let listener = null;
 let live = null;
 let dialing = false;
 let lastError = null;
+let liveSeq = 0;
 const blocked = new Map();
+const played = new Set();
 let audioCtx = null;
 const ctx = () => {
   audioCtx ??= new AudioContext();
@@ -101,7 +103,8 @@ const ctx = () => {
 let queue = Promise.resolve();
 const sendFrame = (f) => {
   const bytes = typeof f === 'string' ? enc.encode(f) : f;
-  const p = queue.then(() => send_only(bytes));
+  const g = gen;
+  const p = queue.then(() => (g === gen ? send_only(bytes) : Promise.reject(new Error('stream replaced'))));
   queue = p.catch(() => {});
   return p;
 };
@@ -110,10 +113,10 @@ async function hangUp() {
   const old = listener;
   if (!old) return;
   gen++;
-  listener = null;
   const settled = Promise.race([old.then(() => true), sleep(5000).then(() => false)]);
   await Promise.race([sendFrame('bye').catch(() => {}), sleep(5000)]);
   if (!await settled) throw new Error('the old stream is stuck; reload the page');
+  listener = null;
 }
 
 async function dial(liveMode) {
@@ -156,21 +159,25 @@ async function listen(my) {
 function onReply([stamp, t, w], body) {
   const tlen = Number(t), wlen = Number(w);
   if (!stamp || body.length !== tlen + wlen) return setStatus(`bad reply frame ${stamp ?? ''}`, 'err');
-  if (blocked.has(stamp)) return;
+  if (blocked.has(stamp) || played.has(stamp)) return;
   const url = URL.createObjectURL(new Blob([body.subarray(tlen)], { type: 'audio/wav' }));
   const audio = new Audio(url);
-  audio.onended = () => URL.revokeObjectURL(url);
   const text = dec.decode(body.subarray(0, tlen));
-  const played = () => { sendFrame(`ack\n${stamp}`).catch(() => {}); say('hub', text); live?.report('reply playing'); };
-  audio.play().then(played).catch(() => { blocked.set(stamp, { audio, played }); setStatus('tap to enable audio', 'err'); });
+  const ack = () => { played.add(stamp); sendFrame(`ack\n${stamp}`).catch(() => {}); say('hub', text); };
+  const ended = new Promise((r) => { audio.onended = r; audio.onerror = r; setTimeout(r, 120000); }).then(() => URL.revokeObjectURL(url));
+  const entry = { audio, ack, ended };
+  audio.play().then(() => { ack(); live?.report('reply playing'); }).catch((e) => {
+    if (e?.name === 'NotAllowedError') { blocked.set(stamp, entry); setStatus('tap to enable audio', 'err'); }
+    else { ack(); setStatus(`reply failed to play: ${msg(e)}`, 'err'); }
+  });
 }
 document.addEventListener('pointerdown', () => {
   const queued = [...blocked.values()];
   blocked.clear();
   const chain = (i) => {
     if (i >= queued.length) return;
-    const { audio, played } = queued[i];
-    audio.play().then(() => { played(); return new Promise((r) => { audio.onended = r; }); }).catch(() => {}).then(() => chain(i + 1));
+    const { audio, ack, ended } = queued[i];
+    audio.play().then(() => { ack(); return ended; }, (e) => { ack(); setStatus(`reply failed to play: ${msg(e)}`, 'err'); }).then(() => chain(i + 1));
   };
   chain(0);
 }, true);
@@ -205,7 +212,7 @@ const ptt = createPtt({ mediaDevices: navigator.mediaDevices, sink: () => (live 
 const hold = $('hold');
 const down = (e) => {
   e.preventDefault();
-  if (dialing) return;
+  if (dialing || stopping) return;
   ctx();
   live?.nudge.hold();
   hold.classList.add('on');
@@ -277,6 +284,7 @@ const gathered = (pc) => new Promise((r) => {
 });
 
 async function liveStart() {
+  const seq = ++liveSeq;
   dialing = true;
   $('live').classList.add('on');
   setStatus('live: reconnecting…');
@@ -303,7 +311,7 @@ async function liveStart() {
     await sendFrame(`offer\n${pc.localDescription.sdp}`);
     report(`offer sent, ${candidates(pc.localDescription.sdp)}`);
   } catch (e) { return liveStop(msg(e)); }
-  finally { dialing = false; }
+  finally { if (seq === liveSeq) dialing = false; }
 }
 let stopping = null;
 function liveStop(why, reconnect = true) {

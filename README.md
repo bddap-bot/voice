@@ -6,7 +6,8 @@ the botq dashboard ships (imported from https://bddap-bot.github.io/botq/), with
 token pasted once on the device. The mic exists only while the button is held;
 release ends the turn and uploads one 16 kHz wav. Replies the hub queues with
 `voice-reply web '<text>'` are pushed down the same stream, spoken, and acked.
-`Live call` reconnects in live mode: the hold streams to GPT-Live over WebRTC for
-transcription; replies still arrive as pushed wavs the page plays.
+The button labels each step: hold to talk → listening… → sending… → thinking… →
+hold to talk; the status line carries connection words only, diagnostics go to
+the console.
 
 Token: `voice-web token` on bothouse. Tests: `node --test test/*.test.js`.

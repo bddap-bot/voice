@@ -100,55 +100,18 @@ export function wavSink({ capture, upload, onState = () => {} }) {
   };
 }
 
-export function describeTrack(track) {
-  return track ? `${track.kind || 'track'}:${track.readyState || '?'} enabled=${track.enabled !== false} muted=${track.muted === true}` : 'none';
-}
-
-export function trackSink({ sender, silence, send, onState = () => {}, makeMeter = () => null }) {
-  let meter = null;
+export function labeller(show) {
+  let busy = null;
+  let awaiting = false;
+  const paint = () => show(busy ?? (awaiting ? 'thinking…' : 'hold to talk'));
+  paint();
   return {
-    async open(stream) {
-      const t = stream.getAudioTracks()[0];
-      if (!t) throw new Error('no audio track');
-      onState(`mic granted: ${describeTrack(t)}`);
-      try { meter = makeMeter(stream); }
-      catch (e) { onState(`input meter failed: ${msg(e)}`); }
-      try {
-        await sender.replaceTrack(t);
-        onState(`sender hold: ${describeTrack(sender.track || t)}`);
-        await send('hold');
-      } catch (e) {
-        if (meter) meter.close();
-        meter = null;
-        await sender.replaceTrack(silence).catch(() => {});
-        throw e;
-      }
-      return 'talking';
+    word(w) {
+      if (w === 'opening mic') return;
+      busy = w === 'listening' ? 'listening…' : w === 'sending' ? 'sending…' : null;
+      paint();
     },
-    async close() {
-      if (meter) {
-        try { onState(`input peak ${meter.read().toFixed(4)}`); }
-        catch (e) { onState(`input meter failed: ${msg(e)}`); }
-        meter.close(); meter = null;
-      }
-      try {
-        await sender.replaceTrack(silence);
-        onState(`sender release: ${describeTrack(sender.track || silence)}`);
-      } catch (e) { onState(`sender release failed: ${msg(e)}`); }
-      await send('release');
-      return 'listening';
-    },
-  };
-}
-
-export function createNudge({ afterMs = 8000, onNudge, onClear = () => {}, setTimer = setTimeout, clearTimer = clearTimeout }) {
-  let timer = null;
-  let fired = false;
-  let held = false;
-  const clear = () => { if (timer !== null) clearTimer(timer); timer = null; };
-  return {
-    connected() { if (held || fired) return; fired = true; timer = setTimer(() => { timer = null; if (!held) onNudge(); }, afterMs); },
-    hold() { held = true; clear(); onClear(); },
-    stop() { clear(); onClear(); },
+    sent() { busy = null; awaiting = true; paint(); },
+    reply() { awaiting = false; paint(); },
   };
 }

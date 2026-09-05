@@ -24,9 +24,6 @@
   #hold { width: min(70vw, 320px); height: min(70vw, 320px); border-radius: 50%; font-size: 24px;
           background: #1d1d20; border: 3px solid #3a3a3f; touch-action: none; user-select: none; -webkit-user-select: none; }
   #hold.on { background: #b3261e; border-color: #ff6b6b; }
-  #hold.nudge { animation: nudge 1s ease-in-out infinite alternate; }
-  @keyframes nudge { from { border-color: #3a3a3f; } to { border-color: #ff6b6b; box-shadow: 0 0 24px #ff6b6b; } }
-  #live.on { background: #1f6f3f; border-color: #6bd47a; }
   #log { padding: 0 16px 16px; font-size: 15px; white-space: pre-wrap; }
   #log .me { color: #9fb7ff; } #log .hub { color: #e6e6e6; }
 </style>
@@ -55,14 +52,11 @@
 <div id="talk" class="hidden">
   <button id="hold">hold to talk</button>
 </div>
-<div id="modes" class="row hidden">
-  <button id="live">Live call</button>
-</div>
 <div id="log"></div>
 
 <script type="module">
 import wbgInit, { init as wasmInit, connect, send_only, recv } from 'https://bddap-bot.github.io/botq/botq_dash_wasm.js';
-import { createPtt, wavSink, trackSink, createNudge } from './ptt.js';
+import { createPtt, wavSink, labeller } from './ptt.js';
 
 const KEY = 'voice.token';
 const ALPN = 'voice-web/1';
@@ -70,7 +64,6 @@ const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const msg = (e) => (e && e.message ? e.message : String(e));
 
 function setStatus(text, cls = '') { $('status').textContent = text; $('status').className = cls; }
 function showSavedState(saved) { $('entry').classList.toggle('hidden', saved); $('saved').classList.toggle('hidden', !saved); }
@@ -87,10 +80,6 @@ function b64urlToText(s) {
 let token = null;
 let gen = 0;
 let listener = null;
-let live = null;
-let dialing = false;
-let lastError = null;
-let liveSeq = 0;
 const blocked = new Map();
 const played = new Set();
 let audioCtx = null;
@@ -99,6 +88,8 @@ const ctx = () => {
   if (audioCtx.state !== 'running') audioCtx.resume().catch(() => {});
   return audioCtx;
 };
+const hold = $('hold');
+const label = labeller((t) => { hold.textContent = t; });
 
 let queue = Promise.resolve();
 const sendFrame = (f) => {
@@ -119,11 +110,11 @@ async function hangUp() {
   listener = null;
 }
 
-async function dial(liveMode) {
+async function dial() {
   await hangUp();
   await connect(token.relay_url ? `${token.endpoint_id}@${token.relay_url}` : token.endpoint_id, ALPN);
-  await sendFrame(JSON.stringify({ auth: token.secret, live: liveMode }));
-  if (!JSON.parse(dec.decode(await recv())).ok) throw new Error('auth rejected — wrong secret');
+  await sendFrame(JSON.stringify({ auth: token.secret }));
+  if (!JSON.parse(dec.decode(await recv())).ok) throw new Error('wrong token');
   const my = ++gen;
   listener = listen(my);
   return my;
@@ -139,18 +130,14 @@ async function listen(my) {
       const body = nl < 0 ? new Uint8Array() : f.subarray(nl + 1);
       const [verb, ...args] = head.split(' ');
       if (verb === 'reply') onReply(args, body);
-      else if (verb === 'sent') { setStatus('sent', 'ok'); say('me', `🎙 sent ${(Number(args[0]) / 32000).toFixed(1)}s`); }
-      else if (verb === 'answer') await live?.pc.setRemoteDescription({ type: 'answer', sdp: dec.decode(body) });
-      else if (verb === 'status') setStatus(`live: ${dec.decode(body)}`, 'ok');
-      else if (verb === 'you') say('me', `🎙 ${dec.decode(body)}`);
-      else if (verb === 'error') { lastError = dec.decode(body); setStatus(live || dialing ? `live: ${lastError}` : lastError, 'err'); }
+      else if (verb === 'sent') { label.sent(); say('me', `🎙 sent ${(Number(args[0]) / 32000).toFixed(1)}s`); }
+      else if (verb === 'error') { console.warn('voice-web:', dec.decode(body)); label.word('error'); setStatus('server refused it', 'err'); }
     }
   } catch (e) {
     if (my !== gen) return;
-    const why = lastError ?? msg(e);
-    lastError = null;
-    if (live || dialing) { liveStop(why); return; }
-    setStatus(`connection lost: ${why} — reconnecting…`, 'err');
+    console.warn('stream lost:', e);
+    label.word('lost');
+    setStatus('connection lost, reconnecting…', 'err');
     await sleep(3000);
     if (my === gen) session();
   }
@@ -158,17 +145,19 @@ async function listen(my) {
 
 function onReply([stamp, t, w], body) {
   const tlen = Number(t), wlen = Number(w);
-  if (!stamp || body.length !== tlen + wlen) return setStatus(`bad reply frame ${stamp ?? ''}`, 'err');
+  if (!stamp || body.length !== tlen + wlen) { console.warn('bad reply frame', stamp, body.length, tlen, wlen); return setStatus('bad reply', 'err'); }
   if (blocked.has(stamp) || played.has(stamp)) return;
+  label.reply();
   const url = URL.createObjectURL(new Blob([body.subarray(tlen)], { type: 'audio/wav' }));
   const audio = new Audio(url);
   const text = dec.decode(body.subarray(0, tlen));
   const ack = () => { played.add(stamp); sendFrame(`ack\n${stamp}`).catch(() => {}); say('hub', text); };
   const ended = new Promise((r) => { audio.onended = r; audio.onerror = r; setTimeout(r, 120000); }).then(() => URL.revokeObjectURL(url));
   const entry = { audio, ack, ended };
-  audio.play().then(() => { ack(); live?.report('reply playing'); }).catch((e) => {
+  const failed = (e) => { ack(); console.warn('reply playback:', e); setStatus('reply failed to play', 'err'); };
+  audio.play().then(ack).catch((e) => {
     if (e?.name === 'NotAllowedError') { blocked.set(stamp, entry); setStatus('tap to enable audio', 'err'); }
-    else { ack(); setStatus(`reply failed to play: ${msg(e)}`, 'err'); }
+    else failed(e);
   });
 }
 document.addEventListener('pointerdown', () => {
@@ -177,18 +166,22 @@ document.addEventListener('pointerdown', () => {
   const chain = (i) => {
     if (i >= queued.length) return;
     const { audio, ack, ended } = queued[i];
-    audio.play().then(() => { ack(); return ended; }, (e) => { ack(); setStatus(`reply failed to play: ${msg(e)}`, 'err'); }).then(() => chain(i + 1));
+    audio.play().then(() => { ack(); return ended; }, (e) => { ack(); console.warn('reply playback:', e); setStatus('reply failed to play', 'err'); }).then(() => chain(i + 1));
   };
   chain(0);
 }, true);
 
 async function session() {
-  setStatus('connecting over iroh…');
+  setStatus('connecting…');
   for (;;) {
-    try { await dial(false); break; }
-    catch (e) { setStatus(`connect failed: ${msg(e)} — retrying…`, 'err'); await sleep(3000); }
+    try { await dial(); break; }
+    catch (e) {
+      console.warn('connect:', e);
+      setStatus(e?.message === 'wrong token' ? 'wrong token, retrying…' : 'connect failed, retrying…', 'err');
+      await sleep(3000);
+    }
   }
-  setStatus('connected — hold the button to talk', 'ok');
+  setStatus('connected', 'ok');
 }
 
 function capture(stream) {
@@ -205,20 +198,22 @@ async function upload(wav) {
   frame.set(enc.encode('utter\n')); frame.set(wav, 6);
   await sendFrame(frame);
 }
-const level = (s) => (/fail|refused/.test(s) ? 'err' : '');
-const onState = (s) => (live ? live.report(s, level(s) || 'ok') : setStatus(s, level(s)));
+const onState = (s) => {
+  console.log('ptt:', s);
+  label.word(s);
+  if (s === 'listening') setStatus('connected', 'ok');
+  else if (s === 'nothing captured') setStatus(s);
+  else if (/fail|refused/.test(s)) setStatus(s.split(':')[0], 'err');
+};
 const wav = wavSink({ capture, upload, onState });
-const ptt = createPtt({ mediaDevices: navigator.mediaDevices, sink: () => (live ? live.sink : wav), onState });
-const hold = $('hold');
+const ptt = createPtt({ mediaDevices: navigator.mediaDevices, sink: () => wav, onState });
 const down = (e) => {
   e.preventDefault();
-  if (dialing || stopping) return;
   ctx();
-  live?.nudge.hold();
   hold.classList.add('on');
-  ptt.hold().catch((err) => setStatus(`hold failed: ${msg(err)}`, 'err'));
+  ptt.hold().catch((err) => { console.warn('hold:', err); onState('hold failed'); });
 };
-const up = (e) => { e.preventDefault(); hold.classList.remove('on'); ptt.release().catch((err) => setStatus(`release failed: ${msg(err)}`, 'err')); };
+const up = (e) => { e.preventDefault(); hold.classList.remove('on'); ptt.release().catch((err) => { console.warn('release:', err); onState('release failed'); }); };
 hold.addEventListener('pointerdown', down);
 hold.addEventListener('pointerup', up);
 hold.addEventListener('pointercancel', up);
@@ -240,104 +235,16 @@ async function start(raw) {
   $('token').value = '';
   showSavedState(true);
   $('talk').classList.remove('hidden');
-  $('modes').classList.remove('hidden');
   await session();
 }
-
-function silenceTrack() {
-  const c = ctx();
-  const src = c.createConstantSource(); src.offset.value = 0;
-  const dst = c.createMediaStreamDestination(); src.connect(dst); src.start();
-  return { track: dst.stream.getAudioTracks()[0], close: () => { src.stop(); src.disconnect(); } };
-}
-function makeMeter(stream) {
-  const c = ctx();
-  const analyser = c.createAnalyser();
-  analyser.fftSize = 1024;
-  const source = c.createMediaStreamSource(stream);
-  source.connect(analyser);
-  const values = new Float32Array(analyser.fftSize);
-  let peak = 0;
-  const sample = () => {
-    analyser.getFloatTimeDomainData(values);
-    let sum = 0;
-    for (const value of values) sum += value * value;
-    peak = Math.max(peak, Math.sqrt(sum / values.length));
-  };
-  const timer = setInterval(sample, 100);
-  sample();
-  return { read: () => { sample(); return peak; }, close: () => { clearInterval(timer); source.disconnect(); analyser.disconnect(); } };
-}
-function candidates(sdp) {
-  const local = {};
-  for (const l of sdp.match(/^a=candidate:.*/gm) ?? []) {
-    const [, proto, addr, typ] = /^a=candidate:\S+ \d+ (\S+) \d+ (\S+) \d+ typ (\S+)/.exec(l) ?? [];
-    const kind = proto ? `${proto.toLowerCase()}${addr.includes(':') ? '6' : /^\d+(\.\d+){3}$/.test(addr) ? '4' : ''} ${typ}` : 'unparsed';
-    local[kind] = (local[kind] ?? 0) + 1;
-  }
-  return Object.entries(local).map(([k, n]) => `${k}×${n}`).join(' ') || 'no candidates';
-}
-const gathered = (pc) => new Promise((r) => {
-  if (pc.iceGatheringState === 'complete') return r();
-  const t = setTimeout(r, 2000);
-  pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') { clearTimeout(t); r(); } };
-});
-
-async function liveStart() {
-  const seq = ++liveSeq;
-  dialing = true;
-  $('live').classList.add('on');
-  setStatus('live: reconnecting…');
-  const report = (s, cls = 'ok') => { s = String(s).slice(0, 190); setStatus(`live: ${s}`, cls); sendFrame(`state\n${s}`).catch(() => {}); };
-  try {
-    await ptt.release();
-    const my = await dial(true);
-    if (!dialing) return;
-    const pc = new RTCPeerConnection();
-    const silence = silenceTrack();
-    const sender = pc.addTrack(silence.track, new MediaStream([silence.track]));
-    const nudge = createNudge({ onNudge: () => { report('hold the button to talk', 'err'); hold.classList.add('nudge'); }, onClear: () => hold.classList.remove('nudge') });
-    const sink = trackSink({ sender, silence: silence.track, send: sendFrame, makeMeter, onState: (s) => report(s, /refused|failed/.test(s) ? 'err' : 'ok') });
-    live = { pc, silence, nudge, report, sink };
-    pc.onconnectionstatechange = () => {
-      const st = pc.connectionState;
-      report(`media ${st}`, st === 'failed' || st === 'disconnected' ? 'err' : 'ok');
-      if (st === 'connected') nudge.connected();
-      if (st === 'failed') liveStop('media failed');
-    };
-    await pc.setLocalDescription(await pc.createOffer());
-    await gathered(pc);
-    if (my !== gen || live?.pc !== pc) return;
-    await sendFrame(`offer\n${pc.localDescription.sdp}`);
-    report(`offer sent, ${candidates(pc.localDescription.sdp)}`);
-  } catch (e) { return liveStop(msg(e)); }
-  finally { if (seq === liveSeq) dialing = false; }
-}
-let stopping = null;
-function liveStop(why, reconnect = true) {
-  stopping ??= (async () => {
-    dialing = false;
-    const l = live;
-    live = null;
-    $('live').classList.remove('on');
-    await ptt.release().catch(() => {});
-    if (l) { l.nudge.stop(); l.pc.close(); l.silence.close(); }
-    if (why) { say('hub', `live ended: ${why}`); sendFrame(`bye\n${why}`).catch(() => {}); }
-    if (reconnect) await session();
-  })().finally(() => { stopping = null; });
-  return stopping;
-}
-$('live').addEventListener('click', () => { if (stopping) return; if (live || dialing) liveStop(); else liveStart(); });
 
 $('connect').addEventListener('click', () => start($('token').value));
 $('reenter').addEventListener('click', () => { $('token').value = ''; showSavedState(false); $('token').focus(); });
 $('forget').addEventListener('click', async () => {
   localStorage.removeItem(KEY);
-  if (live || dialing) await liveStop(undefined, false);
   await hangUp().catch(() => {});
   showSavedState(false);
   $('talk').classList.add('hidden');
-  $('modes').classList.add('hidden');
   setStatus('token forgotten');
 });
 

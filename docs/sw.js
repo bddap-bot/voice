@@ -1,4 +1,4 @@
-const CACHE = 'voice-shell-v2';
+const CACHE = 'voice-shell-v3';
 const SHELL = ['.', 'index.html', 'ptt.js', 'manifest.webmanifest', 'icons/icon.svg'];
 
 self.addEventListener('install', (e) => {

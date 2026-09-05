@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createPtt, wavSink, trackSink, createNudge, describeTrack, encodeWav } from '../docs/ptt.js';
+import { createPtt, wavSink, labeller, encodeWav } from '../docs/ptt.js';
 
 const tick = (ms = 10) => new Promise((r) => setTimeout(r, ms));
 
@@ -103,121 +103,6 @@ test('encodeWav resamples to 16 kHz mono 16-bit', () => {
   assert.equal(v.getInt16(44, true), Math.trunc(0.25 * 0x7fff));
 });
 
-test('live: track reports contain the capture state Firefox exposes', () => {
-  assert.equal(describeTrack({ kind: 'audio', readyState: 'live', enabled: true, muted: false }), 'audio:live enabled=true muted=false');
-  assert.equal(describeTrack(null), 'none');
-});
-
-function liveRig({ refuse = false, gated = false, slowSender = false, meter = null, refuseSender = false } = {}) {
-  const mics = [];
-  const sent = [];
-  const installed = [];
-  const states = [];
-  const silence = { silence: true };
-  let gate = null;
-  let senderGate = null;
-  const mediaDevices = {
-    getUserMedia: async () => {
-      if (refuse) throw new Error('denied');
-      if (gated) await new Promise((r) => { gate = r; });
-      const m = fakeMic(); mics.push(m); return m.stream;
-    },
-  };
-  const sender = {
-    track: silence,
-    replaceTrack: async (t) => {
-      if (refuseSender) throw new Error('incompatible track');
-      if (slowSender && t !== silence) await new Promise((r) => { senderGate = r; });
-      sender.track = t; installed.push(t);
-    },
-  };
-  const sink = trackSink({ sender, silence, send: async (f) => sent.push(f), onState: (s) => states.push(s), makeMeter: meter ?? (() => null) });
-  const live = createPtt({ mediaDevices, sink: () => sink, onState: (s) => states.push(s) });
-  return { live, mics, sent, installed, states, sender, silence, openGate: () => gate && gate(), openSender: () => senderGate && senderGate() };
-}
-
-test('live: mic track only installed while held; release stops it and restores silence + sends release', async () => {
-  const h = liveRig();
-  await h.live.hold();
-  assert.equal(h.sender.track, h.mics[0].track);
-  assert.deepEqual(h.sent, ['hold']);
-  assert.ok(h.states.includes('talking'));
-  await h.live.release();
-  assert.equal(h.mics[0].track.stopped, true, 'mic track ended on release');
-  assert.equal(h.sender.track, h.silence, 'nothing but silence leaves the page outside a hold');
-  assert.deepEqual(h.sent, ['hold', 'release']);
-  assert.deepEqual(h.installed, [h.mics[0].track, h.silence]);
-  assert.equal(h.states.at(-1), 'listening');
-});
-
-test('live: release reports the measured input peak', async () => {
-  const h = liveRig({ meter: () => ({ read: () => 0.125, close() {} }) });
-  await h.live.hold();
-  await h.live.release();
-  assert.ok(h.states.includes('input peak 0.1250'));
-  assert.ok(h.states.some((s) => s.startsWith('mic granted: audio:')));
-  assert.ok(h.states.some((s) => s.startsWith('sender hold: audio:')));
-});
-
-test('live: failed diagnostics do not break capture cleanup or release', async () => {
-  const h = liveRig({ meter: () => { throw new Error('analyser unavailable'); } });
-  await h.live.hold();
-  await h.live.release();
-  assert.equal(h.mics[0].track.stopped, true);
-  assert.deepEqual(h.sent, ['hold', 'release']);
-  assert.ok(h.states.includes('input meter failed: analyser unavailable'));
-});
-
-test('live: sender refusal stops the mic and sends no hold', async () => {
-  const h = liveRig({ refuseSender: true });
-  await h.live.hold();
-  assert.equal(h.mics[0].track.stopped, true);
-  assert.equal(h.live.held, false);
-  assert.deepEqual(h.sent, []);
-  assert.ok(h.states.includes('hold failed: incompatible track'));
-});
-
-test('live: release racing getUserMedia stops the track and never installs it', async () => {
-  const h = liveRig({ gated: true });
-  const holding = h.live.hold();
-  await tick();
-  const releasing = h.live.release();
-  h.openGate();
-  await holding;
-  await releasing;
-  assert.equal(h.mics[0].track.stopped, true);
-  assert.equal(h.sender.track, h.silence);
-  assert.deepEqual(h.sent, [], 'no hold frame for a hold that never went live');
-});
-
-test('live: release racing replaceTrack still sends hold then release, in that order', async () => {
-  const h = liveRig({ slowSender: true });
-  const holding = h.live.hold();
-  await tick();
-  const releasing = h.live.release();
-  await tick();
-  assert.deepEqual(h.sent, [], 'nothing sent while the sender is still installing');
-  h.openSender();
-  await holding;
-  await releasing;
-  assert.deepEqual(h.sent, ['hold', 'release']);
-  assert.equal(h.sender.track, h.silence);
-  assert.equal(h.mics[0].track.stopped, true);
-  assert.equal(h.live.held, false);
-});
-
-test('live: a hold frame that fails to send restores silence and reports the failure', async () => {
-  const h = liveRig();
-  const states = [];
-  const sink = trackSink({ sender: h.sender, silence: h.silence, send: async () => { throw new Error('stream gone'); }, onState: (s) => states.push(s) });
-  const live = createPtt({ mediaDevices: { getUserMedia: async () => { const m = fakeMic(); h.mics.push(m); return m.stream; } }, sink: () => sink, onState: (s) => states.push(s) });
-  await live.hold();
-  assert.equal(live.held, false);
-  assert.equal(h.sender.track, h.silence, 'the mic track does not stay on the sender');
-  assert.equal(h.mics[0].track.stopped, true);
-  assert.ok(states.includes('hold failed: stream gone'));
-});
-
 test('a second hold while the first is still opening waits for it; the first mic is stopped, not leaked', async () => {
   const r = wavRig({ gated: true });
   const first = r.ptt.hold();
@@ -240,35 +125,6 @@ test('a second hold while the first is still opening waits for it; the first mic
   assert.equal(r.log.mics[1].track.stopped, true);
 });
 
-test('live: awaiting release alone covers the in-flight hold', async () => {
-  const h = liveRig({ gated: true });
-  h.live.hold();
-  await tick();
-  const releasing = h.live.release();
-  h.openGate();
-  await releasing;
-  assert.equal(h.mics[0].track.stopped, true);
-  assert.equal(h.sender.track, h.silence);
-});
-
-test('live: mic refusal leaves it unheld and sends nothing', async () => {
-  const h = liveRig({ refuse: true });
-  await h.live.hold();
-  assert.equal(h.live.held, false);
-  assert.deepEqual(h.sent, []);
-  assert.equal(h.sender.track, h.silence);
-});
-
-test('live: a second hold while held is a no-op (one mic per hold)', async () => {
-  const h = liveRig();
-  await h.live.hold();
-  await h.live.hold();
-  assert.equal(h.mics.length, 1);
-  await h.live.release();
-  await h.live.release();
-  assert.deepEqual(h.sent, ['hold', 'release']);
-});
-
 test('the sink chosen at hold time is the one closed at release, even if the mode switched meanwhile', async () => {
   const closed = [];
   const mk = (name) => ({ open: async () => name, close: async () => { closed.push(name); } });
@@ -280,78 +136,46 @@ test('the sink chosen at hold time is the one closed at release, even if the mod
   assert.deepEqual(closed, ['a']);
 });
 
-function nudgeRig() {
-  const log = { nudges: 0, clears: 0 };
-  const timers = []; const cleared = [];
-  const nudge = createNudge({
-    onNudge: () => { log.nudges++; },
-    onClear: () => { log.clears++; },
-    setTimer: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
-    clearTimer: (id) => { cleared.push(id); timers[id - 1].fn = null; },
-  });
-  return { nudge, log, timers, cleared, fire: () => { for (const tm of timers) { const fn = tm.fn; tm.fn = null; if (fn) fn(); } } };
+function labelRig() {
+  const shown = [];
+  const label = labeller((t) => shown.push(t));
+  return { label, shown, last: () => shown.at(-1) };
 }
 
-test('nudge: media connected with no hold fires once after the window', () => {
-  const r = nudgeRig();
-  r.nudge.connected();
-  assert.equal(r.timers.length, 1);
-  assert.equal(r.timers[0].ms, 8000);
-  assert.equal(r.log.nudges, 0);
-  r.fire();
-  assert.equal(r.log.nudges, 1);
+test('label: idle → listening… → sending… → thinking… → hold to talk, one label per step', () => {
+  const r = labelRig();
+  assert.equal(r.last(), 'hold to talk');
+  r.label.word('opening mic');
+  r.label.word('listening');
+  r.label.word('sending');
+  r.label.sent();
+  r.label.reply();
+  assert.deepEqual(r.shown, ['hold to talk', 'listening…', 'sending…', 'thinking…', 'hold to talk']);
 });
 
-test('nudge: a hold inside the window clears the timer; the recorded callback is inert afterwards', () => {
-  const r = nudgeRig();
-  r.nudge.connected();
-  const { fn } = r.timers[0];
-  r.nudge.hold();
-  assert.deepEqual(r.cleared, [1]);
-  assert.equal(r.log.clears, 1);
-  fn();
-  assert.equal(r.log.nudges, 0);
+test('label: a reply while held keeps listening…; a hold during thinking shows listening…, and thinking resumes after', () => {
+  const r = labelRig();
+  r.label.word('listening'); r.label.word('sending'); r.label.sent();
+  assert.equal(r.last(), 'thinking…');
+  r.label.word('listening');
+  assert.equal(r.last(), 'listening…');
+  r.label.reply();
+  assert.equal(r.last(), 'listening…');
+  r.label.word('sending');
+  assert.equal(r.last(), 'sending…');
+  r.label.sent();
+  assert.equal(r.last(), 'thinking…');
 });
 
-test('nudge: stop clears a pending timer and calls onClear', () => {
-  const r = nudgeRig();
-  r.nudge.connected();
-  r.nudge.stop();
-  assert.deepEqual(r.cleared, [1]);
-  assert.equal(r.log.clears, 1);
-  r.fire();
-  assert.equal(r.log.nudges, 0);
-});
-
-test('nudge: a second connected() while pending arms no second timer', () => {
-  const r = nudgeRig();
-  r.nudge.connected();
-  r.nudge.connected();
-  assert.equal(r.timers.length, 1);
-});
-
-test('nudge: after a hold, connected() arms nothing', () => {
-  const r = nudgeRig();
-  r.nudge.hold();
-  r.nudge.connected();
-  assert.equal(r.timers.length, 0);
-  assert.equal(r.log.nudges, 0);
-});
-
-test('nudge: once fired, a reconnect arms nothing again', () => {
-  const r = nudgeRig();
-  r.nudge.connected();
-  r.fire();
-  r.nudge.connected();
-  assert.equal(r.timers.length, 1);
-  assert.equal(r.log.nudges, 1);
-});
-
-test('nudge: a fired timer is forgotten; stop does not clear it again', () => {
-  const r = nudgeRig();
-  r.nudge.connected();
-  r.fire();
-  r.nudge.stop();
-  assert.deepEqual(r.cleared, []);
-  assert.equal(r.log.clears, 1);
+test('label: a failure or a lost stream clears the busy word; nothing captured returns to idle', () => {
+  const r = labelRig();
+  r.label.word('listening'); r.label.word('sending');
+  r.label.word('send failed: stream gone');
+  assert.equal(r.last(), 'hold to talk');
+  r.label.word('listening');
+  r.label.word('nothing captured');
+  assert.equal(r.last(), 'hold to talk');
+  r.label.word('listening'); r.label.word('sending'); r.label.sent();
+  r.label.word('lost');
+  assert.equal(r.last(), 'thinking…', 'an unanswered note stays thinking through a reconnect; the reply is re-served');
 });

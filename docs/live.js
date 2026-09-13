@@ -44,9 +44,12 @@ export class ConversationTrace {
     this.pendingEntries = new Set();
     this.heardAt = 0;
     this.nextSpeechSource = 'model alone';
+    this.activeSpeechSource = null;
+    this.lastOutputEnd = null;
     this.forceNewSpeech = false;
   }
-  heard(delta, now = Date.now()) {
+  heard(delta, now = Date.now(), startMs = null) {
+    if (this.activeSpeechSource === 'model via hub' && Number.isFinite(startMs) && Number.isFinite(this.lastOutputEnd) && startMs >= this.lastOutputEnd) this.activeSpeechSource = null;
     if (!this.pendingTurns.length) this.heardAt = now;
     let entry = this.entries.at(-1);
     if (entry?.kind !== 'heard') {
@@ -60,8 +63,11 @@ export class ConversationTrace {
     this.onChange(this.entries);
   }
   delegated(id, now = Date.now()) {
-    const sent = this.pendingTurns.map((text) => text.trim()).filter(Boolean).join('\n');
+    const pending = this.pendingTurns.map((text) => text.trim()).filter(Boolean);
+    while (pending.length > 1 && new TextEncoder().encode(pending.join('\n')).length > 8192) pending.shift();
+    const sent = pending.join('\n');
     const context = this.entries.filter((item) => item.kind !== 'delegation' && !this.pendingEntries.has(item)).slice(-20).map((item) => ({ speaker: item.kind === 'heard' ? 'owner' : 'live', text: item.text }));
+    while (context.length && new TextEncoder().encode(JSON.stringify(context)).length > 8192) context.shift();
     const entry = { kind: 'delegation', id, sent, context, reply: '', timing: null, duration_ms: this.heardAt ? now - this.heardAt : 0 };
     this.entries.push(entry);
     this.pendingTurns = [];
@@ -76,6 +82,7 @@ export class ConversationTrace {
     entry.reply = reply;
     entry.timing = timing;
     this.nextSpeechSource = 'model via hub';
+    this.activeSpeechSource = null;
     this.forceNewSpeech = true;
     this.onChange(this.entries);
     return true;
@@ -97,23 +104,18 @@ export class ConversationTrace {
     }
     this.onChange(this.entries);
   }
-  spoke(delta) {
+  spoke(delta, startMs = null, endMs = null) {
     let entry = this.entries.at(-1);
     if (entry?.kind !== 'spoken' || this.forceNewSpeech) {
-      entry = { kind: 'spoken', source: this.nextSpeechSource, text: '' };
+      this.activeSpeechSource ??= this.nextSpeechSource;
+      entry = { kind: 'spoken', source: this.activeSpeechSource, text: '' };
       this.entries.push(entry);
       this.nextSpeechSource = 'model alone';
       this.forceNewSpeech = false;
     }
     entry.text += delta;
+    if (Number.isFinite(endMs)) this.lastOutputEnd = Math.max(this.lastOutputEnd ?? endMs, endMs);
     this.onChange(this.entries);
     return entry;
-  }
-  completeSpeech() {
-    const entry = this.entries.at(-1);
-    if (entry?.kind !== 'spoken' || entry.source !== 'model alone') return;
-    this.pendingTurns = [];
-    this.pendingEntries.clear();
-    this.heardAt = 0;
   }
 }

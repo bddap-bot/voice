@@ -71,6 +71,7 @@ let answerWaiter;
 let conversation;
 let usageSeconds = 0;
 let connected = false;
+let starting;
 
 function setStatus(text, kind = '') { $('status').textContent = text; $('status').className = kind; }
 function savedState(saved) { $('entry').classList.toggle('hidden', saved); $('saved').classList.toggle('hidden', !saved); $('conversation').classList.toggle('hidden', !saved); }
@@ -85,29 +86,42 @@ function sendFrame(value) {
   sendQueue = next.catch(() => {});
   return next;
 }
+let logNodes = new WeakMap();
 function render(entries) {
-  $('log').replaceChildren(...entries.map((entry) => {
+  if (!entries.length) {
+    $('log').replaceChildren();
+    logNodes = new WeakMap();
+    return;
+  }
+  for (const entry of entries) {
+    let record = logNodes.get(entry);
+    if (!record) {
     const node = document.createElement('article');
     node.className = 'turn';
     const tag = document.createElement('div');
-    const name = entry.kind === 'heard' ? 'model heard' : entry.kind === 'spoken' ? entry.source : 'delegated';
-    tag.className = `tag${name === 'model alone' ? ' alone' : ''}`;
-    tag.textContent = name;
+      const body = document.createElement('div');
     node.append(tag);
+      node.append(body);
+      $('log').append(node);
+      record = { node, tag, body };
+      logNodes.set(entry, record);
+    }
+    const name = entry.kind === 'heard' ? 'model heard' : entry.kind === 'spoken' ? entry.source : 'delegated';
+    record.tag.className = `tag${name === 'model alone' ? ' alone' : ''}`;
+    record.tag.textContent = name;
     const lines = entry.kind === 'heard' ? [['heard', entry.text]]
       : entry.kind === 'spoken' ? [['said', entry.text]]
       : [['sent to hub', entry.sent], ['context sent', JSON.stringify(entry.context)], ['hub reply', entry.reply || 'waiting…'], ['hub timing', entry.timing === null ? 'waiting…' : `${entry.timing} ms`]];
-    for (const [key, value] of lines) {
+    record.body.replaceChildren(...lines.map(([key, value]) => {
       const line = document.createElement('div');
       line.className = 'line';
       const label = document.createElement('span');
       label.className = 'key';
       label.textContent = `${key}: `;
       line.append(label, document.createTextNode(value));
-      node.append(line);
-    }
-    return node;
-  }));
+      return line;
+    }));
+  }
 }
 let trace = new ConversationTrace(render);
 
@@ -123,6 +137,7 @@ async function listen(mine) {
       if (verb === 'answer') answerWaiter?.resolve(JSON.parse(body));
       else if (verb === 'hub') await receiveHub(JSON.parse(body));
       else if (verb === 'hub-error') await receiveHubError(JSON.parse(body));
+      else if (verb === 'cap') await stopConversation('billing cap reached — conversation stopped', true);
       else if (verb === 'error') {
         answerWaiter?.reject(new Error(body));
         answerWaiter = null;
@@ -180,9 +195,8 @@ function waitData(channel, predicate, timeout = 10000) {
 function onLiveEvent(message) {
   let event;
   try { event = JSON.parse(message.data); } catch { return; }
-  if (event.type === 'session.input_transcript.delta') trace.heard(event.delta ?? '');
-  else if (event.type === 'session.output_transcript.delta') trace.spoke(event.delta ?? '');
-  else if (event.type === 'session.output_transcript.done') trace.completeSpeech();
+  if (event.type === 'session.input_transcript.delta') trace.heard(event.delta ?? '', Date.now(), event.start_ms);
+  else if (event.type === 'session.output_transcript.delta') trace.spoke(event.delta ?? '', event.start_ms, event.end_ms);
   else if (event.type === 'session.delegation.created') {
     const id = event.delegation?.id;
     if (!id) return setStatus('Live delegation had no id', 'err');
@@ -204,36 +218,78 @@ async function receiveHubError(result) {
   if (!conversation?.channel || !trace.failed(result.id, result.message)) return;
   conversation.channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: `hub_error_${Date.now()}`, delegation_id: result.id, content: `The hub could not answer this request: ${result.message}. Say that briefly without inventing.` }));
 }
-async function startConversation() {
-  if (!connected) await dial();
-  trace = new ConversationTrace(render);
-  render([]);
-  usageSeconds = 0;
-  setStatus('opening microphone…');
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  const pc = new RTCPeerConnection();
-  const channel = pc.createDataChannel('oai-events');
-  const started = waitData(channel, (event) => event.type === 'session.started', 30000);
-  channel.addEventListener('message', onLiveEvent);
-  pc.ontrack = (event) => { $('speaker').srcObject = event.streams[0]; };
-  for (const track of stream.getTracks()) pc.addTrack(track, stream);
-  conversation = { pc, channel, stream, clock: null };
-  await pc.setLocalDescription(await pc.createOffer());
-  await waitIce(pc);
-  const answerPromise = waitForAnswer();
-  await sendFrame(`offer\n${pc.localDescription.sdp}`);
-  const answer = await answerPromise;
+function paintOff() {
+  $('toggle').classList.remove('on');
+  $('toggle').setAttribute('aria-pressed', 'false');
+  $('toggle').textContent = 'conversation off';
+  $('elapsed').textContent = '00:00 / 30:00';
+}
+function cancelStarting() {
+  if (!starting) return;
+  starting.cancelled = true;
+  for (const track of starting.stream?.getTracks() ?? []) track.stop();
+  starting.channel?.close();
+  starting.pc?.close();
+  answerWaiter?.reject(new Error('conversation start cancelled'));
   answerWaiter = null;
-  await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
-  await started;
-  const capLabel = formatElapsed(answer.cap_seconds);
-  const clock = new SessionClock({ capSeconds: answer.cap_seconds, onTick: (seconds) => { $('elapsed').textContent = `${formatElapsed(seconds)} / ${capLabel}`; }, onCap: () => stopConversation(`${Math.round(answer.cap_seconds / 60)} minute cap reached — conversation stopped`) });
-  conversation.clock = clock;
-  clock.start();
-  $('toggle').classList.add('on');
-  $('toggle').setAttribute('aria-pressed', 'true');
-  $('toggle').textContent = 'conversation on';
-  setStatus('live', 'ok');
+  sendFrame('cancel').catch(() => {});
+  paintOff();
+  setStatus('conversation off', 'ok');
+}
+async function startConversation() {
+  const attempt = { cancelled: false, stream: null, pc: null, channel: null };
+  starting = attempt;
+  $('toggle').textContent = 'starting…';
+  try {
+    if (!connected) await dial();
+    if (attempt.cancelled) return;
+    trace = new ConversationTrace(render);
+    render([]);
+    usageSeconds = 0;
+    setStatus('opening microphone…');
+    attempt.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (attempt.cancelled) {
+      for (const track of attempt.stream.getTracks()) track.stop();
+      return;
+    }
+    attempt.pc = new RTCPeerConnection();
+    attempt.channel = attempt.pc.createDataChannel('oai-events');
+    const started = waitData(attempt.channel, (event) => event.type === 'session.started', 30000);
+    started.catch(() => {});
+    attempt.channel.addEventListener('message', onLiveEvent);
+    attempt.pc.ontrack = (event) => { $('speaker').srcObject = event.streams[0]; };
+    for (const track of attempt.stream.getTracks()) attempt.pc.addTrack(track, attempt.stream);
+    await attempt.pc.setLocalDescription(await attempt.pc.createOffer());
+    await waitIce(attempt.pc);
+    if (attempt.cancelled) return;
+    const answerPromise = waitForAnswer();
+    await sendFrame(`offer\n${attempt.pc.localDescription.sdp}`);
+    const answer = await answerPromise;
+    answerWaiter = null;
+    if (attempt.cancelled) return;
+    await attempt.pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
+    await started;
+    if (attempt.cancelled) return;
+    conversation = { pc: attempt.pc, channel: attempt.channel, stream: attempt.stream, clock: null };
+    const capLabel = formatElapsed(answer.cap_seconds);
+    const clock = new SessionClock({ capSeconds: answer.cap_seconds, onTick: (seconds) => { $('elapsed').textContent = `${formatElapsed(seconds)} / ${capLabel}`; }, onCap: () => stopConversation(`${Math.round(answer.cap_seconds / 60)} minute cap reached — conversation stopped`) });
+    conversation.clock = clock;
+    clock.start();
+    $('toggle').classList.add('on');
+    $('toggle').setAttribute('aria-pressed', 'true');
+    $('toggle').textContent = 'conversation on';
+    setStatus('live', 'ok');
+  } catch (error) {
+    if (attempt.cancelled) throw new Error('conversation start cancelled');
+    throw error;
+  } finally {
+    if (conversation?.pc !== attempt.pc) {
+      for (const track of attempt.stream?.getTracks() ?? []) track.stop();
+      attempt.channel?.close();
+      attempt.pc?.close();
+    }
+    if (starting === attempt) starting = null;
+  }
 }
 async function stopConversation(reason = 'conversation off', remoteClosed = false) {
   const current = conversation;
@@ -242,10 +298,7 @@ async function stopConversation(reason = 'conversation off', remoteClosed = fals
   current.clock?.stop();
   for (const track of current.stream.getTracks()) track.stop();
   trace.cancel();
-  $('toggle').classList.remove('on');
-  $('toggle').setAttribute('aria-pressed', 'false');
-  $('toggle').textContent = 'conversation off';
-  $('elapsed').textContent = '00:00 / 30:00';
+  paintOff();
   sendFrame('cancel').catch(() => {});
   if (!remoteClosed && current.channel.readyState === 'open') {
     const closed = waitData(current.channel, (event) => event.type === 'session.closed', 5000).catch(() => null);
@@ -264,15 +317,17 @@ async function stopConversation(reason = 'conversation off', remoteClosed = fals
   setStatus(reason, reason === 'conversation off' ? 'ok' : 'err');
 }
 async function toggleConversation() {
-  $('toggle').disabled = true;
   try {
-    if (conversation) await stopConversation();
+    if (starting) cancelStarting();
+    else if (conversation) await stopConversation();
     else await startConversation();
   } catch (error) {
     if (conversation) await stopConversation('conversation could not start');
+    else paintOff();
+    if (error.message === 'conversation start cancelled') return;
     console.warn('voice:', error);
     setStatus(`conversation could not start: ${error.message}`, 'err');
-  } finally { $('toggle').disabled = false; }
+  }
 }
 async function start(raw) {
   setStatus('decoding token…');

@@ -46,7 +46,7 @@ class FakeChannel extends EventTarget {
 }
 class FakePeerConnection {
   constructor() { this.iceGatheringState = 'complete'; this.localDescription = { sdp: 'offer' }; }
-  createDataChannel() { this.channel = new FakeChannel(); return this.channel; }
+  createDataChannel() { this.channel = new FakeChannel(); globalThis.testChannel = this.channel; return this.channel; }
   async createOffer() { return { type: 'offer', sdp: 'offer' }; }
   async setLocalDescription(description) { this.localDescription = description; }
   async setRemoteDescription() { queueMicrotask(() => this.channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.started' }) }))); }
@@ -67,9 +67,18 @@ window.addEventListener('load', () => {
       if (status !== 'live' && !status.startsWith('conversation could not start:')) return;
       clearInterval(started);
       document.body.dataset.startTest = status;
+      window.dispatchEvent(new Event('test-ready'));
     }, 10);
   }, 10);
 });
+`;
+
+const appendEntries = `
+const append = (type, delta) => testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type, delta }) }));
+for (let index = 0; index < 5; index++) {
+  append('session.input_transcript.delta', 'heard ' + index);
+  append('session.output_transcript.delta', 'spoken ' + index);
+}
 `;
 
 async function chromiumExecutable() {
@@ -94,10 +103,10 @@ async function chromiumExecutable() {
   throw new Error('headless Chromium is required; set CHROMIUM_BIN');
 }
 
-test('the page toggle completes its start path in headless Chromium', async () => {
+async function runPage(testSetup = '') {
   const index = (await readFile(new URL('../docs/index.html', import.meta.url), 'utf8'))
     .replace('https://bddap-bot.github.io/botq/botq_dash_wasm.js', '/botq_dash_wasm.js')
-    .replace('</head>', `<script>${browserSetup}</script></head>`);
+    .replace('</head>', `<script>${browserSetup}${testSetup}</script></head>`);
   const live = await readFile(new URL('../docs/live.js', import.meta.url));
   const scratch = await mkdtemp(join(process.cwd(), '.chromium-'));
   const profile = join(scratch, 'profile');
@@ -116,15 +125,52 @@ test('the page toggle completes its start path in headless Chromium', async () =
       '--headless=new',
       '--no-sandbox',
       '--disable-gpu',
+      '--window-size=390,844',
       `--user-data-dir=${profile}`,
       '--virtual-time-budget=3000',
       '--dump-dom',
       `http://127.0.0.1:${server.address().port}/`,
     ], { timeout: 15000, killSignal: 'SIGKILL', env: { ...process.env, TMPDIR: temporary } });
-    const observed = /data-start-test="([^"]*)"/.exec(stdout)?.[1] ?? 'start path did not settle';
-    assert.equal(observed, 'live', `${observed}\n${stderr}`);
+    return { stdout, stderr };
   } finally {
     if (server.listening) await new Promise((resolve) => server.close(resolve));
     await rm(scratch, { recursive: true, force: true });
   }
+}
+
+test('the page toggle completes its start path in headless Chromium', async () => {
+  const { stdout, stderr } = await runPage();
+  const observed = /data-start-test="([^"]*)"/.exec(stdout)?.[1] ?? 'start path did not settle';
+  assert.equal(observed, 'live', `${observed}\n${stderr}`);
+});
+
+test('the delegation log keeps the last of ten appended entries visible', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  ${appendEntries}
+  const log = document.querySelector('#log');
+  const last = log.lastElementChild;
+  const lastBox = last.getBoundingClientRect();
+  const logBox = log.getBoundingClientRect();
+  document.body.dataset.followTest = String(lastBox.bottom <= logBox.bottom + 1 && lastBox.top >= logBox.top - 1);
+});
+`);
+  const observed = /data-follow-test="([^"]*)"/.exec(stdout)?.[1] ?? 'follow test did not run';
+  assert.equal(observed, 'true', `${observed}\n${stderr}`);
+});
+
+test('the delegation log does not move when an entry arrives after scrolling to the top', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  ${appendEntries}
+  const log = document.querySelector('#log');
+  log.scrollTop = 0;
+  log.dispatchEvent(new Event('scroll'));
+  const before = log.scrollTop;
+  append('session.input_transcript.delta', 'newest');
+  document.body.dataset.pauseTest = String(log.scrollTop === before);
+});
+`);
+  const observed = /data-pause-test="([^"]*)"/.exec(stdout)?.[1] ?? 'pause test did not run';
+  assert.equal(observed, 'true', `${observed}\n${stderr}`);
 });

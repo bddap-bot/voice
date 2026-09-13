@@ -1,13 +1,13 @@
 # voice
 
-Push-to-talk page to the bothouse hub (bddap/bothouse#326). Served from GitHub
-Pages (`docs/`), it reaches `voice-web` on bothouse over the same wasm iroh client
-the botq dashboard ships (imported from https://bddap-bot.github.io/botq/), with a
-token pasted once on the device. The mic exists only while the button is held;
-release ends the turn and uploads one 16 kHz wav. Replies the hub queues with
-`voice-reply web '<text>'` are pushed down the same stream, spoken, and acked.
-The button labels each step: hold to talk → listening… → sending… → thinking… →
-hold to talk; the status line carries connection words only, diagnostics go to
-the console.
+The phone page at <https://bddap-bot.github.io/voice/> is one continuous conversation with the bothouse hub. Its only conversation control is an on/off toggle: on opens a `gpt-live-1` WebRTC session and streams the microphone without a push-to-talk gate, local activity detector, or wake word; off closes the session. The elapsed clock is visible while on. A configurable server-provided cap defaults to 30 minutes, then flips the toggle off with a billing-guard message. There is no legacy fallback: without a usable API key the one page fails closed and says the conversation could not start.
 
-Token: `voice-web token` on bothouse. Tests: `node --test test/*.test.js`.
+The browser authenticates to bothouse over the existing iroh link. Bothouse—not the browser—exchanges the browser's SDP at `POST /v1/live/sessions`, using these documented fields: `session.model: "gpt-live-1"`, `session.instructions`, `session.audio.output.voice: "marin"`, `session.delegation.type: "client"`, and `transport: { type: "webrtc", sdp }`. The current Live WebRTC API documents this trusted-server SDP exchange rather than an ephemeral-secret field. Consequently `OPENAI_API_KEY` is read only at runtime from mode-600 `/home/bot/.secrets/openai.env`; it never enters the browser, repository, Nix store, relay diagnostics, or logs. See the official [GPT Live model page](https://developers.openai.com/api/docs/models/gpt-live-1), [WebRTC session guide](https://developers.openai.com/api/docs/guides/voice-webrtc?api=live), and [Live conversations guide](https://developers.openai.com/api/docs/guides/live-conversations).
+
+Client-side delegation makes the backend agent the hub. The model emits `session.delegation.created`; the page sends the exact accumulated `session.input_transcript.delta` text to bothouse, which emits the same `voice-note: web ...` hub event as the former recorder. The hub's `voice-reply web '<text>'` result returns to the model as `session.commentary.append` with `delegation_id` and `content`, so the model speaks it. See the official [backend-agent delegation guide](https://developers.openai.com/api/docs/guides/live-delegation?delegation-mode=client). While the hub works the model may say that it is waiting, but must not invent a result or use scripted filler.
+
+At each toggle-on, bothouse assembles one situation card under 600 words from the NOW notes, live jobs, owner waits, open questions, and today's landings, then appends it to that session's instructions. Small questions plainly covered by the card may be answered directly. Projects, machines, schedules, plans, facts, or current state beyond it delegate by default.
+
+Beside the toggle, the single page keeps a live delegation log: every turn as the model heard it; the exact hub request, reply, and round-trip timing when delegated, or a visible “model alone” tag; and the exact output transcript the model spoke. The final usage duration and estimated session cost are logged on close. This is observability, not a second interaction surface.
+
+Generate the device credential with `voice-web token` on bothouse. Run the page tests with `node --test test/*.test.js`.

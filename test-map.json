@@ -2,14 +2,14 @@
   "about": "Touched-path → test-suite map, read by `botq test-map` (bddap/bothouse#236). First matching rule wins; `tests: []` means consciously untested and must carry its why.",
   "rules": [
     {
-      "paths": ["docs/ptt.js", "test/**", "test-map.json"],
+      "paths": ["docs/live.js", "test/**", "test-map.json"],
       "tests": ["node --test test/*.test.js"],
-      "why": "the push-to-talk core: mic only while held, one upload per hold, nothing sent outside a hold, the button label per step"
+      "why": "the continuous-conversation core: cap shutoff and the complete delegated-versus-alone turn ledger"
     },
     {
       "paths": ["docs/**"],
       "tests": [],
-      "why": "the GH-Pages page (token paste, iroh transport, audio graph) is drilled from bothouse by voice-ptt-drill.sh (headless Chromium against the deployed page) — run by hand after Pages deploys"
+      "why": "the GitHub Pages shell and browser WebRTC wiring; its stateful trace and cap logic are separated into live.js and tested above, while the real transport is covered by the bothouse Live smoke"
     },
     {
       "paths": ["README.md", ".gitignore"],

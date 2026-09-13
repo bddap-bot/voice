@@ -9,249 +9,259 @@
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
 <style>
   :root { color-scheme: dark; }
-  body { margin: 0; background: #0b0b0c; color: #e6e6e6; font: 16px/1.4 system-ui, sans-serif;
-         min-height: 100dvh; display: flex; flex-direction: column; }
-  header { display: flex; gap: 12px; align-items: baseline; padding: 12px 16px; }
-  h1 { font-size: 18px; margin: 0; }
-  #status { color: #9a9a9a; font-size: 14px; }
-  #status.err { color: #ff6b6b; } #status.ok { color: #6bd47a; }
-  .row { display: flex; gap: 8px; padding: 8px 16px; align-items: center; flex-wrap: wrap; }
-  textarea { width: 100%; min-height: 80px; background: #151517; color: inherit; border: 1px solid #333; border-radius: 6px; padding: 8px; }
-  button { background: #1d1d20; color: inherit; border: 1px solid #3a3a3f; border-radius: 6px; padding: 8px 14px; font: inherit; }
-  button.primary { background: #2c5cff; border-color: #2c5cff; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100dvh; background: #0b0b0c; color: #ececed; font: 15px/1.45 system-ui, sans-serif; }
+  header { display: flex; gap: 12px; align-items: baseline; padding: 16px clamp(16px, 4vw, 36px); border-bottom: 1px solid #26262a; }
+  h1 { font-size: 18px; margin: 0; letter-spacing: .05em; }
+  #status { color: #a5a5aa; } #status.err { color: #ff8585; } #status.ok { color: #75dc8b; }
   .hidden { display: none !important; }
-  #talk { flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px; }
-  #hold { width: min(70vw, 320px); height: min(70vw, 320px); border-radius: 50%; font-size: 24px;
-          background: #1d1d20; border: 3px solid #3a3a3f; touch-action: none; user-select: none; -webkit-user-select: none; }
-  #hold.on { background: #b3261e; border-color: #ff6b6b; }
-  #log { padding: 0 16px 16px; font-size: 15px; white-space: pre-wrap; }
-  #log .me { color: #9fb7ff; } #log .hub { color: #e6e6e6; }
+  .entry, .saved { padding: 18px clamp(16px, 4vw, 36px); display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  textarea { flex: 1 1 440px; min-height: 72px; background: #151517; color: inherit; border: 1px solid #39393f; border-radius: 8px; padding: 10px; }
+  button { background: #1d1d20; color: inherit; border: 1px solid #414148; border-radius: 8px; padding: 9px 14px; font: inherit; }
+  button.primary { background: #315ee8; border-color: #315ee8; }
+  main { display: grid; grid-template-columns: minmax(240px, .7fr) minmax(360px, 1.5fr); gap: 18px; padding: clamp(16px, 4vw, 36px); }
+  .control, .ledger { background: #141416; border: 1px solid #2d2d31; border-radius: 14px; }
+  .control { min-height: 260px; display: grid; place-content: center; justify-items: center; gap: 18px; padding: 28px; }
+  #toggle { width: min(62vw, 230px); height: 112px; border-radius: 58px; font-size: 22px; font-weight: 650; touch-action: manipulation; }
+  #toggle.on { background: #1f7642; border-color: #50c878; }
+  #elapsed { font: 28px/1 ui-monospace, monospace; color: #bdbdc3; min-height: 28px; }
+  .ledger { min-height: 260px; padding: 18px; overflow: hidden; }
+  .ledger h2 { margin: 0 0 12px; font-size: 14px; text-transform: uppercase; letter-spacing: .08em; color: #a5a5aa; }
+  #log { display: flex; flex-direction: column-reverse; gap: 10px; max-height: 65dvh; overflow: auto; }
+  .turn, .usage { padding: 11px 12px; background: #1b1b1e; border-radius: 8px; overflow-wrap: anywhere; }
+  .tag { color: #8eabff; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+  .tag.alone { color: #d4ae68; }
+  .line { margin-top: 5px; } .key { color: #8f8f96; }
+  @media (max-width: 720px) { main { grid-template-columns: 1fr; } .control { min-height: 220px; } #log { max-height: none; } }
 </style>
 </head>
 <body>
-<header>
-  <h1>voice</h1>
-  <span id="status">paste token to connect</span>
-</header>
-
-<div id="entry">
-  <div class="row">
-    <textarea id="token" placeholder="paste your `voice-web token` here" autocomplete="off" spellcheck="false" inputmode="text"></textarea>
-  </div>
-  <div class="row">
-    <button id="connect" class="primary">Connect</button>
-  </div>
-</div>
-
-<div id="saved" class="row hidden">
-  <span>🔒 token saved on this device</span>
-  <button id="reenter">Use a different token</button>
-  <button id="forget">Forget token</button>
-</div>
-
-<div id="talk" class="hidden">
-  <button id="hold">hold to talk</button>
-</div>
-<div id="log"></div>
-
+<header><h1>voice</h1><span id="status">paste token to connect</span></header>
+<section id="entry" class="entry">
+  <textarea id="token" placeholder="paste your `voice-web token` here" autocomplete="off" spellcheck="false"></textarea>
+  <button id="connect" class="primary">Connect</button>
+</section>
+<section id="saved" class="saved hidden">
+  <span>🔒 device authenticated</span><button id="reenter">Use another token</button><button id="forget">Forget token</button>
+</section>
+<main id="conversation" class="hidden">
+  <section class="control">
+    <button id="toggle" aria-pressed="false">conversation off</button>
+    <div id="elapsed" aria-live="polite">00:00</div>
+  </section>
+  <section class="ledger"><h2>live delegation log</h2><div id="log" aria-live="polite"></div></section>
+</main>
+<audio id="speaker" autoplay></audio>
 <script type="module">
 import wbgInit, { init as wasmInit, connect, send_only, recv } from 'https://bddap-bot.github.io/botq/botq_dash_wasm.js';
-import { createPtt, wavSink, labeller } from './ptt.js';
+import { ConversationTrace, SessionClock, formatElapsed } from './live.js';
 
 const KEY = 'voice.token';
 const ALPN = 'voice-web/1';
 const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+let token;
+let wasm;
+let generation = 0;
+let listener;
+let sendQueue = Promise.resolve();
+let answerWaiter;
+let conversation;
+let usageSeconds = 0;
 
-function setStatus(text, cls = '') { $('status').textContent = text; $('status').className = cls; }
-function showSavedState(saved) { $('entry').classList.toggle('hidden', saved); $('saved').classList.toggle('hidden', !saved); }
-function say(cls, text) {
-  const d = document.createElement('div'); d.className = cls; d.textContent = text;
-  $('log').prepend(d);
+function setStatus(text, kind = '') { $('status').textContent = text; $('status').className = kind; }
+function savedState(saved) { $('entry').classList.toggle('hidden', saved); $('saved').classList.toggle('hidden', !saved); $('conversation').classList.toggle('hidden', !saved); }
+function decodeToken(raw) {
+  let value = raw.trim().replace(/-/g, '+').replace(/_/g, '/');
+  while (value.length % 4) value += '=';
+  return JSON.parse(dec.decode(Uint8Array.from(atob(value), (char) => char.charCodeAt(0))));
 }
-function b64urlToText(s) {
-  s = s.replace(/-/g, '+').replace(/_/g, '/');
-  while (s.length % 4) s += '=';
-  return dec.decode(Uint8Array.from(atob(s), (c) => c.charCodeAt(0)));
+function sendFrame(value) {
+  const mine = generation;
+  const next = sendQueue.then(() => mine === generation ? send_only(enc.encode(value)) : Promise.reject(new Error('connection replaced')));
+  sendQueue = next.catch(() => {});
+  return next;
 }
-
-let token = null;
-let gen = 0;
-let listener = null;
-const blocked = new Map();
-const played = new Set();
-let audioCtx = null;
-const ctx = () => {
-  audioCtx ??= new AudioContext();
-  if (audioCtx.state !== 'running') audioCtx.resume().catch(() => {});
-  return audioCtx;
-};
-const hold = $('hold');
-const label = labeller((t) => { hold.textContent = t; });
-
-let queue = Promise.resolve();
-const sendFrame = (f) => {
-  const bytes = typeof f === 'string' ? enc.encode(f) : f;
-  const g = gen;
-  const p = queue.then(() => (g === gen ? send_only(bytes) : Promise.reject(new Error('stream replaced'))));
-  queue = p.catch(() => {});
-  return p;
-};
-
-async function hangUp() {
-  const old = listener;
-  if (!old) return;
-  gen++;
-  const settled = Promise.race([old.then(() => true), sleep(5000).then(() => false)]);
-  await Promise.race([sendFrame('bye').catch(() => {}), sleep(5000)]);
-  if (!await settled) throw new Error('the old stream is stuck; reload the page');
-  listener = null;
+function render(entries) {
+  $('log').replaceChildren(...entries.map((entry) => {
+    const node = document.createElement('article');
+    node.className = 'turn';
+    const tag = document.createElement('div');
+    tag.className = `tag${entry.decision === 'model alone' ? ' alone' : ''}`;
+    tag.textContent = entry.decision;
+    node.append(tag);
+    const lines = [
+      ['heard', entry.heard],
+      ...(entry.decision === 'delegated' ? [['sent to hub', entry.sent], ['hub reply', entry.reply || 'waiting…'], ['hub timing', entry.timing === null ? 'waiting…' : `${entry.timing} ms`]] : []),
+      ['said', entry.said || 'waiting…'],
+    ];
+    for (const [key, value] of lines) {
+      const line = document.createElement('div');
+      line.className = 'line';
+      const label = document.createElement('span');
+      label.className = 'key';
+      label.textContent = `${key}: `;
+      line.append(label, document.createTextNode(value));
+      node.append(line);
+    }
+    return node;
+  }));
 }
+const trace = new ConversationTrace(render);
 
+async function listen(mine) {
+  try {
+    for (;;) {
+      const raw = await recv();
+      if (mine !== generation) return;
+      const value = dec.decode(raw);
+      const at = value.indexOf('\n');
+      const verb = at < 0 ? value : value.slice(0, at);
+      const body = at < 0 ? '' : value.slice(at + 1);
+      if (verb === 'answer') answerWaiter?.resolve(JSON.parse(body));
+      else if (verb === 'hub') await receiveHub(JSON.parse(body));
+      else if (verb === 'error') {
+        answerWaiter?.reject(new Error(body));
+        setStatus(body, 'err');
+      }
+    }
+  } catch (error) {
+    if (mine !== generation) return;
+    setStatus('connection lost', 'err');
+    if (conversation) await stopConversation('connection lost');
+  }
+}
 async function dial() {
-  await hangUp();
+  generation++;
   await connect(token.relay_url ? `${token.endpoint_id}@${token.relay_url}` : token.endpoint_id, ALPN);
   await sendFrame(JSON.stringify({ auth: token.secret }));
   if (!JSON.parse(dec.decode(await recv())).ok) throw new Error('wrong token');
-  const my = ++gen;
-  listener = listen(my);
-  return my;
+  listener = listen(generation);
 }
-
-async function listen(my) {
-  try {
-    for (;;) {
-      const f = await recv();
-      if (my !== gen) return;
-      const nl = f.indexOf(10);
-      const head = dec.decode(nl < 0 ? f : f.subarray(0, nl));
-      const body = nl < 0 ? new Uint8Array() : f.subarray(nl + 1);
-      const [verb, ...args] = head.split(' ');
-      if (verb === 'reply') onReply(args, body);
-      else if (verb === 'sent') { label.sent(); say('me', `🎙 sent ${(Number(args[0]) / 32000).toFixed(1)}s`); }
-      else if (verb === 'error') { console.warn('voice-web:', dec.decode(body)); label.idle(); setStatus('the hub refused that note', 'err'); }
-    }
-  } catch (e) {
-    if (my !== gen) return;
-    console.warn('stream lost:', e);
-    label.idle();
-    setStatus('connection lost, reconnecting…', 'err');
-    await sleep(3000);
-    if (my === gen) session();
-  }
+function waitForAnswer() {
+  return new Promise((resolve, reject) => { answerWaiter = { resolve, reject }; });
 }
-
-function onReply([stamp, t, w], body) {
-  const tlen = Number(t), wlen = Number(w);
-  if (!stamp || body.length !== tlen + wlen) { console.warn('bad reply frame', stamp, body.length, tlen, wlen); return setStatus('garbled reply', 'err'); }
-  if (blocked.has(stamp)) return;
-  if (played.has(stamp)) { sendFrame(`ack\n${stamp}`).catch(() => {}); return; }
-  label.reply();
-  const url = URL.createObjectURL(new Blob([body.subarray(tlen)], { type: 'audio/wav' }));
-  const audio = new Audio(url);
-  const text = dec.decode(body.subarray(0, tlen));
-  const ack = () => { played.add(stamp); sendFrame(`ack\n${stamp}`).catch(() => {}); say('hub', text); };
-  const ended = new Promise((r) => { audio.onended = r; audio.onerror = r; setTimeout(r, 120000); }).then(() => URL.revokeObjectURL(url));
-  const entry = { audio, ack, ended };
-  const failed = (e) => { ack(); console.warn('reply playback:', e); setStatus('reply failed to play', 'err'); };
-  audio.play().then(ack).catch((e) => {
-    if (e?.name === 'NotAllowedError') { blocked.set(stamp, entry); setStatus('tap to hear the reply', 'err'); }
-    else failed(e);
+function waitIce(pc) {
+  if (pc.iceGatheringState === 'complete') return Promise.resolve();
+  return new Promise((resolve) => pc.addEventListener('icegatheringstatechange', () => { if (pc.iceGatheringState === 'complete') resolve(); }));
+}
+function waitData(channel, predicate, timeout = 10000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { channel.removeEventListener('message', onMessage); reject(new Error('Live session timed out')); }, timeout);
+    const onMessage = (message) => {
+      let event;
+      try { event = JSON.parse(message.data); } catch { return; }
+      if (!predicate(event)) return;
+      clearTimeout(timer);
+      channel.removeEventListener('message', onMessage);
+      resolve(event);
+    };
+    channel.addEventListener('message', onMessage);
   });
 }
-document.addEventListener('pointerdown', () => {
-  const queued = [...blocked.values()];
-  blocked.clear();
-  const chain = (i) => {
-    if (i >= queued.length) return;
-    const { audio, ack, ended } = queued[i];
-    audio.play().then(() => { ack(); return ended; }, (e) => { ack(); console.warn('reply playback:', e); setStatus('reply failed to play', 'err'); }).then(() => chain(i + 1));
-  };
-  chain(0);
-}, true);
-
-async function session() {
-  setStatus('connecting…');
-  for (;;) {
-    try { await dial(); break; }
-    catch (e) {
-      console.warn('connect:', e);
-      if (e?.message === 'wrong token') { localStorage.removeItem(KEY); showSavedState(false); $('talk').classList.add('hidden'); return setStatus('wrong token, paste a new one', 'err'); }
-      setStatus('cannot reach the hub, retrying…', 'err');
-      await sleep(3000);
-    }
+function onLiveEvent(message) {
+  let event;
+  try { event = JSON.parse(message.data); } catch { return; }
+  if (event.type === 'session.input_transcript.delta') trace.heard(event.delta ?? '');
+  else if (event.type === 'session.output_transcript.delta') trace.spoke(event.delta ?? '');
+  else if (event.type === 'session.delegation.created') {
+    const id = event.delegation?.id;
+    if (!id) return setStatus('Live delegation had no id', 'err');
+    const turn = trace.delegated(id);
+    if (!turn.sent) return setStatus('Live delegated before producing a transcript', 'err');
+    sendFrame(`delegate\n${JSON.stringify({ id, text: turn.sent, duration_ms: turn.duration_ms })}`).catch((error) => setStatus(error.message, 'err'));
+  } else if (event.type === 'session.usage.updated') usageSeconds = Number(event.usage?.seconds ?? usageSeconds);
+}
+async function receiveHub(result) {
+  if (!conversation?.channel || !trace.hub(result.id, result.reply, result.timing_ms)) return;
+  conversation.channel.send(JSON.stringify({ type: 'session.commentary.append', delegation_id: result.id, content: result.reply }));
+  await sendFrame(`hub-ack\n${JSON.stringify({ id: result.id, stamp: result.stamp })}`);
+}
+async function startConversation() {
+  setStatus('opening microphone…');
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const pc = new RTCPeerConnection();
+  const channel = pc.createDataChannel('oai-events');
+  const started = waitData(channel, (event) => event.type === 'session.started', 30000);
+  channel.addEventListener('message', onLiveEvent);
+  pc.ontrack = (event) => { $('speaker').srcObject = event.streams[0]; };
+  for (const track of stream.getTracks()) pc.addTrack(track, stream);
+  conversation = { pc, channel, stream, clock: null };
+  await pc.setLocalDescription(await pc.createOffer());
+  await waitIce(pc);
+  const answerPromise = waitForAnswer();
+  await sendFrame(`offer\n${pc.localDescription.sdp}`);
+  const answer = await answerPromise;
+  answerWaiter = null;
+  await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
+  await started;
+  const clock = new SessionClock({ capSeconds: answer.cap_seconds, onTick: (seconds) => { $('elapsed').textContent = formatElapsed(seconds); }, onCap: () => stopConversation(`${Math.round(answer.cap_seconds / 60)} minute cap reached — conversation stopped`) });
+  conversation.clock = clock;
+  clock.start();
+  $('toggle').classList.add('on');
+  $('toggle').setAttribute('aria-pressed', 'true');
+  $('toggle').textContent = 'conversation on';
+  setStatus('live', 'ok');
+}
+async function stopConversation(reason = 'conversation off') {
+  const current = conversation;
+  if (!current) return;
+  conversation = null;
+  current.clock?.stop();
+  if (current.channel.readyState === 'open') {
+    const closed = waitData(current.channel, (event) => event.type === 'session.closed', 5000).catch(() => null);
+    current.channel.send(JSON.stringify({ type: 'session.close' }));
+    const final = await closed;
+    usageSeconds = Number(final?.usage?.seconds ?? usageSeconds);
   }
-  setStatus('connected', 'ok');
+  for (const track of current.stream.getTracks()) track.stop();
+  current.channel.close();
+  current.pc.close();
+  $('speaker').srcObject = null;
+  $('toggle').classList.remove('on');
+  $('toggle').setAttribute('aria-pressed', 'false');
+  $('toggle').textContent = 'conversation off';
+  $('elapsed').textContent = '00:00';
+  const cost = usageSeconds * 0.05 / 60;
+  const item = document.createElement('div');
+  item.className = 'usage';
+  item.textContent = `session: ${usageSeconds.toFixed(1)} s · estimated $${cost.toFixed(4)} at $0.05/min`;
+  $('log').prepend(item);
+  setStatus(reason, reason.includes('cap reached') ? 'err' : 'ok');
 }
-
-function capture(stream) {
-  const c = ctx();
-  const src = c.createMediaStreamSource(stream);
-  const proc = c.createScriptProcessor(4096, 1, 1);
-  let cb = () => {};
-  proc.onaudioprocess = (e) => cb(e.inputBuffer.getChannelData(0).slice());
-  src.connect(proc); proc.connect(c.destination);
-  return { rate: c.sampleRate, onChunk: (f) => { cb = f; }, close: () => { proc.disconnect(); src.disconnect(); } };
+async function toggleConversation() {
+  $('toggle').disabled = true;
+  try {
+    if (conversation) await stopConversation();
+    else await startConversation();
+  } catch (error) {
+    if (conversation) await stopConversation('conversation could not start');
+    console.warn('voice:', error);
+    setStatus(`conversation could not start: ${error.message}`, 'err');
+  } finally { $('toggle').disabled = false; }
 }
-async function upload(wav) {
-  const frame = new Uint8Array(6 + wav.length);
-  frame.set(enc.encode('utter\n')); frame.set(wav, 6);
-  await sendFrame(frame);
-}
-const onState = (s) => {
-  console.log('ptt:', s);
-  if (s === 'opening mic') return;
-  if (s === 'listening') { label.listening(); return setStatus('connected', 'ok'); }
-  if (s === 'sending') return label.sending();
-  label.idle();
-  setStatus(s.split(':')[0], /fail|refused/.test(s) ? 'err' : '');
-};
-const ptt = createPtt({ mediaDevices: navigator.mediaDevices, sink: wavSink({ capture, upload, onState }), onState });
-const down = (e) => {
-  e.preventDefault();
-  ctx();
-  hold.classList.add('on');
-  ptt.hold().catch((err) => onState(`hold failed: ${err}`));
-};
-const up = (e) => { e.preventDefault(); hold.classList.remove('on'); ptt.release().catch((err) => onState(`release failed: ${err}`)); };
-hold.addEventListener('pointerdown', down);
-hold.addEventListener('pointerup', up);
-hold.addEventListener('pointercancel', up);
-hold.addEventListener('pointerleave', (e) => { if (ptt.held) up(e); });
-hold.addEventListener('contextmenu', (e) => e.preventDefault());
-
-let wasm = null;
 async function start(raw) {
   setStatus('decoding token…');
-  let t;
-  try { t = JSON.parse(b64urlToText(raw.trim())); }
-  catch { return setStatus('that does not look like a token', 'err'); }
-  if (!t.endpoint_id || !t.secret) return setStatus('that token is missing pieces', 'err');
-  token = t;
-  setStatus('loading wasm…');
+  try { token = decodeToken(raw); } catch { return setStatus('that does not look like a token', 'err'); }
+  if (!token.endpoint_id || !token.secret) return setStatus('that token is missing pieces', 'err');
+  setStatus('loading…');
   wasm ??= wbgInit().then(() => wasmInit());
   await wasm;
+  await dial();
   localStorage.setItem(KEY, raw.trim());
   $('token').value = '';
-  showSavedState(true);
-  $('talk').classList.remove('hidden');
-  await session();
+  savedState(true);
+  setStatus('ready', 'ok');
 }
 
-$('connect').addEventListener('click', () => start($('token').value));
-$('reenter').addEventListener('click', () => { $('token').value = ''; showSavedState(false); $('token').focus(); });
-$('forget').addEventListener('click', async () => {
-  localStorage.removeItem(KEY);
-  await hangUp().catch(() => {});
-  showSavedState(false);
-  $('talk').classList.add('hidden');
-  setStatus('token forgotten');
-});
-
+$('toggle').addEventListener('click', toggleConversation);
+$('connect').addEventListener('click', () => start($('token').value).catch((error) => setStatus(error.message, 'err')));
+$('reenter').addEventListener('click', async () => { await stopConversation(); savedState(false); $('token').focus(); });
+$('forget').addEventListener('click', async () => { await stopConversation(); localStorage.removeItem(KEY); generation++; sendFrame('bye').catch(() => {}); savedState(false); setStatus('token forgotten'); });
 const saved = localStorage.getItem(KEY);
-if (saved) { showSavedState(true); start(saved); }
+if (saved) start(saved).catch((error) => { localStorage.removeItem(KEY); savedState(false); setStatus(error.message, 'err'); });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 </script>
 </body>

@@ -1,5 +1,5 @@
-const CACHE = 'voice-shell-v3';
-const SHELL = ['.', 'index.html', 'ptt.js', 'manifest.webmanifest', 'icons/icon.svg'];
+const CACHE = 'voice-shell-v4';
+const SHELL = ['.', 'index.html', 'live.js', 'manifest.webmanifest', 'icons/icon.svg'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

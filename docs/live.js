@@ -7,6 +7,15 @@ export function isOfferFor(waiter, payload) {
   return Boolean(waiter && (waiter.id ?? waiter.offerId) === (payload.offer_id ?? payload.id));
 }
 
+export function formatStartError(error) {
+  const name = error?.name || 'Error';
+  const message = error?.message || String(error);
+  const summary = message.startsWith(`${name}:`) ? message : `${name}: ${message}`;
+  const headers = new Set([name, message, `${name}: ${message}`]);
+  const frame = String(error?.stack ?? '').split('\n').map((line) => line.trim()).find((line) => line && !headers.has(line));
+  return frame ? `${summary} — ${frame}` : summary;
+}
+
 function boundedText(parts, maximum) {
   const encoder = new TextEncoder();
   while (parts.length > 1 && encoder.encode(parts.join('\n')).length > maximum) parts.shift();
@@ -18,7 +27,7 @@ function boundedText(parts, maximum) {
 }
 
 export class SessionClock {
-  constructor({ capSeconds, now = () => Date.now(), every = setInterval, cancel = clearInterval, onTick, onCap }) {
+  constructor({ capSeconds, now = () => Date.now(), every = (...args) => globalThis.setInterval(...args), cancel = (timer) => globalThis.clearInterval(timer), onTick, onCap }) {
     this.capSeconds = capSeconds;
     this.now = now;
     this.every = every;

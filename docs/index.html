@@ -54,7 +54,7 @@
 <audio id="speaker" autoplay></audio>
 <script type="module">
 import wbgInit, { init as wasmInit, connect, send_only, recv } from 'https://bddap-bot.github.io/botq/botq_dash_wasm.js';
-import { ConversationTrace, SessionClock, formatElapsed, isOfferFor } from './live.js';
+import { ConversationTrace, SessionClock, formatElapsed, formatStartError, isOfferFor } from './live.js';
 
 const KEY = 'voice.token';
 const ALPN = 'voice-web/1';
@@ -393,7 +393,7 @@ async function toggleConversation() {
     if (conversation) await stopConversation('conversation could not start');
     else paintOff();
     console.warn('voice:', error);
-    setStatus(`conversation could not start: ${error.message}`, 'err');
+    setStatus(`conversation could not start: ${formatStartError(error)}`, 'err');
   }
 }
 async function start(raw) {

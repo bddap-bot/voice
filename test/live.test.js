@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ConversationTrace, SessionClock, formatElapsed, isOfferFor } from '../docs/live.js';
+import { ConversationTrace, SessionClock, formatElapsed, formatStartError, isOfferFor } from '../docs/live.js';
+
+test('start errors include their name and first stack frame', () => {
+  const error = new TypeError('Illegal invocation');
+  error.stack = 'TypeError: Illegal invocation\n    at SessionClock.start (live.js:42:23)\n    at later (index.html:1:1)';
+  assert.equal(formatStartError(error), 'TypeError: Illegal invocation — at SessionClock.start (live.js:42:23)');
+  error.stack = 'SessionClock.start@https://example.test/live.js:42:23\nlater@https://example.test/index.html:1:1';
+  assert.equal(formatStartError(error), 'TypeError: Illegal invocation — SessionClock.start@https://example.test/live.js:42:23');
+});
 
 test('only the matching SDP answer can resolve a replacement attempt', () => {
   const waiter = { id: 'new_offer' };

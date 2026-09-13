@@ -10,4 +10,6 @@ At each toggle-on, bothouse assembles one situation card under 600 words from th
 
 Beside the toggle, the single page keeps a live delegation log: every turn as the model heard it; the exact hub request, reply, and round-trip timing when delegated, or a visible “model alone” tag; and the exact output transcript the model spoke. The final usage duration and estimated session cost are logged on close. This is observability, not a second interaction surface.
 
+Speech received after a hub reply is tagged “model after hub reply,” a chronological claim rather than proof that the model consumed that reply. The adjacent delegation record remains the authoritative record of what went to the hub and what came back.
+
 Generate the device credential with `voice-web token` on bothouse. Run the page tests with `node --test test/*.test.js`.

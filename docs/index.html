@@ -54,7 +54,7 @@
 <audio id="speaker" autoplay></audio>
 <script type="module">
 import wbgInit, { init as wasmInit, connect, send_only, recv } from 'https://bddap-bot.github.io/botq/botq_dash_wasm.js';
-import { ConversationTrace, SessionClock, formatElapsed } from './live.js';
+import { ConversationTrace, SessionClock, formatElapsed, isOfferFor } from './live.js';
 
 const KEY = 'voice.token';
 const ALPN = 'voice-web/1';
@@ -72,6 +72,7 @@ let conversation;
 let usageSeconds = 0;
 let connected = false;
 let starting;
+let stopping;
 
 function setStatus(text, kind = '') { $('status').textContent = text; $('status').className = kind; }
 function savedState(saved) { $('entry').classList.toggle('hidden', saved); $('saved').classList.toggle('hidden', !saved); $('conversation').classList.toggle('hidden', !saved); }
@@ -134,10 +135,21 @@ async function listen(mine) {
       const at = value.indexOf('\n');
       const verb = at < 0 ? value : value.slice(0, at);
       const body = at < 0 ? '' : value.slice(at + 1);
-      if (verb === 'answer') answerWaiter?.resolve(JSON.parse(body));
+      if (verb === 'answer') {
+        const answer = JSON.parse(body);
+        if (isOfferFor(answerWaiter, answer)) answerWaiter.resolve(answer);
+      }
+      else if (verb === 'offer-error') {
+        const failure = JSON.parse(body);
+        if (isOfferFor(answerWaiter, failure)) answerWaiter.reject(new Error(failure.message));
+      }
       else if (verb === 'hub') await receiveHub(JSON.parse(body));
       else if (verb === 'hub-error') await receiveHubError(JSON.parse(body));
-      else if (verb === 'cap') await stopConversation('billing cap reached — conversation stopped', true);
+      else if (verb === 'cap') {
+        const capped = JSON.parse(body);
+        if (isOfferFor(conversation, capped)) await stopConversation('billing cap reached — conversation stopped');
+        else if (isOfferFor(starting, capped)) cancelStarting('billing cap reached — conversation stopped');
+      }
       else if (verb === 'error') {
         answerWaiter?.reject(new Error(body));
         answerWaiter = null;
@@ -162,37 +174,66 @@ async function dial() {
   connected = true;
   listener = listen(generation);
 }
-function waitForAnswer() {
+function waitForAnswer(id) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       answerWaiter = null;
       reject(new Error('SDP exchange timed out'));
     }, 30000);
     answerWaiter = {
+      id,
       resolve: (value) => { clearTimeout(timer); resolve(value); },
       reject: (error) => { clearTimeout(timer); reject(error); },
     };
   });
 }
-function waitIce(pc) {
+function waitIce(pc, attempt) {
   if (pc.iceGatheringState === 'complete') return Promise.resolve();
-  return new Promise((resolve) => pc.addEventListener('icegatheringstatechange', () => { if (pc.iceGatheringState === 'complete') resolve(); }));
+  return new Promise((resolve) => {
+    const finish = () => {
+      pc.removeEventListener('icegatheringstatechange', onChange);
+      attempt.cancelIce = null;
+      resolve();
+    };
+    const onChange = () => { if (pc.iceGatheringState === 'complete') finish(); };
+    attempt.cancelIce = finish;
+    pc.addEventListener('icegatheringstatechange', onChange);
+  });
 }
-function waitData(channel, predicate, timeout = 10000) {
+function openMicrophone(attempt) {
+  let rejectCancellation;
+  const cancelled = new Promise((_, reject) => { rejectCancellation = reject; });
+  attempt.cancelMic = () => rejectCancellation(new Error('conversation start cancelled'));
+  const pending = navigator.mediaDevices.getUserMedia({ audio: true });
+  pending.then((stream) => {
+    if (attempt.cancelled) for (const track of stream.getTracks()) track.stop();
+  }).catch(() => {});
+  return Promise.race([pending, cancelled]).finally(() => { attempt.cancelMic = null; });
+}
+function waitData(channel, predicate, timeout = 10000, attempt = null) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { channel.removeEventListener('message', onMessage); reject(new Error('Live session timed out')); }, timeout);
+    let settled = false;
+    const finish = (action, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      channel.removeEventListener('message', onMessage);
+      if (attempt) attempt.cancelData = null;
+      action(value);
+    };
+    const timer = setTimeout(() => finish(reject, new Error('Live session timed out')), timeout);
     const onMessage = (message) => {
       let event;
       try { event = JSON.parse(message.data); } catch { return; }
       if (!predicate(event)) return;
-      clearTimeout(timer);
-      channel.removeEventListener('message', onMessage);
-      resolve(event);
+      finish(resolve, event);
     };
+    if (attempt) attempt.cancelData = () => finish(reject, new Error('conversation start cancelled'));
     channel.addEventListener('message', onMessage);
   });
 }
-function onLiveEvent(message) {
+function onLiveEvent(message, source) {
+  if (source !== conversation?.channel && source !== starting?.channel) return;
   let event;
   try { event = JSON.parse(message.data); } catch { return; }
   if (event.type === 'session.input_transcript.delta') trace.heard(event.delta ?? '', Date.now(), event.start_ms);
@@ -206,7 +247,8 @@ function onLiveEvent(message) {
   } else if (event.type === 'session.usage.updated') usageSeconds = Number(event.usage?.seconds ?? usageSeconds);
   else if (event.type === 'session.closed') {
     usageSeconds = Number(event.usage?.seconds ?? usageSeconds);
-    stopConversation('Live session ended', true);
+    if (source === conversation?.channel) stopConversation('Live session ended', true);
+    else cancelStarting();
   }
 }
 async function receiveHub(result) {
@@ -224,53 +266,71 @@ function paintOff() {
   $('toggle').textContent = 'conversation off';
   $('elapsed').textContent = '00:00 / 30:00';
 }
-function cancelStarting() {
+function cancelOffer(attempt) {
+  if (!attempt?.offered || attempt.cancelSent) return;
+  attempt.cancelSent = true;
+  sendFrame('cancel').catch(() => {});
+}
+function cancelStarting(reason = 'conversation off') {
   if (!starting) return;
-  starting.cancelled = true;
-  for (const track of starting.stream?.getTracks() ?? []) track.stop();
-  starting.channel?.close();
-  starting.pc?.close();
+  const attempt = starting;
+  starting = null;
+  attempt.cancelled = true;
+  attempt.cancelMic?.();
+  for (const track of attempt.stream?.getTracks() ?? []) track.stop();
+  attempt.cancelData?.();
+  attempt.channel?.close();
+  attempt.pc?.close();
+  attempt.cancelIce?.();
   answerWaiter?.reject(new Error('conversation start cancelled'));
   answerWaiter = null;
-  sendFrame('cancel').catch(() => {});
+  cancelOffer(attempt);
   paintOff();
-  setStatus('conversation off', 'ok');
+  setStatus(reason, reason === 'conversation off' ? 'ok' : 'err');
 }
 async function startConversation() {
-  const attempt = { cancelled: false, stream: null, pc: null, channel: null };
+  const attempt = { cancelled: false, offered: false, cancelSent: false, cancelMic: null, cancelIce: null, cancelData: null, stream: null, pc: null, channel: null };
   starting = attempt;
   $('toggle').textContent = 'starting…';
   try {
+    if (stopping) await stopping;
+    if (attempt.cancelled) return;
     if (!connected) await dial();
     if (attempt.cancelled) return;
     trace = new ConversationTrace(render);
     render([]);
     usageSeconds = 0;
     setStatus('opening microphone…');
-    attempt.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    attempt.stream = await openMicrophone(attempt);
     if (attempt.cancelled) {
       for (const track of attempt.stream.getTracks()) track.stop();
       return;
     }
     attempt.pc = new RTCPeerConnection();
     attempt.channel = attempt.pc.createDataChannel('oai-events');
-    const started = waitData(attempt.channel, (event) => event.type === 'session.started', 30000);
+    const started = waitData(attempt.channel, (event) => event.type === 'session.started', 30000, attempt);
     started.catch(() => {});
-    attempt.channel.addEventListener('message', onLiveEvent);
+    attempt.channel.addEventListener('message', (event) => onLiveEvent(event, attempt.channel));
     attempt.pc.ontrack = (event) => { $('speaker').srcObject = event.streams[0]; };
     for (const track of attempt.stream.getTracks()) attempt.pc.addTrack(track, attempt.stream);
     await attempt.pc.setLocalDescription(await attempt.pc.createOffer());
-    await waitIce(attempt.pc);
+    await waitIce(attempt.pc, attempt);
     if (attempt.cancelled) return;
-    const answerPromise = waitForAnswer();
-    await sendFrame(`offer\n${attempt.pc.localDescription.sdp}`);
+    attempt.offerId = crypto.randomUUID();
+    const answerPromise = waitForAnswer(attempt.offerId);
+    attempt.offered = true;
+    await sendFrame(`offer\n${JSON.stringify({ id: attempt.offerId, sdp: attempt.pc.localDescription.sdp })}`);
+    if (attempt.cancelled) {
+      cancelOffer(attempt);
+      return;
+    }
     const answer = await answerPromise;
     answerWaiter = null;
     if (attempt.cancelled) return;
     await attempt.pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
     await started;
     if (attempt.cancelled) return;
-    conversation = { pc: attempt.pc, channel: attempt.channel, stream: attempt.stream, clock: null };
+    conversation = { pc: attempt.pc, channel: attempt.channel, stream: attempt.stream, clock: null, id: attempt.offerId };
     const capLabel = formatElapsed(answer.cap_seconds);
     const clock = new SessionClock({ capSeconds: answer.cap_seconds, onTick: (seconds) => { $('elapsed').textContent = `${formatElapsed(seconds)} / ${capLabel}`; }, onCap: () => stopConversation(`${Math.round(answer.cap_seconds / 60)} minute cap reached — conversation stopped`) });
     conversation.clock = clock;
@@ -284,6 +344,7 @@ async function startConversation() {
     throw error;
   } finally {
     if (conversation?.pc !== attempt.pc) {
+      cancelOffer(attempt);
       for (const track of attempt.stream?.getTracks() ?? []) track.stop();
       attempt.channel?.close();
       attempt.pc?.close();
@@ -291,7 +352,13 @@ async function startConversation() {
     if (starting === attempt) starting = null;
   }
 }
-async function stopConversation(reason = 'conversation off', remoteClosed = false) {
+function stopConversation(reason = 'conversation off', remoteClosed = false) {
+  if (starting) cancelStarting();
+  if (stopping) return stopping;
+  stopping = finishStop(reason, remoteClosed).finally(() => { stopping = null; });
+  return stopping;
+}
+async function finishStop(reason, remoteClosed) {
   const current = conversation;
   if (!current) return;
   conversation = null;
@@ -322,9 +389,9 @@ async function toggleConversation() {
     else if (conversation) await stopConversation();
     else await startConversation();
   } catch (error) {
+    if (error.message === 'conversation start cancelled') return;
     if (conversation) await stopConversation('conversation could not start');
     else paintOff();
-    if (error.message === 'conversation start cancelled') return;
     console.warn('voice:', error);
     setStatus(`conversation could not start: ${error.message}`, 'err');
   }

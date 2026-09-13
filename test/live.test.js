@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ConversationTrace, SessionClock, formatElapsed } from '../docs/live.js';
+import { ConversationTrace, SessionClock, formatElapsed, isOfferFor } from '../docs/live.js';
+
+test('only the matching SDP answer can resolve a replacement attempt', () => {
+  const waiter = { id: 'new_offer' };
+  assert.equal(isOfferFor(waiter, { offer_id: 'old_offer' }), false);
+  assert.equal(isOfferFor(waiter, { offer_id: 'new_offer' }), true);
+  assert.equal(isOfferFor(waiter, { id: 'new_offer' }), true);
+  assert.equal(isOfferFor({ offerId: 'new_offer' }, { offer_id: 'new_offer' }), true);
+});
 
 test('clock displays elapsed minutes and flips off at the configured cap', () => {
   let now = 1000;
@@ -37,7 +45,7 @@ test('timeline preserves every heard and spoken fragment around delegation', () 
     { kind: 'spoken', source: 'model alone', text: 'One moment.' },
     { kind: 'heard', text: 'deployment' },
     { kind: 'delegation', id: 'item_1', sent: 'check the\ndeployment', context: [{ speaker: 'live', text: 'One moment.' }], reply: 'running', timing: 870, duration_ms: 400 },
-    { kind: 'spoken', source: 'model via hub', text: 'It is running.' },
+    { kind: 'spoken', source: 'model after hub reply', text: 'It is running.' },
   ]);
 });
 
@@ -78,7 +86,16 @@ test('delegation request drops oldest complete fragments to fit the broker limit
   assert.doesNotMatch(entry.sent, /question 0 /);
 });
 
-test('hub speech keeps its attribution when input interleaves', () => {
+test('one uninterrupted delegation transcript is UTF-8 safely bounded', () => {
+  const trace = new ConversationTrace();
+  trace.heard(`prefix ${'🟢'.repeat(3000)} final words`);
+  const sent = trace.delegated('item_long').sent;
+  assert.ok(new TextEncoder().encode(sent).length <= 8192);
+  assert.match(sent, /final words$/);
+  assert.doesNotMatch(sent, /�/);
+});
+
+test('speech received after a hub reply keeps chronological attribution when input interleaves', () => {
   const trace = new ConversationTrace();
   trace.heard('status');
   trace.delegated('item_overlap');
@@ -86,7 +103,7 @@ test('hub speech keeps its attribution when input interleaves', () => {
   trace.spoke('It is ', 100, 200);
   trace.heard('sorry', 0, 150);
   trace.spoke('running.', 200, 300);
-  assert.deepEqual(trace.entries.filter((entry) => entry.kind === 'spoken').map((entry) => entry.source), ['model via hub', 'model via hub']);
+  assert.deepEqual(trace.entries.filter((entry) => entry.kind === 'spoken').map((entry) => entry.source), ['model after hub reply', 'model after hub reply']);
 });
 
 test('speech after a later owner turn is tagged model alone', () => {

@@ -3,6 +3,20 @@ export function formatElapsed(seconds) {
   return `${String(Math.floor(whole / 60)).padStart(2, '0')}:${String(whole % 60).padStart(2, '0')}`;
 }
 
+export function isOfferFor(waiter, payload) {
+  return Boolean(waiter && (waiter.id ?? waiter.offerId) === (payload.offer_id ?? payload.id));
+}
+
+function boundedText(parts, maximum) {
+  const encoder = new TextEncoder();
+  while (parts.length > 1 && encoder.encode(parts.join('\n')).length > maximum) parts.shift();
+  const bytes = encoder.encode(parts.join('\n'));
+  if (bytes.length <= maximum) return new TextDecoder().decode(bytes);
+  let start = bytes.length - maximum;
+  while ((bytes[start] & 0xc0) === 0x80) start++;
+  return new TextDecoder().decode(bytes.subarray(start));
+}
+
 export class SessionClock {
   constructor({ capSeconds, now = () => Date.now(), every = setInterval, cancel = clearInterval, onTick, onCap }) {
     this.capSeconds = capSeconds;
@@ -49,7 +63,7 @@ export class ConversationTrace {
     this.forceNewSpeech = false;
   }
   heard(delta, now = Date.now(), startMs = null) {
-    if (this.activeSpeechSource === 'model via hub' && Number.isFinite(startMs) && Number.isFinite(this.lastOutputEnd) && startMs >= this.lastOutputEnd) this.activeSpeechSource = null;
+    if (this.activeSpeechSource === 'model after hub reply' && Number.isFinite(startMs) && Number.isFinite(this.lastOutputEnd) && startMs >= this.lastOutputEnd) this.activeSpeechSource = null;
     if (!this.pendingTurns.length) this.heardAt = now;
     let entry = this.entries.at(-1);
     if (entry?.kind !== 'heard') {
@@ -64,8 +78,7 @@ export class ConversationTrace {
   }
   delegated(id, now = Date.now()) {
     const pending = this.pendingTurns.map((text) => text.trim()).filter(Boolean);
-    while (pending.length > 1 && new TextEncoder().encode(pending.join('\n')).length > 8192) pending.shift();
-    const sent = pending.join('\n');
+    const sent = boundedText(pending, 8192);
     const context = this.entries.filter((item) => item.kind !== 'delegation' && !this.pendingEntries.has(item)).slice(-20).map((item) => ({ speaker: item.kind === 'heard' ? 'owner' : 'live', text: item.text }));
     while (context.length && new TextEncoder().encode(JSON.stringify(context)).length > 8192) context.shift();
     const entry = { kind: 'delegation', id, sent, context, reply: '', timing: null, duration_ms: this.heardAt ? now - this.heardAt : 0 };
@@ -81,7 +94,7 @@ export class ConversationTrace {
     if (!entry) return false;
     entry.reply = reply;
     entry.timing = timing;
-    this.nextSpeechSource = 'model via hub';
+    this.nextSpeechSource = 'model after hub reply';
     this.activeSpeechSource = null;
     this.forceNewSpeech = true;
     this.onChange(this.entries);

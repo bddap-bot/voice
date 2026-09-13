@@ -47,7 +47,7 @@
 <main id="conversation" class="hidden">
   <section class="control">
     <button id="toggle" aria-pressed="false">conversation off</button>
-    <div id="elapsed" aria-live="polite">00:00</div>
+    <div id="elapsed" aria-live="polite">00:00 / 30:00</div>
   </section>
   <section class="ledger"><h2>live delegation log</h2><div id="log" aria-live="polite"></div></section>
 </main>
@@ -70,6 +70,7 @@ let sendQueue = Promise.resolve();
 let answerWaiter;
 let conversation;
 let usageSeconds = 0;
+let connected = false;
 
 function setStatus(text, kind = '') { $('status').textContent = text; $('status').className = kind; }
 function savedState(saved) { $('entry').classList.toggle('hidden', saved); $('saved').classList.toggle('hidden', !saved); $('conversation').classList.toggle('hidden', !saved); }
@@ -89,14 +90,13 @@ function render(entries) {
     const node = document.createElement('article');
     node.className = 'turn';
     const tag = document.createElement('div');
-    tag.className = `tag${entry.decision === 'model alone' ? ' alone' : ''}`;
-    tag.textContent = entry.decision;
+    const name = entry.kind === 'heard' ? 'model heard' : entry.kind === 'spoken' ? entry.source : 'delegated';
+    tag.className = `tag${name === 'model alone' ? ' alone' : ''}`;
+    tag.textContent = name;
     node.append(tag);
-    const lines = [
-      ['heard', entry.heard],
-      ...(entry.decision === 'delegated' ? [['sent to hub', entry.sent], ['hub reply', entry.reply || 'waiting…'], ['hub timing', entry.timing === null ? 'waiting…' : `${entry.timing} ms`]] : []),
-      ['said', entry.said || 'waiting…'],
-    ];
+    const lines = entry.kind === 'heard' ? [['heard', entry.text]]
+      : entry.kind === 'spoken' ? [['said', entry.text]]
+      : [['sent to hub', entry.sent], ['context sent', JSON.stringify(entry.context)], ['hub reply', entry.reply || 'waiting…'], ['hub timing', entry.timing === null ? 'waiting…' : `${entry.timing} ms`]];
     for (const [key, value] of lines) {
       const line = document.createElement('div');
       line.className = 'line';
@@ -109,7 +109,7 @@ function render(entries) {
     return node;
   }));
 }
-const trace = new ConversationTrace(render);
+let trace = new ConversationTrace(render);
 
 async function listen(mine) {
   try {
@@ -122,26 +122,42 @@ async function listen(mine) {
       const body = at < 0 ? '' : value.slice(at + 1);
       if (verb === 'answer') answerWaiter?.resolve(JSON.parse(body));
       else if (verb === 'hub') await receiveHub(JSON.parse(body));
+      else if (verb === 'hub-error') await receiveHubError(JSON.parse(body));
       else if (verb === 'error') {
         answerWaiter?.reject(new Error(body));
+        answerWaiter = null;
         setStatus(body, 'err');
       }
     }
   } catch (error) {
     if (mine !== generation) return;
-    setStatus('connection lost', 'err');
+    answerWaiter?.reject(error);
+    answerWaiter = null;
+    connected = false;
     if (conversation) await stopConversation('connection lost');
+    else setStatus('connection lost', 'err');
   }
 }
 async function dial() {
+  connected = false;
   generation++;
   await connect(token.relay_url ? `${token.endpoint_id}@${token.relay_url}` : token.endpoint_id, ALPN);
   await sendFrame(JSON.stringify({ auth: token.secret }));
   if (!JSON.parse(dec.decode(await recv())).ok) throw new Error('wrong token');
+  connected = true;
   listener = listen(generation);
 }
 function waitForAnswer() {
-  return new Promise((resolve, reject) => { answerWaiter = { resolve, reject }; });
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      answerWaiter = null;
+      reject(new Error('SDP exchange timed out'));
+    }, 30000);
+    answerWaiter = {
+      resolve: (value) => { clearTimeout(timer); resolve(value); },
+      reject: (error) => { clearTimeout(timer); reject(error); },
+    };
+  });
 }
 function waitIce(pc) {
   if (pc.iceGatheringState === 'complete') return Promise.resolve();
@@ -166,20 +182,33 @@ function onLiveEvent(message) {
   try { event = JSON.parse(message.data); } catch { return; }
   if (event.type === 'session.input_transcript.delta') trace.heard(event.delta ?? '');
   else if (event.type === 'session.output_transcript.delta') trace.spoke(event.delta ?? '');
+  else if (event.type === 'session.output_transcript.done') trace.completeSpeech();
   else if (event.type === 'session.delegation.created') {
     const id = event.delegation?.id;
     if (!id) return setStatus('Live delegation had no id', 'err');
     const turn = trace.delegated(id);
     if (!turn.sent) return setStatus('Live delegated before producing a transcript', 'err');
-    sendFrame(`delegate\n${JSON.stringify({ id, text: turn.sent, duration_ms: turn.duration_ms })}`).catch((error) => setStatus(error.message, 'err'));
+    sendFrame(`delegate\n${JSON.stringify({ id, text: turn.sent, context: turn.context, duration_ms: turn.duration_ms })}`).catch((error) => setStatus(error.message, 'err'));
   } else if (event.type === 'session.usage.updated') usageSeconds = Number(event.usage?.seconds ?? usageSeconds);
+  else if (event.type === 'session.closed') {
+    usageSeconds = Number(event.usage?.seconds ?? usageSeconds);
+    stopConversation('Live session ended', true);
+  }
 }
 async function receiveHub(result) {
   if (!conversation?.channel || !trace.hub(result.id, result.reply, result.timing_ms)) return;
-  conversation.channel.send(JSON.stringify({ type: 'session.commentary.append', delegation_id: result.id, content: result.reply }));
+  conversation.channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: `hub_${result.stamp}`, delegation_id: result.id, content: result.reply }));
   await sendFrame(`hub-ack\n${JSON.stringify({ id: result.id, stamp: result.stamp })}`);
 }
+async function receiveHubError(result) {
+  if (!conversation?.channel || !trace.failed(result.id, result.message)) return;
+  conversation.channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: `hub_error_${Date.now()}`, delegation_id: result.id, content: `The hub could not answer this request: ${result.message}. Say that briefly without inventing.` }));
+}
 async function startConversation() {
+  if (!connected) await dial();
+  trace = new ConversationTrace(render);
+  render([]);
+  usageSeconds = 0;
   setStatus('opening microphone…');
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   const pc = new RTCPeerConnection();
@@ -197,7 +226,8 @@ async function startConversation() {
   answerWaiter = null;
   await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
   await started;
-  const clock = new SessionClock({ capSeconds: answer.cap_seconds, onTick: (seconds) => { $('elapsed').textContent = formatElapsed(seconds); }, onCap: () => stopConversation(`${Math.round(answer.cap_seconds / 60)} minute cap reached — conversation stopped`) });
+  const capLabel = formatElapsed(answer.cap_seconds);
+  const clock = new SessionClock({ capSeconds: answer.cap_seconds, onTick: (seconds) => { $('elapsed').textContent = `${formatElapsed(seconds)} / ${capLabel}`; }, onCap: () => stopConversation(`${Math.round(answer.cap_seconds / 60)} minute cap reached — conversation stopped`) });
   conversation.clock = clock;
   clock.start();
   $('toggle').classList.add('on');
@@ -205,31 +235,33 @@ async function startConversation() {
   $('toggle').textContent = 'conversation on';
   setStatus('live', 'ok');
 }
-async function stopConversation(reason = 'conversation off') {
+async function stopConversation(reason = 'conversation off', remoteClosed = false) {
   const current = conversation;
   if (!current) return;
   conversation = null;
   current.clock?.stop();
-  if (current.channel.readyState === 'open') {
+  for (const track of current.stream.getTracks()) track.stop();
+  trace.cancel();
+  $('toggle').classList.remove('on');
+  $('toggle').setAttribute('aria-pressed', 'false');
+  $('toggle').textContent = 'conversation off';
+  $('elapsed').textContent = '00:00 / 30:00';
+  sendFrame('cancel').catch(() => {});
+  if (!remoteClosed && current.channel.readyState === 'open') {
     const closed = waitData(current.channel, (event) => event.type === 'session.closed', 5000).catch(() => null);
     current.channel.send(JSON.stringify({ type: 'session.close' }));
     const final = await closed;
     usageSeconds = Number(final?.usage?.seconds ?? usageSeconds);
   }
-  for (const track of current.stream.getTracks()) track.stop();
   current.channel.close();
   current.pc.close();
   $('speaker').srcObject = null;
-  $('toggle').classList.remove('on');
-  $('toggle').setAttribute('aria-pressed', 'false');
-  $('toggle').textContent = 'conversation off';
-  $('elapsed').textContent = '00:00';
   const cost = usageSeconds * 0.05 / 60;
   const item = document.createElement('div');
   item.className = 'usage';
   item.textContent = `session: ${usageSeconds.toFixed(1)} s · estimated $${cost.toFixed(4)} at $0.05/min`;
   $('log').prepend(item);
-  setStatus(reason, reason.includes('cap reached') ? 'err' : 'ok');
+  setStatus(reason, reason === 'conversation off' ? 'ok' : 'err');
 }
 async function toggleConversation() {
   $('toggle').disabled = true;
@@ -259,7 +291,7 @@ async function start(raw) {
 $('toggle').addEventListener('click', toggleConversation);
 $('connect').addEventListener('click', () => start($('token').value).catch((error) => setStatus(error.message, 'err')));
 $('reenter').addEventListener('click', async () => { await stopConversation(); savedState(false); $('token').focus(); });
-$('forget').addEventListener('click', async () => { await stopConversation(); localStorage.removeItem(KEY); generation++; sendFrame('bye').catch(() => {}); savedState(false); setStatus('token forgotten'); });
+$('forget').addEventListener('click', async () => { await stopConversation(); localStorage.removeItem(KEY); await sendFrame('bye').catch(() => {}); generation++; connected = false; savedState(false); setStatus('token forgotten'); });
 const saved = localStorage.getItem(KEY);
 if (saved) start(saved).catch((error) => { localStorage.removeItem(KEY); savedState(false); setStatus(error.message, 'err'); });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});

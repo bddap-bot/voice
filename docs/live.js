@@ -40,50 +40,80 @@ export class ConversationTrace {
   constructor(onChange = () => {}) {
     this.onChange = onChange;
     this.entries = [];
-    this.hearing = '';
+    this.pendingTurns = [];
+    this.pendingEntries = new Set();
     this.heardAt = 0;
-    this.speaking = null;
+    this.nextSpeechSource = 'model alone';
+    this.forceNewSpeech = false;
   }
   heard(delta, now = Date.now()) {
-    if (!this.hearing) this.heardAt = now;
-    this.speaking = null;
-    this.hearing += delta;
+    if (!this.pendingTurns.length) this.heardAt = now;
+    let entry = this.entries.at(-1);
+    if (entry?.kind !== 'heard') {
+      entry = { kind: 'heard', text: '' };
+      this.entries.push(entry);
+      this.pendingEntries.add(entry);
+      this.pendingTurns.push('');
+    }
+    entry.text += delta;
+    this.pendingTurns[this.pendingTurns.length - 1] += delta;
     this.onChange(this.entries);
   }
   delegated(id, now = Date.now()) {
-    const exact = this.hearing.trim();
-    const entry = { id, heard: exact, decision: 'delegated', sent: exact, reply: '', timing: null, said: '' };
-    entry.duration_ms = this.heardAt ? now - this.heardAt : 0;
+    const sent = this.pendingTurns.map((text) => text.trim()).filter(Boolean).join('\n');
+    const context = this.entries.filter((item) => item.kind !== 'delegation' && !this.pendingEntries.has(item)).slice(-20).map((item) => ({ speaker: item.kind === 'heard' ? 'owner' : 'live', text: item.text }));
+    const entry = { kind: 'delegation', id, sent, context, reply: '', timing: null, duration_ms: this.heardAt ? now - this.heardAt : 0 };
     this.entries.push(entry);
-    this.speaking = entry;
-    this.hearing = '';
+    this.pendingTurns = [];
+    this.pendingEntries.clear();
     this.heardAt = 0;
     this.onChange(this.entries);
     return entry;
   }
   hub(id, reply, timing) {
-    const entry = this.entries.find((item) => item.id === id);
+    const entry = this.entries.find((item) => item.kind === 'delegation' && item.id === id);
     if (!entry) return false;
     entry.reply = reply;
     entry.timing = timing;
+    this.nextSpeechSource = 'model via hub';
+    this.forceNewSpeech = true;
     this.onChange(this.entries);
     return true;
   }
-  spoke(delta) {
-    let entry = this.speaking;
-    if (!entry) entry = [...this.entries].reverse().find((item) => item.decision === 'delegated' && !item.said);
-    if (!entry) {
-      entry = this.entries.at(-1);
-      if (!entry || entry.decision !== 'model alone' || entry.said) {
-        entry = { heard: this.hearing.trim(), decision: 'model alone', sent: '', reply: '', timing: null, said: '' };
-        this.entries.push(entry);
-        this.hearing = '';
-        this.heardAt = 0;
+  failed(id, message) {
+    const entry = this.entries.find((item) => item.kind === 'delegation' && item.id === id);
+    if (!entry) return false;
+    entry.reply = message;
+    entry.failed = true;
+    this.onChange(this.entries);
+    return true;
+  }
+  cancel() {
+    for (const entry of this.entries) {
+      if (entry.kind === 'delegation' && !entry.reply) {
+        entry.reply = 'cancelled';
+        entry.failed = true;
       }
     }
-    this.speaking = entry;
-    entry.said += delta;
+    this.onChange(this.entries);
+  }
+  spoke(delta) {
+    let entry = this.entries.at(-1);
+    if (entry?.kind !== 'spoken' || this.forceNewSpeech) {
+      entry = { kind: 'spoken', source: this.nextSpeechSource, text: '' };
+      this.entries.push(entry);
+      this.nextSpeechSource = 'model alone';
+      this.forceNewSpeech = false;
+    }
+    entry.text += delta;
     this.onChange(this.entries);
     return entry;
+  }
+  completeSpeech() {
+    const entry = this.entries.at(-1);
+    if (entry?.kind !== 'spoken' || entry.source !== 'model alone') return;
+    this.pendingTurns = [];
+    this.pendingEntries.clear();
+    this.heardAt = 0;
   }
 }

@@ -81,11 +81,15 @@ test('waiting holds a readable gesture until the hub result releases it', () => 
   assert.equal(runtime.gestureState.releasing, true);
 });
 
-test('panel pointing can replace the waiting gesture when display material arrives', () => {
-  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), { waitingForHub: true, gestureState: { name: 'waiting' }, gestureOffsets: {} });
+test('a hub wait drops every gesture except panel pointing', () => {
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), { waitingForHub: true, gestureState: { name: 'waiting' }, gestureOffsets: {}, clips: new Map() });
+  runtime.gesture('beat');
+  runtime.gesture('nod');
+  assert.equal(runtime.gestureState.name, 'waiting');
   runtime.gesture('point', 'panel');
   assert.equal(runtime.gestureState.name, 'point_at');
-  assert.throws(() => runtime.gesture('beat'), /waiting/);
+  runtime.gesture('beat');
+  assert.equal(runtime.gestureState.name, 'point_at');
 });
 
 test('Mixamo rest rotations preserve an upright VRM bone-space invariant', () => {

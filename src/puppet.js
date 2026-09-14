@@ -354,7 +354,7 @@ export class PuppetRuntime {
   gesture(name, target) {
     const resolved = name === 'point' && target === 'panel' ? 'point_at' : name;
     if (!GESTURES[resolved] && !CLIP_GESTURES.has(resolved)) throw new Error(`unknown gesture ${name}`);
-    if (this.waitingForHub && resolved !== 'point_at') throw new Error('puppet is waiting for the hub');
+    if (this.waitingForHub && resolved !== 'point_at') return;
     if (CLIP_GESTURES.has(resolved)) this.playClip(resolved, this.poseName === 'sit' ? 'sit-idle' : 'idle');
     else this.beginGesture(resolved, false);
   }

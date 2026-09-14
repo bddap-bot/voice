@@ -63,6 +63,7 @@
 import wbgInit, { init as wasmInit, connect, send_only, recv } from 'https://bddap-bot.github.io/botq/botq_dash_wasm.js';
 import { ConversationTrace, SessionClock, formatElapsed, formatStartError, isOfferFor } from './live.js';
 import { PuppetChannel } from './puppet-client.js';
+import { TranscriptMoodDriver } from './puppet-drivers.js';
 import { PuppetTools, completedToolCall } from './puppet-tools.js';
 import { PuppetRuntime } from './puppet.js';
 
@@ -93,6 +94,7 @@ let puppetActive;
 let puppetScope;
 let puppetRuntime;
 let puppetTools;
+const moodDriver = new TranscriptMoodDriver((mood) => puppetRuntime?.mood(mood));
 const hubWaiting = new Set();
 const completedToolCalls = new Set();
 const puppetChannel = new PuppetChannel(sendFrame, caches, () => token?.endpoint_id ?? '');
@@ -311,7 +313,10 @@ function onLiveEvent(message, source) {
   try { event = JSON.parse(message.data); } catch { return; }
   const toolCall = completedToolCall(event);
   if (event.type === 'session.input_transcript.delta') trace.heard(event.delta ?? '', Date.now(), event.start_ms);
-  else if (event.type === 'session.output_transcript.delta') trace.spoke(event.delta ?? '', event.start_ms, event.end_ms);
+  else if (event.type === 'session.output_transcript.delta') {
+    trace.spoke(event.delta ?? '', event.start_ms, event.end_ms);
+    moodDriver.push(event.delta ?? '');
+  }
   else if (toolCall) handlePuppetTool(toolCall, source).catch((error) => setStatus(`puppet tool failed: ${error.message}`, 'err'));
   else if (event.type === 'session.delegation.created') {
     const id = event.delegation?.id;
@@ -363,6 +368,7 @@ async function receiveHubError(result) {
 }
 function paintOff() {
   hubWaiting.clear();
+  moodDriver.reset();
   puppetRuntime?.waiting(false);
   puppetRuntime?.pose('sit');
   $('elapsed').textContent = '00:00 / 30:00';

@@ -150,13 +150,14 @@ async function runPage(testSetup = '') {
   const live = await readFile(new URL('../docs/live.js', import.meta.url));
   const puppetClient = await readFile(new URL('../docs/puppet-client.js', import.meta.url));
   const puppetTools = await readFile(new URL('../docs/puppet-tools.js', import.meta.url));
+  const puppetDrivers = await readFile(new URL('../docs/puppet-drivers.js', import.meta.url));
   const scratch = await mkdtemp(join(process.cwd(), '.chromium-'));
   const profile = join(scratch, 'profile');
   const temporary = join(scratch, 'tmp');
   await Promise.all([mkdir(profile), mkdir(temporary)]);
   const server = createServer((request, response) => {
     const path = new URL(request.url, 'http://localhost').pathname;
-    const body = path === '/botq_dash_wasm.js' ? mockWasm : path === '/fake-puppet.js' ? fakePuppet : path === '/puppet-client.js' ? puppetClient : path === '/puppet-tools.js' ? puppetTools : path === '/live.js' ? live : index;
+    const body = path === '/botq_dash_wasm.js' ? mockWasm : path === '/fake-puppet.js' ? fakePuppet : path === '/puppet-client.js' ? puppetClient : path === '/puppet-drivers.js' ? puppetDrivers : path === '/puppet-tools.js' ? puppetTools : path === '/live.js' ? live : index;
     response.writeHead(200, { 'content-type': path.endsWith('.js') ? 'text/javascript' : 'text/html' });
     response.end(body);
   });
@@ -228,4 +229,18 @@ window.addEventListener('test-ready', () => {
 `);
   const encoded = /data-tool-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   assert.deepEqual(JSON.parse(encoded ?? 'null'), { calls: [['mood', 'amused']], events: ['conversation.item.create', 'response.create'] }, stderr);
+});
+
+test('output transcript drives mood and delegation drives the waiting pose', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  const event = (value) => testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(value) }));
+  event({ type: 'session.output_transcript.delta', delta: 'Sorry, that was my fault.' });
+  event({ type: 'session.input_transcript.delta', delta: 'check it' });
+  event({ type: 'session.delegation.created', delegation: { id: 'wait_1' } });
+  setTimeout(() => { document.body.dataset.driverTest = JSON.stringify(testPuppet.calls.filter(([name]) => name === 'mood' || name === 'waiting')); }, 20);
+});
+`);
+  const encoded = /data-driver-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), [['mood', 'apologetic'], ['waiting', true]], stderr);
 });

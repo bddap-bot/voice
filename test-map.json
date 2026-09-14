@@ -2,7 +2,7 @@
   "about": "Touched-path → test-suite map, read by `botq test-map` (bddap/bothouse#236). First matching rule wins; `tests: []` means consciously untested and must carry its why.",
   "rules": [
     {
-      "paths": ["src/**", "package.json", "package-lock.json", "docs/index.html", "docs/puppet-client.js", "docs/puppet-tools.js", "docs/puppet.js", "docs/sw.js"],
+      "paths": ["src/**", "package.json", "package-lock.json", "docs/index.html", "docs/puppet-client.js", "docs/puppet-drivers.js", "docs/puppet-tools.js", "docs/puppet.js", "docs/sw.js"],
       "tests": ["npm test", "npm run build"],
       "why": "the browser puppet runtime, authenticated transfer/cache client, page wiring, and reproducible Three/VRM bundle"
     },

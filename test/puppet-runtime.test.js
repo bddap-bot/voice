@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as THREE from 'three';
-import { MOOD_TABLE, PuppetRuntime, audioVisemes } from '../src/puppet.js';
+import { MOOD_TABLE, PuppetRuntime, audioEnergy, audioVisemes, shouldBeat } from '../src/puppet.js';
 
 function waveform(amplitude) {
   return Uint8Array.from({ length: 256 }, (_, index) => 128 + Math.round(Math.sin(index / 3) * amplitude));
@@ -31,6 +31,43 @@ test('every mood has bounded expressions and a head or shoulder pose', () => {
     assert.ok(Object.values(mood.expressions).every((value) => value >= 0 && value <= 1));
     assert.ok(['head', 'leftShoulder', 'rightShoulder'].some((bone) => bone in mood.bones));
   }
+});
+
+test('audio energy distinguishes silence from a speech beat', () => {
+  assert.equal(audioEnergy(new Uint8Array(32).fill(128)), 0);
+  assert.ok(audioEnergy(Uint8Array.from({ length: 32 }, (_, index) => index % 2 ? 180 : 76)) > 0.35);
+});
+
+test('speech attacks trigger bounded beats outside hub waits', () => {
+  assert.equal(shouldBeat(0.12, 0.04, false), true);
+  assert.equal(shouldBeat(0.12, 0.1, false), false);
+  assert.equal(shouldBeat(0.12, 0.04, true), false);
+});
+
+test('audio beats never replace an active explicit gesture', () => {
+  const runtime = Object.create(PuppetRuntime.prototype);
+  runtime.audio = {
+    analyser: {
+      fftSize: 256,
+      getByteTimeDomainData: (data) => data.forEach((_, index) => { data[index] = index % 2 ? 180 : 76; }),
+      getByteFrequencyData: (data) => data.fill(80),
+    },
+    context: { sampleRate: 48000 },
+    waveform: new Uint8Array(256),
+    spectrum: new Uint8Array(128),
+  };
+  runtime.mouthValues = { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 };
+  runtime.previousEnergy = 0;
+  runtime.waitingForHub = false;
+  runtime.gestureState = { name: 'point_at' };
+  runtime.beginGesture = (name) => { runtime.gestureState = { name }; };
+  const manager = { setValue() {} };
+  runtime.updateMouth(manager);
+  assert.equal(runtime.gestureState.name, 'point_at');
+  runtime.gestureState = null;
+  runtime.previousEnergy = 0;
+  runtime.updateMouth(manager);
+  assert.equal(runtime.gestureState.name, 'beat');
 });
 
 test('waiting holds a readable gesture until the hub result releases it', () => {

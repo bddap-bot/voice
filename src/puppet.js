@@ -93,6 +93,19 @@ export function audioVisemes(waveform, spectrum, sampleRate, fftSize) {
   return Object.fromEntries(VISEMES.map((name) => [name, gate * shaped[name] / total * 0.82]));
 }
 
+export function audioEnergy(waveform) {
+  let square = 0;
+  for (const sample of waveform) {
+    const centered = (sample - 128) / 128;
+    square += centered * centered;
+  }
+  return Math.sqrt(square / waveform.length);
+}
+
+export function shouldBeat(energy, previousEnergy, waiting) {
+  return !waiting && energy > 0.075 && energy > previousEnergy * 1.28;
+}
+
 export class PuppetRuntime {
   constructor(canvas) {
     this.canvas = canvas;
@@ -159,6 +172,7 @@ export class PuppetRuntime {
     this.gestureOffsets = {};
     this.gestureRotation = new THREE.Quaternion();
     this.waitingForHub = false;
+    this.previousEnergy = 0;
     this.resize = new ResizeObserver(() => this.fit());
     this.resize.observe(canvas);
     this.fit();
@@ -334,6 +348,7 @@ export class PuppetRuntime {
   }
   mood(name) {
     if (!MOOD_TABLE[name]) throw new Error(`unknown mood ${name}`);
+    if (this.moodName === name) return;
     this.moodName = name;
     this.moodFrom = copyOffsets(this.moodBones);
     this.moodStarted = performance.now();
@@ -406,11 +421,17 @@ export class PuppetRuntime {
       this.audio.analyser.getByteTimeDomainData(this.audio.waveform);
       this.audio.analyser.getByteFrequencyData(this.audio.spectrum);
       targets = audioVisemes(this.audio.waveform, this.audio.spectrum, this.audio.context.sampleRate, this.audio.analyser.fftSize);
+      const energy = audioEnergy(this.audio.waveform);
+      if (!this.gestureState && shouldBeat(energy, this.previousEnergy, this.waitingForHub)) {
+        this.beginGesture('beat', false);
+      }
+      this.previousEnergy = energy;
     }
     for (const name of VISEMES) {
       this.mouthValues[name] = THREE.MathUtils.lerp(this.mouthValues[name], targets?.[name] ?? 0, 0.65);
       manager.setValue(name, this.mouthValues[name]);
     }
+    if (!this.audio) this.previousEnergy = 0;
   }
   animate(now) {
     const delta = Math.min(this.clock.getDelta(), 0.05);

@@ -44,6 +44,18 @@ export async function send_only(bytes) {
     deliver(enc.encode('audio-ack\\n' + JSON.stringify({ session_id: chunk.session_id, side: chunk.side, seq: chunk.seq })));
   }
   else if (frame === 'puppets') deliver(enc.encode('puppets\\n' + JSON.stringify({ active: '42', avatars: ['42', '43', '44'].map((id) => ({ id, size: 3, contentHash: 'hash-' + id, creditLine: '', licenseFlags: { creditRequired: false } })) })));
+  else if (frame === 'clips') deliver(enc.encode('clips\\n' + JSON.stringify({ clips: [{ action: 'idle', name: 'idle.fbx', format: 'fbx', contentHash: 'clip-hash' }] })));
+  else if (frame.startsWith('clip\\n')) {
+    const id = JSON.parse(frame.slice(frame.indexOf('\\n') + 1)).id;
+    const compressed = new Uint8Array(await new Response(new Blob([Uint8Array.from([7, 8, 9])]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+    deliver(enc.encode('clip-start\\n' + JSON.stringify({ id, size: compressed.length, originalSize: 3, contentHash: 'clip-hash', encoding: 'gzip' })));
+    const prefix = enc.encode('clip-chunk\\n' + id + '\\n');
+    const chunk = new Uint8Array(prefix.length + compressed.length);
+    chunk.set(prefix);
+    chunk.set(compressed, prefix.length);
+    deliver(chunk);
+    deliver(enc.encode('clip-end\\n' + id));
+  }
   else if (frame.startsWith('puppet\\n')) {
     const id = JSON.parse(frame.slice(frame.indexOf('\\n') + 1)).id;
     globalThis.puppetRequests.push(id);
@@ -77,8 +89,9 @@ export async function recv() {
 
 const fakePuppet = `
 export class PuppetRuntime {
-  constructor() { this.calls = []; globalThis.testPuppet = this; }
+  constructor() { this.calls = []; this.humanoidBone = 0; globalThis.testPuppet = this; }
   async load(bytes, valid, beforeCommit) { await beforeCommit(); return valid(); }
+  async loadClips(entries) { const before = this.humanoidBone; this.humanoidBone += entries[0].bytes.byteLength; globalThis.clipMovement = { before, after: this.humanoidBone, loaded: entries.map((entry) => [entry.action, entry.format]) }; }
   pose(...args) { this.calls.push(['pose', ...args]); }
   gesture(...args) { this.calls.push(['gesture', ...args]); }
   look(...args) { this.calls.push(['look', ...args]); }
@@ -246,14 +259,14 @@ window.addEventListener('test-ready', () => {
   assert.deepEqual(JSON.parse(encoded ?? 'null'), ['open', 'close'], stderr);
 });
 
-test('the page preloads every inactive puppet in catalog order after rendering the active puppet', async () => {
+test('the page loads a clip, moves a humanoid bone, and preloads inactive puppets', async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => setTimeout(() => {
-  document.body.dataset.preloadTest = JSON.stringify({ requests: puppetRequests, cacheKeys: [...puppetCache.keys()].map((url) => new URL(url).pathname.split('/').at(-1)) });
+  document.body.dataset.preloadTest = JSON.stringify({ requests: puppetRequests, cacheKeys: [...puppetCache.keys()].map((url) => new URL(url).pathname.split('/').at(-1)), clipMovement });
 }, 100));
 `);
   const encoded = /data-preload-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { requests: ['42', '43', '44'], cacheKeys: ['hash-42.vrm', 'hash-43.vrm', 'hash-44.vrm'] }, stderr);
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { requests: ['42', '43', '44'], cacheKeys: ['hash-42.vrm', 'clip-hash.fbx', 'hash-43.vrm', 'hash-44.vrm'], clipMovement: { before: 0, after: 3, loaded: [['idle', 'fbx']] } }, stderr);
 });
 
 test('authenticated text box sends a URL verbatim and informs an open Live session', async () => {

@@ -855,6 +855,11 @@ async function loadPuppet(id, epoch, request, valid) {
   if (!puppetRuntime) throw new Error('puppet renderer unavailable');
   const loaded = await puppetRuntime.load(bytes, current, () => puppetChannel.select(id));
   if (!loaded) throw new Error('puppet load replaced');
+  const clipCatalog = await puppetChannel.clips();
+  const clips = [];
+  for (const entry of clipCatalog.clips) clips.push({ ...entry, bytes: await puppetChannel.clipBytes(entry) });
+  if (!current()) throw new Error('puppet load replaced');
+  await puppetRuntime.loadClips(clips);
   if (!current()) throw new Error('puppet load replaced');
   $('puppet-credit').textContent = avatar.licenseFlags.creditRequired ? avatar.creditLine : '';
   $('puppet-choice').value = id;

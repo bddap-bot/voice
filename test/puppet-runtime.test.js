@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as THREE from 'three';
-import { MOOD_TABLE, PuppetRuntime, audioEnergy, audioVisemes, shouldBeat } from '../src/puppet.js';
+import { MOOD_TABLE, PuppetRuntime, audioEnergy, audioVisemes, retargetMixamoClip, shouldBeat } from '../src/puppet.js';
 
 function waveform(amplitude) {
   return Uint8Array.from({ length: 256 }, (_, index) => 128 + Math.round(Math.sin(index / 3) * amplitude));
@@ -88,11 +88,16 @@ test('panel pointing can replace the waiting gesture when display material arriv
   assert.throws(() => runtime.gesture('beat'), /waiting/);
 });
 
-test('pose transitions capture the base layer without reapplying overlays', () => {
-  const base = new THREE.Quaternion();
-  const node = { quaternion: new THREE.Quaternion().setFromEuler(new THREE.Euler(0.34, 0, 0)) };
-  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), { bones: new Map([['head', { node, rest: new THREE.Quaternion(), base, from: new THREE.Quaternion(), target: new THREE.Quaternion() }]]), stage: { position: { y: 0 } }, seat: {} });
-  runtime.pose('stand');
-  assert.ok(runtime.bones.get('head').from.equals(base));
-  assert.ok(!runtime.bones.get('head').from.equals(node.quaternion));
+test('Mixamo FBX tracks retarget onto VRM humanoid bones', () => {
+  const hips = new THREE.Bone();
+  hips.name = 'NormalizedHips';
+  const arm = new THREE.Bone();
+  arm.name = 'NormalizedRightUpperArm';
+  const nodes = { hips, rightUpperArm: arm };
+  const rotation = new THREE.QuaternionKeyframeTrack('mixamorigRightArm.quaternion', [0, 1], [0, 0, 0, 1, 0.2, 0, 0, 0.98]);
+  const position = new THREE.VectorKeyframeTrack('mixamorigHips.position', [0, 1], [0, 100, 0, 0, 110, 0]);
+  const source = { animations: [new THREE.AnimationClip('Pointing', 1, [rotation, position])] };
+  const clip = retargetMixamoClip(source, { humanoid: { getNormalizedBoneNode: (name) => nodes[name] } });
+  assert.deepEqual(clip.tracks.map((track) => track.name), ['NormalizedRightUpperArm.quaternion', 'NormalizedHips.position']);
+  assert.ok(Math.abs(clip.tracks[1].values[4] - 1.1) < 1e-6);
 });

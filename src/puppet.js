@@ -1,47 +1,68 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+import { VRMAnimationLoaderPlugin, createVRMAnimationClip } from '@pixiv/three-vrm-animation';
 
-const BONE_POSES = {
-  sit: {
-    leftUpperLeg: [-1.12, 0, -0.2],
-    rightUpperLeg: [-1.12, 0, 0.2],
-    leftLowerLeg: [1.32, 0, 0.18],
-    rightLowerLeg: [1.32, 0, -0.18],
-    spine: [-0.08, 0, 0],
-    leftUpperArm: [0.12, 0, 1.05],
-    rightUpperArm: [0.12, 0, -1.05],
-    leftLowerArm: [0, 0, -0.12],
-    rightLowerArm: [0, 0, 0.12],
-  },
-  stand: {
-    leftUpperArm: [0.08, 0, 1.22],
-    rightUpperArm: [0.08, 0, -1.22],
-    leftLowerArm: [0, 0, -0.08],
-    rightLowerArm: [0, 0, 0.08],
-  },
-  listen: {
-    spine: [-0.04, 0, 0],
-    head: [0.08, 0, 0.03],
-    leftUpperArm: [0.08, 0, 1.08],
-    rightUpperArm: [0.08, 0, -1.08],
-    leftLowerArm: [0, 0, -0.32],
-    rightLowerArm: [0, 0, 0.32],
-  },
+const MIXAMO_BONES = {
+  hips: 'hips', spine: 'spine', spine1: 'chest', spine2: 'upperChest', neck: 'neck', head: 'head',
+  leftshoulder: 'leftShoulder', leftarm: 'leftUpperArm', leftforearm: 'leftLowerArm', lefthand: 'leftHand',
+  rightshoulder: 'rightShoulder', rightarm: 'rightUpperArm', rightforearm: 'rightLowerArm', righthand: 'rightHand',
+  leftupleg: 'leftUpperLeg', leftleg: 'leftLowerLeg', leftfoot: 'leftFoot', lefttoebase: 'leftToes',
+  rightupleg: 'rightUpperLeg', rightleg: 'rightLowerLeg', rightfoot: 'rightFoot', righttoebase: 'rightToes',
 };
 
 const VISEMES = ['aa', 'ih', 'ou', 'ee', 'oh'];
 const MOOD_EXPRESSIONS = ['happy', 'angry', 'sad', 'relaxed', 'surprised'];
 
 const GESTURES = {
-  nod: { head: [0.34, 0, 0] },
-  shrug: { leftShoulder: [0, 0, 0.2], rightShoulder: [0, 0, -0.2], leftUpperArm: [0, 0, -0.28], rightUpperArm: [0, 0, 0.28], spine: [-0.08, 0, 0] },
-  think: { head: [0.12, -0.12, 0.05], rightUpperArm: [-0.72, 0.08, 0.5], rightLowerArm: [-1.05, 0, 0.28] },
-  point: { spine: [0, -0.2, 0], head: [0, 0.16, 0], rightUpperArm: [0, 0, 1.15], rightLowerArm: [0, 0, -0.12] },
   beat: { rightUpperArm: [-0.24, 0, 0.4], rightLowerArm: [-0.48, 0, 0.16] },
   point_at: { spine: [0, -0.42, 0], head: [0, 0.28, 0], rightUpperArm: [0, 0, 1.2], rightLowerArm: [0, 0, -0.08] },
   waiting: { spine: [-0.08, 0.12, 0], head: [0.12, -0.18, 0.08], leftUpperArm: [-0.28, 0, -0.15], rightUpperArm: [-0.58, 0, 0.4], rightLowerArm: [-0.92, 0, 0.26] },
 };
+
+const CLIP_GESTURES = new Set(['point', 'nod', 'shrug', 'think', 'wave']);
+
+function mixamoBoneName(trackName) {
+  const source = trackName.slice(0, trackName.lastIndexOf('.')).replace(/^.*\[|\]$/g, '').split(':').at(-1).replace(/^mixamorig/i, '').toLowerCase();
+  return MIXAMO_BONES[source];
+}
+
+export function retargetMixamoClip(source, vrm) {
+  const clip = source.animations?.[0];
+  if (!clip) throw new Error('FBX has no animation clip');
+  const tracks = [];
+  for (const track of clip.tracks) {
+    const humanoidName = mixamoBoneName(track.name);
+    const node = humanoidName && vrm.humanoid?.getNormalizedBoneNode(humanoidName);
+    if (!node) continue;
+    if (track.name.endsWith('.quaternion')) {
+      const target = new THREE.QuaternionKeyframeTrack(`${node.name}.quaternion`, track.times, track.values);
+      tracks.push(target);
+    } else if (humanoidName === 'hips' && track.name.endsWith('.position')) {
+      const values = Float32Array.from(track.values, (value) => value * 0.01);
+      tracks.push(new THREE.VectorKeyframeTrack(`${node.name}.position`, track.times, values));
+    }
+  }
+  if (!tracks.some((track) => track.name.endsWith('.quaternion'))) throw new Error('FBX has no mapped humanoid rotation tracks');
+  return new THREE.AnimationClip(clip.name || 'Clip', clip.duration, tracks);
+}
+
+export async function animationClip(bytes, format, vrm) {
+  if (format === 'vrma') {
+    const loader = new GLTFLoader();
+    loader.register((parser) => new VRMAnimationLoaderPlugin(parser));
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'model/gltf-binary' }));
+    try {
+      const gltf = await loader.loadAsync(url);
+      const animation = gltf.userData.vrmAnimations?.[0];
+      if (!animation) throw new Error('VRMA has no animation');
+      return createVRMAnimationClip(animation, vrm);
+    } finally { URL.revokeObjectURL(url); }
+  }
+  if (format === 'fbx') return retargetMixamoClip(new FBXLoader().parse(bytes, ''), vrm);
+  throw new Error(`unsupported animation format ${format}`);
+}
 
 export const MOOD_TABLE = {
   curious: { expressions: { surprised: 0.22 }, bones: { head: [-0.03, 0.12, 0.08], leftShoulder: [0, 0, 0.05] } },
@@ -147,11 +168,11 @@ export class PuppetRuntime {
       new THREE.NumberKeyframeTrack('.rotation[y]', [0, 2.5, 4.5, 6], [0, 0.018, -0.015, 0]),
     ]);
     this.mixer.clipAction(idle).play();
+    this.clips = new Map();
+    this.clipAction = null;
+    this.clipFallback = null;
     this.clock = new THREE.Clock();
     this.poseName = 'sit';
-    this.poseStart = performance.now();
-    this.poseFromY = -0.48;
-    this.poseToY = -0.48;
     this.bones = new Map();
     this.lookTarget = new THREE.Euler();
     this.lookOffset = new THREE.Quaternion();
@@ -244,6 +265,11 @@ export class PuppetRuntime {
     this.pose(this.poseName);
     return true;
   }
+  async loadClips(entries) {
+    this.clips.clear();
+    for (const entry of entries) this.clips.set(entry.action, await animationClip(entry.bytes, entry.format, this.vrm));
+    this.pose(this.poseName);
+  }
   clear() {
     if (!this.vrm) return;
     this.idleRoot.remove(this.vrm.scene);
@@ -311,22 +337,31 @@ export class PuppetRuntime {
     this.camera.updateProjectionMatrix();
   }
   pose(name) {
-    if (!BONE_POSES[name]) throw new Error(`unknown pose ${name}`);
+    const resolved = name === 'listen' ? 'idle' : name;
+    if (!['sit', 'stand', 'idle'].includes(resolved)) throw new Error(`unknown pose ${name}`);
     this.poseName = name;
-    this.poseStart = performance.now();
-    this.poseFromY = this.stage.position.y;
-    this.poseToY = name === 'sit' ? -0.48 : 0;
-    this.seat.visible = name === 'sit';
-    for (const [bone, entry] of this.bones) {
-      entry.from.copy(entry.base);
-      entry.target.setFromEuler(new THREE.Euler(...(BONE_POSES[name][bone] ?? [0, 0, 0]))).multiply(entry.rest);
-    }
+    const transition = resolved === 'sit' ? 'sit' : resolved === 'stand' ? 'stand' : 'idle';
+    const fallback = resolved === 'sit' ? 'sit-idle' : 'idle';
+    this.playClip(transition, fallback);
+    this.stage.position.y = resolved === 'sit' ? -0.48 : 0;
+    this.seat.visible = resolved === 'sit';
   }
   gesture(name, target) {
     const resolved = name === 'point' && target === 'panel' ? 'point_at' : name;
-    if (!GESTURES[resolved]) throw new Error(`unknown gesture ${name}`);
+    if (!GESTURES[resolved] && !CLIP_GESTURES.has(resolved)) throw new Error(`unknown gesture ${name}`);
     if (this.waitingForHub && resolved !== 'point_at') throw new Error('puppet is waiting for the hub');
-    this.beginGesture(resolved, false);
+    if (CLIP_GESTURES.has(resolved)) this.playClip(resolved, this.poseName === 'sit' ? 'sit-idle' : 'idle');
+    else this.beginGesture(resolved, false);
+  }
+  playClip(name, fallback) {
+    const clip = this.clips.get(name);
+    if (!clip) return;
+    this.clipAction?.fadeOut(0.18);
+    const action = this.mixer.clipAction(clip, this.vrm.scene).reset().fadeIn(0.18).play();
+    action.setLoop(name === fallback ? THREE.LoopRepeat : THREE.LoopOnce, name === fallback ? Infinity : 1);
+    action.clampWhenFinished = name !== fallback;
+    this.clipAction = action;
+    this.clipFallback = fallback;
   }
   beginGesture(name, hold) {
     const now = performance.now();
@@ -354,11 +389,11 @@ export class PuppetRuntime {
     this.moodStarted = performance.now();
   }
   updatePose(now) {
-    const amount = THREE.MathUtils.smoothstep((now - this.poseStart) / 420, 0, 1);
-    this.stage.position.y = THREE.MathUtils.lerp(this.poseFromY, this.poseToY, amount);
-    for (const entry of this.bones.values()) {
-      entry.base.slerpQuaternions(entry.from, entry.target, amount);
-      entry.node.quaternion.copy(entry.base);
+    if (this.clipAction && !this.clipAction.isRunning() && this.clipFallback) {
+      const fallback = this.clipFallback;
+      this.clipAction = null;
+      this.clipFallback = null;
+      this.playClip(fallback, fallback);
     }
   }
   updateGesture(now) {

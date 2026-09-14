@@ -18,6 +18,7 @@ export class PuppetChannel {
     this.cacheStorage = cache;
     this.cacheScope = cacheScope;
     this.catalogWaiter = null;
+    this.clipCatalogWaiter = null;
     this.selectionWaiter = null;
     this.transfer = null;
     this.epoch = 0;
@@ -46,21 +47,38 @@ export class PuppetChannel {
     }
     finally { if (this.selectionWaiter === waiter) this.selectionWaiter = null; }
   }
+  async clips() {
+    if (this.clipCatalogWaiter) return this.clipCatalogWaiter.promise;
+    const waiter = deferred();
+    this.clipCatalogWaiter = waiter;
+    try {
+      await this.send('clips');
+      return await waiter.promise;
+    } finally {
+      if (this.clipCatalogWaiter === waiter) this.clipCatalogWaiter = null;
+    }
+  }
+  clipBytes(entry) {
+    return this.transferBytes('clip', entry.name, entry.contentHash, entry.format);
+  }
   async bytes(id, contentHash = '') {
+    return this.transferBytes('puppet', id, contentHash, 'vrm');
+  }
+  async transferBytes(kind, id, contentHash, format) {
     const epoch = this.epoch;
     const cache = await this.cacheStorage.open('voice-puppets-v1');
-    const request = this.cacheRequest(contentHash || id);
+    const request = kind === 'puppet' ? this.cacheRequest(contentHash || id) : new Request(new URL(`.private-motion/${encodeURIComponent(this.cacheScope())}/${encodeURIComponent(contentHash || id)}.${format}`, location.href));
     const saved = await cache.match(request);
     if (epoch !== this.epoch) throw new Error('connection replaced');
     if (saved) return saved.arrayBuffer();
     if (this.transfer) throw new Error('another puppet is loading');
     const waiting = deferred();
-    this.transfer = { id, contentHash, size: null, originalSize: null, encoding: null, total: 0, chunks: [], waiting, cache, request };
+    this.transfer = { kind, id, contentHash, size: null, originalSize: null, encoding: null, total: 0, chunks: [], waiting, cache, request };
     try {
       const encodings = ['br', 'gzip'].filter((encoding) => {
         try { new DecompressionStream(encoding); return true; } catch { return false; }
       });
-      await this.send(`puppet\n${JSON.stringify({ id, encodings })}`);
+      await this.send(`${kind}\n${JSON.stringify({ id, encodings })}`);
       return await waiting.promise;
     } finally {
       if (this.transfer?.waiting === waiting) this.transfer = null;
@@ -69,7 +87,19 @@ export class PuppetChannel {
   async receive(raw) {
     const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
     const [verb, offset] = line(bytes);
-    if (!verb.startsWith('puppet')) return false;
+    if (!verb.startsWith('puppet') && !verb.startsWith('clip')) return false;
+    if (verb === 'clips') {
+      const waiter = this.clipCatalogWaiter;
+      this.clipCatalogWaiter = null;
+      waiter?.resolve(JSON.parse(decoder.decode(bytes.subarray(offset))));
+      return true;
+    }
+    if (verb === 'clips-error') {
+      const waiter = this.clipCatalogWaiter;
+      this.clipCatalogWaiter = null;
+      waiter?.reject(new Error(JSON.parse(decoder.decode(bytes.subarray(offset))).message));
+      return true;
+    }
     if (verb === 'puppets') {
       const waiter = this.catalogWaiter;
       this.catalogWaiter = null;
@@ -89,28 +119,28 @@ export class PuppetChannel {
       else this.selectionWaiter?.reject(new Error(value.message));
       return true;
     }
-    if (verb === 'puppet-start') {
+    if (verb === 'puppet-start' || verb === 'clip-start') {
       const value = JSON.parse(decoder.decode(bytes.subarray(offset)));
-      if (!this.transfer || value.id !== this.transfer.id || !Number.isSafeInteger(value.size) || value.size <= 0 || !Number.isSafeInteger(value.originalSize) || value.originalSize <= 0 || !['br', 'gzip'].includes(value.encoding) || value.contentHash !== this.transfer.contentHash) throw new Error('invalid puppet transfer');
+      if (!this.transfer || verb !== `${this.transfer.kind}-start` || value.id !== this.transfer.id || !Number.isSafeInteger(value.size) || value.size <= 0 || !Number.isSafeInteger(value.originalSize) || value.originalSize <= 0 || !['br', 'gzip'].includes(value.encoding) || value.contentHash !== this.transfer.contentHash) throw new Error('invalid transfer');
       this.transfer.size = value.size;
       this.transfer.originalSize = value.originalSize;
       this.transfer.encoding = value.encoding;
       return true;
     }
-    if (verb === 'puppet-chunk') {
+    if (verb === 'puppet-chunk' || verb === 'clip-chunk') {
       const [id, body] = line(bytes, offset);
-      if (!this.transfer || id !== this.transfer.id || this.transfer.size === null) throw new Error('unexpected puppet chunk');
+      if (!this.transfer || verb !== `${this.transfer.kind}-chunk` || id !== this.transfer.id || this.transfer.size === null) throw new Error('unexpected transfer chunk');
       const chunk = bytes.slice(body);
       this.transfer.total += chunk.length;
       if (this.transfer.total > this.transfer.size) throw new Error('puppet exceeds advertised size');
       this.transfer.chunks.push(chunk);
       return true;
     }
-    if (verb === 'puppet-end') {
+    if (verb === 'puppet-end' || verb === 'clip-end') {
       const id = decoder.decode(bytes.subarray(offset));
       const transfer = this.transfer;
       this.transfer = null;
-      if (!transfer || id !== transfer.id || transfer.total !== transfer.size) {
+      if (!transfer || verb !== `${transfer.kind}-end` || id !== transfer.id || transfer.total !== transfer.size) {
         transfer?.waiting.reject(new Error('incomplete puppet transfer'));
         return true;
       }
@@ -130,7 +160,7 @@ export class PuppetChannel {
       transfer.cache.put(transfer.request, new Response(decoded, { headers: { 'content-type': 'model/gltf-binary' } })).catch(() => {});
       return true;
     }
-    if (verb === 'puppet-error') {
+    if (verb === 'puppet-error' || verb === 'clip-error') {
       const value = JSON.parse(decoder.decode(bytes.subarray(offset)));
       if (value.code !== 'busy' && this.transfer && (!value.id || value.id === this.transfer.id)) {
         const transfer = this.transfer;
@@ -144,9 +174,11 @@ export class PuppetChannel {
   fail(error) {
     this.epoch++;
     this.catalogWaiter?.reject(error);
+    this.clipCatalogWaiter?.reject(error);
     this.selectionWaiter?.reject(error);
     this.transfer?.waiting.reject(error);
     this.catalogWaiter = null;
+    this.clipCatalogWaiter = null;
     this.selectionWaiter = null;
     this.transfer = null;
   }

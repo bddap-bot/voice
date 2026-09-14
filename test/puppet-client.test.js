@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { gzipSync } from 'node:zlib';
 import { PuppetChannel } from '../docs/puppet-client.js';
 
 globalThis.location = new URL('https://example.test/voice/');
@@ -28,6 +29,13 @@ function binaryFrame(id, bytes) {
   return frame;
 }
 
+async function deliverPuppet(channel, id, original, contentHash = '') {
+  const compressed = gzipSync(original);
+  await channel.receive(puppetFrame('puppet-start', JSON.stringify({ id, size: compressed.length, originalSize: original.length, contentHash, encoding: 'gzip' })));
+  await channel.receive(binaryFrame(id, compressed));
+  await channel.receive(puppetFrame('puppet-end', id));
+}
+
 test('private puppet bytes are checked, cached, and selected separately', async () => {
   const sent = [];
   const cache = cacheStorage();
@@ -36,17 +44,17 @@ test('private puppet bytes are checked, cached, and selected separately', async 
   assert.deepEqual(sent, ['puppets']);
   await channel.receive(puppetFrame('puppets', JSON.stringify({ active: '42', avatars: [{ id: '42' }] })));
   assert.deepEqual(await catalogPromise, { active: '42', avatars: [{ id: '42' }] });
-  const bytesPromise = channel.bytes('42');
+  const bytesPromise = channel.bytes('42', 'hash-42');
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(sent.at(-1), 'puppet\n{"id":"42"}');
-  await channel.receive(puppetFrame('puppet-start', '{"id":"42","size":6}'));
-  await channel.receive(binaryFrame('42', Uint8Array.from([0, 128, 255])));
-  await channel.receive(binaryFrame('42', Uint8Array.from([1, 2, 3])));
+  assert.equal(sent.at(-1), 'puppet\n{"id":"42","encodings":["gzip"]}');
+  const compressed = gzipSync(Uint8Array.from([0, 128, 255, 1, 2, 3]));
+  await channel.receive(puppetFrame('puppet-start', JSON.stringify({ id: '42', size: compressed.length, originalSize: 6, contentHash: 'hash-42', encoding: 'gzip' })));
+  await channel.receive(binaryFrame('42', compressed));
   await channel.receive(puppetFrame('puppet-end', '42'));
   assert.deepEqual(new Uint8Array(await bytesPromise), Uint8Array.from([0, 128, 255, 1, 2, 3]));
   await new Promise((resolve) => setImmediate(resolve));
   const before = sent.length;
-  assert.deepEqual(new Uint8Array(await channel.bytes('42')), Uint8Array.from([0, 128, 255, 1, 2, 3]));
+  assert.deepEqual(new Uint8Array(await channel.bytes('42', 'hash-42')), Uint8Array.from([0, 128, 255, 1, 2, 3]));
   assert.equal(sent.length, before);
 });
 
@@ -56,17 +64,13 @@ test('private puppet caches are isolated by authenticated endpoint', async () =>
   const channel = new PuppetChannel(async () => {}, cache, () => scope);
   const first = channel.bytes('42');
   await new Promise((resolve) => setImmediate(resolve));
-  await channel.receive(puppetFrame('puppet-start', '{"id":"42","size":1}'));
-  await channel.receive(binaryFrame('42', Uint8Array.of(1)));
-  await channel.receive(puppetFrame('puppet-end', '42'));
+  await deliverPuppet(channel, '42', Uint8Array.of(1));
   assert.deepEqual(new Uint8Array(await first), Uint8Array.of(1));
   await new Promise((resolve) => setImmediate(resolve));
   scope = 'second';
   const second = channel.bytes('42');
   await new Promise((resolve) => setImmediate(resolve));
-  await channel.receive(puppetFrame('puppet-start', '{"id":"42","size":1}'));
-  await channel.receive(binaryFrame('42', Uint8Array.of(2)));
-  await channel.receive(puppetFrame('puppet-end', '42'));
+  await deliverPuppet(channel, '42', Uint8Array.of(2));
   assert.deepEqual(new Uint8Array(await second), Uint8Array.of(2));
   assert.equal(cache.entries.size, 2);
 });
@@ -76,8 +80,9 @@ test('an incomplete transfer is rejected and never cached', async () => {
   const channel = new PuppetChannel(async () => {}, cache);
   const result = channel.bytes('7');
   await new Promise((resolve) => setImmediate(resolve));
-  await channel.receive(puppetFrame('puppet-start', '{"id":"7","size":4}'));
-  await channel.receive(binaryFrame('7', Uint8Array.from([1, 2, 3])));
+  const partial = gzipSync(Uint8Array.from([1, 2, 3]));
+  await channel.receive(puppetFrame('puppet-start', JSON.stringify({ id: '7', size: partial.length + 1, originalSize: 3, contentHash: '', encoding: 'gzip' })));
+  await channel.receive(binaryFrame('7', partial));
   await channel.receive(puppetFrame('puppet-end', '7'));
   await assert.rejects(result, /incomplete puppet transfer/);
   assert.equal(cache.entries.size, 0);
@@ -110,9 +115,7 @@ test('a cache quota failure still returns the verified download', async () => {
   const channel = new PuppetChannel(async (value) => sent.push(value), cache);
   const result = channel.bytes('8');
   await new Promise((resolve) => setImmediate(resolve));
-  await channel.receive(puppetFrame('puppet-start', '{"id":"8","size":1}'));
-  await channel.receive(binaryFrame('8', Uint8Array.of(9)));
-  await channel.receive(puppetFrame('puppet-end', '8'));
+  await deliverPuppet(channel, '8', Uint8Array.of(9));
   assert.deepEqual(new Uint8Array(await result), Uint8Array.of(9));
 });
 

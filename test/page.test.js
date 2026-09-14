@@ -14,6 +14,7 @@ const enc = new TextEncoder();
 const dec = new TextDecoder();
 const queued = [enc.encode(JSON.stringify({ ok: true }))];
 const waiting = [];
+globalThis.puppetRequests = [];
 function deliver(value) {
   const resolve = waiting.shift();
   if (resolve) resolve(value);
@@ -25,16 +26,22 @@ export async function init() {}
 export async function connect() {}
 export async function send_only(bytes) {
   const frame = dec.decode(bytes);
-  if (frame === 'puppets') deliver(enc.encode('puppets\\n' + JSON.stringify({ active: '42', avatars: [{ id: '42', creditLine: '', licenseFlags: { creditRequired: false } }] })));
+  if (frame === 'puppets') deliver(enc.encode('puppets\\n' + JSON.stringify({ active: '42', avatars: ['42', '43', '44'].map((id) => ({ id, size: 3, contentHash: 'hash-' + id, creditLine: '', licenseFlags: { creditRequired: false } })) })));
   else if (frame.startsWith('puppet\\n')) {
-    deliver(enc.encode('puppet-start\\n{"id":"42","size":3}'));
-    const prefix = enc.encode('puppet-chunk\\n42\\n');
-    const chunk = new Uint8Array(prefix.length + 3);
+    const id = JSON.parse(frame.slice(frame.indexOf('\\n') + 1)).id;
+    globalThis.puppetRequests.push(id);
+    const compressed = new Uint8Array(await new Response(new Blob([Uint8Array.from([1, 2, Number(id) - 39])]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+    deliver(enc.encode('puppet-start\\n' + JSON.stringify({ id, size: compressed.length, originalSize: 3, contentHash: 'hash-' + id, encoding: 'gzip' })));
+    const prefix = enc.encode('puppet-chunk\\n' + id + '\\n');
+    const chunk = new Uint8Array(prefix.length + compressed.length);
     chunk.set(prefix);
-    chunk.set([1, 2, 3], prefix.length);
+    chunk.set(compressed, prefix.length);
     deliver(chunk);
-    deliver(enc.encode('puppet-end\\n42'));
-  } else if (frame.startsWith('puppet-select\\n')) deliver(enc.encode('puppet-selected\\n{"id":"42"}'));
+    deliver(enc.encode('puppet-end\\n' + id));
+  } else if (frame.startsWith('puppet-select\\n')) {
+    const id = JSON.parse(frame.slice(frame.indexOf('\\n') + 1)).id;
+    deliver(enc.encode('puppet-selected\\n' + JSON.stringify({ id })));
+  }
   else if (frame.startsWith('offer\\n')) {
     const offer = JSON.parse(frame.slice(6));
     deliver(enc.encode('answer\\n' + JSON.stringify({ offer_id: offer.id, sdp: 'answer', cap_seconds: 60 })));
@@ -104,7 +111,7 @@ window.addEventListener('load', () => {
   document.querySelector('#token').value = btoa(JSON.stringify({ endpoint_id: 'test', secret: 'test' }));
   document.querySelector('#connect').click();
   const ready = poll(() => {
-    if (document.querySelector('#status').textContent !== 'ready') return;
+    if (document.querySelector('#status').textContent !== 'ready' || document.querySelector('#toggle').disabled) return;
     clearInterval(ready);
     document.querySelector('#toggle').click();
     const started = poll(() => {
@@ -191,6 +198,16 @@ test('the page toggle completes its start path in headless Chromium', async () =
   const { stdout, stderr } = await runPage();
   const observed = /data-start-test="([^"]*)"/.exec(stdout)?.[1] ?? 'start path did not settle';
   assert.equal(observed, 'live', `${observed}\n${stderr}`);
+});
+
+test('the page preloads every inactive puppet in catalog order after rendering the active puppet', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => setTimeout(() => {
+  document.body.dataset.preloadTest = JSON.stringify({ requests: puppetRequests, cacheKeys: [...puppetCache.keys()].map((url) => new URL(url).pathname.split('/').at(-1)) });
+}, 100));
+`);
+  const encoded = /data-preload-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { requests: ['42', '43', '44'], cacheKeys: ['hash-42.vrm', 'hash-43.vrm', 'hash-44.vrm'] }, stderr);
 });
 
 test('authenticated text box sends a URL verbatim and informs an open Live session', async () => {

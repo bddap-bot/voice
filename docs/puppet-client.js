@@ -46,18 +46,21 @@ export class PuppetChannel {
     }
     finally { if (this.selectionWaiter === waiter) this.selectionWaiter = null; }
   }
-  async bytes(id) {
+  async bytes(id, contentHash = '') {
     const epoch = this.epoch;
     const cache = await this.cacheStorage.open('voice-puppets-v1');
-    const request = this.cacheRequest(id);
+    const request = this.cacheRequest(contentHash || id);
     const saved = await cache.match(request);
     if (epoch !== this.epoch) throw new Error('connection replaced');
     if (saved) return saved.arrayBuffer();
     if (this.transfer) throw new Error('another puppet is loading');
     const waiting = deferred();
-    this.transfer = { id, size: null, total: 0, chunks: [], waiting, cache, request };
+    this.transfer = { id, contentHash, size: null, originalSize: null, encoding: null, total: 0, chunks: [], waiting, cache, request };
     try {
-      await this.send(`puppet\n${JSON.stringify({ id })}`);
+      const encodings = ['br', 'gzip'].filter((encoding) => {
+        try { new DecompressionStream(encoding); return true; } catch { return false; }
+      });
+      await this.send(`puppet\n${JSON.stringify({ id, encodings })}`);
       return await waiting.promise;
     } finally {
       if (this.transfer?.waiting === waiting) this.transfer = null;
@@ -88,8 +91,10 @@ export class PuppetChannel {
     }
     if (verb === 'puppet-start') {
       const value = JSON.parse(decoder.decode(bytes.subarray(offset)));
-      if (!this.transfer || value.id !== this.transfer.id || !Number.isSafeInteger(value.size) || value.size <= 0) throw new Error('invalid puppet transfer');
+      if (!this.transfer || value.id !== this.transfer.id || !Number.isSafeInteger(value.size) || value.size <= 0 || !Number.isSafeInteger(value.originalSize) || value.originalSize <= 0 || !['br', 'gzip'].includes(value.encoding) || value.contentHash !== this.transfer.contentHash) throw new Error('invalid puppet transfer');
       this.transfer.size = value.size;
+      this.transfer.originalSize = value.originalSize;
+      this.transfer.encoding = value.encoding;
       return true;
     }
     if (verb === 'puppet-chunk') {
@@ -115,8 +120,14 @@ export class PuppetChannel {
         complete.set(chunk, at);
         at += chunk.length;
       }
-      transfer.waiting.resolve(complete.buffer);
-      transfer.cache.put(transfer.request, new Response(complete, { headers: { 'content-type': 'model/gltf-binary' } })).catch(() => {});
+      const response = new Response(complete).body.pipeThrough(new DecompressionStream(transfer.encoding));
+      const decoded = await new Response(response).arrayBuffer();
+      if (decoded.byteLength !== transfer.originalSize) {
+        transfer.waiting.reject(new Error('invalid decompressed puppet size'));
+        return true;
+      }
+      transfer.waiting.resolve(decoded);
+      transfer.cache.put(transfer.request, new Response(decoded, { headers: { 'content-type': 'model/gltf-binary' } })).catch(() => {});
       return true;
     }
     if (verb === 'puppet-error') {
@@ -141,5 +152,10 @@ export class PuppetChannel {
   }
   clearCache() {
     return this.cacheStorage.delete('voice-puppets-v1');
+  }
+  async preload(avatars, active) {
+    for (const avatar of avatars) {
+      if (avatar.id !== active) await this.bytes(avatar.id, avatar.contentHash);
+    }
   }
 }

@@ -720,7 +720,7 @@ async function loadPuppet(id, epoch, request, valid) {
   if (!current()) throw new Error('puppet load replaced');
   const avatar = puppetCatalog.avatars.find((item) => item.id === id);
   if (!avatar) throw new Error('puppet is unavailable');
-  const bytes = await puppetChannel.bytes(id);
+  const bytes = await puppetChannel.bytes(id, avatar.contentHash);
   if (!current()) throw new Error('puppet load replaced');
   if (!puppetRuntime) throw new Error('puppet renderer unavailable');
   const loaded = await puppetRuntime.load(bytes, current, () => puppetChannel.select(id));
@@ -745,6 +745,7 @@ async function loadPrivatePuppets() {
     return option;
   }));
   await showPuppet(puppetCatalog.active);
+  puppetChannel.preload(puppetCatalog.avatars, puppetCatalog.active).catch(() => {});
 }
 
 $('toggle').addEventListener('click', toggleConversation);

@@ -47,7 +47,7 @@ test('waiting holds a readable gesture until the hub result releases it', () => 
 test('pose transitions capture the base layer without reapplying overlays', () => {
   const base = new THREE.Quaternion();
   const node = { quaternion: new THREE.Quaternion().setFromEuler(new THREE.Euler(0.34, 0, 0)) };
-  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), { bones: new Map([['head', { node, rest: new THREE.Quaternion(), base, from: new THREE.Quaternion(), target: new THREE.Quaternion() }]]), stage: { position: { y: 0 } } });
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), { bones: new Map([['head', { node, rest: new THREE.Quaternion(), base, from: new THREE.Quaternion(), target: new THREE.Quaternion() }]]), stage: { position: { y: 0 } }, seat: {} });
   runtime.pose('stand');
   assert.ok(runtime.bones.get('head').from.equals(base));
   assert.ok(!runtime.bones.get('head').from.equals(node.quaternion));

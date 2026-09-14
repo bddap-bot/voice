@@ -4,29 +4,29 @@ import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 
 const BONE_POSES = {
   sit: {
-    leftUpperLeg: [-1.12, 0, 0.05],
-    rightUpperLeg: [-1.12, 0, -0.05],
-    leftLowerLeg: [1.32, 0, 0],
-    rightLowerLeg: [1.32, 0, 0],
+    leftUpperLeg: [-1.12, 0, -0.2],
+    rightUpperLeg: [-1.12, 0, 0.2],
+    leftLowerLeg: [1.32, 0, 0.18],
+    rightLowerLeg: [1.32, 0, -0.18],
     spine: [-0.08, 0, 0],
-    leftUpperArm: [0.12, 0, -1.05],
-    rightUpperArm: [0.12, 0, 1.05],
-    leftLowerArm: [0, 0, -0.18],
-    rightLowerArm: [0, 0, 0.18],
-  },
-  stand: {
-    leftUpperArm: [0.08, 0, -1.22],
-    rightUpperArm: [0.08, 0, 1.22],
+    leftUpperArm: [0.12, 0, 1.05],
+    rightUpperArm: [0.12, 0, -1.05],
     leftLowerArm: [0, 0, -0.12],
     rightLowerArm: [0, 0, 0.12],
+  },
+  stand: {
+    leftUpperArm: [0.08, 0, 1.22],
+    rightUpperArm: [0.08, 0, -1.22],
+    leftLowerArm: [0, 0, -0.08],
+    rightLowerArm: [0, 0, 0.08],
   },
   listen: {
     spine: [-0.04, 0, 0],
     head: [0.08, 0, 0.03],
-    leftUpperArm: [0.14, 0, -1.08],
-    rightUpperArm: [0.14, 0, 1.08],
-    leftLowerArm: [0, 0, -0.42],
-    rightLowerArm: [0, 0, 0.42],
+    leftUpperArm: [0.08, 0, 1.08],
+    rightUpperArm: [0.08, 0, -1.08],
+    leftLowerArm: [0, 0, -0.32],
+    rightLowerArm: [0, 0, 0.32],
   },
 };
 
@@ -35,12 +35,12 @@ const MOOD_EXPRESSIONS = ['happy', 'angry', 'sad', 'relaxed', 'surprised'];
 
 const GESTURES = {
   nod: { head: [0.34, 0, 0] },
-  shrug: { leftShoulder: [0, 0, 0.2], rightShoulder: [0, 0, -0.2], leftUpperArm: [0, 0, 0.24], rightUpperArm: [0, 0, -0.24], spine: [-0.08, 0, 0] },
-  think: { head: [0.12, -0.12, 0.05], rightUpperArm: [-0.72, 0.08, -0.18], rightLowerArm: [-1.05, 0, 0.28] },
-  point: { spine: [0, -0.2, 0], head: [0, 0.16, 0], rightUpperArm: [0.08, -0.72, -0.9], rightLowerArm: [0, 0, -0.12] },
-  beat: { rightUpperArm: [-0.24, 0, -0.3], rightLowerArm: [-0.48, 0, 0.16] },
-  point_at: { spine: [0, -0.42, 0], head: [0, 0.28, 0], rightUpperArm: [0.04, -0.9, -1.08], rightLowerArm: [0, 0, -0.08] },
-  waiting: { spine: [-0.08, 0.12, 0], head: [0.12, -0.18, 0.08], leftUpperArm: [-0.28, 0, 0.18], rightUpperArm: [-0.58, 0, -0.28], rightLowerArm: [-0.92, 0, 0.26] },
+  shrug: { leftShoulder: [0, 0, 0.2], rightShoulder: [0, 0, -0.2], leftUpperArm: [0, 0, -0.28], rightUpperArm: [0, 0, 0.28], spine: [-0.08, 0, 0] },
+  think: { head: [0.12, -0.12, 0.05], rightUpperArm: [-0.72, 0.08, 0.5], rightLowerArm: [-1.05, 0, 0.28] },
+  point: { spine: [0, -0.2, 0], head: [0, 0.16, 0], rightUpperArm: [0, 0, 1.15], rightLowerArm: [0, 0, -0.12] },
+  beat: { rightUpperArm: [-0.24, 0, 0.4], rightLowerArm: [-0.48, 0, 0.16] },
+  point_at: { spine: [0, -0.42, 0], head: [0, 0.28, 0], rightUpperArm: [0, 0, 1.2], rightLowerArm: [0, 0, -0.08] },
+  waiting: { spine: [-0.08, 0.12, 0], head: [0.12, -0.18, 0.08], leftUpperArm: [-0.28, 0, -0.15], rightUpperArm: [-0.58, 0, 0.4], rightLowerArm: [-0.92, 0, 0.26] },
 };
 
 export const MOOD_TABLE = {
@@ -104,7 +104,7 @@ export class PuppetRuntime {
     this.camera.position.set(0, 1.25, 6.4);
     this.camera.lookAt(0, 1.25, 0);
     this.stage = new THREE.Group();
-    this.stage.position.y = -0.72;
+    this.stage.position.y = -0.48;
     this.idleRoot = new THREE.Group();
     this.stage.add(this.idleRoot);
     this.scene.add(this.stage);
@@ -115,6 +115,18 @@ export class PuppetRuntime {
     const rim = new THREE.DirectionalLight(0x7d8cff, 2.4);
     rim.position.set(-3, 2, -2);
     this.scene.add(rim);
+    const seatMaterial = new THREE.MeshStandardMaterial({ color: 0x34364a, roughness: 0.72 });
+    this.seat = new THREE.Group();
+    const cushion = new THREE.Mesh(new THREE.BoxGeometry(1.55, 0.12, 0.38), seatMaterial);
+    cushion.position.set(0, 0.92, -0.55);
+    const back = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.72, 0.12), seatMaterial);
+    back.position.set(0, 1.3, -0.74);
+    const leftLeg = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.92, 0.1), seatMaterial);
+    leftLeg.position.set(-0.58, 0.44, -0.58);
+    const rightLeg = leftLeg.clone();
+    rightLeg.position.x = 0.58;
+    this.seat.add(cushion, back, leftLeg, rightLeg);
+    this.scene.add(this.seat);
     this.mixer = new THREE.AnimationMixer(this.idleRoot);
     const idle = new THREE.AnimationClip('base-idle', 6, [
       new THREE.NumberKeyframeTrack('.position[y]', [0, 1.5, 3, 4.5, 6], [0, 0.018, 0, 0.012, 0]),
@@ -125,8 +137,8 @@ export class PuppetRuntime {
     this.clock = new THREE.Clock();
     this.poseName = 'sit';
     this.poseStart = performance.now();
-    this.poseFromY = -0.72;
-    this.poseToY = -0.72;
+    this.poseFromY = -0.48;
+    this.poseToY = -0.48;
     this.bones = new Map();
     this.lookTarget = new THREE.Euler();
     this.lookOffset = new THREE.Quaternion();
@@ -289,7 +301,8 @@ export class PuppetRuntime {
     this.poseName = name;
     this.poseStart = performance.now();
     this.poseFromY = this.stage.position.y;
-    this.poseToY = name === 'sit' ? -0.72 : 0;
+    this.poseToY = name === 'sit' ? -0.48 : 0;
+    this.seat.visible = name === 'sit';
     for (const [bone, entry] of this.bones) {
       entry.from.copy(entry.base);
       entry.target.setFromEuler(new THREE.Euler(...(BONE_POSES[name][bone] ?? [0, 0, 0]))).multiply(entry.rest);
@@ -414,6 +427,10 @@ export class PuppetRuntime {
     this.resize.disconnect();
     this.detachAudio();
     this.clear();
+    this.seat.traverse((object) => {
+      object.geometry?.dispose();
+      object.material?.dispose();
+    });
     this.renderer.dispose();
   }
 }

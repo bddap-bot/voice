@@ -167,18 +167,6 @@ export class PuppetRuntime {
     const rim = new THREE.DirectionalLight(0x7d8cff, 2.4);
     rim.position.set(-3, 2, -2);
     this.scene.add(rim);
-    const seatMaterial = new THREE.MeshStandardMaterial({ color: 0x34364a, roughness: 0.72 });
-    this.seat = new THREE.Group();
-    const cushion = new THREE.Mesh(new THREE.BoxGeometry(1.55, 0.12, 0.38), seatMaterial);
-    cushion.position.set(0, 0.92, -0.55);
-    const back = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.72, 0.12), seatMaterial);
-    back.position.set(0, 1.3, -0.74);
-    const leftLeg = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.92, 0.1), seatMaterial);
-    leftLeg.position.set(-0.58, 0.44, -0.58);
-    const rightLeg = leftLeg.clone();
-    rightLeg.position.x = 0.58;
-    this.seat.add(cushion, back, leftLeg, rightLeg);
-    this.scene.add(this.seat);
     this.mixer = new THREE.AnimationMixer(this.idleRoot);
     const idle = new THREE.AnimationClip('base-idle', 6, [
       new THREE.NumberKeyframeTrack('.position[y]', [0, 1.5, 3, 4.5, 6], [0, 0.018, 0, 0.012, 0]),
@@ -362,7 +350,6 @@ export class PuppetRuntime {
     const fallback = resolved === 'sit' ? 'sit-idle' : 'idle';
     this.playClip(transition, fallback);
     this.stage.position.y = resolved === 'sit' ? -0.48 : 0;
-    this.seat.visible = resolved === 'sit';
   }
   gesture(name, target) {
     const resolved = name === 'point' && target === 'panel' ? 'point_at' : name;
@@ -501,10 +488,6 @@ export class PuppetRuntime {
     this.resize.disconnect();
     this.detachAudio();
     this.clear();
-    this.seat.traverse((object) => {
-      object.geometry?.dispose();
-      object.material?.dispose();
-    });
     this.renderer.dispose();
   }
 }

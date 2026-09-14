@@ -162,7 +162,6 @@ export class PuppetRuntime {
     this.camera.position.set(0, 1.25, 6.4);
     this.camera.lookAt(0, 1.25, 0);
     this.stage = new THREE.Group();
-    this.stage.position.y = -0.48;
     this.idleRoot = new THREE.Group();
     this.stage.add(this.idleRoot);
     this.scene.add(this.stage);
@@ -361,7 +360,6 @@ export class PuppetRuntime {
     const transition = resolved === 'sit' ? 'sit' : resolved === 'stand' ? 'stand' : 'idle';
     const fallback = resolved === 'sit' ? 'sit-idle' : 'idle';
     this.playClip(transition, fallback);
-    this.stage.position.y = resolved === 'sit' ? -0.48 : 0;
   }
   gesture(name, target) {
     const resolved = name === 'point' && target === 'panel' ? 'point_at' : name;

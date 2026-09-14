@@ -192,6 +192,63 @@ test('a hub wait resumes after an explicit procedural gesture releases', () => {
   assert.equal(runtime.gestureState.releaseAt, Infinity);
 });
 
+test('sit and stand transitions keep model-root and head velocity bounded', () => {
+  const stage = new THREE.Group();
+  const model = new THREE.Group();
+  const hips = new THREE.Bone();
+  const head = new THREE.Bone();
+  head.position.y = 1;
+  hips.add(head);
+  model.add(hips);
+  stage.add(model);
+  const clips = new Map([
+    ['idle', new THREE.AnimationClip('idle', 1, [new THREE.NumberKeyframeTrack(`${hips.uuid}.position[y]`, [0, 1], [1.4, 1.4])])],
+    ['sit-idle', new THREE.AnimationClip('sit-idle', 1, [new THREE.NumberKeyframeTrack(`${hips.uuid}.position[y]`, [0, 1], [0.75, 0.75])])],
+    ['sit', new THREE.AnimationClip('sit', 0.8, [new THREE.NumberKeyframeTrack(`${hips.uuid}.position[y]`, [0, 0.8], [1.4, 0.75])])],
+    ['stand', new THREE.AnimationClip('stand', 0.8, [new THREE.NumberKeyframeTrack(`${hips.uuid}.position[y]`, [0, 0.8], [0.75, 1.4])])],
+  ]);
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+    stage,
+    vrm: { scene: model },
+    mixer: new THREE.AnimationMixer(model),
+    clips,
+    clipAction: null,
+    clipFallback: null,
+    clipGesture: null,
+    poseName: 'stand',
+  });
+  const modelPosition = new THREE.Vector3();
+  const headPosition = new THREE.Vector3();
+  const previousModel = new THREE.Vector3();
+  const previousHead = new THREE.Vector3();
+  const velocities = [];
+  const sample = () => {
+    stage.updateMatrixWorld(true);
+    model.getWorldPosition(modelPosition);
+    head.getWorldPosition(headPosition);
+    velocities.push({ model: modelPosition.distanceTo(previousModel) * 60, head: headPosition.distanceTo(previousHead) * 60 });
+    previousModel.copy(modelPosition);
+    previousHead.copy(headPosition);
+  };
+  runtime.playClip('idle', 'idle');
+  for (let frame = 0; frame < 15; frame++) runtime.mixer.update(1 / 60);
+  stage.updateMatrixWorld(true);
+  model.getWorldPosition(previousModel);
+  head.getWorldPosition(previousHead);
+  for (const pose of ['sit', 'stand']) {
+    runtime.pose(pose);
+    for (let frame = 0; frame < 60; frame++) {
+      runtime.mixer.update(1 / 60);
+      runtime.updatePose(frame * 1000 / 60);
+      sample();
+    }
+  }
+  assert.equal(stage.position.y, 0);
+  assert.ok(Math.max(...velocities.map(({ model: velocity }) => velocity)) < 0.001);
+  const peakHeadVelocity = Math.max(...velocities.map(({ head: velocity }) => velocity));
+  assert.ok(peakHeadVelocity < 3, `peak head velocity ${peakHeadVelocity}`);
+});
+
 test('Mixamo rest rotations preserve an upright VRM bone-space invariant', () => {
   const source = new THREE.Group();
   const rig = new THREE.Bone();

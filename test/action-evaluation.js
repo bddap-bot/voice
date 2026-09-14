@@ -1,4 +1,5 @@
-import { EmbeddingActionClassifier, keywordMood } from '../docs/puppet-drivers.js';
+import assert from 'node:assert/strict';
+import { EmbeddingActionClassifier, LABELS, keywordMood } from '../docs/puppet-drivers.js';
 
 export const evaluation = [
   ['gesture','nod','I concur with that conclusion.'], ['gesture','nod','You have my approval.'], ['gesture','nod','That answer checks out.'], ['gesture','nod','Proceed with the plan.'],
@@ -23,18 +24,29 @@ export async function evaluate(loadEmbedder) {
   const classifier = new EmbeddingActionClassifier(loadEmbedder);
   let before = 0;
   let after = 0;
+  const rows = new Map(Object.entries(LABELS).flatMap(([kind, names]) => Object.keys(names).map((name) => [`${kind}:${name}`, { token: `${kind}:${name}`, examples: [], hits: 0 }])));
   for (const [kind, name, text] of evaluation) {
     const baseline = keywordMood(text);
     if (baseline?.kind === kind && baseline?.name === name) before++;
     const result = await classifier.classify(text);
-    if (result.kind === kind && result.name === name) after++;
+    const hit = result.kind === kind && result.name === name;
+    if (hit) after++;
+    const row = rows.get(`${kind}:${name}`);
+    row.examples.push({ prior: ['We are reviewing the result.', 'Please continue.'], sentence: text, classified: `${result.kind}:${result.name}`, hit });
+    if (hit) row.hits++;
   }
-  return { total: evaluation.length, before, after };
+  for (const row of rows.values()) assert.ok(row.hits, `unreachable action token: ${row.token}`);
+  for (const [sentence, token] of [['Yes.', 'gesture:nod'], ['Hmm.', 'mood:thinking']]) {
+    const result = await classifier.classify(sentence);
+    assert.equal(`${result.kind}:${result.name}`, token, `short sentence ${sentence}`);
+  }
+  return { total: evaluation.length, before, after, rows: [...rows.values()].map((row) => ({ ...row, hitRate: `${row.hits}/${row.examples.length}` })) };
 }
 
 if (process.argv[1] === new URL(import.meta.url).pathname) {
   const { pipeline } = await import('@huggingface/transformers');
   const extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { dtype: 'q8' });
   const result = await evaluate(async () => async (texts) => (await extractor(texts, { pooling: 'mean', normalize: true })).tolist());
-  console.log(JSON.stringify(result));
+  console.table(result.rows.map(({ token, hitRate }) => ({ token, hitRate })));
+  console.log(JSON.stringify({ total: result.total, before: result.before, after: result.after }));
 }

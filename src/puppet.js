@@ -177,6 +177,7 @@ export class PuppetRuntime {
     this.clips = new Map();
     this.clipAction = null;
     this.clipFallback = null;
+    this.clipGesture = null;
     this.clock = new THREE.Clock();
     this.poseName = 'sit';
     this.bones = new Map();
@@ -354,9 +355,17 @@ export class PuppetRuntime {
   gesture(name, target) {
     const resolved = name === 'point' && target === 'panel' ? 'point_at' : name;
     if (!GESTURES[resolved] && !CLIP_GESTURES.has(resolved)) throw new Error(`unknown gesture ${name}`);
-    if (this.waitingForHub && resolved !== 'point_at') return;
-    if (CLIP_GESTURES.has(resolved)) this.playClip(resolved, this.poseName === 'sit' ? 'sit-idle' : 'idle');
-    else this.beginGesture(resolved, false);
+    if (resolved === 'beat' && (this.waitingForHub || this.gestureState || this.clipGesture)) return;
+    if (CLIP_GESTURES.has(resolved)) {
+      this.gestureState = null;
+      this.gestureOffsets = {};
+      this.playClip(resolved, this.poseName === 'sit' ? 'sit-idle' : 'idle');
+      this.clipGesture = resolved;
+    } else {
+      if (this.clipGesture) this.playClip(this.poseName === 'sit' ? 'sit-idle' : 'idle', this.poseName === 'sit' ? 'sit-idle' : 'idle');
+      this.clipGesture = null;
+      this.beginGesture(resolved, false);
+    }
   }
   playClip(name, fallback) {
     const clip = this.clips.get(name);
@@ -374,7 +383,7 @@ export class PuppetRuntime {
   }
   waiting(active) {
     this.waitingForHub = active;
-    if (active) this.beginGesture('waiting', true);
+    if (active && !this.clipGesture && !this.gestureState) this.beginGesture('waiting', true);
     else if (this.gestureState?.name === 'waiting') this.releaseGesture(performance.now());
   }
   releaseGesture(now) {
@@ -398,7 +407,9 @@ export class PuppetRuntime {
       const fallback = this.clipFallback;
       this.clipAction = null;
       this.clipFallback = null;
+      this.clipGesture = null;
       this.playClip(fallback, fallback);
+      if (this.waitingForHub) this.beginGesture('waiting', true);
     }
   }
   updateGesture(now) {
@@ -412,7 +423,10 @@ export class PuppetRuntime {
       this.gestureRotation.setFromEuler(new THREE.Euler(...values));
       bone.quaternion.multiply(this.gestureRotation);
     }
-    if (this.gestureState.releasing && amount === 1) this.gestureState = null;
+    if (this.gestureState.releasing && amount === 1) {
+      this.gestureState = null;
+      if (this.waitingForHub) this.beginGesture('waiting', true);
+    }
   }
   updateMood(now, manager) {
     const mood = MOOD_TABLE[this.moodName];
@@ -462,9 +476,7 @@ export class PuppetRuntime {
       this.audio.analyser.getByteFrequencyData(this.audio.spectrum);
       targets = audioVisemes(this.audio.waveform, this.audio.spectrum, this.audio.context.sampleRate, this.audio.analyser.fftSize);
       const energy = audioEnergy(this.audio.waveform);
-      if (!this.gestureState && shouldBeat(energy, this.previousEnergy, this.waitingForHub)) {
-        this.beginGesture('beat', false);
-      }
+      if (shouldBeat(energy, this.previousEnergy, this.waitingForHub)) this.gesture('beat');
       this.previousEnergy = energy;
     }
     for (const name of VISEMES) {

@@ -59,12 +59,17 @@ test('audio beats never replace an active explicit gesture', () => {
   runtime.mouthValues = { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 };
   runtime.previousEnergy = 0;
   runtime.waitingForHub = false;
+  runtime.clipGesture = 'nod';
   runtime.gestureState = { name: 'point_at' };
   runtime.beginGesture = (name) => { runtime.gestureState = { name }; };
   const manager = { setValue() {} };
   runtime.updateMouth(manager);
   assert.equal(runtime.gestureState.name, 'point_at');
   runtime.gestureState = null;
+  runtime.previousEnergy = 0;
+  runtime.updateMouth(manager);
+  assert.equal(runtime.gestureState, null);
+  runtime.clipGesture = null;
   runtime.previousEnergy = 0;
   runtime.updateMouth(manager);
   assert.equal(runtime.gestureState.name, 'beat');
@@ -81,15 +86,52 @@ test('waiting holds a readable gesture until the hub result releases it', () => 
   assert.equal(runtime.gestureState.releasing, true);
 });
 
-test('a hub wait drops every gesture except panel pointing', () => {
-  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), { waitingForHub: true, gestureState: { name: 'waiting' }, gestureOffsets: {}, clips: new Map() });
+test('explicit gestures replace a hub wait and beats cannot replace either', () => {
+  const played = [];
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), { waitingForHub: true, gestureState: { name: 'waiting' }, gestureOffsets: { head: [1, 0, 0] }, clips: new Map(), clipGesture: null, poseName: 'sit', playClip: (name) => played.push(name) });
   runtime.gesture('beat');
-  runtime.gesture('nod');
   assert.equal(runtime.gestureState.name, 'waiting');
+  runtime.gesture('nod');
+  assert.equal(runtime.gestureState, null);
+  assert.deepEqual(runtime.gestureOffsets, {});
+  assert.equal(runtime.clipGesture, 'nod');
+  assert.deepEqual(played, ['nod']);
+  runtime.gesture('beat');
+  assert.equal(runtime.clipGesture, 'nod');
   runtime.gesture('point', 'panel');
   assert.equal(runtime.gestureState.name, 'point_at');
+  assert.equal(runtime.clipGesture, null);
+  assert.deepEqual(played, ['nod', 'sit-idle']);
   runtime.gesture('beat');
   assert.equal(runtime.gestureState.name, 'point_at');
+});
+
+test('a hub wait resumes after an explicit clip finishes', () => {
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+    waitingForHub: true,
+    clipGesture: 'nod',
+    clipAction: { isRunning: () => false },
+    clipFallback: 'sit-idle',
+    gestureState: null,
+    gestureOffsets: {},
+    playClip() {},
+  });
+  runtime.updatePose(performance.now());
+  assert.equal(runtime.clipGesture, null);
+  assert.equal(runtime.gestureState.name, 'waiting');
+  assert.equal(runtime.gestureState.releaseAt, Infinity);
+});
+
+test('a hub wait resumes after an explicit procedural gesture releases', () => {
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+    waitingForHub: true,
+    gestureState: { name: 'point_at', from: {}, to: {}, started: 0, releaseAt: Infinity, releasing: true },
+    gestureOffsets: {},
+    bones: new Map(),
+  });
+  runtime.updateGesture(1000);
+  assert.equal(runtime.gestureState.name, 'waiting');
+  assert.equal(runtime.gestureState.releaseAt, Infinity);
 });
 
 test('Mixamo rest rotations preserve an upright VRM bone-space invariant', () => {

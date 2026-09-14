@@ -24,9 +24,20 @@ export async function init() {}
 export async function connect() {}
 export async function send_only(bytes) {
   const frame = dec.decode(bytes);
-  if (!frame.startsWith('offer\\n')) return;
-  const offer = JSON.parse(frame.slice(6));
-  deliver(enc.encode('answer\\n' + JSON.stringify({ offer_id: offer.id, sdp: 'answer', cap_seconds: 60 })));
+  if (frame === 'puppets') deliver(enc.encode('puppets\\n' + JSON.stringify({ active: '42', avatars: [{ id: '42', creditLine: '', licenseFlags: { creditRequired: false } }] })));
+  else if (frame.startsWith('puppet\\n')) {
+    deliver(enc.encode('puppet-start\\n{"id":"42","size":3}'));
+    const prefix = enc.encode('puppet-chunk\\n42\\n');
+    const chunk = new Uint8Array(prefix.length + 3);
+    chunk.set(prefix);
+    chunk.set([1, 2, 3], prefix.length);
+    deliver(chunk);
+    deliver(enc.encode('puppet-end\\n42'));
+  } else if (frame.startsWith('puppet-select\\n')) deliver(enc.encode('puppet-selected\\n{"id":"42"}'));
+  else if (frame.startsWith('offer\\n')) {
+    const offer = JSON.parse(frame.slice(6));
+    deliver(enc.encode('answer\\n' + JSON.stringify({ offer_id: offer.id, sdp: 'answer', cap_seconds: 60 })));
+  }
 }
 export async function recv() {
   if (queued.length) return queued.shift();
@@ -34,7 +45,26 @@ export async function recv() {
 }
 `;
 
+const fakePuppet = `
+export class PuppetRuntime {
+  constructor() {}
+  async load(bytes, valid, beforeCommit) { await beforeCommit(); return valid(); }
+  pose() {}
+  start() {}
+  pause() {}
+  clear() {}
+  dispose() {}
+}
+`;
+
 const browserSetup = `
+window.addEventListener('error', (event) => { document.body.dataset.browserError = event.message; });
+window.addEventListener('unhandledrejection', (event) => { document.body.dataset.browserError = String(event.reason?.stack || event.reason); });
+const puppetCache = new Map();
+Object.defineProperty(globalThis, 'caches', { value: { open: async () => ({
+  match: async (request) => puppetCache.get(request.url)?.clone(),
+  put: async (request, response) => puppetCache.set(request.url, response.clone()),
+}) } });
 const stream = { getTracks: () => [{ stop() {} }] };
 Object.defineProperty(navigator, 'mediaDevices', { value: { getUserMedia: async () => stream } });
 class FakeChannel extends EventTarget {
@@ -106,15 +136,17 @@ async function chromiumExecutable() {
 async function runPage(testSetup = '') {
   const index = (await readFile(new URL('../docs/index.html', import.meta.url), 'utf8'))
     .replace('https://bddap-bot.github.io/botq/botq_dash_wasm.js', '/botq_dash_wasm.js')
+    .replace('./puppet.js', '/fake-puppet.js')
     .replace('</head>', `<script>${browserSetup}${testSetup}</script></head>`);
   const live = await readFile(new URL('../docs/live.js', import.meta.url));
+  const puppetClient = await readFile(new URL('../docs/puppet-client.js', import.meta.url));
   const scratch = await mkdtemp(join(process.cwd(), '.chromium-'));
   const profile = join(scratch, 'profile');
   const temporary = join(scratch, 'tmp');
   await Promise.all([mkdir(profile), mkdir(temporary)]);
   const server = createServer((request, response) => {
     const path = new URL(request.url, 'http://localhost').pathname;
-    const body = path === '/botq_dash_wasm.js' ? mockWasm : path === '/live.js' ? live : index;
+    const body = path === '/botq_dash_wasm.js' ? mockWasm : path === '/fake-puppet.js' ? fakePuppet : path === '/puppet-client.js' ? puppetClient : path === '/live.js' ? live : index;
     response.writeHead(200, { 'content-type': path.endsWith('.js') ? 'text/javascript' : 'text/html' });
     response.end(body);
   });

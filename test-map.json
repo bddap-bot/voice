@@ -2,6 +2,11 @@
   "about": "Touched-path → test-suite map, read by `botq test-map` (bddap/bothouse#236). First matching rule wins; `tests: []` means consciously untested and must carry its why.",
   "rules": [
     {
+      "paths": ["src/**", "package.json", "package-lock.json", "docs/index.html", "docs/puppet-client.js", "docs/puppet.js", "docs/sw.js"],
+      "tests": ["npm test", "npm run build"],
+      "why": "the browser puppet runtime, authenticated transfer/cache client, page wiring, and reproducible Three/VRM bundle"
+    },
+    {
       "paths": ["docs/live.js", "test/**", "test-map.json"],
       "tests": ["node --test test/*.test.js"],
       "why": "the continuous-conversation core: cap shutoff and the complete delegated-versus-alone turn ledger"
@@ -9,7 +14,7 @@
     {
       "paths": ["docs/**"],
       "tests": [],
-      "why": "the GitHub Pages shell and browser WebRTC wiring; its stateful trace and cap logic are separated into live.js and tested above, while the real transport is covered by the bothouse Live smoke"
+      "why": "the GitHub Pages shell and browser WebRTC wiring; its stateful trace and cap logic are separated into live.js and covered above, while the real transport is covered by the bothouse Live smoke"
     },
     {
       "paths": ["README.md", ".gitignore"],

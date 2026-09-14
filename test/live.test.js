@@ -114,7 +114,7 @@ test('speech received after a hub reply keeps chronological attribution when inp
   assert.deepEqual(trace.entries.filter((entry) => entry.kind === 'spoken').map((entry) => entry.source), ['model after hub reply', 'model after hub reply']);
 });
 
-test('speech after a later owner turn is tagged model alone', () => {
+test('speech after a later user turn is tagged model alone', () => {
   const trace = new ConversationTrace();
   trace.heard('status');
   trace.delegated('item_later');

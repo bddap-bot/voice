@@ -21,9 +21,14 @@
   button.primary { background: #315ee8; border-color: #315ee8; }
   main { display: grid; grid-template-columns: minmax(240px, .7fr) minmax(360px, 1.5fr); gap: 18px; padding: clamp(16px, 4vw, 36px); }
   .control, .ledger { background: #141416; border: 1px solid #2d2d31; border-radius: 14px; }
-  .control { min-height: 260px; display: grid; place-content: center; justify-items: center; gap: 18px; padding: 28px; }
-  #toggle { width: min(62vw, 230px); height: 112px; border-radius: 58px; font-size: 22px; font-weight: 650; touch-action: manipulation; }
-  #toggle.on { background: #1f7642; border-color: #50c878; }
+  .control { min-height: 520px; display: grid; grid-template-rows: minmax(380px, 1fr) auto auto auto; gap: 12px; padding: 14px; }
+  #toggle { position: relative; width: 100%; min-height: 380px; overflow: hidden; padding: 0; border-radius: 12px; touch-action: manipulation; background: radial-gradient(circle at 50% 35%, #313346, #171820 62%, #101115); }
+  #toggle.on { border-color: #50c878; box-shadow: inset 0 0 40px #173e2a; }
+  #puppet { display: block; width: 100%; height: 100%; min-height: 380px; }
+  #puppet-state { position: absolute; inset: auto 12px 12px; padding: 7px 11px; border-radius: 18px; background: #090a0dbb; font-weight: 650; pointer-events: none; }
+  .puppet-picker { display: flex; gap: 10px; align-items: center; justify-content: center; }
+  #puppet-choice { min-width: 150px; background: #1d1d20; color: inherit; border: 1px solid #414148; border-radius: 8px; padding: 8px; }
+  #puppet-credit { min-height: 21px; color: #bdbdc3; text-align: center; font-size: 13px; }
   #elapsed { font: 28px/1 ui-monospace, monospace; color: #bdbdc3; min-height: 28px; }
   .ledger { min-height: 260px; padding: 18px; overflow: hidden; }
   .ledger h2 { margin: 0 0 12px; font-size: 14px; text-transform: uppercase; letter-spacing: .08em; color: #a5a5aa; }
@@ -32,7 +37,7 @@
   .tag { color: #8eabff; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
   .tag.alone { color: #d4ae68; }
   .line { margin-top: 5px; } .key { color: #8f8f96; }
-  @media (max-width: 720px) { main { grid-template-columns: 1fr; } .control { min-height: 220px; } }
+  @media (max-width: 720px) { main { grid-template-columns: 1fr; } .control { min-height: 500px; } }
 </style>
 </head>
 <body>
@@ -46,7 +51,9 @@
 </section>
 <main id="conversation" class="hidden">
   <section class="control">
-    <button id="toggle" aria-pressed="false">conversation off</button>
+    <button id="toggle" aria-pressed="false" aria-label="start conversation" disabled><canvas id="puppet"></canvas><span id="puppet-state">loading puppet…</span></button>
+    <label class="puppet-picker">appearance <select id="puppet-choice" aria-label="puppet appearance"></select></label>
+    <div id="puppet-credit"></div>
     <div id="elapsed" aria-live="polite">00:00 / 30:00</div>
   </section>
   <section class="ledger"><h2>live delegation log</h2><div id="log" aria-live="polite"></div></section>
@@ -55,6 +62,8 @@
 <script type="module">
 import wbgInit, { init as wasmInit, connect, send_only, recv } from 'https://bddap-bot.github.io/botq/botq_dash_wasm.js';
 import { ConversationTrace, SessionClock, formatElapsed, formatStartError, isOfferFor } from './live.js';
+import { PuppetChannel } from './puppet-client.js';
+import { PuppetRuntime } from './puppet.js';
 
 const KEY = 'voice.token';
 const ALPN = 'voice-web/1';
@@ -73,9 +82,58 @@ let usageSeconds = 0;
 let connected = false;
 let starting;
 let stopping;
+let puppetCatalog;
+let puppetLoadTail = Promise.resolve();
+let puppetEpoch = 0;
+let puppetRequest;
+let puppetLoading = false;
+let puppetReady = false;
+let puppetActive;
+let puppetScope;
+let puppetRuntime;
+const puppetChannel = new PuppetChannel(sendFrame, caches, () => token?.endpoint_id ?? '');
 
 function setStatus(text, kind = '') { $('status').textContent = text; $('status').className = kind; }
-function savedState(saved) { $('entry').classList.toggle('hidden', saved); $('saved').classList.toggle('hidden', !saved); $('conversation').classList.toggle('hidden', !saved); }
+function savedState(saved) {
+  $('entry').classList.toggle('hidden', saved);
+  $('saved').classList.toggle('hidden', !saved);
+  $('conversation').classList.toggle('hidden', !saved);
+  if (saved && !document.hidden) puppetRuntime?.start();
+  else puppetRuntime?.pause();
+}
+function syncPuppetUi() {
+  const active = Boolean(conversation);
+  $('toggle').classList.toggle('on', active);
+  $('toggle').disabled = !puppetReady && !active && !starting;
+  $('toggle').setAttribute('aria-pressed', String(active));
+  $('toggle').setAttribute('aria-label', active || starting ? 'stop conversation' : 'start conversation');
+  $('puppet-state').textContent = puppetLoading ? 'loading puppet…' : active ? 'tap to sit and stop voice' : starting ? 'standing… tap to stop' : puppetRuntime ? 'tap to stand and start voice' : 'puppet renderer unavailable';
+}
+try {
+  puppetRuntime = new PuppetRuntime($('puppet'));
+  puppetRuntime.pause();
+} catch (error) {
+  console.warn('puppet:', error);
+  syncPuppetUi();
+}
+function resetPuppetConnection(error = new Error('connection replaced'), clearAppearance = false) {
+  puppetEpoch++;
+  puppetRequest = Symbol('cancelled puppet request');
+  puppetLoadTail = Promise.resolve();
+  puppetLoading = false;
+  puppetCatalog = undefined;
+  if (clearAppearance) {
+    puppetReady = false;
+    puppetActive = undefined;
+    puppetScope = undefined;
+    puppetRuntime?.clear();
+    $('puppet-choice').replaceChildren();
+    $('puppet-credit').textContent = '';
+  }
+  $('puppet-choice').disabled = false;
+  puppetChannel.fail(error);
+  syncPuppetUi();
+}
 function decodeToken(raw) {
   let value = raw.trim().replace(/-/g, '+').replace(/_/g, '/');
   while (value.length % 4) value += '=';
@@ -117,7 +175,7 @@ function render(entries) {
     record.tag.className = `tag${name === 'model alone' ? ' alone' : ''}`;
     record.tag.textContent = name;
     const lines = entry.kind === 'heard' ? [['heard', entry.text]]
-      : entry.kind === 'spoken' ? [['said', entry.text]]
+      : entry.kind === 'spoken' ? [['spoke', entry.text]]
       : [['sent to hub', entry.sent], ['context sent', JSON.stringify(entry.context)], ['hub reply', entry.reply || 'waiting…'], ['hub timing', entry.timing === null ? 'waiting…' : `${entry.timing} ms`]];
     record.body.replaceChildren(...lines.map(([key, value]) => {
       const line = document.createElement('div');
@@ -138,6 +196,7 @@ async function listen(mine) {
     for (;;) {
       const raw = await recv();
       if (mine !== generation) return;
+      if (await puppetChannel.receive(raw)) continue;
       const value = dec.decode(raw);
       const at = value.indexOf('\n');
       const verb = at < 0 ? value : value.slice(0, at);
@@ -167,6 +226,7 @@ async function listen(mine) {
     if (mine !== generation) return;
     answerWaiter?.reject(error);
     answerWaiter = null;
+    puppetChannel.fail(error);
     connected = false;
     if (conversation) await stopConversation('connection lost');
     else setStatus('connection lost', 'err');
@@ -174,6 +234,7 @@ async function listen(mine) {
 }
 async function dial() {
   connected = false;
+  resetPuppetConnection(new Error('connection replaced'), Boolean(puppetScope && puppetScope !== token.endpoint_id));
   generation++;
   await connect(token.relay_url ? `${token.endpoint_id}@${token.relay_url}` : token.endpoint_id, ALPN);
   await sendFrame(JSON.stringify({ auth: token.secret }));
@@ -268,10 +329,9 @@ async function receiveHubError(result) {
   conversation.channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: `hub_error_${Date.now()}`, delegation_id: result.id, content: `The hub could not answer this request: ${result.message}. Say that briefly without inventing.` }));
 }
 function paintOff() {
-  $('toggle').classList.remove('on');
-  $('toggle').setAttribute('aria-pressed', 'false');
-  $('toggle').textContent = 'conversation off';
+  puppetRuntime?.pose('sit');
   $('elapsed').textContent = '00:00 / 30:00';
+  syncPuppetUi();
 }
 function cancelOffer(attempt) {
   if (!attempt?.offered || attempt.cancelSent) return;
@@ -298,11 +358,15 @@ function cancelStarting(reason = 'conversation off') {
 async function startConversation() {
   const attempt = { cancelled: false, offered: false, cancelSent: false, cancelMic: null, cancelIce: null, cancelData: null, stream: null, pc: null, channel: null };
   starting = attempt;
-  $('toggle').textContent = 'starting…';
+  puppetRuntime?.pose('stand');
+  syncPuppetUi();
   try {
     if (stopping) await stopping;
     if (attempt.cancelled) return;
-    if (!connected) await dial();
+    if (!connected) {
+      await dial();
+      await loadPrivatePuppets();
+    }
     if (attempt.cancelled) return;
     trace = new ConversationTrace(render);
     render([]);
@@ -342,9 +406,8 @@ async function startConversation() {
     const clock = new SessionClock({ capSeconds: answer.cap_seconds, onTick: (seconds) => { $('elapsed').textContent = `${formatElapsed(seconds)} / ${capLabel}`; }, onCap: () => stopConversation(`${Math.round(answer.cap_seconds / 60)} minute cap reached — conversation stopped`) });
     conversation.clock = clock;
     clock.start();
-    $('toggle').classList.add('on');
-    $('toggle').setAttribute('aria-pressed', 'true');
-    $('toggle').textContent = 'conversation on';
+    puppetRuntime?.pose('listen');
+    syncPuppetUi();
     setStatus('live', 'ok');
   } catch (error) {
     if (attempt.cancelled) throw new Error('conversation start cancelled');
@@ -416,12 +479,70 @@ async function start(raw) {
   $('token').value = '';
   savedState(true);
   setStatus('ready', 'ok');
+  loadPrivatePuppets().catch((error) => setStatus(`puppet unavailable: ${error.message}`, 'err'));
+}
+
+function showPuppet(id) {
+  const epoch = puppetEpoch;
+  const request = Symbol('puppet request');
+  puppetRequest = request;
+  puppetLoading = true;
+  $('puppet-choice').disabled = true;
+  syncPuppetUi();
+  const operation = puppetLoadTail.then(() => loadPuppet(id, epoch, request));
+  puppetLoadTail = operation.catch(() => {});
+  return operation.finally(() => {
+    if (puppetRequest !== request) return;
+    puppetLoading = false;
+    $('puppet-choice').disabled = false;
+    syncPuppetUi();
+  });
+}
+
+async function loadPuppet(id, epoch, request) {
+  const current = () => epoch === puppetEpoch && request === puppetRequest;
+  if (!current()) throw new Error('puppet load replaced');
+  const avatar = puppetCatalog.avatars.find((item) => item.id === id);
+  if (!avatar) throw new Error('puppet is unavailable');
+  const bytes = await puppetChannel.bytes(id);
+  if (!current()) throw new Error('puppet load replaced');
+  if (!puppetRuntime) throw new Error('puppet renderer unavailable');
+  const loaded = await puppetRuntime.load(bytes, current, () => puppetChannel.select(id));
+  if (!loaded) throw new Error('puppet load replaced');
+  if (!current()) throw new Error('puppet load replaced');
+  $('puppet-credit').textContent = avatar.licenseFlags.creditRequired ? avatar.creditLine : '';
+  $('puppet-choice').value = id;
+  puppetActive = id;
+  puppetScope = token.endpoint_id;
+  puppetReady = true;
+  if (conversation) puppetRuntime?.pose('listen');
+  else if (starting) puppetRuntime?.pose('stand');
+  else paintOff();
+}
+
+async function loadPrivatePuppets() {
+  const epoch = puppetEpoch;
+  puppetCatalog = await puppetChannel.catalog();
+  if (epoch !== puppetEpoch) throw new Error('puppet catalog replaced');
+  $('puppet-choice').replaceChildren(...puppetCatalog.avatars.map((avatar, index) => {
+    const option = document.createElement('option');
+    option.value = avatar.id;
+    option.textContent = `puppet ${index + 1}`;
+    return option;
+  }));
+  await showPuppet(puppetCatalog.active);
 }
 
 $('toggle').addEventListener('click', toggleConversation);
+$('puppet-choice').addEventListener('change', () => showPuppet($('puppet-choice').value).catch((error) => {
+  if (puppetActive) $('puppet-choice').value = puppetActive;
+  setStatus(error.message, 'err');
+}));
 $('connect').addEventListener('click', () => start($('token').value).catch((error) => setStatus(error.message, 'err')));
 $('reenter').addEventListener('click', async () => { await stopConversation(); savedState(false); $('token').focus(); });
-$('forget').addEventListener('click', async () => { await stopConversation(); localStorage.removeItem(KEY); await sendFrame('bye').catch(() => {}); generation++; connected = false; savedState(false); setStatus('token forgotten'); });
+$('forget').addEventListener('click', async () => { await stopConversation(); localStorage.removeItem(KEY); await sendFrame('bye').catch(() => {}); generation++; connected = false; resetPuppetConnection(new Error('connection replaced'), true); await puppetChannel.clearCache().catch(() => {}); savedState(false); setStatus('token forgotten'); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) puppetRuntime?.pause(); else if (!$('conversation').classList.contains('hidden')) puppetRuntime?.start(); });
+window.addEventListener('beforeunload', () => puppetRuntime?.dispose());
 const saved = localStorage.getItem(KEY);
 if (saved) start(saved).catch((error) => { localStorage.removeItem(KEY); savedState(false); setStatus(error.message, 'err'); });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});

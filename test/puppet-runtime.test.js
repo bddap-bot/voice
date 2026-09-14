@@ -81,6 +81,13 @@ test('waiting holds a readable gesture until the hub result releases it', () => 
   assert.equal(runtime.gestureState.releasing, true);
 });
 
+test('panel pointing can replace the waiting gesture when display material arrives', () => {
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), { waitingForHub: true, gestureState: { name: 'waiting' }, gestureOffsets: {} });
+  runtime.gesture('point', 'panel');
+  assert.equal(runtime.gestureState.name, 'point_at');
+  assert.throws(() => runtime.gesture('beat'), /waiting/);
+});
+
 test('pose transitions capture the base layer without reapplying overlays', () => {
   const base = new THREE.Quaternion();
   const node = { quaternion: new THREE.Quaternion().setFromEuler(new THREE.Euler(0.34, 0, 0)) };

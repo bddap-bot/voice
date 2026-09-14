@@ -19,6 +19,7 @@ function deliver(value) {
   if (resolve) resolve(value);
   else queued.push(value);
 }
+globalThis.deliverRelay = deliver;
 export default async function initWasm() {}
 export async function init() {}
 export async function connect() {}
@@ -214,6 +215,24 @@ window.addEventListener('test-ready', () => {
 `);
   const encoded = /data-share-error-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   assert.deepEqual(JSON.parse(encoded ?? 'null'), { status: 'hub queue is full', disabled: false }, stderr);
+});
+
+test('a display payload appears newest first and points the puppet while a plain hub reply adds nothing', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  const enc = new TextEncoder();
+  const metadata = enc.encode('display\\n' + JSON.stringify({ markdown: '**Result** details', link: 'https://example.test/result', image: { mime: 'image/png' } }) + '\\n');
+  const image = Uint8Array.from([137,80,78,71,13,10,26,10]);
+  const frame = new Uint8Array(metadata.length + image.length);
+  frame.set(metadata); frame.set(image, metadata.length);
+  deliverRelay(enc.encode('hub\\n' + JSON.stringify({ id: 'unknown', reply: 'plain', timing_ms: 1 })));
+  deliverRelay(frame);
+  deliverRelay(enc.encode('display\\n' + JSON.stringify({ markdown: 'Newest' }) + '\\n'));
+  setTimeout(() => { document.body.dataset.displayTest = JSON.stringify({ count: document.querySelectorAll('.display-item').length, first: document.querySelector('.display-item')?.textContent, link: document.querySelector('.display-item:last-child a')?.href, image: Boolean(document.querySelector('.display-item:last-child img')), pointed: testPuppet.calls.some((call) => call[0] === 'gesture' && call[1] === 'point' && call[2] === 'panel') }); }, 40);
+});
+`);
+  const encoded = /data-display-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { count: 2, first: 'Newest', link: 'https://example.test/result', image: true, pointed: true }, stderr);
 });
 
 test('the delegation log keeps the last of ten appended entries visible', async () => {

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="img-src 'self'; media-src blob:;">
+<meta http-equiv="Content-Security-Policy" content="img-src 'self' blob:; media-src blob:;">
 <title>voice</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
@@ -19,8 +19,8 @@
   textarea { flex: 1 1 440px; min-height: 72px; background: #151517; color: inherit; border: 1px solid #39393f; border-radius: 8px; padding: 10px; }
   button { background: #1d1d20; color: inherit; border: 1px solid #414148; border-radius: 8px; padding: 9px 14px; font: inherit; }
   button.primary { background: #315ee8; border-color: #315ee8; }
-  main { display: grid; grid-template-columns: minmax(240px, .7fr) minmax(360px, 1.5fr); gap: 18px; padding: clamp(16px, 4vw, 36px); }
-  .control, .ledger { background: #141416; border: 1px solid #2d2d31; border-radius: 14px; }
+  main { display: grid; grid-template-columns: minmax(240px, .75fr) minmax(280px, 1fr) minmax(280px, 1fr); gap: 18px; padding: clamp(16px, 4vw, 36px); }
+  .control, .display, .ledger { background: #141416; border: 1px solid #2d2d31; border-radius: 14px; }
   .control { min-height: 520px; display: grid; grid-template-rows: minmax(380px, 1fr) auto auto auto auto; gap: 12px; padding: 14px; }
   #toggle { position: relative; width: 100%; min-height: 380px; overflow: hidden; padding: 0; border-radius: 12px; touch-action: manipulation; background: radial-gradient(circle at 50% 35%, #313346, #171820 62%, #101115); }
   #toggle.on { border-color: #50c878; box-shadow: inset 0 0 40px #173e2a; }
@@ -38,14 +38,20 @@
   #share-image { color: #bdbdc3; flex: 1; overflow-wrap: anywhere; }
   #share-target { border: 1px dashed #414148; border-radius: 8px; padding: 8px; text-align: center; color: #a5a5aa; }
   #share-target.over { border-color: #8eabff; color: #ececed; }
-  .ledger { min-height: 260px; padding: 18px; overflow: hidden; }
-  .ledger h2 { margin: 0 0 12px; font-size: 14px; text-transform: uppercase; letter-spacing: .08em; color: #a5a5aa; }
+  .display, .ledger { min-height: 260px; padding: 18px; overflow: hidden; }
+  .display h2, .ledger h2 { margin: 0 0 12px; font-size: 14px; text-transform: uppercase; letter-spacing: .08em; color: #a5a5aa; }
+  #display-items { display: flex; flex-direction: column; gap: 12px; max-height: 65dvh; overflow: auto; }
+  .display-item { padding: 13px; background: #1b1b1e; border-radius: 8px; overflow-wrap: anywhere; }
+  .display-item > :first-child { margin-top: 0; } .display-item > :last-child { margin-bottom: 0; }
+  .display-item img { display: block; width: 100%; height: auto; max-height: 52dvh; object-fit: contain; margin-top: 10px; border-radius: 6px; background: #0b0b0c; }
+  .display-item a { color: #8eabff; }
   #log { display: flex; flex-direction: column; gap: 10px; max-height: 65dvh; overflow: auto; }
   .turn, .usage { padding: 11px 12px; background: #1b1b1e; border-radius: 8px; overflow-wrap: anywhere; }
   .tag { color: #8eabff; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
   .tag.alone { color: #d4ae68; }
   .line { margin-top: 5px; } .key { color: #8f8f96; }
-  @media (max-width: 720px) { main { grid-template-columns: 1fr; } .control { min-height: 500px; } }
+  @media (max-width: 1000px) { main { grid-template-columns: minmax(240px, .8fr) minmax(320px, 1.2fr); } .ledger { grid-column: 1 / -1; } }
+  @media (max-width: 720px) { main { grid-template-columns: 1fr; } .control { min-height: 500px; } .ledger { grid-column: auto; } }
 </style>
 </head>
 <body>
@@ -69,6 +75,7 @@
       <div class="share-actions"><label for="share-file"><span class="button">Choose image</span></label><input id="share-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" capture="environment"><button id="share-remove" class="hidden">Remove image</button><span id="share-image">No image selected</span><button id="share-send" class="primary">Send</button></div>
     </section>
   </section>
+  <section class="display" aria-label="hub display"><h2>from the hub</h2><div id="display-items" aria-live="polite"></div></section>
   <section class="ledger"><h2>live delegation log</h2><div id="log" aria-live="polite"></div></section>
 </main>
 <audio id="speaker" autoplay></audio>
@@ -227,7 +234,8 @@ async function listen(mine) {
       const at = value.indexOf('\n');
       const verb = at < 0 ? value : value.slice(0, at);
       const body = at < 0 ? '' : value.slice(at + 1);
-      if (verb === 'answer') {
+      if (verb === 'display') receiveDisplay(raw);
+      else if (verb === 'answer') {
         const answer = JSON.parse(body);
         if (isOfferFor(answerWaiter, answer)) answerWaiter.resolve(answer);
       }
@@ -261,6 +269,70 @@ async function listen(mine) {
     if (conversation) await stopConversation('connection lost');
     else setStatus('connection lost', 'err');
   }
+}
+function appendInline(parent, text) {
+  const pattern = /(\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|\*\*([^*]+)\*\*|\*([^*]+)\*|`([^`]+)`)/g;
+  let offset = 0;
+  for (const match of text.matchAll(pattern)) {
+    parent.append(document.createTextNode(text.slice(offset, match.index)));
+    const node = match[2] ? document.createElement('a') : match[4] ? document.createElement('strong') : match[5] ? document.createElement('em') : document.createElement('code');
+    node.textContent = match[2] || match[4] || match[5] || match[6];
+    if (match[2]) { node.href = match[3]; node.target = '_blank'; node.rel = 'noopener noreferrer'; }
+    parent.append(node);
+    offset = match.index + match[0].length;
+  }
+  parent.append(document.createTextNode(text.slice(offset)));
+}
+function appendMarkdown(parent, markdown) {
+  const lines = markdown.split('\n');
+  for (let index = 0; index < lines.length;) {
+    const line = lines[index];
+    if (!line.trim()) { index++; continue; }
+    if (line.startsWith('```')) {
+      const code = [];
+      for (index++; index < lines.length && !lines[index].startsWith('```'); index++) code.push(lines[index]);
+      index += index < lines.length ? 1 : 0;
+      const pre = document.createElement('pre');
+      const content = document.createElement('code'); content.textContent = code.join('\n'); pre.append(content); parent.append(pre);
+      continue;
+    }
+    if (/^[-*] /.test(line)) {
+      const list = document.createElement('ul');
+      while (index < lines.length && /^[-*] /.test(lines[index])) { const entry = document.createElement('li'); appendInline(entry, lines[index].slice(2)); list.append(entry); index++; }
+      parent.append(list); continue;
+    }
+    const heading = /^(#{1,6})\s+(.+)$/.exec(line);
+    const block = document.createElement(heading ? `h${Math.min(heading[1].length + 2, 6)}` : 'p');
+    appendInline(block, heading ? heading[2] : line); parent.append(block); index++;
+  }
+}
+function receiveDisplay(raw) {
+  const prefix = enc.encode('display\n');
+  let boundary = prefix.length;
+  while (boundary < raw.length && raw[boundary] !== 10) boundary++;
+  if (boundary === raw.length) return;
+  let payload;
+  try { payload = JSON.parse(dec.decode(raw.slice(prefix.length, boundary))); } catch { return; }
+  if (!payload || typeof payload !== 'object') return;
+  const item = document.createElement('article');
+  item.className = 'display-item';
+  if (typeof payload.markdown === 'string') appendMarkdown(item, payload.markdown);
+  if (typeof payload.link === 'string' && /^https?:\/\//i.test(payload.link)) {
+    const link = document.createElement('a');
+    link.href = payload.link; link.textContent = payload.link; link.target = '_blank'; link.rel = 'noopener noreferrer';
+    item.append(link);
+  }
+  if (['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(payload.image?.mime) && boundary + 1 < raw.length && raw.length - boundary - 1 <= 8 * 1024 * 1024) {
+    const url = URL.createObjectURL(new Blob([raw.slice(boundary + 1)], { type: payload.image.mime }));
+    const image = document.createElement('img');
+    image.src = url; image.alt = typeof payload.markdown === 'string' ? payload.markdown.slice(0, 160) : 'Hub image';
+    item.append(image);
+    item.imageUrl = url;
+  }
+  if (!item.childNodes.length) return;
+  $('display-items').prepend(item);
+  while ($('display-items').childNodes.length > 20) { const removed = $('display-items').lastChild; if (removed.imageUrl) URL.revokeObjectURL(removed.imageUrl); removed.remove(); }
+  puppetRuntime?.gesture('point', 'panel');
 }
 function receiveShare(result) {
   const waiter = shareWaiters.get(result.id);

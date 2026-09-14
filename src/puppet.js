@@ -23,6 +23,12 @@ const GESTURES = {
 
 const CLIP_GESTURES = new Set(['point', 'nod', 'shrug', 'think', 'wave']);
 
+const GAZE_POINTS = {
+  camera: [0, 1.25, 6.4],
+  panel: [2.8, 1.35, 2.4],
+  away: [-1.8, 1.8, 2.8],
+};
+
 function mixamoBoneName(trackName) {
   const source = trackName.slice(0, trackName.lastIndexOf('.')).replace(/^.*\[|\]$/g, '').split(':').at(-1).replace(/^mixamorig/i, '').toLowerCase();
   return MIXAMO_BONES[source];
@@ -181,11 +187,15 @@ export class PuppetRuntime {
     this.clock = new THREE.Clock();
     this.poseName = 'sit';
     this.bones = new Map();
-    this.lookTarget = new THREE.Euler();
-    this.lookOffset = new THREE.Quaternion();
-    this.lookTargetQuaternion = new THREE.Quaternion();
-    this.lookUntil = 0;
-    this.nextLook = 0;
+    this.gazeTarget = new THREE.Object3D();
+    this.gazeTarget.position.fromArray(GAZE_POINTS.camera);
+    this.scene.add(this.gazeTarget);
+    this.gazePoint = this.gazeTarget.position.clone();
+    this.gazeDestination = this.gazePoint.clone();
+    this.gazeMode = 'camera';
+    this.gazeUntil = 0;
+    this.nextSaccade = 0;
+    this.gazeRotation = new THREE.Quaternion();
     this.nextBlink = performance.now() + 1200;
     this.blinkStart = 0;
     this.audio = null;
@@ -254,6 +264,7 @@ export class PuppetRuntime {
     vrm.scene.traverse((object) => { object.frustumCulled = false; });
     this.idleRoot.add(vrm.scene);
     this.vrm = vrm;
+    if (vrm.lookAt) vrm.lookAt.target = this.gazeTarget;
     this.bones.clear();
     for (const bone of ['leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg', 'spine', 'head', 'leftShoulder', 'rightShoulder', 'leftUpperArm', 'rightUpperArm', 'leftLowerArm', 'rightLowerArm']) {
       const node = vrm.humanoid?.getNormalizedBoneNode(bone);
@@ -356,6 +367,8 @@ export class PuppetRuntime {
     const resolved = name === 'point' && target === 'panel' ? 'point_at' : name;
     if (!GESTURES[resolved] && !CLIP_GESTURES.has(resolved)) throw new Error(`unknown gesture ${name}`);
     if (resolved === 'beat' && (this.waitingForHub || this.gestureState || this.clipGesture)) return;
+    if (resolved === 'point_at') this.setGaze('panel', 2200);
+    if (resolved === 'think') this.setGaze('away', 1800);
     if (CLIP_GESTURES.has(resolved)) {
       this.gestureState = null;
       this.gestureOffsets = {};
@@ -391,9 +404,12 @@ export class PuppetRuntime {
   }
   look(direction) {
     if (direction !== 'toward' && direction !== 'away') throw new Error(`unknown look ${direction}`);
-    this.lookTarget.set(0, direction === 'away' ? 0.42 : 0, 0);
-    this.lookTargetQuaternion.setFromEuler(this.lookTarget);
-    this.lookUntil = performance.now() + 1800;
+    this.setGaze(direction === 'away' ? 'away' : 'camera', 1800);
+  }
+  setGaze(mode, duration, now = performance.now()) {
+    this.gazeMode = mode;
+    this.gazeUntil = now + duration;
+    this.gazeDestination.fromArray(GAZE_POINTS[mode]);
   }
   mood(name) {
     if (!MOOD_TABLE[name]) throw new Error(`unknown mood ${name}`);
@@ -459,15 +475,28 @@ export class PuppetRuntime {
       this.updateMood(now, manager);
       this.updateMouth(manager);
     }
+    this.updateGaze(now);
+  }
+  updateGaze(now) {
+    if (!this.vrm?.lookAt) return;
+    if (this.gazeMode !== 'camera' && now >= this.gazeUntil) {
+      this.gazeMode = 'camera';
+      this.nextSaccade = now;
+    }
+    if (this.gazeMode === 'camera' && now >= this.nextSaccade) {
+      this.gazeDestination.fromArray(GAZE_POINTS.camera);
+      this.gazeDestination.x += (Math.random() - 0.5) * 0.24;
+      this.gazeDestination.y += (Math.random() - 0.5) * 0.12;
+      this.nextSaccade = now + 1800 + Math.random() * 3200;
+    } else if (this.gazeMode !== 'camera') this.gazeDestination.fromArray(GAZE_POINTS[this.gazeMode]);
+    this.gazePoint.lerp(this.gazeDestination, 0.08);
+    this.gazeTarget.position.copy(this.gazePoint);
     const head = this.bones.get('head')?.node;
     if (!head) return;
-    if (now >= this.lookUntil && now >= this.nextLook) {
-      this.lookTarget.set((Math.random() - 0.5) * 0.1, (Math.random() - 0.5) * 0.24, 0);
-      this.lookTargetQuaternion.setFromEuler(this.lookTarget);
-      this.nextLook = now + 2400 + Math.random() * 3600;
-    }
-    this.lookOffset.slerp(this.lookTargetQuaternion, 0.012);
-    head.quaternion.multiply(this.lookOffset);
+    const yaw = THREE.MathUtils.clamp(Math.atan2(this.gazePoint.x, this.gazePoint.z) * 0.18, -0.14, 0.14);
+    const pitch = THREE.MathUtils.clamp(-Math.atan2(this.gazePoint.y - 1.25, Math.hypot(this.gazePoint.x, this.gazePoint.z)) * 0.14, -0.08, 0.08);
+    this.gazeRotation.setFromEuler(new THREE.Euler(pitch, yaw, 0));
+    head.quaternion.multiply(this.gazeRotation);
   }
   updateMouth(manager) {
     let targets;

@@ -237,6 +237,59 @@ async function runPage(testSetup = '') {
   }
 }
 
+async function runGazePage() {
+  const puppet = await readFile(new URL('../docs/puppet.js', import.meta.url));
+  const html = `<!doctype html><canvas id="puppet" style="width:390px;height:844px"></canvas><script type="module">
+import { PuppetRuntime } from '/puppet.js';
+const runtime = new PuppetRuntime(document.querySelector('#puppet'));
+runtime.pause();
+runtime.vrm = { lookAt: {} };
+runtime.setGaze('panel', 2200, 0);
+for (let frame = 0; frame < 30; frame++) runtime.updateGaze(100 + frame * 16);
+const panel = { mode: runtime.gazeMode, x: runtime.gazeTarget.position.x };
+Math.random = () => 0.5;
+for (let frame = 0; frame < 30; frame++) runtime.updateGaze(2201 + frame * 16);
+document.body.dataset.gazeTest = JSON.stringify({ panel, returned: { mode: runtime.gazeMode, x: runtime.gazeTarget.position.x } });
+runtime.dispose();
+</script>`;
+  const scratch = await mkdtemp(join(process.cwd(), '.chromium-'));
+  const profile = join(scratch, 'profile');
+  const temporary = join(scratch, 'tmp');
+  await Promise.all([mkdir(profile), mkdir(temporary)]);
+  const server = createServer((request, response) => {
+    const body = request.url === '/puppet.js' ? puppet : html;
+    response.writeHead(200, { 'content-type': request.url === '/puppet.js' ? 'text/javascript' : 'text/html' });
+    response.end(body);
+  });
+  try {
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const executable = await chromiumExecutable();
+    return await execute(executable, [
+      '--headless=new',
+      '--no-sandbox',
+      '--use-angle=swiftshader',
+      '--enable-unsafe-swiftshader',
+      `--user-data-dir=${profile}`,
+      '--virtual-time-budget=3000',
+      '--dump-dom',
+      `http://127.0.0.1:${server.address().port}/`,
+    ], { timeout: 15000, killSignal: 'SIGKILL', env: { ...process.env, TMPDIR: temporary } });
+  } finally {
+    if (server.listening) await new Promise((resolve) => server.close(resolve));
+    await rm(scratch, { recursive: true, force: true });
+  }
+}
+
+test('the real page runtime moves its look-at target to the panel and back over time', async () => {
+  const { stdout, stderr } = await runGazePage();
+  const encoded = /data-gaze-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  const result = JSON.parse(encoded ?? 'null');
+  assert.equal(result?.panel.mode, 'panel', stderr);
+  assert.ok(result.panel.x > 2.5, stderr);
+  assert.equal(result.returned.mode, 'camera', stderr);
+  assert.ok(result.returned.x < 0.3, stderr);
+});
+
 test('the page toggle completes its start path in headless Chromium', async () => {
   const { stdout, stderr } = await runPage();
   const observed = /data-start-test="([^"]*)"/.exec(stdout)?.[1] ?? 'start path did not settle';

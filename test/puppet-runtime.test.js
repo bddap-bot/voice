@@ -88,7 +88,7 @@ test('waiting holds a readable gesture until the hub result releases it', () => 
 
 test('explicit gestures replace a hub wait and beats cannot replace either', () => {
   const played = [];
-  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), { waitingForHub: true, gestureState: { name: 'waiting' }, gestureOffsets: { head: [1, 0, 0] }, clips: new Map(), clipGesture: null, poseName: 'sit', playClip: (name) => played.push(name) });
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), { waitingForHub: true, gestureState: { name: 'waiting' }, gestureOffsets: { head: [1, 0, 0] }, clips: new Map(), clipGesture: null, poseName: 'sit', gazeDestination: new THREE.Vector3(), playClip: (name) => played.push(name) });
   runtime.gesture('beat');
   assert.equal(runtime.gestureState.name, 'waiting');
   runtime.gesture('nod');
@@ -104,6 +104,64 @@ test('explicit gestures replace a hub wait and beats cannot replace either', () 
   assert.deepEqual(played, ['nod', 'sit-idle']);
   runtime.gesture('beat');
   assert.equal(runtime.gestureState.name, 'point_at');
+});
+
+test('the look-at target glances to a fresh panel and returns to camera dwell', () => {
+  const head = new THREE.Object3D();
+  const target = new THREE.Object3D();
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+    vrm: { lookAt: { target } },
+    gazeTarget: target,
+    gazePoint: new THREE.Vector3(0, 1.25, 6.4),
+    gazeDestination: new THREE.Vector3(0, 1.25, 6.4),
+    gazeMode: 'camera',
+    gazeUntil: 0,
+    nextSaccade: Infinity,
+    gazeRotation: new THREE.Quaternion(),
+    bones: new Map([['head', { node: head }]]),
+  });
+  runtime.setGaze('panel', 2200, 0);
+  for (let frame = 0; frame < 30; frame++) {
+    head.quaternion.identity();
+    runtime.updateGaze(100 + frame * 16);
+  }
+  assert.equal(runtime.gazeMode, 'panel');
+  assert.ok(target.position.x > 2.5);
+  const panelX = target.position.x;
+  const panelHeadYaw = head.rotation.y;
+  const random = Math.random;
+  Math.random = () => 0.5;
+  try {
+    for (let frame = 0; frame < 30; frame++) {
+      head.quaternion.identity();
+      runtime.updateGaze(2201 + frame * 16);
+    }
+  } finally {
+    Math.random = random;
+  }
+  assert.equal(runtime.gazeMode, 'camera');
+  assert.ok(target.position.x < panelX * 0.1);
+  assert.ok(panelHeadYaw > 0.08);
+  assert.ok(Math.abs(head.rotation.y) < panelHeadYaw * 0.1);
+});
+
+test('gaze is inert when a puppet has no look-at rig', () => {
+  const target = new THREE.Object3D();
+  const head = new THREE.Object3D();
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+    vrm: {},
+    gazeTarget: target,
+    gazePoint: new THREE.Vector3(0, 1.25, 6.4),
+    gazeDestination: new THREE.Vector3(2.8, 1.35, 2.4),
+    gazeMode: 'panel',
+    gazeUntil: 2200,
+    nextSaccade: 0,
+    gazeRotation: new THREE.Quaternion(),
+    bones: new Map([['head', { node: head }]]),
+  });
+  runtime.updateGaze(1000);
+  assert.deepEqual(target.position.toArray(), [0, 0, 0]);
+  assert.deepEqual(head.quaternion.toArray(), [0, 0, 0, 1]);
 });
 
 test('a hub wait resumes after an explicit clip finishes', () => {

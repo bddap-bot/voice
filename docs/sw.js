@@ -1,5 +1,5 @@
-const CACHE = 'voice-shell-v6';
-const SHELL = ['.', 'index.html', 'live.js', 'puppet-client.js', 'puppet.js', 'manifest.webmanifest', 'icons/icon.svg'];
+const CACHE = 'voice-shell-v7';
+const SHELL = ['.', 'index.html', 'live.js', 'puppet-client.js', 'puppet-tools.js', 'puppet.js', 'manifest.webmanifest', 'icons/icon.svg'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

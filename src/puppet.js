@@ -31,6 +31,39 @@ const BONE_POSES = {
 };
 
 const VISEMES = ['aa', 'ih', 'ou', 'ee', 'oh'];
+const MOOD_EXPRESSIONS = ['happy', 'angry', 'sad', 'relaxed', 'surprised'];
+
+const GESTURES = {
+  nod: { head: [0.34, 0, 0] },
+  shrug: { leftShoulder: [0, 0, 0.2], rightShoulder: [0, 0, -0.2], leftUpperArm: [0, 0, 0.24], rightUpperArm: [0, 0, -0.24], spine: [-0.08, 0, 0] },
+  think: { head: [0.12, -0.12, 0.05], rightUpperArm: [-0.72, 0.08, -0.18], rightLowerArm: [-1.05, 0, 0.28] },
+  point: { spine: [0, -0.2, 0], head: [0, 0.16, 0], rightUpperArm: [0.08, -0.72, -0.9], rightLowerArm: [0, 0, -0.12] },
+  beat: { rightUpperArm: [-0.24, 0, -0.3], rightLowerArm: [-0.48, 0, 0.16] },
+  point_at: { spine: [0, -0.42, 0], head: [0, 0.28, 0], rightUpperArm: [0.04, -0.9, -1.08], rightLowerArm: [0, 0, -0.08] },
+  waiting: { spine: [-0.08, 0.12, 0], head: [0.12, -0.18, 0.08], leftUpperArm: [-0.28, 0, 0.18], rightUpperArm: [-0.58, 0, -0.28], rightLowerArm: [-0.92, 0, 0.26] },
+};
+
+export const MOOD_TABLE = {
+  curious: { expressions: { surprised: 0.22 }, bones: { head: [-0.03, 0.12, 0.08], leftShoulder: [0, 0, 0.05] } },
+  amused: { expressions: { happy: 0.68, relaxed: 0.12 }, bones: { head: [0.02, -0.08, -0.07], rightShoulder: [0, 0, -0.06] } },
+  puzzled: { expressions: { sad: 0.2, surprised: 0.12 }, bones: { head: [0.04, 0.14, 0.1], leftShoulder: [0, 0, 0.08] } },
+  thinking: { expressions: { relaxed: 0.28 }, bones: { head: [0.08, -0.12, 0.04], rightShoulder: [0.03, 0, -0.05] } },
+  pleased: { expressions: { happy: 0.76 }, bones: { head: [-0.04, 0, -0.03], leftShoulder: [0, 0, 0.04], rightShoulder: [0, 0, -0.04] } },
+  apologetic: { expressions: { sad: 0.48 }, bones: { head: [0.09, 0, 0.04], leftShoulder: [0.06, 0, 0.03], rightShoulder: [0.06, 0, -0.03] } },
+  alert: { expressions: { surprised: 0.35 }, bones: { head: [-0.08, 0, 0], spine: [-0.04, 0, 0] } },
+  sleepy: { expressions: { relaxed: 0.68 }, bones: { head: [0.16, -0.08, 0.08], spine: [0.08, 0, 0] } },
+  surprised: { expressions: { surprised: 0.9 }, bones: { head: [-0.12, 0, 0], leftShoulder: [-0.08, 0, 0.08], rightShoulder: [-0.08, 0, -0.08] } },
+  skeptical: { expressions: { angry: 0.18 }, bones: { head: [0.02, -0.16, -0.11], rightShoulder: [0, 0, -0.06] } },
+};
+
+function copyOffsets(source = {}) {
+  return Object.fromEntries(Object.entries(source).map(([name, values]) => [name, [...values]]));
+}
+
+function blendOffsets(from, to, amount) {
+  const names = new Set([...Object.keys(from), ...Object.keys(to)]);
+  return Object.fromEntries([...names].map((name) => [name, [0, 1, 2].map((axis) => THREE.MathUtils.lerp(from[name]?.[axis] ?? 0, to[name]?.[axis] ?? 0, amount))]));
+}
 
 function bandEnergy(spectrum, sampleRate, fftSize, low, high) {
   const first = Math.max(1, Math.ceil(low * fftSize / sampleRate));
@@ -98,12 +131,22 @@ export class PuppetRuntime {
     this.lookTarget = new THREE.Euler();
     this.lookOffset = new THREE.Quaternion();
     this.lookTargetQuaternion = new THREE.Quaternion();
+    this.lookUntil = 0;
     this.nextLook = 0;
     this.nextBlink = performance.now() + 1200;
     this.blinkStart = 0;
     this.audio = null;
     this.audioEpoch = 0;
     this.mouthValues = Object.fromEntries(VISEMES.map((name) => [name, 0]));
+    this.moodValues = Object.fromEntries(MOOD_EXPRESSIONS.map((name) => [name, 0]));
+    this.moodName = null;
+    this.moodFrom = {};
+    this.moodBones = {};
+    this.moodStarted = performance.now();
+    this.gestureState = null;
+    this.gestureOffsets = {};
+    this.gestureRotation = new THREE.Quaternion();
+    this.waitingForHub = false;
     this.resize = new ResizeObserver(() => this.fit());
     this.resize.observe(canvas);
     this.fit();
@@ -158,11 +201,19 @@ export class PuppetRuntime {
     this.idleRoot.add(vrm.scene);
     this.vrm = vrm;
     this.bones.clear();
-    for (const bone of ['leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg', 'spine', 'head', 'leftUpperArm', 'rightUpperArm', 'leftLowerArm', 'rightLowerArm']) {
+    for (const bone of ['leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg', 'spine', 'head', 'leftShoulder', 'rightShoulder', 'leftUpperArm', 'rightUpperArm', 'leftLowerArm', 'rightLowerArm']) {
       const node = vrm.humanoid?.getNormalizedBoneNode(bone);
       if (!node) continue;
       const rest = node.quaternion.clone();
-      this.bones.set(bone, { node, rest, from: rest.clone(), target: rest.clone() });
+      this.bones.set(bone, { node, rest, base: rest.clone(), from: rest.clone(), target: rest.clone() });
+    }
+    for (const name of MOOD_EXPRESSIONS) {
+      const expression = vrm.expressionManager?.getExpression(name);
+      if (expression) {
+        expression.overrideMouth = 'none';
+        expression.overrideBlink = 'none';
+        expression.overrideLookAt = 'none';
+      }
     }
     this.pose(this.poseName);
     return true;
@@ -240,14 +291,76 @@ export class PuppetRuntime {
     this.poseFromY = this.stage.position.y;
     this.poseToY = name === 'sit' ? -0.72 : 0;
     for (const [bone, entry] of this.bones) {
-      entry.from.copy(entry.node.quaternion);
+      entry.from.copy(entry.base);
       entry.target.setFromEuler(new THREE.Euler(...(BONE_POSES[name][bone] ?? [0, 0, 0]))).multiply(entry.rest);
     }
+  }
+  gesture(name, target) {
+    const resolved = name === 'point' && target === 'panel' ? 'point_at' : name;
+    if (!GESTURES[resolved]) throw new Error(`unknown gesture ${name}`);
+    if (this.waitingForHub) throw new Error('puppet is waiting for the hub');
+    this.beginGesture(resolved, false);
+  }
+  beginGesture(name, hold) {
+    const now = performance.now();
+    this.gestureState = { name, from: copyOffsets(this.gestureOffsets), to: copyOffsets(GESTURES[name]), started: now, releaseAt: hold ? Infinity : now + 900, releasing: false };
+  }
+  waiting(active) {
+    this.waitingForHub = active;
+    if (active) this.beginGesture('waiting', true);
+    else if (this.gestureState?.name === 'waiting') this.releaseGesture(performance.now());
+  }
+  releaseGesture(now) {
+    this.gestureState = { name: this.gestureState?.name, from: copyOffsets(this.gestureOffsets), to: {}, started: now, releaseAt: Infinity, releasing: true };
+  }
+  look(direction) {
+    if (direction !== 'toward' && direction !== 'away') throw new Error(`unknown look ${direction}`);
+    this.lookTarget.set(0, direction === 'away' ? 0.42 : 0, 0);
+    this.lookTargetQuaternion.setFromEuler(this.lookTarget);
+    this.lookUntil = performance.now() + 1800;
+  }
+  mood(name) {
+    if (!MOOD_TABLE[name]) throw new Error(`unknown mood ${name}`);
+    this.moodName = name;
+    this.moodFrom = copyOffsets(this.moodBones);
+    this.moodStarted = performance.now();
   }
   updatePose(now) {
     const amount = THREE.MathUtils.smoothstep((now - this.poseStart) / 420, 0, 1);
     this.stage.position.y = THREE.MathUtils.lerp(this.poseFromY, this.poseToY, amount);
-    for (const entry of this.bones.values()) entry.node.quaternion.slerpQuaternions(entry.from, entry.target, amount);
+    for (const entry of this.bones.values()) {
+      entry.base.slerpQuaternions(entry.from, entry.target, amount);
+      entry.node.quaternion.copy(entry.base);
+    }
+  }
+  updateGesture(now) {
+    if (!this.gestureState) return;
+    if (!this.gestureState.releasing && now >= this.gestureState.releaseAt) this.releaseGesture(now);
+    const amount = THREE.MathUtils.smoothstep((now - this.gestureState.started) / 320, 0, 1);
+    this.gestureOffsets = blendOffsets(this.gestureState.from, this.gestureState.to, amount);
+    for (const [name, values] of Object.entries(this.gestureOffsets)) {
+      const bone = this.bones.get(name)?.node;
+      if (!bone) continue;
+      this.gestureRotation.setFromEuler(new THREE.Euler(...values));
+      bone.quaternion.multiply(this.gestureRotation);
+    }
+    if (this.gestureState.releasing && amount === 1) this.gestureState = null;
+  }
+  updateMood(now, manager) {
+    const mood = MOOD_TABLE[this.moodName];
+    for (const name of MOOD_EXPRESSIONS) {
+      this.moodValues[name] = THREE.MathUtils.lerp(this.moodValues[name], mood?.expressions[name] ?? 0, 0.12);
+      manager.setValue(name, this.moodValues[name]);
+    }
+    if (!mood) return;
+    const amount = THREE.MathUtils.smoothstep((now - this.moodStarted) / 320, 0, 1);
+    this.moodBones = blendOffsets(this.moodFrom, mood.bones, amount);
+    for (const [name, values] of Object.entries(this.moodBones)) {
+      const bone = this.bones.get(name)?.node;
+      if (!bone) continue;
+      this.gestureRotation.setFromEuler(new THREE.Euler(...values));
+      bone.quaternion.multiply(this.gestureRotation);
+    }
   }
   updateFace(now) {
     const manager = this.vrm?.expressionManager;
@@ -261,19 +374,18 @@ export class PuppetRuntime {
           this.nextBlink = now + 2200 + Math.random() * 4200;
         }
       }
+      this.updateMood(now, manager);
       this.updateMouth(manager);
     }
     const head = this.bones.get('head')?.node;
     if (!head) return;
-    if (now >= this.nextLook) {
+    if (now >= this.lookUntil && now >= this.nextLook) {
       this.lookTarget.set((Math.random() - 0.5) * 0.1, (Math.random() - 0.5) * 0.24, 0);
       this.lookTargetQuaternion.setFromEuler(this.lookTarget);
       this.nextLook = now + 2400 + Math.random() * 3600;
     }
-    if (this.poseName === 'stand' || this.poseName === 'sit') {
-      this.lookOffset.slerp(this.lookTargetQuaternion, 0.012);
-      head.quaternion.multiply(this.lookOffset);
-    }
+    this.lookOffset.slerp(this.lookTargetQuaternion, 0.012);
+    head.quaternion.multiply(this.lookOffset);
   }
   updateMouth(manager) {
     let targets;
@@ -291,6 +403,7 @@ export class PuppetRuntime {
     const delta = Math.min(this.clock.getDelta(), 0.05);
     this.mixer.update(delta);
     this.updatePose(now);
+    this.updateGesture(now);
     this.updateFace(now);
     this.vrm?.update(delta);
     this.renderer.render(this.scene, this.camera);

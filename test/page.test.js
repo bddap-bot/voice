@@ -47,9 +47,13 @@ export async function recv() {
 
 const fakePuppet = `
 export class PuppetRuntime {
-  constructor() {}
+  constructor() { this.calls = []; globalThis.testPuppet = this; }
   async load(bytes, valid, beforeCommit) { await beforeCommit(); return valid(); }
-  pose() {}
+  pose(...args) { this.calls.push(['pose', ...args]); }
+  gesture(...args) { this.calls.push(['gesture', ...args]); }
+  look(...args) { this.calls.push(['look', ...args]); }
+  mood(...args) { this.calls.push(['mood', ...args]); }
+  waiting(...args) { this.calls.push(['waiting', ...args]); }
   start() {}
   pause() {}
   clear() {}
@@ -72,7 +76,9 @@ Object.defineProperty(navigator, 'mediaDevices', { value: { getUserMedia: async 
 class FakeChannel extends EventTarget {
   constructor() { super(); this.readyState = 'open'; }
   send(value) {
-    if (JSON.parse(value).type === 'session.close') queueMicrotask(() => this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.closed', usage: { seconds: 0 } }) })));
+    const event = JSON.parse(value);
+    globalThis.sentLiveEvents.push(event);
+    if (event.type === 'session.close') queueMicrotask(() => this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.closed', usage: { seconds: 0 } }) })));
   }
   close() { this.readyState = 'closed'; }
 }
@@ -86,6 +92,7 @@ class FakePeerConnection {
   close() {}
 }
 globalThis.RTCPeerConnection = FakePeerConnection;
+globalThis.sentLiveEvents = [];
 window.addEventListener('load', () => {
   const poll = globalThis.setInterval.bind(globalThis);
   document.querySelector('#token').value = btoa(JSON.stringify({ endpoint_id: 'test', secret: 'test' }));
@@ -142,13 +149,14 @@ async function runPage(testSetup = '') {
     .replace('</head>', `<script>${browserSetup}${testSetup}</script></head>`);
   const live = await readFile(new URL('../docs/live.js', import.meta.url));
   const puppetClient = await readFile(new URL('../docs/puppet-client.js', import.meta.url));
+  const puppetTools = await readFile(new URL('../docs/puppet-tools.js', import.meta.url));
   const scratch = await mkdtemp(join(process.cwd(), '.chromium-'));
   const profile = join(scratch, 'profile');
   const temporary = join(scratch, 'tmp');
   await Promise.all([mkdir(profile), mkdir(temporary)]);
   const server = createServer((request, response) => {
     const path = new URL(request.url, 'http://localhost').pathname;
-    const body = path === '/botq_dash_wasm.js' ? mockWasm : path === '/fake-puppet.js' ? fakePuppet : path === '/puppet-client.js' ? puppetClient : path === '/live.js' ? live : index;
+    const body = path === '/botq_dash_wasm.js' ? mockWasm : path === '/fake-puppet.js' ? fakePuppet : path === '/puppet-client.js' ? puppetClient : path === '/puppet-tools.js' ? puppetTools : path === '/live.js' ? live : index;
     response.writeHead(200, { 'content-type': path.endsWith('.js') ? 'text/javascript' : 'text/html' });
     response.end(body);
   });
@@ -207,4 +215,17 @@ window.addEventListener('test-ready', () => {
 `);
   const observed = /data-pause-test="([^"]*)"/.exec(stdout)?.[1] ?? 'pause test did not run';
   assert.equal(observed, 'true', `${observed}\n${stderr}`);
+});
+
+test('completed puppet tool calls execute locally and are acknowledged to Live', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.output_item.done', item: { type: 'function_call', call_id: 'call_1', name: 'mood', arguments: '{"name":"amused"}' } }) }));
+  setTimeout(() => {
+    document.body.dataset.toolTest = JSON.stringify({ calls: testPuppet.calls.filter(([name]) => name === 'mood'), events: sentLiveEvents.filter(({ type }) => type === 'conversation.item.create' || type === 'response.create').map(({ type }) => type) });
+  }, 20);
+});
+`);
+  const encoded = /data-tool-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { calls: [['mood', 'amused']], events: ['conversation.item.create', 'response.create'] }, stderr);
 });

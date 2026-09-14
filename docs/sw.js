@@ -1,4 +1,4 @@
-const CACHE = 'voice-shell-v7';
+const CACHE = 'voice-shell-v8';
 const SHELL = ['.', 'index.html', 'live.js', 'puppet-client.js', 'puppet-drivers.js', 'puppet-tools.js', 'puppet.js', 'manifest.webmanifest', 'icons/icon.svg'];
 
 self.addEventListener('install', (e) => {

@@ -83,7 +83,7 @@
 import wbgInit, { init as wasmInit, connect, send_only, recv } from 'https://bddap-bot.github.io/botq/botq_dash_wasm.js';
 import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, SessionClock, TranscriptBatcher, errorEvent, formatElapsed, formatStartError, isOfferFor, shareFrame } from './live.js';
 import { PuppetChannel } from './puppet-client.js';
-import { TranscriptMoodDriver } from './puppet-drivers.js';
+import { TranscriptActionDriver } from './puppet-drivers.js';
 import { PuppetTools, completedToolCall } from './puppet-tools.js';
 import { PuppetRuntime } from './puppet.js';
 
@@ -118,7 +118,7 @@ let puppetTools;
 let selectedImage;
 let sharing = false;
 const shareWaiters = new Map();
-const moodDriver = new TranscriptMoodDriver((mood) => puppetRuntime?.mood(mood));
+const actionDriver = new TranscriptActionDriver((action) => action.kind === 'mood' ? puppetRuntime?.mood(action.name) : puppetRuntime?.gesture(action.name));
 const hubWaiting = new Set();
 const completedToolCalls = new Set();
 const telemetryWaiters = new Map();
@@ -592,7 +592,7 @@ function onLiveEvent(message, source) {
   }
   else if (event.type === 'session.output_transcript.delta') {
     trace.spoke(event.delta ?? '', event.start_ms, event.end_ms);
-    moodDriver.push(event.delta ?? '');
+    actionDriver.push(event.delta ?? '');
     conversation?.transcript?.add('model', event.delta ?? '');
   }
   else if (toolCall) {
@@ -656,7 +656,7 @@ async function receiveHubError(result) {
 }
 function paintOff() {
   hubWaiting.clear();
-  moodDriver.reset();
+  actionDriver.reset();
   puppetRuntime?.waiting(false);
   puppetRuntime?.pose('sit');
   $('elapsed').textContent = '00:00 / 30:00';

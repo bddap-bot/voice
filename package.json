@@ -11,6 +11,7 @@
     "three": "0.180.0"
   },
   "devDependencies": {
+    "@huggingface/transformers": "3.7.3",
     "esbuild": "0.25.9"
   }
 }

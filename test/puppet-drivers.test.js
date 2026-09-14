@@ -1,33 +1,38 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { TranscriptMoodDriver, transcriptMood } from '../docs/puppet-drivers.js';
+import { EmbeddingActionClassifier, TranscriptActionDriver, keywordMood } from '../docs/puppet-drivers.js';
 
-test('the transcript classifier reaches the complete mood table', () => {
-  const examples = {
-    curious: 'I wonder why that happened?', amused: 'That joke was funny', puzzled: "I'm confused by this",
-    thinking: 'Let me think through it', pleased: 'Great, that is done', apologetic: 'Sorry, my fault',
-    alert: 'Warning, be careful', sleepy: 'I am tired and sleepy', surprised: 'Wow, that was unexpected',
-    skeptical: 'I doubt that; I am not convinced',
-  };
-  for (const [mood, text] of Object.entries(examples)) assert.equal(transcriptMood(text), mood);
-  assert.equal(transcriptMood('A neutral statement.'), null);
+const vectors = { yes: [1, 0], agree: [1, 0], sorry: [0, 1], mistake: [0, 1] };
+const loadEmbedder = async () => async (texts) => texts.map((text) => {
+  const words = text.toLowerCase().match(/[a-z]+/g) ?? [];
+  return words.reduce((sum, word) => sum.map((value, i) => value + (vectors[word]?.[i] ?? 0)), [0.01, 0.01]);
 });
 
-test('streamed transcript follows the newest cue and resets between sessions', () => {
+test('the embedding classifier uses semantic centroids behind one action interface', async () => {
+  const classifier = new EmbeddingActionClassifier(loadEmbedder);
+  const nod = await classifier.classify('yes, I agree');
+  assert.equal(nod.kind, 'gesture');
+  assert.equal(nod.name, 'nod');
+  const apology = await classifier.classify('sorry about my mistake');
+  assert.equal(apology.kind, 'mood');
+  assert.equal(apology.name, 'apologetic');
+});
+
+test('complete streamed sentences dispatch once and reset invalidates old work', async () => {
+  const waiting = [];
+  const classifier = { classify: (text) => new Promise((resolve) => waiting.push({ text, resolve })) };
   const applied = [];
-  const driver = new TranscriptMoodDriver((mood) => applied.push(mood));
-  driver.push('That is won');
-  driver.push('derful');
-  driver.push('. Sorry about that');
+  const driver = new TranscriptActionDriver((action) => applied.push(action), classifier);
+  driver.push('First sen');
+  driver.push('tence. Second');
+  assert.equal(waiting.length, 1);
   driver.reset();
-  driver.push('Wonderful');
-  assert.deepEqual(applied, ['pleased', 'apologetic', 'pleased']);
+  waiting[0].resolve({ kind: 'gesture', name: 'nod' });
+  await Promise.resolve();
+  assert.deepEqual(applied, []);
 });
 
-test('the newest repeated cue wins and neutral deltas do not replay it', () => {
-  const applied = [];
-  const driver = new TranscriptMoodDriver((mood) => applied.push(mood));
-  driver.push('Great. Sorry. Great.');
-  driver.push(' Here is the result.');
-  assert.deepEqual(applied, ['pleased']);
+test('the keyword baseline only emits moods', () => {
+  assert.deepEqual(keywordMood('This is an urgent warning'), { kind: 'mood', name: 'alert' });
+  assert.equal(keywordMood('I concur with that conclusion'), null);
 });

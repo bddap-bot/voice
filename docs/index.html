@@ -21,7 +21,7 @@
   button.primary { background: #315ee8; border-color: #315ee8; }
   main { display: grid; grid-template-columns: minmax(240px, .7fr) minmax(360px, 1.5fr); gap: 18px; padding: clamp(16px, 4vw, 36px); }
   .control, .ledger { background: #141416; border: 1px solid #2d2d31; border-radius: 14px; }
-  .control { min-height: 520px; display: grid; grid-template-rows: minmax(380px, 1fr) auto auto auto; gap: 12px; padding: 14px; }
+  .control { min-height: 520px; display: grid; grid-template-rows: minmax(380px, 1fr) auto auto auto auto; gap: 12px; padding: 14px; }
   #toggle { position: relative; width: 100%; min-height: 380px; overflow: hidden; padding: 0; border-radius: 12px; touch-action: manipulation; background: radial-gradient(circle at 50% 35%, #313346, #171820 62%, #101115); }
   #toggle.on { border-color: #50c878; box-shadow: inset 0 0 40px #173e2a; }
   #puppet { display: block; width: 100%; height: 100%; min-height: 380px; }
@@ -30,6 +30,14 @@
   #puppet-choice { min-width: 150px; background: #1d1d20; color: inherit; border: 1px solid #414148; border-radius: 8px; padding: 8px; }
   #puppet-credit { min-height: 21px; color: #bdbdc3; text-align: center; font-size: 13px; }
   #elapsed { font: 28px/1 ui-monospace, monospace; color: #bdbdc3; min-height: 28px; }
+  .share { display: grid; gap: 8px; padding-top: 12px; border-top: 1px solid #2d2d31; }
+  .share textarea { min-height: 76px; resize: vertical; }
+  .share-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .share-actions label { background: #1d1d20; border: 1px solid #414148; border-radius: 8px; padding: 9px 14px; cursor: pointer; }
+  #share-file { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  #share-image { color: #bdbdc3; flex: 1; overflow-wrap: anywhere; }
+  #share-target { border: 1px dashed #414148; border-radius: 8px; padding: 8px; text-align: center; color: #a5a5aa; }
+  #share-target.over { border-color: #8eabff; color: #ececed; }
   .ledger { min-height: 260px; padding: 18px; overflow: hidden; }
   .ledger h2 { margin: 0 0 12px; font-size: 14px; text-transform: uppercase; letter-spacing: .08em; color: #a5a5aa; }
   #log { display: flex; flex-direction: column; gap: 10px; max-height: 65dvh; overflow: auto; }
@@ -55,13 +63,18 @@
     <label class="puppet-picker">appearance <select id="puppet-choice" aria-label="puppet appearance"></select></label>
     <div id="puppet-credit"></div>
     <div id="elapsed" aria-live="polite">00:00 / 30:00</div>
+    <section class="share" aria-label="send text or image">
+      <textarea id="share-text" maxlength="8192" placeholder="Paste text, a URL, or an image"></textarea>
+      <div id="share-target">Drop or paste an image here</div>
+      <div class="share-actions"><label for="share-file"><span class="button">Choose image</span></label><input id="share-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" capture="environment"><button id="share-remove" class="hidden">Remove image</button><span id="share-image">No image selected</span><button id="share-send" class="primary">Send</button></div>
+    </section>
   </section>
   <section class="ledger"><h2>live delegation log</h2><div id="log" aria-live="polite"></div></section>
 </main>
 <audio id="speaker" autoplay></audio>
 <script type="module">
 import wbgInit, { init as wasmInit, connect, send_only, recv } from 'https://bddap-bot.github.io/botq/botq_dash_wasm.js';
-import { ConversationTrace, SessionClock, formatElapsed, formatStartError, isOfferFor } from './live.js';
+import { ConversationTrace, SessionClock, formatElapsed, formatStartError, isOfferFor, shareFrame } from './live.js';
 import { PuppetChannel } from './puppet-client.js';
 import { TranscriptMoodDriver } from './puppet-drivers.js';
 import { PuppetTools, completedToolCall } from './puppet-tools.js';
@@ -94,6 +107,9 @@ let puppetActive;
 let puppetScope;
 let puppetRuntime;
 let puppetTools;
+let selectedImage;
+let sharing = false;
+const shareWaiters = new Map();
 const moodDriver = new TranscriptMoodDriver((mood) => puppetRuntime?.mood(mood));
 const hubWaiting = new Set();
 const completedToolCalls = new Set();
@@ -147,8 +163,11 @@ function decodeToken(raw) {
   return JSON.parse(dec.decode(Uint8Array.from(atob(value), (char) => char.charCodeAt(0))));
 }
 function sendFrame(value) {
+  return sendBytes(enc.encode(value));
+}
+function sendBytes(value) {
   const mine = generation;
-  const next = sendQueue.then(() => mine === generation ? send_only(enc.encode(value)) : Promise.reject(new Error('connection replaced')));
+  const next = sendQueue.then(() => mine === generation ? send_only(value) : Promise.reject(new Error('connection replaced')));
   sendQueue = next.catch(() => {});
   return next;
 }
@@ -218,6 +237,9 @@ async function listen(mine) {
       }
       else if (verb === 'hub') await receiveHub(JSON.parse(body));
       else if (verb === 'hub-error') await receiveHubError(JSON.parse(body));
+      else if (verb === 'share-ok') receiveShare(JSON.parse(body));
+      else if (verb === 'share-reply') receiveShareReply(JSON.parse(body));
+      else if (verb === 'share-error') receiveShareError(JSON.parse(body));
       else if (verb === 'cap') {
         const capped = JSON.parse(body);
         if (isOfferFor(conversation, capped)) await stopConversation('billing cap reached — conversation stopped');
@@ -231,12 +253,87 @@ async function listen(mine) {
     }
   } catch (error) {
     if (mine !== generation) return;
+    failShares(error);
     answerWaiter?.reject(error);
     answerWaiter = null;
     puppetChannel.fail(error);
     connected = false;
     if (conversation) await stopConversation('connection lost');
     else setStatus('connection lost', 'err');
+  }
+}
+function receiveShare(result) {
+  const waiter = shareWaiters.get(result.id);
+  if (!waiter) return;
+  shareWaiters.delete(result.id);
+  trace.shared(result.id, waiter.text || 'image');
+  waiter.resolve(result);
+}
+function failShares(error) {
+  for (const waiter of shareWaiters.values()) waiter.reject(error);
+  shareWaiters.clear();
+}
+function receiveShareError(result) {
+  trace.failed(result.id, result.message);
+  const waiter = shareWaiters.get(result.id);
+  if (waiter) {
+    shareWaiters.delete(result.id);
+    waiter.reject(new Error(result.message));
+  } else setStatus(result.message, 'err');
+}
+function receiveShareReply(result) {
+  trace.hub(result.id, result.reply, result.timing_ms);
+  if (conversation?.channel?.readyState === 'open') {
+    conversation.channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: `share_reply_${result.stamp}`, content: result.reply }));
+  }
+  sendFrame(`hub-ack\n${JSON.stringify({ id: result.id, stamp: result.stamp })}`).catch(() => {});
+}
+function chooseImage(file) {
+  if (sharing) throw new Error('send in progress');
+  if (!file) {
+    selectedImage = undefined;
+    $('share-image').textContent = 'No image selected';
+    $('share-remove').classList.add('hidden');
+    return;
+  }
+  if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(file.type)) throw new Error('choose a PNG, JPEG, GIF, or WebP image');
+  if (file.size > 8 * 1024 * 1024) throw new Error('image is too large');
+  selectedImage = file;
+  $('share-remove').classList.remove('hidden');
+  $('share-image').textContent = `${file.name || 'pasted image'} · ${(file.size / 1024).toFixed(0)} KB`;
+}
+async function submitShare() {
+  const id = crypto.randomUUID();
+  const image = selectedImage ? new Uint8Array(await selectedImage.arrayBuffer()) : new Uint8Array();
+  const frame = shareFrame({ id, text: $('share-text').value, mime: selectedImage?.type, image });
+  $('share-send').disabled = true;
+  $('share-remove').disabled = true;
+  $('share-text').disabled = true;
+  $('share-file').disabled = true;
+  sharing = true;
+  setStatus('sending…');
+  try {
+    const accepted = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { shareWaiters.delete(id); reject(new Error('send timed out')); }, 15000);
+      shareWaiters.set(id, { text: $('share-text').value, resolve: (value) => { clearTimeout(timer); resolve(value); }, reject: (error) => { clearTimeout(timer); reject(error); } });
+    });
+    sendBytes(frame).catch((error) => shareWaiters.get(id)?.reject(error));
+    const result = await accepted;
+    $('share-text').value = '';
+    $('share-file').value = '';
+    sharing = false;
+    chooseImage();
+    if (conversation?.channel?.readyState === 'open') {
+      conversation.channel.send(JSON.stringify({ type: 'conversation.item.create', event_id: `share_${result.stamp}`, item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: result.summary }] } }));
+      conversation.channel.send(JSON.stringify({ type: 'response.create', event_id: `share_response_${result.stamp}` }));
+    }
+    setStatus('sent', 'ok');
+  } finally {
+    sharing = false;
+    $('share-send').disabled = false;
+    $('share-remove').disabled = false;
+    $('share-text').disabled = false;
+    $('share-file').disabled = false;
   }
 }
 async function dial() {
@@ -409,9 +506,9 @@ async function startConversation() {
       await loadPrivatePuppets();
     }
     if (attempt.cancelled) return;
-    trace = new ConversationTrace(render);
+    if (!trace.entries.some((entry) => entry.shared && !entry.reply)) trace = new ConversationTrace(render);
     completedToolCalls.clear();
-    render([]);
+    render(trace.entries);
     usageSeconds = 0;
     setStatus('opening microphone…');
     attempt.stream = await openMicrophone(attempt);
@@ -579,6 +676,16 @@ async function loadPrivatePuppets() {
 }
 
 $('toggle').addEventListener('click', toggleConversation);
+$('share-file').addEventListener('change', () => { try { chooseImage($('share-file').files[0]); } catch (error) { chooseImage(); setStatus(error.message, 'err'); } });
+$('share-remove').addEventListener('click', () => { $('share-file').value = ''; chooseImage(); });
+$('share-text').addEventListener('paste', (event) => {
+  const image = [...event.clipboardData.files].find((file) => file.type.startsWith('image/'));
+  if (image) try { chooseImage(image); } catch (error) { setStatus(error.message, 'err'); }
+});
+for (const name of ['dragenter', 'dragover']) $('share-target').addEventListener(name, (event) => { event.preventDefault(); $('share-target').classList.add('over'); });
+for (const name of ['dragleave', 'drop']) $('share-target').addEventListener(name, (event) => { event.preventDefault(); $('share-target').classList.remove('over'); });
+$('share-target').addEventListener('drop', (event) => { try { chooseImage([...event.dataTransfer.files].find((file) => file.type.startsWith('image/'))); } catch (error) { setStatus(error.message, 'err'); } });
+$('share-send').addEventListener('click', () => submitShare().catch((error) => setStatus(error.message, 'err')));
 $('puppet-choice').addEventListener('change', () => showPuppet($('puppet-choice').value).catch((error) => {
   if (puppetActive) $('puppet-choice').value = puppetActive;
   setStatus(error.message, 'err');

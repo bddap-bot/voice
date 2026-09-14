@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ConversationTrace, SessionClock, formatElapsed, formatStartError, isOfferFor } from '../docs/live.js';
+import { ConversationTrace, SessionClock, formatElapsed, formatStartError, isOfferFor, shareFrame } from '../docs/live.js';
 
 test('start errors include their name and first stack frame', () => {
   const error = new TypeError('Illegal invocation');
@@ -16,6 +16,32 @@ test('only the matching SDP answer can resolve a replacement attempt', () => {
   assert.equal(isOfferFor(waiter, { offer_id: 'new_offer' }), true);
   assert.equal(isOfferFor(waiter, { id: 'new_offer' }), true);
   assert.equal(isOfferFor({ offerId: 'new_offer' }, { offer_id: 'new_offer' }), true);
+});
+
+test('share frame preserves a URL and carries image bytes after metadata', () => {
+  const frame = shareFrame({ id: 'share_1', text: 'https://example.test/a?q=one', mime: 'image/png', image: Uint8Array.of(137, 80, 78, 71) });
+  const boundary = new TextDecoder().decode(frame).indexOf('\n', 6);
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(frame.subarray(6, boundary))), { id: 'share_1', text: 'https://example.test/a?q=one', mime: 'image/png' });
+  assert.deepEqual([...frame.subarray(boundary + 1)], [137, 80, 78, 71]);
+  assert.throws(() => shareFrame({ id: 'share_2', text: '', mime: 'image/svg+xml', image: Uint8Array.of(1) }), /PNG, JPEG, GIF, or WebP/);
+  assert.throws(() => shareFrame({ id: 'share_3', text: 'x'.repeat(8193) }), /text is too large/);
+});
+
+test('shared material and its hub reply remain in the conversation trace', () => {
+  const trace = new ConversationTrace();
+  trace.shared('share_1', 'https://example.test/a?q=one');
+  assert.equal(trace.hub('share_1', 'received', 12), true);
+  assert.deepEqual(trace.entries[0], { kind: 'delegation', id: 'share_1', sent: 'https://example.test/a?q=one', context: [], reply: 'received', timing: 12, shared: true });
+});
+
+test('ending voice does not cancel a pending shared request', () => {
+  const trace = new ConversationTrace();
+  trace.shared('share_pending', 'image');
+  trace.heard('stop voice');
+  trace.delegated('spoken_pending');
+  trace.cancel();
+  assert.equal(trace.entries[0].reply, '');
+  assert.equal(trace.entries[2].reply, 'cancelled');
 });
 
 test('clock displays elapsed minutes and flips off at the configured cap', () => {

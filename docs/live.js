@@ -16,6 +16,21 @@ export function formatStartError(error) {
   return frame ? `${summary} — ${frame}` : summary;
 }
 
+export function shareFrame({ id, text, mime = null, image = new Uint8Array() }) {
+  const encoder = new TextEncoder();
+  const cleanText = String(text ?? '');
+  const bytes = image instanceof Uint8Array ? image : new Uint8Array(image);
+  if (!cleanText.trim() && !bytes.length) throw new Error('add text or an image');
+  if (encoder.encode(cleanText).length > 8192) throw new Error('text is too large');
+  if (bytes.length > 8 * 1024 * 1024) throw new Error('image is too large');
+  if (bytes.length && !['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(mime)) throw new Error('choose a PNG, JPEG, GIF, or WebP image');
+  const header = encoder.encode(`share\n${JSON.stringify({ id, text: cleanText, mime: bytes.length ? mime : null })}\n`);
+  const frame = new Uint8Array(header.length + bytes.length);
+  frame.set(header);
+  frame.set(bytes, header.length);
+  return frame;
+}
+
 function boundedText(parts, maximum) {
   const encoder = new TextEncoder();
   while (parts.length > 1 && encoder.encode(parts.join('\n')).length > maximum) parts.shift();
@@ -98,6 +113,12 @@ export class ConversationTrace {
     this.onChange(this.entries);
     return entry;
   }
+  shared(id, sent) {
+    const entry = { kind: 'delegation', id, sent, context: [], reply: '', timing: null, shared: true };
+    this.entries.push(entry);
+    this.onChange(this.entries);
+    return entry;
+  }
   hub(id, reply, timing) {
     const entry = this.entries.find((item) => item.kind === 'delegation' && item.id === id);
     if (!entry) return false;
@@ -119,7 +140,7 @@ export class ConversationTrace {
   }
   cancel() {
     for (const entry of this.entries) {
-      if (entry.kind === 'delegation' && !entry.reply) {
+      if (entry.kind === 'delegation' && !entry.shared && !entry.reply) {
         entry.reply = 'cancelled';
         entry.failed = true;
       }

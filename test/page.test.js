@@ -38,6 +38,11 @@ export async function send_only(bytes) {
     const offer = JSON.parse(frame.slice(6));
     deliver(enc.encode('answer\\n' + JSON.stringify({ offer_id: offer.id, sdp: 'answer', cap_seconds: 60 })));
   }
+  else if (frame.startsWith('share\\n')) {
+    const metadata = JSON.parse(frame.slice(6, frame.indexOf('\\n', 6)));
+    globalThis.sentShare = { metadata, size: bytes.length };
+    deliver(enc.encode((metadata.text === 'reject' ? 'share-error\\n' + JSON.stringify({ id: metadata.id, message: 'hub queue is full' }) : 'share-ok\\n' + JSON.stringify({ id: metadata.id, stamp: 'share_stamp', summary: 'A link arrived.' }))));
+  }
 }
 export async function recv() {
   if (queued.length) return queued.shift();
@@ -185,6 +190,30 @@ test('the page toggle completes its start path in headless Chromium', async () =
   const { stdout, stderr } = await runPage();
   const observed = /data-start-test="([^"]*)"/.exec(stdout)?.[1] ?? 'start path did not settle';
   assert.equal(observed, 'live', `${observed}\n${stderr}`);
+});
+
+test('authenticated text box sends a URL verbatim and informs an open Live session', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  document.querySelector('#share-text').value = 'https://example.test/a?q=one';
+  document.querySelector('#share-send').click();
+  setTimeout(() => { document.body.dataset.shareTest = JSON.stringify({ sent: globalThis.sentShare?.metadata?.text, status: document.querySelector('#status').textContent, notices: sentLiveEvents.filter((event) => event.event_id?.startsWith('share_')).map((event) => event.item?.content?.[0]?.text ?? event.type) }); }, 30);
+});
+`);
+  const encoded = /data-share-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { sent: 'https://example.test/a?q=one', status: 'sent', notices: ['A link arrived.', 'response.create'] }, stderr);
+});
+
+test('a rejected submission immediately restores its controls and reports the reason', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  document.querySelector('#share-text').value = 'reject';
+  document.querySelector('#share-send').click();
+  setTimeout(() => { document.body.dataset.shareErrorTest = JSON.stringify({ status: document.querySelector('#status').textContent, disabled: document.querySelector('#share-send').disabled }); }, 30);
+});
+`);
+  const encoded = /data-share-error-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { status: 'hub queue is full', disabled: false }, stderr);
 });
 
 test('the delegation log keeps the last of ten appended entries visible', async () => {

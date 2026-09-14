@@ -88,16 +88,69 @@ test('panel pointing can replace the waiting gesture when display material arriv
   assert.throws(() => runtime.gesture('beat'), /waiting/);
 });
 
-test('Mixamo FBX tracks retarget onto VRM humanoid bones', () => {
+test('Mixamo rest rotations preserve an upright VRM bone-space invariant', () => {
+  const source = new THREE.Group();
+  const rig = new THREE.Bone();
+  rig.name = 'mixamorigRoot';
   const hips = new THREE.Bone();
-  hips.name = 'NormalizedHips';
-  const arm = new THREE.Bone();
-  arm.name = 'NormalizedRightUpperArm';
-  const nodes = { hips, rightUpperArm: arm };
-  const rotation = new THREE.QuaternionKeyframeTrack('mixamorigRightArm.quaternion', [0, 1], [0, 0, 0, 1, 0.2, 0, 0, 0.98]);
+  hips.name = 'mixamorigHips';
+  rig.rotation.set(0.35, -0.2, 0.7);
+  hips.rotation.set(-0.4, 0.3, 1.1);
+  source.add(rig);
+  rig.add(hips);
+  source.updateMatrixWorld(true);
+  const rest = hips.quaternion.toArray();
+  const rotation = new THREE.QuaternionKeyframeTrack('mixamorigHips.quaternion', [0, 1], [...rest, ...rest]);
   const position = new THREE.VectorKeyframeTrack('mixamorigHips.position', [0, 1], [0, 100, 0, 0, 110, 0]);
-  const source = { animations: [new THREE.AnimationClip('Pointing', 1, [rotation, position])] };
-  const clip = retargetMixamoClip(source, { humanoid: { getNormalizedBoneNode: (name) => nodes[name] } });
-  assert.deepEqual(clip.tracks.map((track) => track.name), ['NormalizedRightUpperArm.quaternion', 'NormalizedHips.position']);
+  source.animations = [new THREE.AnimationClip('Idle', 1, [rotation, position])];
+
+  const target = new THREE.Group();
+  const targetHips = new THREE.Bone();
+  targetHips.name = 'NormalizedHips';
+  const head = new THREE.Bone();
+  head.position.y = 1;
+  const leftFoot = new THREE.Bone();
+  leftFoot.position.set(-0.2, -1, 0);
+  const rightFoot = new THREE.Bone();
+  rightFoot.position.set(0.2, -1, 0);
+  target.add(targetHips);
+  targetHips.add(head, leftFoot, rightFoot);
+  const clip = retargetMixamoClip(source, { humanoid: { getNormalizedBoneNode: (name) => name === 'hips' ? targetHips : null } });
+  assert.deepEqual(clip.tracks.map((track) => track.name), ['NormalizedHips.quaternion', 'NormalizedHips.position']);
   assert.ok(Math.abs(clip.tracks[1].values[4] - 1.1) < 1e-6);
+
+  const mixer = new THREE.AnimationMixer(target);
+  mixer.clipAction(clip).play();
+  const hipsWorld = new THREE.Vector3();
+  const headWorld = new THREE.Vector3();
+  const footWorld = new THREE.Vector3();
+  for (const time of [0, 0.25, 0.5, 0.75, 1]) {
+    mixer.setTime(time);
+    target.updateMatrixWorld(true);
+    targetHips.getWorldPosition(hipsWorld);
+    head.getWorldPosition(headWorld);
+    assert.ok(headWorld.clone().sub(hipsWorld).angleTo(new THREE.Vector3(0, 1, 0)) < 1e-5);
+    for (const foot of [leftFoot, rightFoot]) {
+      foot.getWorldPosition(footWorld);
+      assert.ok(footWorld.y < hipsWorld.y);
+    }
+  }
+});
+
+test('VRM0 retarget flips quaternion and root-motion x/z axes', () => {
+  const source = new THREE.Group();
+  const hips = new THREE.Bone();
+  hips.name = 'mixamorigHips';
+  source.add(hips);
+  const rotation = new THREE.QuaternionKeyframeTrack('mixamorigHips.quaternion', [0], [0.1, 0.2, 0.3, 0.9]);
+  const position = new THREE.VectorKeyframeTrack('mixamorigHips.position', [0], [100, 200, 300]);
+  source.animations = [new THREE.AnimationClip('Move', 1, [rotation, position])];
+  const target = new THREE.Bone();
+  target.name = 'NormalizedHips';
+  const clip = retargetMixamoClip(source, { meta: { metaVersion: '0' }, humanoid: { getNormalizedBoneNode: () => target } });
+  const expected = new THREE.Quaternion(0.1, 0.2, 0.3, 0.9).normalize();
+  assert.ok(Math.abs(clip.tracks[0].values[0] + expected.x) < 1e-6);
+  assert.ok(Math.abs(clip.tracks[0].values[1] - expected.y) < 1e-6);
+  assert.ok(Math.abs(clip.tracks[0].values[2] + expected.z) < 1e-6);
+  assert.deepEqual(Array.from(clip.tracks[1].values), [-1, 2, -3]);
 });

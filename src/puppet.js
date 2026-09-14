@@ -31,16 +31,34 @@ function mixamoBoneName(trackName) {
 export function retargetMixamoClip(source, vrm) {
   const clip = source.animations?.[0];
   if (!clip) throw new Error('FBX has no animation clip');
+  source.updateMatrixWorld?.(true);
   const tracks = [];
+  const restRotationInverse = new THREE.Quaternion();
+  const parentRestWorldRotation = new THREE.Quaternion();
+  const rotation = new THREE.Quaternion();
   for (const track of clip.tracks) {
     const humanoidName = mixamoBoneName(track.name);
     const node = humanoidName && vrm.humanoid?.getNormalizedBoneNode(humanoidName);
     if (!node) continue;
     if (track.name.endsWith('.quaternion')) {
-      const target = new THREE.QuaternionKeyframeTrack(`${node.name}.quaternion`, track.times, track.values);
+      const sourceName = track.name.slice(0, track.name.lastIndexOf('.')).replace(/^.*\[|\]$/g, '');
+      const sourceNode = source.getObjectByName?.(sourceName);
+      if (!sourceNode?.parent) continue;
+      sourceNode.getWorldQuaternion(restRotationInverse).invert();
+      sourceNode.parent.getWorldQuaternion(parentRestWorldRotation);
+      const values = Float32Array.from(track.values);
+      for (let index = 0; index < values.length; index += 4) {
+        rotation.fromArray(values, index).premultiply(parentRestWorldRotation).multiply(restRotationInverse).normalize();
+        if (vrm.meta?.metaVersion === '0') {
+          rotation.x = -rotation.x;
+          rotation.z = -rotation.z;
+        }
+        rotation.toArray(values, index);
+      }
+      const target = new THREE.QuaternionKeyframeTrack(`${node.name}.quaternion`, track.times, values);
       tracks.push(target);
     } else if (humanoidName === 'hips' && track.name.endsWith('.position')) {
-      const values = Float32Array.from(track.values, (value) => value * 0.01);
+      const values = Float32Array.from(track.values, (value, index) => value * 0.01 * (vrm.meta?.metaVersion === '0' && index % 3 !== 1 ? -1 : 1));
       tracks.push(new THREE.VectorKeyframeTrack(`${node.name}.position`, track.times, values));
     }
   }

@@ -81,7 +81,7 @@
 <audio id="speaker" autoplay></audio>
 <script type="module">
 import wbgInit, { init as wasmInit, connect, send_only, recv } from 'https://bddap-bot.github.io/botq/botq_dash_wasm.js';
-import { ConversationTrace, SessionClock, formatElapsed, formatStartError, isOfferFor, shareFrame } from './live.js';
+import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, SessionClock, TranscriptBatcher, errorEvent, formatElapsed, formatStartError, isOfferFor, shareFrame } from './live.js';
 import { PuppetChannel } from './puppet-client.js';
 import { TranscriptMoodDriver } from './puppet-drivers.js';
 import { PuppetTools, completedToolCall } from './puppet-tools.js';
@@ -102,6 +102,7 @@ let answerWaiter;
 let conversation;
 let usageSeconds = 0;
 let connected = false;
+let everConnected = false;
 let starting;
 let stopping;
 let puppetCatalog;
@@ -120,7 +121,36 @@ const shareWaiters = new Map();
 const moodDriver = new TranscriptMoodDriver((mood) => puppetRuntime?.mood(mood));
 const hubWaiting = new Set();
 const completedToolCalls = new Set();
+const telemetryWaiters = new Map();
 const puppetChannel = new PuppetChannel(sendFrame, caches, () => token?.endpoint_id ?? '');
+const telemetry = new EventBatcher(sendTelemetry);
+const persistenceUploads = new AckUploader(sendBytes, { maximumBytes: 128 * 1024 * 1024, onOverflow: () => recordPageError(new Error('session upload queue is full')) });
+
+function sessionId() { return conversation?.id ?? starting?.offerId ?? null; }
+function recordPageError(error, id = sessionId()) { telemetry.add(errorEvent(error, id)); }
+function recordSession(name, detail = '', id = sessionId()) { telemetry.add({ kind: 'session', session_id: id, name, detail: String(detail).slice(0, 2048), at: Date.now() }); }
+window.addEventListener('error', (event) => recordPageError(event.error || Object.assign(new Error(event.message), { stack: `${event.filename || ''}:${event.lineno || 0}:${event.colno || 0}` })));
+window.addEventListener('unhandledrejection', (event) => recordPageError(event.reason));
+
+async function sendTelemetry(events) {
+  const batchId = crypto.randomUUID();
+  const acknowledged = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      telemetryWaiters.delete(batchId);
+      reject(new Error('telemetry acknowledgment timed out'));
+    }, 5000);
+    telemetryWaiters.set(batchId, {
+      resolve: () => { clearTimeout(timer); telemetryWaiters.delete(batchId); resolve(); },
+      reject: (error) => { clearTimeout(timer); telemetryWaiters.delete(batchId); reject(error); },
+    });
+  });
+  try {
+    await sendFrame(`telemetry\n${JSON.stringify({ batch_id: batchId, events })}`);
+  } catch (error) {
+    telemetryWaiters.get(batchId)?.reject(error);
+  }
+  await acknowledged;
+}
 
 function setStatus(text, kind = '') { $('status').textContent = text; $('status').className = kind; }
 function savedState(saved) {
@@ -248,6 +278,28 @@ async function listen(mine) {
       else if (verb === 'share-ok') receiveShare(JSON.parse(body));
       else if (verb === 'share-reply') receiveShareReply(JSON.parse(body));
       else if (verb === 'share-error') receiveShareError(JSON.parse(body));
+      else if (verb === 'transcript-ack') {
+        const result = JSON.parse(body);
+        persistenceUploads.ack(`transcript:${result.session_id}:${result.seq}`);
+      }
+      else if (verb === 'audio-ack') {
+        const result = JSON.parse(body);
+        persistenceUploads.ack(`audio:${result.session_id}:${result.side}:${result.seq}`);
+      }
+      else if (verb === 'telemetry-ack') {
+        const result = JSON.parse(body);
+        telemetryWaiters.get(result.batch_id)?.resolve();
+      }
+      else if (verb === 'storage-error') {
+        const result = JSON.parse(body);
+        const key = result.kind === 'transcript' ? `transcript:${result.session_id}:${result.seq}`
+          : result.kind === 'audio' ? `audio:${result.session_id}:${result.side}:${result.seq}` : null;
+        if (result.kind === 'telemetry') telemetryWaiters.get(result.batch_id)?.reject(new Error(result.message));
+        else if (key) {
+          persistenceUploads.fail(key, result.retryable !== false);
+          if (result.retryable === false) recordPageError(new Error(result.message));
+        }
+      }
       else if (verb === 'cap') {
         const capped = JSON.parse(body);
         if (isOfferFor(conversation, capped)) await stopConversation('billing cap reached — conversation stopped');
@@ -409,6 +461,7 @@ async function submitShare() {
   }
 }
 async function dial() {
+  const reconnecting = everConnected;
   connected = false;
   resetPuppetConnection(new Error('connection replaced'), Boolean(puppetScope && puppetScope !== token.endpoint_id));
   generation++;
@@ -416,7 +469,9 @@ async function dial() {
   await sendFrame(JSON.stringify({ auth: token.secret }));
   if (!JSON.parse(dec.decode(await recv())).ok) throw new Error('wrong token');
   connected = true;
+  everConnected = true;
   listener = listen(generation);
+  if (reconnecting) recordSession('reconnect');
 }
 function waitForAnswer(id) {
   return new Promise((resolve, reject) => {
@@ -454,6 +509,56 @@ function openMicrophone(attempt) {
   }).catch(() => {});
   return Promise.race([pending, cancelled]).finally(() => { attempt.cancelMic = null; });
 }
+function recordAudio(stream, side, id) {
+  if (!globalThis.MediaRecorder?.isTypeSupported?.('audio/webm;codecs=opus')) {
+    recordPageError(new Error('Opus/WebM recording is unavailable'));
+    return null;
+  }
+  let recorder;
+  try {
+    recorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus', audioBitsPerSecond: 32000 });
+  } catch (error) {
+    recordPageError(error);
+    return null;
+  }
+  const chunks = new AudioChunker(id, side, persistenceUploads, {
+    onCap: () => {
+      if (recorder.state !== 'inactive') recorder.stop();
+      recordPageError(new Error(`${side} audio recording reached its size cap`));
+    },
+    onError: recordPageError,
+  });
+  recorder.addEventListener('dataavailable', (event) => {
+    chunks.add(event.data).then((stored) => {
+      if (stored === false && recorder.state !== 'inactive') recorder.stop();
+    });
+  });
+  recorder.addEventListener('error', (event) => recordPageError(event.error || new Error(`${side} audio recording failed`)));
+  recorder.voiceChunks = chunks;
+  try {
+    recorder.start(2000);
+  } catch (error) {
+    recordPageError(error);
+    return null;
+  }
+  return recorder;
+}
+function startRecorders(attempt, id) {
+  attempt.recorders ??= [];
+  if (!attempt.recorders.some((item) => item.side === 'mic')) attempt.recorders.push({ side: 'mic', recorder: recordAudio(attempt.stream, 'mic', id) });
+  if (attempt.outputStream && !attempt.recorders.some((item) => item.side === 'model')) attempt.recorders.push({ side: 'model', recorder: recordAudio(attempt.outputStream, 'model', id) });
+}
+async function stopRecorders(attempt) {
+  await Promise.all((attempt?.recorders ?? []).map(async (item) => {
+    if (!item.recorder) return;
+    if (item.recorder.state !== 'inactive') {
+      const stopped = new Promise((resolve) => item.recorder.addEventListener('stop', resolve, { once: true }));
+      item.recorder.stop();
+      await stopped;
+    }
+    await item.recorder.voiceChunks?.tail;
+  }));
+}
 function waitData(channel, predicate, timeout = 10000, attempt = null) {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -481,22 +586,31 @@ function onLiveEvent(message, source) {
   let event;
   try { event = JSON.parse(message.data); } catch { return; }
   const toolCall = completedToolCall(event);
-  if (event.type === 'session.input_transcript.delta') trace.heard(event.delta ?? '', Date.now(), event.start_ms);
+  if (event.type === 'session.input_transcript.delta') {
+    trace.heard(event.delta ?? '', Date.now(), event.start_ms);
+    conversation?.transcript?.add('user', event.delta ?? '');
+  }
   else if (event.type === 'session.output_transcript.delta') {
     trace.spoke(event.delta ?? '', event.start_ms, event.end_ms);
     moodDriver.push(event.delta ?? '');
+    conversation?.transcript?.add('model', event.delta ?? '');
   }
-  else if (toolCall) handlePuppetTool(toolCall, source).catch((error) => setStatus(`puppet tool failed: ${error.message}`, 'err'));
+  else if (toolCall) {
+    if (!completedToolCalls.has(toolCall.call_id)) recordSession('tool_call', toolCall.name);
+    handlePuppetTool(toolCall, source).catch((error) => setStatus(`puppet tool failed: ${error.message}`, 'err'));
+  }
   else if (event.type === 'session.delegation.created') {
     const id = event.delegation?.id;
     if (!id) return setStatus('Live delegation had no id', 'err');
     const turn = trace.delegated(id);
     if (!turn.sent) return setStatus('Live delegated before producing a transcript', 'err');
     hubWaiting.add(id);
+    recordSession('delegation_start', id);
     puppetRuntime?.waiting(true);
     syncPuppetUi();
     sendFrame(`delegate\n${JSON.stringify({ id, text: turn.sent, context: turn.context, duration_ms: turn.duration_ms })}`).catch((error) => {
       finishHubWait(id);
+      recordSession('delegation_end', `${id}: failed`);
       setStatus(error.message, 'err');
     });
   } else if (event.type === 'session.usage.updated') usageSeconds = Number(event.usage?.seconds ?? usageSeconds);
@@ -514,7 +628,10 @@ async function handlePuppetTool(item, source) {
     if (!puppetTools) throw new Error('puppet renderer unavailable');
     output = await puppetTools.execute(item.name, item.arguments, () => source === conversation?.channel || source === starting?.channel);
   }
-  catch { output = { ok: false, error: 'puppet action failed' }; }
+  catch (error) {
+    recordPageError(error);
+    output = { ok: false, error: 'puppet action failed' };
+  }
   if (source !== conversation?.channel && source !== starting?.channel) return;
   source.send(JSON.stringify({ type: 'conversation.item.create', event_id: `puppet_${crypto.randomUUID()}`, item: { type: 'function_call_output', call_id: item.call_id, output: JSON.stringify(output) } }));
   source.send(JSON.stringify({ type: 'response.create', event_id: `puppet_continue_${crypto.randomUUID()}` }));
@@ -527,12 +644,14 @@ function finishHubWait(id) {
 async function receiveHub(result) {
   finishHubWait(result.id);
   if (!conversation?.channel || !trace.hub(result.id, result.reply, result.timing_ms)) return;
+  recordSession('delegation_end', `${result.id}: ok`);
   conversation.channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: `hub_${result.stamp}`, delegation_id: result.id, content: result.reply }));
   await sendFrame(`hub-ack\n${JSON.stringify({ id: result.id, stamp: result.stamp })}`);
 }
 async function receiveHubError(result) {
   finishHubWait(result.id);
   if (!conversation?.channel || !trace.failed(result.id, result.message)) return;
+  recordSession('delegation_end', `${result.id}: failed`);
   conversation.channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: `hub_error_${Date.now()}`, delegation_id: result.id, content: `The hub could not answer this request: ${result.message}. Say that briefly without inventing.` }));
 }
 function paintOff() {
@@ -566,7 +685,7 @@ function cancelStarting(reason = 'conversation off') {
   setStatus(reason, reason === 'conversation off' ? 'ok' : 'err');
 }
 async function startConversation() {
-  const attempt = { cancelled: false, offered: false, cancelSent: false, cancelMic: null, cancelIce: null, cancelData: null, stream: null, pc: null, channel: null };
+  const attempt = { cancelled: false, offered: false, cancelSent: false, cancelMic: null, cancelIce: null, cancelData: null, stream: null, outputStream: null, recorders: [], pc: null, channel: null };
   starting = attempt;
   puppetRuntime?.pose('stand');
   syncPuppetUi();
@@ -594,8 +713,10 @@ async function startConversation() {
     started.catch(() => {});
     attempt.channel.addEventListener('message', (event) => onLiveEvent(event, attempt.channel));
     attempt.pc.ontrack = (event) => {
-      $('speaker').srcObject = event.streams[0];
-      puppetRuntime?.attachAudio(event.streams[0], attempt).catch((error) => setStatus(`mouth unavailable: ${error.message}`, 'err'));
+      attempt.outputStream = event.streams[0] ?? new MediaStream([event.track]);
+      $('speaker').srcObject = attempt.outputStream;
+      puppetRuntime?.attachAudio(attempt.outputStream, attempt).catch((error) => setStatus(`mouth unavailable: ${error.message}`, 'err'));
+      if (conversation?.audioOwner === attempt) startRecorders(attempt, conversation.id);
     };
     for (const track of attempt.stream.getTracks()) attempt.pc.addTrack(track, attempt.stream);
     await attempt.pc.setLocalDescription(await attempt.pc.createOffer());
@@ -615,7 +736,8 @@ async function startConversation() {
     await attempt.pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
     await started;
     if (attempt.cancelled) return;
-    conversation = { pc: attempt.pc, channel: attempt.channel, stream: attempt.stream, clock: null, id: attempt.offerId, audioOwner: attempt };
+    conversation = { pc: attempt.pc, channel: attempt.channel, stream: attempt.stream, clock: null, id: attempt.offerId, audioOwner: attempt, transcript: new TranscriptBatcher(attempt.offerId, persistenceUploads, { onTurn: (side, at) => telemetry.add({ kind: 'transcript', session_id: attempt.offerId, name: side, at }) }) };
+    startRecorders(attempt, attempt.offerId);
     const capLabel = formatElapsed(answer.cap_seconds);
     const clock = new SessionClock({ capSeconds: answer.cap_seconds, onTick: (seconds) => { $('elapsed').textContent = `${formatElapsed(seconds)} / ${capLabel}`; }, onCap: () => stopConversation(`${Math.round(answer.cap_seconds / 60)} minute cap reached — conversation stopped`) });
     conversation.clock = clock;
@@ -623,12 +745,15 @@ async function startConversation() {
     puppetRuntime?.pose('listen');
     syncPuppetUi();
     setStatus('live', 'ok');
+    recordSession('open', '', attempt.offerId);
   } catch (error) {
     if (attempt.cancelled) throw new Error('conversation start cancelled');
+    recordPageError(error, attempt.offerId ?? null);
     throw error;
   } finally {
     if (conversation?.pc !== attempt.pc) {
       cancelOffer(attempt);
+      await stopRecorders(attempt);
       for (const track of attempt.stream?.getTracks() ?? []) track.stop();
       attempt.channel?.close();
       attempt.pc?.close();
@@ -646,9 +771,11 @@ function stopConversation(reason = 'conversation off', remoteClosed = false) {
 async function finishStop(reason, remoteClosed) {
   const current = conversation;
   if (!current) return;
-  conversation = null;
+  recordSession('close', reason, current.id);
+  await stopRecorders(current.audioOwner);
   current.clock?.stop();
   for (const track of current.stream.getTracks()) track.stop();
+  for (const id of hubWaiting) recordSession('delegation_end', `${id}: cancelled`, current.id);
   trace.cancel();
   paintOff();
   sendFrame('cancel').catch(() => {});
@@ -658,6 +785,9 @@ async function finishStop(reason, remoteClosed) {
     const final = await closed;
     usageSeconds = Number(final?.usage?.seconds ?? usageSeconds);
   }
+  current.transcript.flush();
+  conversation = null;
+  syncPuppetUi();
   current.channel.close();
   current.pc.close();
   $('speaker').srcObject = null;
@@ -764,8 +894,8 @@ $('puppet-choice').addEventListener('change', () => showPuppet($('puppet-choice'
   setStatus(error.message, 'err');
 }));
 $('connect').addEventListener('click', () => start($('token').value).catch((error) => setStatus(error.message, 'err')));
-$('reenter').addEventListener('click', async () => { await stopConversation(); savedState(false); $('token').focus(); });
-$('forget').addEventListener('click', async () => { await stopConversation(); localStorage.removeItem(KEY); await sendFrame('bye').catch(() => {}); generation++; connected = false; resetPuppetConnection(new Error('connection replaced'), true); await puppetChannel.clearCache().catch(() => {}); savedState(false); setStatus('token forgotten'); });
+$('reenter').addEventListener('click', async () => { await stopConversation(); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); savedState(false); $('token').focus(); });
+$('forget').addEventListener('click', async () => { await stopConversation(); localStorage.removeItem(KEY); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); await sendFrame('bye').catch(() => {}); generation++; connected = false; resetPuppetConnection(new Error('connection replaced'), true); await puppetChannel.clearCache().catch(() => {}); savedState(false); setStatus('token forgotten'); });
 document.addEventListener('visibilitychange', () => { if (document.hidden) puppetRuntime?.pause(); else if (!$('conversation').classList.contains('hidden')) puppetRuntime?.start(); });
 window.addEventListener('beforeunload', () => puppetRuntime?.dispose());
 const saved = localStorage.getItem(KEY);

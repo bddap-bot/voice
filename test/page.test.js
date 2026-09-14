@@ -15,6 +15,8 @@ const dec = new TextDecoder();
 const queued = [enc.encode(JSON.stringify({ ok: true }))];
 const waiting = [];
 globalThis.puppetRequests = [];
+globalThis.telemetryBatches = [];
+globalThis.fleetLines = [];
 function deliver(value) {
   const resolve = waiting.shift();
   if (resolve) resolve(value);
@@ -26,7 +28,22 @@ export async function init() {}
 export async function connect() {}
 export async function send_only(bytes) {
   const frame = dec.decode(bytes);
-  if (frame === 'puppets') deliver(enc.encode('puppets\\n' + JSON.stringify({ active: '42', avatars: ['42', '43', '44'].map((id) => ({ id, size: 3, contentHash: 'hash-' + id, creditLine: '', licenseFlags: { creditRequired: false } })) })));
+  if (frame.startsWith('telemetry\\n')) {
+    const batch = JSON.parse(frame.slice(frame.indexOf('\\n') + 1));
+    globalThis.telemetryBatches.push(batch.events);
+    for (const event of batch.events.filter((item) => item.kind === 'error')) globalThis.fleetLines.push('fleet-error: voice/page — ' + event.name + ': ' + event.message);
+    deliver(enc.encode('telemetry-ack\\n' + JSON.stringify({ batch_id: batch.batch_id })));
+  }
+  else if (frame.startsWith('transcript\\n')) {
+    const batch = JSON.parse(frame.slice(frame.indexOf('\\n') + 1));
+    deliver(enc.encode('transcript-ack\\n' + JSON.stringify({ session_id: batch.session_id, seq: batch.seq })));
+  }
+  else if (frame.startsWith('audio\\n')) {
+    const boundary = frame.indexOf('\\n', 6);
+    const chunk = JSON.parse(frame.slice(6, boundary));
+    deliver(enc.encode('audio-ack\\n' + JSON.stringify({ session_id: chunk.session_id, side: chunk.side, seq: chunk.seq })));
+  }
+  else if (frame === 'puppets') deliver(enc.encode('puppets\\n' + JSON.stringify({ active: '42', avatars: ['42', '43', '44'].map((id) => ({ id, size: 3, contentHash: 'hash-' + id, creditLine: '', licenseFlags: { creditRequired: false } })) })));
   else if (frame.startsWith('puppet\\n')) {
     const id = JSON.parse(frame.slice(frame.indexOf('\\n') + 1)).id;
     globalThis.puppetRequests.push(id);
@@ -86,6 +103,13 @@ Object.defineProperty(globalThis, 'caches', { value: { open: async () => ({
 }) } });
 const stream = { getTracks: () => [{ stop() {} }] };
 Object.defineProperty(navigator, 'mediaDevices', { value: { getUserMedia: async () => stream } });
+class FakeMediaRecorder extends EventTarget {
+  static isTypeSupported(type) { return type === 'audio/webm;codecs=opus'; }
+  constructor() { super(); this.state = 'inactive'; }
+  start() { this.state = 'recording'; }
+  stop() { this.state = 'inactive'; this.dispatchEvent(new Event('stop')); }
+}
+globalThis.MediaRecorder = FakeMediaRecorder;
 class FakeChannel extends EventTarget {
   constructor() { super(); this.readyState = 'open'; }
   send(value) {
@@ -198,6 +222,28 @@ test('the page toggle completes its start path in headless Chromium', async () =
   const { stdout, stderr } = await runPage();
   const observed = /data-start-test="([^"]*)"/.exec(stdout)?.[1] ?? 'start path did not settle';
   assert.equal(observed, 'live', `${observed}\n${stderr}`);
+});
+
+test('a forced page error reaches the fleet catcher line in headless Chromium', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  setTimeout(() => { throw new TypeError('forced page fault'); }, 0);
+  setTimeout(() => { document.body.dataset.telemetryErrorTest = JSON.stringify(fleetLines); }, 300);
+});
+`);
+  const encoded = /data-telemetry-error-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), ['fleet-error: voice/page — TypeError: forced page fault'], stderr);
+});
+
+test('session open and close arrive as two batched telemetry events', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  document.querySelector('#toggle').click();
+  setTimeout(() => { document.body.dataset.telemetrySessionTest = JSON.stringify(telemetryBatches.flat().filter((event) => event.kind === 'session').map((event) => event.name)); }, 300);
+});
+`);
+  const encoded = /data-telemetry-session-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), ['open', 'close'], stderr);
 });
 
 test('the page preloads every inactive puppet in catalog order after rendering the active puppet', async () => {

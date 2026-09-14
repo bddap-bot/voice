@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ConversationTrace, SessionClock, formatElapsed, formatStartError, isOfferFor, shareFrame } from '../docs/live.js';
+import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, SessionClock, TranscriptBatcher, audioFrame, errorEvent, formatElapsed, formatStartError, isOfferFor, shareFrame } from '../docs/live.js';
 
 test('start errors include their name and first stack frame', () => {
   const error = new TypeError('Illegal invocation');
@@ -25,6 +25,111 @@ test('share frame preserves a URL and carries image bytes after metadata', () =>
   assert.deepEqual([...frame.subarray(boundary + 1)], [137, 80, 78, 71]);
   assert.throws(() => shareFrame({ id: 'share_2', text: '', mime: 'image/svg+xml', image: Uint8Array.of(1) }), /PNG, JPEG, GIF, or WebP/);
   assert.throws(() => shareFrame({ id: 'share_3', text: 'x'.repeat(8193) }), /text is too large/);
+});
+
+test('page errors preserve name message stack and session identity', () => {
+  const error = new TypeError('forced failure');
+  error.stack = 'TypeError: forced failure\n at page.js:1:2';
+  assert.deepEqual(errorEvent(error, 'session_1', 42), { kind: 'error', session_id: 'session_1', name: 'TypeError', message: 'forced failure', stack: error.stack, at: 42 });
+  assert.equal(new TextEncoder().encode(errorEvent(new Error('x'.repeat(3000))).message).length, 2048);
+});
+
+test('telemetry events flush together through one authenticated send', async () => {
+  let flush;
+  const sent = [];
+  const batcher = new EventBatcher(async (events) => sent.push(events), { later: (fn) => { flush = fn; return 1; }, cancel: () => {} });
+  batcher.add({ name: 'open' });
+  batcher.add({ name: 'close' });
+  flush();
+  while (batcher.sending) await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(sent, [[{ name: 'open' }, { name: 'close' }]]);
+});
+
+test('acknowledged transcript and audio frames retain their sequence and bytes', async () => {
+  const sent = [];
+  let uploader;
+  uploader = new AckUploader(async (frame) => {
+    sent.push(frame);
+    const text = new TextDecoder().decode(frame);
+    const metadata = JSON.parse(text.slice(text.indexOf('\n') + 1, text.startsWith('audio\n') ? text.indexOf('\n', 6) : undefined));
+    const key = text.startsWith('audio\n') ? `audio:${metadata.session_id}:${metadata.side}:${metadata.seq}` : `transcript:${metadata.session_id}:${metadata.seq}`;
+    queueMicrotask(() => uploader.ack(key));
+  });
+  const transcript = new TranscriptBatcher('session_2', uploader);
+  transcript.add('user', 'hello', 1);
+  transcript.add('model', 'hi', 2);
+  transcript.flush();
+  const audio = audioFrame({ sessionId: 'session_2', side: 'mic', seq: 0, bytes: Uint8Array.of(1, 2, 3) });
+  uploader.add('audio:session_2:mic:0', audio);
+  while (uploader.running) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(new TextDecoder().decode(sent[0]), 'transcript\n{"session_id":"session_2","seq":0,"turns":[{"at":1,"side":"user","text":"hello"},{"at":2,"side":"model","text":"hi"}]}');
+  assert.deepEqual([...sent[1].slice(-3)], [1, 2, 3]);
+});
+
+test('audio chunks keep recorder order when blob conversion completes out of order', async () => {
+  const frames = [];
+  const uploader = { add: (key, frame) => { frames.push({ key, frame }); return true; } };
+  let first;
+  const chunker = new AudioChunker('session_3', 'model', uploader);
+  const pending = chunker.add({ size: 1, arrayBuffer: () => new Promise((resolve) => { first = resolve; }) });
+  chunker.add({ size: 1, arrayBuffer: async () => Uint8Array.of(2).buffer });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(frames.length, 0);
+  first(Uint8Array.of(1).buffer);
+  await pending;
+  await chunker.tail;
+  assert.deepEqual(frames.map(({ key, frame }) => [key, frame.at(-1)]), [
+    ['audio:session_3:model:0', 1],
+    ['audio:session_3:model:1', 2],
+  ]);
+});
+
+test('large recorder blobs split below the relay limit without sequence gaps', async () => {
+  const frames = [];
+  const chunker = new AudioChunker('session_3', 'mic', { add: (key, frame) => { frames.push({ key, frame }); return true; } });
+  await chunker.add(new Blob([new Uint8Array(1024 * 1024)]));
+  assert.deepEqual(frames.map(({ key }) => key), [
+    'audio:session_3:mic:0',
+    'audio:session_3:mic:1',
+    'audio:session_3:mic:2',
+  ]);
+  assert.ok(frames.every(({ frame }) => frame.byteLength < 512 * 1024));
+});
+
+test('a full upload queue retains transcript text and its sequence for retry', () => {
+  let accepted = false;
+  let retry;
+  const frames = [];
+  const transcript = new TranscriptBatcher('session_5', { add: (key, frame) => { frames.push({ key, frame }); return accepted; } }, { later: (fn) => { retry = fn; return 1; }, cancel: () => {} });
+  transcript.add('user', 'keep me', 1);
+  transcript.flush();
+  accepted = true;
+  retry();
+  assert.deepEqual(frames.map(({ key }) => key), ['transcript:session_5:0', 'transcript:session_5:0']);
+  assert.match(new TextDecoder().decode(frames[1].frame), /keep me/);
+});
+
+test('accepted transcript turns emit content-free telemetry', () => {
+  const events = [];
+  const transcript = new TranscriptBatcher('session_6', { add: () => true }, { onTurn: (side, at) => events.push({ side, at }) });
+  transcript.add('user', 'private words', 7);
+  transcript.add('model', 'private reply', 8);
+  transcript.flush();
+  assert.deepEqual(events, [{ side: 'user', at: 7 }, { side: 'model', at: 8 }]);
+  assert.doesNotMatch(JSON.stringify(events), /private/);
+});
+
+test('retryable storage errors resend while permanent ones release only their matching frame', async () => {
+  const sent = [];
+  let uploader;
+  uploader = new AckUploader(async () => {
+    sent.push('sent');
+    if (sent.length === 1) queueMicrotask(() => uploader.fail('transcript:session_4:0', true));
+    else queueMicrotask(() => uploader.fail('transcript:session_4:0', false));
+  }, { pause: async () => {}, timeout: 1000 });
+  uploader.add('transcript:session_4:0', Uint8Array.of(1));
+  while (uploader.running) await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(sent, ['sent', 'sent']);
 });
 
 test('shared material and its hub reply remain in the conversation trace', () => {

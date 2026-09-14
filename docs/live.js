@@ -31,6 +31,236 @@ export function shareFrame({ id, text, mime = null, image = new Uint8Array() }) 
   return frame;
 }
 
+export function errorEvent(error, sessionId = null, at = Date.now()) {
+  const value = error && typeof error === 'object' ? error : new Error(String(error));
+  return {
+    kind: 'error',
+    session_id: sessionId,
+    name: boundedValue(value.name || 'Error', 160),
+    message: boundedValue(value.message || error || 'unknown page error', 2048),
+    stack: boundedValue(value.stack || '', 16384),
+    at,
+  };
+}
+
+export function audioFrame({ sessionId, side, seq, bytes }) {
+  const body = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const header = new TextEncoder().encode(`audio\n${JSON.stringify({ session_id: sessionId, side, seq, mime: 'audio/webm;codecs=opus' })}\n`);
+  const frame = new Uint8Array(header.length + body.length);
+  frame.set(header);
+  frame.set(body, header.length);
+  return frame;
+}
+
+export function transcriptFrame({ sessionId, seq, turns }) {
+  return new TextEncoder().encode(`transcript\n${JSON.stringify({ session_id: sessionId, seq, turns })}`);
+}
+
+export class TranscriptBatcher {
+  constructor(sessionId, uploader, { delay = 100, maximum = 50, later = (...args) => globalThis.setTimeout(...args), cancel = (timer) => globalThis.clearTimeout(timer), onTurn = () => {} } = {}) {
+    this.sessionId = sessionId;
+    this.uploader = uploader;
+    this.delay = delay;
+    this.maximum = maximum;
+    this.later = later;
+    this.cancel = cancel;
+    this.onTurn = onTurn;
+    this.turns = [];
+    this.sequence = 0;
+    this.timer = null;
+  }
+  add(side, text, at = Date.now()) {
+    if (!text) return;
+    const previous = this.turns.at(-1);
+    if (previous?.side === side && new TextEncoder().encode(previous.text + text).length <= 65536) previous.text += text;
+    else this.turns.push({ at, side, text });
+    if (this.turns.length >= this.maximum) this.flush();
+    else if (this.timer === null) this.timer = this.later(() => this.flush(), this.delay);
+  }
+  flush() {
+    if (this.timer !== null) this.cancel(this.timer);
+    this.timer = null;
+    if (!this.turns.length) return;
+    const seq = this.sequence;
+    const frame = transcriptFrame({ sessionId: this.sessionId, seq, turns: this.turns });
+    if (this.uploader.add(`transcript:${this.sessionId}:${seq}`, frame)) {
+      for (const turn of this.turns) this.onTurn(turn.side, turn.at);
+      this.sequence++;
+      this.turns.splice(0);
+    } else {
+      this.timer = this.later(() => this.flush(), this.delay);
+    }
+  }
+}
+
+export class EventBatcher {
+  constructor(send, { delay = 100, maximum = 50, maximumRetained = 1000, later = (...args) => globalThis.setTimeout(...args), cancel = (timer) => globalThis.clearTimeout(timer), pause = (ms) => new Promise((resolve) => globalThis.setTimeout(resolve, ms)) } = {}) {
+    this.send = send;
+    this.delay = delay;
+    this.maximum = maximum;
+    this.maximumRetained = maximumRetained;
+    this.later = later;
+    this.cancel = cancel;
+    this.pause = pause;
+    this.events = [];
+    this.timer = null;
+    this.sending = false;
+    this.idleWaiters = [];
+  }
+  add(event) {
+    if (this.events.length >= this.maximumRetained) this.events.shift();
+    this.events.push(event);
+    if (this.events.length >= this.maximum) this.flush();
+    else if (this.timer === null) this.timer = this.later(() => this.flush(), this.delay);
+  }
+  flush() {
+    if (this.timer !== null) this.cancel(this.timer);
+    this.timer = null;
+    if (!this.sending) this.pump();
+  }
+  async pump() {
+    this.sending = true;
+    let retry = 250;
+    while (this.events.length) {
+      const batch = this.events.splice(0, this.maximum);
+      try {
+        await this.send(batch);
+        retry = 250;
+      } catch {
+        this.events.unshift(...batch);
+        await this.pause(retry);
+        retry = Math.min(retry * 2, 10000);
+      }
+    }
+    this.sending = false;
+    for (const resolve of this.idleWaiters.splice(0)) resolve();
+  }
+  idle() {
+    this.flush();
+    if (!this.sending && !this.events.length) return Promise.resolve();
+    return new Promise((resolve) => this.idleWaiters.push(resolve));
+  }
+}
+
+export class AckUploader {
+  constructor(send, { maximumBytes = 32 * 1024 * 1024, timeout = 5000, later = (...args) => globalThis.setTimeout(...args), cancel = (timer) => globalThis.clearTimeout(timer), pause = (ms) => new Promise((resolve) => globalThis.setTimeout(resolve, ms)), onOverflow = () => {} } = {}) {
+    this.send = send;
+    this.maximumBytes = maximumBytes;
+    this.timeout = timeout;
+    this.later = later;
+    this.cancel = cancel;
+    this.pause = pause;
+    this.onOverflow = onOverflow;
+    this.bytes = 0;
+    this.queue = [];
+    this.current = null;
+    this.running = false;
+    this.idleWaiters = [];
+  }
+  add(key, frame) {
+    if (this.bytes + frame.byteLength > this.maximumBytes) {
+      this.onOverflow();
+      return false;
+    }
+    this.bytes += frame.byteLength;
+    this.queue.push({ key, frame });
+    if (!this.running) this.pump();
+    return true;
+  }
+  ack(key) {
+    if (this.current?.item.key === key) this.current.resolve();
+  }
+  fail(key, retryable) {
+    if (this.current?.item.key !== key) return;
+    if (retryable) this.current.reject(new Error('persistence rejected upload'));
+    else this.current.resolve();
+  }
+  async pump() {
+    this.running = true;
+    while (this.queue.length) {
+      const item = this.queue[0];
+      let retry = 250;
+      for (;;) {
+        let timer;
+        try {
+          const acknowledged = new Promise((resolve, reject) => {
+            timer = this.later(() => reject(new Error('persistence acknowledgment timed out')), this.timeout);
+            this.current = {
+              item,
+              resolve: () => { this.cancel(timer); resolve(); },
+              reject: (error) => { this.cancel(timer); reject(error); },
+            };
+          });
+          await this.send(item.frame);
+          await acknowledged;
+          break;
+        } catch {
+          if (timer !== undefined) this.cancel(timer);
+          this.current = null;
+          await this.pause(retry);
+          retry = Math.min(retry * 2, 10000);
+        }
+      }
+      this.current = null;
+      this.queue.shift();
+      this.bytes -= item.frame.byteLength;
+    }
+    this.running = false;
+    for (const resolve of this.idleWaiters.splice(0)) resolve();
+  }
+  idle() {
+    if (!this.running && !this.queue.length) return Promise.resolve();
+    return new Promise((resolve) => this.idleWaiters.push(resolve));
+  }
+}
+
+export class AudioChunker {
+  constructor(sessionId, side, uploader, { maximumBytes = 60 * 1024 * 1024, onCap = () => {}, onError = () => {} } = {}) {
+    this.sessionId = sessionId;
+    this.side = side;
+    this.uploader = uploader;
+    this.maximumBytes = maximumBytes;
+    this.onCap = onCap;
+    this.onError = onError;
+    this.sequence = 0;
+    this.bytes = 0;
+    this.tail = Promise.resolve();
+  }
+  add(blob) {
+    if (!blob?.size) return this.tail;
+    this.tail = this.tail.then(async () => {
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      this.bytes += bytes.byteLength;
+      if (this.bytes > this.maximumBytes) {
+        this.onCap();
+        return false;
+      }
+      for (let offset = 0; offset < bytes.byteLength; offset += 480 * 1024) {
+        const sequence = this.sequence;
+        const accepted = this.uploader.add(
+          `audio:${this.sessionId}:${this.side}:${sequence}`,
+          audioFrame({ sessionId: this.sessionId, side: this.side, seq: sequence, bytes: bytes.subarray(offset, offset + 480 * 1024) }),
+        );
+        if (!accepted) return false;
+        this.sequence++;
+      }
+      return true;
+    }).catch((error) => {
+      this.onError(error);
+      return false;
+    });
+    return this.tail;
+  }
+}
+
+function boundedValue(value, maximum) {
+  const bytes = new TextEncoder().encode(String(value));
+  if (bytes.length <= maximum) return String(value);
+  let end = maximum;
+  while (end && (bytes[end] & 0xc0) === 0x80) end--;
+  return new TextDecoder().decode(bytes.subarray(0, end));
+}
+
 function boundedText(parts, maximum) {
   const encoder = new TextEncoder();
   while (parts.length > 1 && encoder.encode(parts.join('\n')).length > maximum) parts.shift();

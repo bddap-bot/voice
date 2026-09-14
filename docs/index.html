@@ -382,7 +382,10 @@ async function startConversation() {
     const started = waitData(attempt.channel, (event) => event.type === 'session.started', 30000, attempt);
     started.catch(() => {});
     attempt.channel.addEventListener('message', (event) => onLiveEvent(event, attempt.channel));
-    attempt.pc.ontrack = (event) => { $('speaker').srcObject = event.streams[0]; };
+    attempt.pc.ontrack = (event) => {
+      $('speaker').srcObject = event.streams[0];
+      puppetRuntime?.attachAudio(event.streams[0], attempt).catch((error) => setStatus(`mouth unavailable: ${error.message}`, 'err'));
+    };
     for (const track of attempt.stream.getTracks()) attempt.pc.addTrack(track, attempt.stream);
     await attempt.pc.setLocalDescription(await attempt.pc.createOffer());
     await waitIce(attempt.pc, attempt);
@@ -401,7 +404,7 @@ async function startConversation() {
     await attempt.pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
     await started;
     if (attempt.cancelled) return;
-    conversation = { pc: attempt.pc, channel: attempt.channel, stream: attempt.stream, clock: null, id: attempt.offerId };
+    conversation = { pc: attempt.pc, channel: attempt.channel, stream: attempt.stream, clock: null, id: attempt.offerId, audioOwner: attempt };
     const capLabel = formatElapsed(answer.cap_seconds);
     const clock = new SessionClock({ capSeconds: answer.cap_seconds, onTick: (seconds) => { $('elapsed').textContent = `${formatElapsed(seconds)} / ${capLabel}`; }, onCap: () => stopConversation(`${Math.round(answer.cap_seconds / 60)} minute cap reached — conversation stopped`) });
     conversation.clock = clock;
@@ -418,6 +421,7 @@ async function startConversation() {
       for (const track of attempt.stream?.getTracks() ?? []) track.stop();
       attempt.channel?.close();
       attempt.pc?.close();
+      await puppetRuntime?.detachAudio(attempt);
     }
     if (starting === attempt) starting = null;
   }
@@ -446,6 +450,7 @@ async function finishStop(reason, remoteClosed) {
   current.channel.close();
   current.pc.close();
   $('speaker').srcObject = null;
+  await puppetRuntime?.detachAudio(current.audioOwner);
   const cost = usageSeconds * 0.05 / 60;
   const item = document.createElement('div');
   item.className = 'usage';

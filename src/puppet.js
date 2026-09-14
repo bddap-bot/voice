@@ -30,6 +30,36 @@ const BONE_POSES = {
   },
 };
 
+const VISEMES = ['aa', 'ih', 'ou', 'ee', 'oh'];
+
+function bandEnergy(spectrum, sampleRate, fftSize, low, high) {
+  const first = Math.max(1, Math.ceil(low * fftSize / sampleRate));
+  const last = Math.min(spectrum.length - 1, Math.floor(high * fftSize / sampleRate));
+  let total = 0;
+  for (let index = first; index <= last; index++) total += spectrum[index];
+  return total / Math.max(1, last - first + 1) / 255;
+}
+
+export function audioVisemes(waveform, spectrum, sampleRate, fftSize) {
+  let square = 0;
+  for (const sample of waveform) {
+    const centered = (sample - 128) / 128;
+    square += centered * centered;
+  }
+  const rms = Math.sqrt(square / waveform.length);
+  const gate = THREE.MathUtils.smoothstep(rms, 0.018, 0.16);
+  const raw = {
+    aa: bandEnergy(spectrum, sampleRate, fftSize, 800, 1300),
+    ih: bandEnergy(spectrum, sampleRate, fftSize, 2400, 4000),
+    ou: bandEnergy(spectrum, sampleRate, fftSize, 180, 420),
+    ee: bandEnergy(spectrum, sampleRate, fftSize, 1300, 2400),
+    oh: bandEnergy(spectrum, sampleRate, fftSize, 420, 800),
+  };
+  const shaped = Object.fromEntries(VISEMES.map((name) => [name, raw[name] * raw[name]]));
+  const total = Math.max(Object.values(shaped).reduce((sum, value) => sum + value, 0), 0.001);
+  return Object.fromEntries(VISEMES.map((name) => [name, gate * shaped[name] / total * 0.82]));
+}
+
 export class PuppetRuntime {
   constructor(canvas) {
     this.canvas = canvas;
@@ -71,6 +101,9 @@ export class PuppetRuntime {
     this.nextLook = 0;
     this.nextBlink = performance.now() + 1200;
     this.blinkStart = 0;
+    this.audio = null;
+    this.audioEpoch = 0;
+    this.mouthValues = Object.fromEntries(VISEMES.map((name) => [name, 0]));
     this.resize = new ResizeObserver(() => this.fit());
     this.resize.observe(canvas);
     this.fit();
@@ -141,6 +174,58 @@ export class PuppetRuntime {
     this.vrm = null;
     this.bones.clear();
   }
+  async attachAudio(stream, owner = stream) {
+    const epoch = ++this.audioEpoch;
+    const previous = this.audio;
+    this.audio = null;
+    previous?.source.disconnect();
+    previous?.context.close().catch(() => {});
+    const Context = globalThis.AudioContext ?? globalThis.webkitAudioContext;
+    if (!Context) throw new Error('Web Audio is unavailable');
+    const context = new Context();
+    let source;
+    try {
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.25;
+      source = context.createMediaStreamSource(stream);
+      source.connect(analyser);
+      const audio = {
+        context,
+        source,
+        analyser,
+        owner,
+        waveform: new Uint8Array(analyser.fftSize),
+        spectrum: new Uint8Array(analyser.frequencyBinCount),
+      };
+      this.audio = audio;
+      await context.resume();
+      if (epoch !== this.audioEpoch) {
+        if (this.audio === audio) this.audio = null;
+        source.disconnect();
+        await context.close().catch(() => {});
+        return false;
+      }
+      return true;
+    } catch (error) {
+      if (this.audio?.context === context) this.audio = null;
+      source?.disconnect();
+      await context.close().catch(() => {});
+      throw error;
+    }
+  }
+  async detachAudio(owner) {
+    if (owner && this.audio?.owner !== owner) return;
+    this.audioEpoch++;
+    const audio = this.audio;
+    this.audio = null;
+    audio?.source.disconnect();
+    for (const name of VISEMES) {
+      this.mouthValues[name] = 0;
+      this.vrm?.expressionManager?.setValue(name, 0);
+    }
+    await audio?.context.close().catch(() => {});
+  }
   fit() {
     const width = Math.max(1, this.canvas.clientWidth);
     const height = Math.max(1, this.canvas.clientHeight);
@@ -176,6 +261,7 @@ export class PuppetRuntime {
           this.nextBlink = now + 2200 + Math.random() * 4200;
         }
       }
+      this.updateMouth(manager);
     }
     const head = this.bones.get('head')?.node;
     if (!head) return;
@@ -187,6 +273,18 @@ export class PuppetRuntime {
     if (this.poseName === 'stand' || this.poseName === 'sit') {
       this.lookOffset.slerp(this.lookTargetQuaternion, 0.012);
       head.quaternion.multiply(this.lookOffset);
+    }
+  }
+  updateMouth(manager) {
+    let targets;
+    if (this.audio) {
+      this.audio.analyser.getByteTimeDomainData(this.audio.waveform);
+      this.audio.analyser.getByteFrequencyData(this.audio.spectrum);
+      targets = audioVisemes(this.audio.waveform, this.audio.spectrum, this.audio.context.sampleRate, this.audio.analyser.fftSize);
+    }
+    for (const name of VISEMES) {
+      this.mouthValues[name] = THREE.MathUtils.lerp(this.mouthValues[name], targets?.[name] ?? 0, 0.65);
+      manager.setValue(name, this.mouthValues[name]);
     }
   }
   animate(now) {
@@ -201,6 +299,7 @@ export class PuppetRuntime {
   dispose() {
     this.pause();
     this.resize.disconnect();
+    this.detachAudio();
     this.clear();
     this.renderer.dispose();
   }

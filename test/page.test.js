@@ -53,6 +53,8 @@ export class PuppetRuntime {
   start() {}
   pause() {}
   clear() {}
+  async attachAudio() {}
+  async detachAudio() {}
   dispose() {}
 }
 `;

@@ -93,8 +93,8 @@ export async function recv() {
 
 const fakePuppet = `
 export class PuppetRuntime {
-  constructor() { this.calls = []; this.humanoidBone = 0; globalThis.testPuppet = this; }
-  async load(bytes, initialClip, valid, beforeCommit) { await beforeCommit(); globalThis.firstVisible = { playable: initialClip.action, order: [...transferOrder] }; this.humanoidBone += initialClip.bytes.byteLength; return valid(); }
+  constructor(canvas) { this.canvas = canvas; this.calls = []; this.humanoidBone = 0; globalThis.testPuppet = this; }
+  async load(bytes, initialClip, valid, beforeCommit) { await beforeCommit(); globalThis.firstVisible = { playable: initialClip.action, order: [...transferOrder] }; this.humanoidBone += initialClip.bytes.byteLength; const context = this.canvas.getContext('2d'); context.fillStyle = '#50c878'; context.fillRect(0, 0, this.canvas.width, this.canvas.height); return valid(); }
   async loadClips(entries) { const before = this.humanoidBone; this.humanoidBone += entries.reduce((sum, entry) => sum + entry.bytes.byteLength, 0); globalThis.clipMovement = { before, after: this.humanoidBone, loaded: entries.map((entry) => [entry.action, entry.format]) }; }
   pose(...args) { this.calls.push(['pose', ...args]); }
   gesture(...args) { this.calls.push(['gesture', ...args]); }
@@ -202,7 +202,7 @@ async function chromiumExecutable() {
   throw new Error('headless Chromium is required; set CHROMIUM_BIN');
 }
 
-async function runPage(testSetup = '') {
+async function runPage(testSetup = '', { scale = 1, size = '390,844', budget = 3000, mobile = false } = {}) {
   const index = (await readFile(new URL('../docs/index.html', import.meta.url), 'utf8'))
     .replace('https://bddap-bot.github.io/botq/botq_dash_wasm.js', '/botq_dash_wasm.js')
     .replace('./puppet.js', '/fake-puppet.js')
@@ -228,9 +228,11 @@ async function runPage(testSetup = '') {
       '--headless=new',
       '--no-sandbox',
       '--disable-gpu',
-      '--window-size=390,844',
+      `--force-device-scale-factor=${scale}`,
+      `--window-size=${size}`,
+      ...(mobile ? ['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36'] : []),
       `--user-data-dir=${profile}`,
-      '--virtual-time-budget=3000',
+      `--virtual-time-budget=${budget}`,
       '--dump-dom',
       `http://127.0.0.1:${server.address().port}/`,
     ], { timeout: 15000, killSignal: 'SIGKILL', env: { ...process.env, TMPDIR: temporary } });
@@ -241,7 +243,7 @@ async function runPage(testSetup = '') {
   }
 }
 
-async function runPuppetPage(html, { scale = 1, size = '390,844' } = {}) {
+async function runPuppetPage(html, { scale = 1, size = '390,844', budget = 3000, mobile = false } = {}) {
   const puppet = await readFile(new URL('../docs/puppet.js', import.meta.url));
   const scratch = await mkdtemp(join(process.cwd(), '.chromium-'));
   const profile = join(scratch, 'profile');
@@ -263,7 +265,8 @@ async function runPuppetPage(html, { scale = 1, size = '390,844' } = {}) {
       `--force-device-scale-factor=${scale}`,
       `--window-size=${size}`,
       `--user-data-dir=${profile}`,
-      '--virtual-time-budget=3000',
+      `--virtual-time-budget=${budget}`,
+      ...(mobile ? ['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36'] : []),
       '--dump-dom',
       `http://127.0.0.1:${server.address().port}/`,
     ], { timeout: 15000, killSignal: 'SIGKILL', env: { ...process.env, TMPDIR: temporary } });
@@ -345,6 +348,55 @@ test('the puppet canvas keeps one layout height across resize-observer ticks', a
   assert.deepEqual(result.errors, []);
   assert.equal(result.settled, result.filled, 'canvas must fill the toggle');
   assert.equal(result.afterBufferChange, result.settled, 'layout height must not follow the drawing buffer');
+});
+
+const layoutViewports = [
+  { name: 'phone', width: 390, height: 844, scale: 3, mobile: true },
+  { name: 'laptop', width: 1440, height: 900, scale: 1, mobile: false },
+  { name: 'tv', width: 1920, height: 1080, scale: 1, mobile: false },
+];
+
+for (const viewport of layoutViewports) test(`stage UI stays outside the puppet projection at ${viewport.name} size`, async () => {
+  const index = await readFile(new URL('../docs/index.html', import.meta.url), 'utf8');
+  const style = /<style>[\s\S]*?<\/style>/.exec(index)[0];
+  const main = /<main[\s\S]*?<\/main>/.exec(index)[0].replace('class="hidden"', '');
+  const chrome = '<header><h1>voice</h1><span id="status">ready</span></header><section id="saved" class="saved"><span>device authenticated</span><button>Forget token</button></section>';
+  const { stdout, stderr } = await runPuppetPage(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">${style}</head><body>${chrome}${main}<script>
+  document.documentElement.style.setProperty('--visual-viewport-height', Math.round(visualViewport?.height ?? innerHeight) + 'px');
+  document.querySelector('main').style.setProperty('--stage-height', Math.round(visualViewport?.height ?? innerHeight) + 'px');
+  const puppet = document.querySelector('#toggle').getBoundingClientRect();
+  const selectors = ['header', '#saved', '.puppet-picker', '#puppet-credit', '#elapsed', '.share', '.display', '.ledger'];
+  const rect = (element) => { const value = element.getBoundingClientRect(); return { left: value.left, right: value.right, top: value.top, bottom: value.bottom }; };
+  const overlaps = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+  const result = selectors.map((selector) => ({ selector, rect: rect(document.querySelector(selector)) })).filter((item) => overlaps(item.rect, puppet));
+  document.body.dataset.overlapTest = JSON.stringify({ puppet: rect(document.querySelector('#toggle')), result, pageHeight: document.documentElement.scrollHeight });
+  </script></body></html>`, { scale: viewport.scale, size: `${viewport.width},${viewport.height}`, mobile: viewport.mobile });
+  const encoded = /data-overlap-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  const result = JSON.parse(encoded ?? 'null');
+  assert.deepEqual(result?.result, [], `${viewport.name}: ${JSON.stringify(result)}\n${stderr}`);
+  if (viewport.name !== 'phone') assert.ok(result.pageHeight <= viewport.height, `${viewport.name} must remain one screen: ${result.pageHeight}`);
+  else assert.ok(result.pageHeight > viewport.height, 'phone controls should continue below the first screen');
+});
+
+test('Android DPR 3 keeps the visual stage height stable and renders after sixty seconds', async () => {
+  const { stdout, stderr } = await runPage(`
+  const heights = [];
+  window.addEventListener('load', () => new ResizeObserver(() => heights.push(document.querySelector('#puppet').clientHeight)).observe(document.querySelector('#puppet')));
+  window.addEventListener('test-ready', () => {
+    const initial = document.querySelector('#puppet').clientHeight;
+  setTimeout(() => {
+      const canvas = document.querySelector('#puppet');
+      const pixel = canvas.getContext('2d').getImageData(Math.floor(canvas.width / 2), Math.floor(canvas.height / 2), 1, 1).data;
+      document.body.dataset.androidTest = JSON.stringify({ viewportHeight: Math.round(visualViewport.height), stageHeight: document.querySelector('#conversation').clientHeight - 940, heights, initial, settled: canvas.clientHeight, loaded: testPuppet.humanoidBone > 0, visible: pixel[3] > 0 });
+  }, 60000);
+  });
+  `, { scale: 3, size: '390,844', budget: 65000, mobile: true });
+  const encoded = /data-android-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  const result = JSON.parse(encoded ?? 'null');
+  assert.ok(result?.loaded && result.visible, `${JSON.stringify(result)}\n${stderr}`);
+  assert.equal(result.settled, result.initial);
+  assert.equal(result.stageHeight, result.viewportHeight);
+  assert.deepEqual(result.heights, result.heights.map(() => result.settled));
 });
 
 test('the real page runtime moves its look-at target to the panel and back over time', async () => {

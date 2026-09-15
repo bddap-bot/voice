@@ -155,6 +155,36 @@ test('procedural mood rotation composes on a running clip pose', () => {
   assert.ok(bone.quaternion.angleTo(new THREE.Quaternion().setFromEuler(new THREE.Euler(...MOOD_TABLE.thinking.bones.head))) > 0.01);
 });
 
+test('procedural rotations stay bounded without a clip and across a clip handover', () => {
+  const run = (handover) => {
+    const head = new THREE.Bone();
+    const rest = head.quaternion.clone();
+    const first = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.08, -0.12, 0.04));
+    const second = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.14, 0.18, -0.06));
+    let frame = 0;
+    const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+      bones: new Map([['head', { node: head, rest, base: rest.clone() }]]),
+      mixer: { update() { if (handover && frame <= 90) head.quaternion.copy(frame < 90 ? first : second); } },
+      gestureRotation: new THREE.Quaternion(),
+      listeningMotion: { lean: 0, nod: 0.03, tilt: 0.04 },
+    });
+    const samples = [];
+    for (; frame <= 180; frame++) {
+      runtime.updateBasePose(1 / 60);
+      runtime.updateListening();
+      if (frame % 30 === 0) samples.push(head.quaternion.clone());
+    }
+    return { rest, first, second, samples };
+  };
+  const idle = run(false);
+  assert.ok(Math.max(...idle.samples.map((rotation) => rotation.angleTo(idle.rest))) < 0.06);
+  assert.ok(idle.samples.at(-1).angleTo(idle.samples.at(-2)) < 1e-7);
+  const clipped = run(true);
+  assert.ok(clipped.samples[2].angleTo(clipped.first) < 0.06);
+  assert.ok(clipped.samples.at(-1).angleTo(clipped.second) < 0.06);
+  assert.ok(clipped.samples.at(-1).angleTo(clipped.samples.at(-2)) < 1e-7);
+});
+
 test('seated poses move both upper arms outward without changing standing poses', () => {
   const left = new THREE.Object3D();
   const right = new THREE.Object3D();

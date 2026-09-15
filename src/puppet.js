@@ -482,6 +482,11 @@ export class PuppetRuntime {
       if (this.waitingForHub) this.beginGesture('waiting', true);
     }
   }
+  updateBasePose(delta) {
+    for (const { node, base } of this.bones.values()) node.quaternion.copy(base);
+    this.mixer.update(delta);
+    for (const { node, base } of this.bones.values()) base.copy(node.quaternion);
+  }
   updateGesture(now) {
     if (!this.gestureState) return;
     if (!this.gestureState.releasing && now >= this.gestureState.releaseAt) this.releaseGesture(now);
@@ -592,7 +597,7 @@ export class PuppetRuntime {
   }
   animate(now) {
     const delta = Math.min(this.clock.getDelta(), 0.05);
-    this.mixer.update(delta);
+    this.updateBasePose(delta);
     this.updatePose(now);
     this.updateSeatedClearance();
     this.updateGesture(now);

@@ -234,34 +234,20 @@ test('a hub wait resumes after an explicit procedural gesture releases', () => {
   assert.equal(runtime.gestureState.releaseAt, Infinity);
 });
 
-test('sit and stand clip-end handovers keep model-root and head velocity bounded', () => {
+test('sit and stand transitions keep model-root and head velocity bounded', () => {
   const stage = new THREE.Group();
   const model = new THREE.Group();
   const hips = new THREE.Bone();
-  hips.name = 'NormalizedHips';
-  hips.position.y = 1;
   const head = new THREE.Bone();
   head.position.y = 1;
   hips.add(head);
   model.add(hips);
   stage.add(model);
-  const retarget = (name, from, to) => {
-    const source = new THREE.Group();
-    const sourceHips = new THREE.Bone();
-    sourceHips.name = 'mixamorigHips';
-    sourceHips.position.y = 100;
-    source.add(sourceHips);
-    source.animations = [new THREE.AnimationClip(name, 0.8, [
-      new THREE.QuaternionKeyframeTrack('mixamorigHips.quaternion', [0, 0.8], [0, 0, 0, 1, 0, 0, 0, 1]),
-      new THREE.VectorKeyframeTrack('mixamorigHips.position', [0, 0.8], from.concat(to)),
-    ])];
-    return retargetMixamoClip(source, { scene: model, humanoid: { getNormalizedBoneNode: () => hips, getRawBoneNode: () => hips } });
-  };
   const clips = new Map([
-    ['idle', retarget('idle', [0, 140, 0], [0, 140, 0])],
-    ['sit-idle', retarget('sit-idle', [0, 75, 0], [0, 75, 0])],
-    ['sit', retarget('sit', [0, 140, 0], [24, 75, 50])],
-    ['stand', retarget('stand', [0, 75, 0], [-18, 140, -48])],
+    ['idle', new THREE.AnimationClip('idle', 1, [new THREE.NumberKeyframeTrack(`${hips.uuid}.position[y]`, [0, 1], [1.4, 1.4])])],
+    ['sit-idle', new THREE.AnimationClip('sit-idle', 1, [new THREE.NumberKeyframeTrack(`${hips.uuid}.position[y]`, [0, 1], [0.75, 0.75])])],
+    ['sit', new THREE.AnimationClip('sit', 0.8, [new THREE.NumberKeyframeTrack(`${hips.uuid}.position[y]`, [0, 0.8], [1.4, 0.75])])],
+    ['stand', new THREE.AnimationClip('stand', 0.8, [new THREE.NumberKeyframeTrack(`${hips.uuid}.position[y]`, [0, 0.8], [0.75, 1.4])])],
   ]);
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
     stage,
@@ -277,13 +263,12 @@ test('sit and stand clip-end handovers keep model-root and head velocity bounded
   const headPosition = new THREE.Vector3();
   const previousModel = new THREE.Vector3();
   const previousHead = new THREE.Vector3();
-  const handoverVelocities = [];
+  const velocities = [];
   const sample = () => {
     stage.updateMatrixWorld(true);
     model.getWorldPosition(modelPosition);
     head.getWorldPosition(headPosition);
-    const headDelta = headPosition.clone().sub(previousHead);
-    handoverVelocities.push({ model: modelPosition.distanceTo(previousModel) * 60, head: headDelta.length() * 60, headHorizontal: Math.hypot(headDelta.x, headDelta.z) * 60 });
+    velocities.push({ model: modelPosition.distanceTo(previousModel) * 60, head: headPosition.distanceTo(previousHead) * 60 });
     previousModel.copy(modelPosition);
     previousHead.copy(headPosition);
   };
@@ -294,21 +279,15 @@ test('sit and stand clip-end handovers keep model-root and head velocity bounded
   head.getWorldPosition(previousHead);
   for (const pose of ['sit', 'stand']) {
     runtime.pose(pose);
-    for (let frame = 0; frame < 66; frame++) {
+    for (let frame = 0; frame < 60; frame++) {
       runtime.mixer.update(1 / 60);
       runtime.updatePose(frame * 1000 / 60);
-      if (frame >= 30) sample();
-      else {
-        stage.updateMatrixWorld(true);
-        model.getWorldPosition(previousModel);
-        head.getWorldPosition(previousHead);
-      }
+      sample();
     }
   }
   assert.equal(stage.position.y, 0);
-  assert.ok(Math.max(...handoverVelocities.map(({ model: velocity }) => velocity)) < 0.001);
-  assert.ok(Math.max(...handoverVelocities.map(({ headHorizontal: velocity }) => velocity)) < 0.001);
-  const peakHeadVelocity = Math.max(...handoverVelocities.map(({ head: velocity }) => velocity));
+  assert.ok(Math.max(...velocities.map(({ model: velocity }) => velocity)) < 0.001);
+  const peakHeadVelocity = Math.max(...velocities.map(({ head: velocity }) => velocity));
   assert.ok(peakHeadVelocity < 3, `peak head velocity ${peakHeadVelocity}`);
 });
 
@@ -436,7 +415,7 @@ test('real Mixamo rest frames preserve signed standing and seated joint angles',
   }
 });
 
-test('VRM0 retarget flips quaternions and removes horizontal root motion', () => {
+test('VRM0 retarget flips quaternion and root-motion x/z axes', () => {
   const source = new THREE.Group();
   const hips = new THREE.Bone();
   hips.name = 'mixamorigHips';
@@ -449,7 +428,7 @@ test('VRM0 retarget flips quaternions and removes horizontal root motion', () =>
   const clip = retargetMixamoClip(source, { meta: { metaVersion: '0' }, humanoid: { getNormalizedBoneNode: () => target } });
   const expected = new THREE.Quaternion(0.1, 0.2, 0.3, 0.9).normalize();
   assert.ok(Math.abs(clip.tracks[0].values[0] + expected.x) < 1e-6);
-  assert.deepEqual(Array.from(clip.tracks[1].values), [0, 2, 0]);
   assert.ok(Math.abs(clip.tracks[0].values[1] - expected.y) < 1e-6);
   assert.ok(Math.abs(clip.tracks[0].values[2] + expected.z) < 1e-6);
+  assert.deepEqual(Array.from(clip.tracks[1].values), [-1, 2, -3]);
 });

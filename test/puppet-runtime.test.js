@@ -155,6 +155,25 @@ test('procedural mood rotation composes on a running clip pose', () => {
   assert.ok(bone.quaternion.angleTo(new THREE.Quaternion().setFromEuler(new THREE.Euler(...MOOD_TABLE.thinking.bones.head))) > 0.01);
 });
 
+test('seated poses move both upper arms outward without changing standing poses', () => {
+  const left = new THREE.Object3D();
+  const right = new THREE.Object3D();
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+    poseName: 'sit',
+    bones: new Map([['leftUpperArm', { node: left }], ['rightUpperArm', { node: right }]]),
+    gestureRotation: new THREE.Quaternion(),
+  });
+  runtime.updateSeatedClearance();
+  assert.ok(left.rotation.z < -0.09);
+  assert.ok(right.rotation.z > 0.09);
+  left.rotation.set(0, 0, 0);
+  right.rotation.set(0, 0, 0);
+  runtime.poseName = 'stand';
+  runtime.updateSeatedClearance();
+  assert.deepEqual(left.quaternion.toArray(), [0, 0, 0, 1]);
+  assert.deepEqual(right.quaternion.toArray(), [0, 0, 0, 1]);
+});
+
 test('idle variants use random dwell and never repeat consecutively', () => {
   const played = [];
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {

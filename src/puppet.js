@@ -14,6 +14,7 @@ const GESTURES = {
 
 const CLIP_GESTURES = new Set(['point', 'nod', 'shrug', 'think', 'wave', 'no', 'laugh', 'clap', 'bow', 'thumbs-up', 'stretch', 'look-around']);
 const IDLE_CLIPS = { stand: ['idle', 'idle-2', 'idle-3'], sit: ['sit-idle', 'sit-idle-2'] };
+const SEATED_ARM_CLEARANCE = { leftUpperArm: [0, 0, -0.1], rightUpperArm: [0, 0, 0.1] };
 
 const GAZE_POINTS = {
   camera: [0, 1.25, 6.4],
@@ -493,6 +494,15 @@ export class PuppetRuntime {
       if (this.waitingForHub) this.beginGesture('waiting', true);
     }
   }
+  updateSeatedClearance() {
+    if (this.poseName !== 'sit') return;
+    for (const [name, values] of Object.entries(SEATED_ARM_CLEARANCE)) {
+      const bone = this.bones.get(name)?.node;
+      if (!bone) continue;
+      this.gestureRotation.setFromEuler(new THREE.Euler(...values));
+      bone.quaternion.multiply(this.gestureRotation);
+    }
+  }
   updateMood(now, manager) {
     const mood = MOOD_TABLE[this.moodName];
     for (const name of MOOD_EXPRESSIONS) {
@@ -567,6 +577,7 @@ export class PuppetRuntime {
     const delta = Math.min(this.clock.getDelta(), 0.05);
     this.mixer.update(delta);
     this.updatePose(now);
+    this.updateSeatedClearance();
     this.updateGesture(now);
     this.updateFace(now);
     this.vrm?.update(delta);

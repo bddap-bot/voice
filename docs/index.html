@@ -107,7 +107,7 @@
 import wbgInit, { init as wasmInit, connect, send_only, recv } from 'https://bddap-bot.github.io/botq/botq_dash_wasm.js';
 import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, SessionClock, TranscriptBatcher, errorEvent, formatElapsed, formatStartError, isOfferFor, shareFrame } from './live.js';
 import { PuppetChannel } from './puppet-client.js';
-import { TranscriptActionDriver } from './puppet-drivers.js';
+import { ListeningReactionDriver, TranscriptActionDriver } from './puppet-drivers.js';
 import { PuppetTools, completedToolCall } from './puppet-tools.js';
 import { PuppetRuntime } from './puppet.js';
 
@@ -158,6 +158,7 @@ function applyTranscriptAction(action, timing) {
   recordSession('transcript-action', JSON.stringify({ sentence: timing.sentence, token: `${action.kind}:${action.name}`, score: action.score, pose, outcome: played ? 'played' : 'refused', playAtMinusNow: timing.playAtMinusNow }));
 }
 const actionDriver = new TranscriptActionDriver(applyTranscriptAction);
+const listeningDriver = new ListeningReactionDriver((motion) => puppetRuntime?.listening(motion));
 const hubWaiting = new Set();
 const completedToolCalls = new Set();
 const telemetryWaiters = new Map();
@@ -629,6 +630,8 @@ function onLiveEvent(message, source) {
     trace.heard(event.delta ?? '', Date.now(), event.start_ms);
     conversation?.transcript?.add('user', event.delta ?? '');
   }
+  else if (event.type === 'input_audio_buffer.speech_started') listeningDriver.activity(true);
+  else if (event.type === 'input_audio_buffer.speech_stopped') listeningDriver.activity(false);
   else if (event.type === 'session.output_transcript.delta') {
     trace.spoke(event.delta ?? '', event.start_ms, event.end_ms);
     const audioNow = $('speaker').currentTime * 1000;
@@ -697,6 +700,7 @@ async function receiveHubError(result) {
 function paintOff() {
   hubWaiting.clear();
   actionDriver.reset();
+  listeningDriver.reset();
   puppetRuntime?.waiting(false);
   puppetRuntime?.pose('sit');
   $('elapsed').textContent = '00:00 / 30:00';

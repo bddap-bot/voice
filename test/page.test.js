@@ -102,6 +102,7 @@ export class PuppetRuntime {
   look(...args) { this.calls.push(['look', ...args]); }
   mood(...args) { this.calls.push(['mood', ...args]); }
   waiting(...args) { this.calls.push(['waiting', ...args]); }
+  listening(...args) { this.calls.push(['listening', ...args]); }
   start() {}
   pause() {}
   clear() {}
@@ -546,6 +547,22 @@ window.addEventListener('test-ready', () => {
 `);
   const encoded = /data-driver-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   assert.deepEqual(JSON.parse(encoded ?? 'null'), [['waiting', true], ['mood', 'apologetic']], stderr);
+});
+
+test('synthetic input activity drives a bounded listening envelope without a clip gesture', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  const event = (type) => testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type }) }));
+  event('input_audio_buffer.speech_started');
+  setTimeout(() => event('input_audio_buffer.speech_stopped'), 2350);
+  setTimeout(() => {
+    const listening = testPuppet.calls.filter(([name]) => name === 'listening').map(([, motion]) => motion);
+    document.body.dataset.listeningTest = JSON.stringify({ peak: Math.max(...listening.map(({ amount }) => amount)), nodded: listening.some(({ nod }) => Math.abs(nod) > 0.02), tilted: listening.some(({ tilt }) => Math.abs(tilt) > 0.01), final: listening.at(-1), gestures: testPuppet.calls.filter(([name]) => name === 'gesture') });
+  }, 2850);
+});
+`, { budget: 4000 });
+  const encoded = /data-listening-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { peak: 1, nodded: true, tilted: true, final: { amount: 0, lean: 0, nod: 0, tilt: 0 }, gestures: [] }, stderr);
 });
 
 test('output transcript can reach a catalog clip action', async () => {

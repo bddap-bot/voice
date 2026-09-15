@@ -199,6 +199,7 @@ export class PuppetRuntime {
     this.gestureState = null;
     this.gestureOffsets = {};
     this.gestureRotation = new THREE.Quaternion();
+    this.listeningMotion = { amount: 0, lean: 0, nod: 0, tilt: 0 };
     this.waitingForHub = false;
     this.previousEnergy = 0;
     this.resize = new ResizeObserver(() => this.fit());
@@ -441,6 +442,9 @@ export class PuppetRuntime {
     if (active && !this.clipGesture && !this.gestureState) this.beginGesture('waiting', true);
     else if (this.gestureState?.name === 'waiting') this.releaseGesture(performance.now());
   }
+  listening(motion) {
+    this.listeningMotion = motion;
+  }
   releaseGesture(now) {
     this.gestureState = { name: this.gestureState?.name, from: copyOffsets(this.gestureOffsets), to: {}, started: now, releaseAt: Infinity, releasing: true };
   }
@@ -501,6 +505,19 @@ export class PuppetRuntime {
       if (!bone) continue;
       this.gestureRotation.setFromEuler(new THREE.Euler(...values));
       bone.quaternion.multiply(this.gestureRotation);
+    }
+  }
+  updateListening() {
+    const { lean, nod, tilt } = this.listeningMotion;
+    const spine = this.bones.get('spine')?.node;
+    const head = this.bones.get('head')?.node;
+    if (spine) {
+      this.gestureRotation.setFromEuler(new THREE.Euler(lean, 0, 0));
+      spine.quaternion.multiply(this.gestureRotation);
+    }
+    if (head) {
+      this.gestureRotation.setFromEuler(new THREE.Euler(nod, 0, tilt));
+      head.quaternion.multiply(this.gestureRotation);
     }
   }
   updateMood(now, manager) {
@@ -579,6 +596,7 @@ export class PuppetRuntime {
     this.updatePose(now);
     this.updateSeatedClearance();
     this.updateGesture(now);
+    this.updateListening();
     this.updateFace(now);
     this.vrm?.update(delta);
     if (this.clipAction) this.renderer.render(this.scene, this.camera);

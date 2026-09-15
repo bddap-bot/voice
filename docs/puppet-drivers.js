@@ -142,4 +142,51 @@ export class TranscriptActionDriver {
   }
 }
 
+export class ListeningReactionDriver {
+  constructor(apply, timing = {}) {
+    this.apply = apply;
+    this.now = timing.now ?? (() => performance.now());
+    this.schedule = timing.schedule ?? ((apply) => setTimeout(apply, 50));
+    this.active = false;
+    this.startedAt = 0;
+    this.stoppedAt = 0;
+    this.scheduled = false;
+  }
+  activity(active) {
+    const now = this.now();
+    if (active) {
+      if (this.active) return;
+      this.active = true;
+      this.startedAt = now;
+      this.stoppedAt = 0;
+    } else {
+      if (!this.active) return;
+      this.active = false;
+      this.stoppedAt = now;
+    }
+    if (!this.scheduled) this.tick();
+  }
+  tick() {
+    this.scheduled = false;
+    const now = this.now();
+    const attack = Math.min(1, Math.max(0, (now - this.startedAt) / 240));
+    const release = this.active ? 1 : Math.min(1, Math.max(0, (this.stoppedAt + 420 - now) / 300));
+    const amount = attack * release;
+    const elapsed = Math.max(0, now - this.startedAt);
+    const nod = this.active && elapsed > 900 ? Math.sin((elapsed - 900) * Math.PI / 520) * 0.035 * amount : 0;
+    const tilt = this.active && elapsed > 2100 ? Math.sin((elapsed - 2100) * Math.PI / 1700) * 0.055 * amount : 0;
+    this.apply({ amount, lean: amount ? -0.055 * amount : 0, nod, tilt });
+    if ((this.active || amount > 0) && !this.scheduled) {
+      this.scheduled = true;
+      this.schedule(() => this.tick());
+    }
+  }
+  reset() {
+    this.active = false;
+    this.startedAt = 0;
+    this.stoppedAt = 0;
+    this.apply({ amount: 0, lean: 0, nod: 0, tilt: 0 });
+  }
+}
+
 export { LABELS };

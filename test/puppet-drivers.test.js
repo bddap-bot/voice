@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { EmbeddingActionClassifier, TranscriptActionDriver, keywordMood } from '../docs/puppet-drivers.js';
+import { EmbeddingActionClassifier, ListeningReactionDriver, TranscriptActionDriver, keywordMood } from '../docs/puppet-drivers.js';
 
 const vectors = { yes: [1, 0], agree: [1, 0], sorry: [0, 1], mistake: [0, 1] };
 const loadEmbedder = async () => async (texts) => texts.map((text) => {
@@ -88,4 +88,28 @@ test('transcript-ahead actions wait for audio and retain a minimum spoken-order 
   scheduled.shift().apply();
   await driver.tail;
   assert.deepEqual(applied, ['pleased', 'sad']);
+});
+
+test('input activity leans in, adds small head motion, then returns to idle after a beat', () => {
+  let now = 0;
+  const scheduled = [];
+  const frames = [];
+  const driver = new ListeningReactionDriver((frame) => frames.push({ now, ...frame }), { now: () => now, schedule: (apply) => scheduled.push(apply) });
+  const advance = (at) => {
+    now = at;
+    scheduled.shift()();
+  };
+  driver.activity(true);
+  advance(240);
+  advance(1100);
+  advance(2300);
+  driver.activity(false);
+  advance(2500);
+  advance(2720);
+  assert.equal(frames[1].amount, 1);
+  assert.equal(frames[1].lean, -0.055);
+  assert.ok(Math.abs(frames[2].nod) > 0.02);
+  assert.ok(Math.abs(frames[3].tilt) > 0.01);
+  assert.ok(frames[4].amount > 0 && frames[4].amount < 1);
+  assert.deepEqual(frames.at(-1), { now: 2720, amount: 0, lean: 0, nod: 0, tilt: 0 });
 });

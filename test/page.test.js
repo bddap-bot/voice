@@ -335,7 +335,7 @@ setTimeout(() => {
   const settled = canvas.clientHeight;
   canvas.width = 100;
   canvas.height = 1000;
-  document.body.dataset.layoutTest = JSON.stringify({ heights, errors, settled, filled: document.querySelector('#toggle').clientHeight, afterBufferChange: canvas.clientHeight });
+  document.body.dataset.layoutTest = JSON.stringify({ heights, errors, settled, afterBufferChange: canvas.clientHeight });
 }, 1500);
 </script></body></html>`, { scale: 1.25, size: '1000,700' });
 }
@@ -347,7 +347,7 @@ test('the puppet canvas keeps one layout height across resize-observer ticks', a
   assert.ok(result?.heights.length >= 1, stderr);
   assert.deepEqual(result.heights, result.heights.map(() => result.heights[0]), `heights across observer ticks: ${result.heights.join(' ')}`);
   assert.deepEqual(result.errors, []);
-  assert.equal(result.settled, result.filled, 'canvas must fill the toggle');
+  assert.equal(result.settled, result.heights[0], 'canvas must retain its projected height');
   assert.equal(result.afterBufferChange, result.settled, 'layout height must not follow the drawing buffer');
 });
 
@@ -365,12 +365,12 @@ for (const viewport of layoutViewports) test(`stage UI stays outside the puppet 
   const { stdout, stderr } = await runPuppetPage(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">${style}</head><body>${chrome}${main}<script>
   document.documentElement.style.setProperty('--visual-viewport-height', Math.round(visualViewport?.height ?? innerHeight) + 'px');
   document.querySelector('main').style.setProperty('--stage-height', Math.round(visualViewport?.height ?? innerHeight) + 'px');
-  const puppet = document.querySelector('#toggle').getBoundingClientRect();
-  const selectors = ['header', '#saved', '.puppet-picker', '#puppet-credit', '#elapsed', '.share', '.display', '.ledger'];
+  const puppet = document.querySelector('#puppet').getBoundingClientRect();
+  const selectors = ['header', '#saved', '#toggle', '.puppet-picker', '#puppet-credit', '#elapsed', '.share', '.display', '.ledger'];
   const rect = (element) => { const value = element.getBoundingClientRect(); return { left: value.left, right: value.right, top: value.top, bottom: value.bottom }; };
   const overlaps = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
   const result = selectors.map((selector) => ({ selector, rect: rect(document.querySelector(selector)) })).filter((item) => overlaps(item.rect, puppet));
-  document.body.dataset.overlapTest = JSON.stringify({ puppet: rect(document.querySelector('#toggle')), result, pageHeight: document.documentElement.scrollHeight });
+  document.body.dataset.overlapTest = JSON.stringify({ puppet: rect(document.querySelector('#puppet')), result, pageHeight: document.documentElement.scrollHeight });
   </script></body></html>`, { scale: viewport.scale, size: `${viewport.width},${viewport.height}`, mobile: viewport.mobile });
   const encoded = /data-overlap-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   const result = JSON.parse(encoded ?? 'null');

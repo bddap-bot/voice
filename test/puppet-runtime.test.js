@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import test from 'node:test';
 import * as THREE from 'three';
+import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { MOOD_TABLE, PuppetRuntime, audioEnergy, audioVisemes, retargetMixamoClip, shouldBeat } from '../src/puppet.js';
 
 function waveform(amplitude) {
@@ -335,6 +337,81 @@ test('Mixamo rest rotations preserve an upright VRM bone-space invariant', () =>
       foot.getWorldPosition(footWorld);
       assert.ok(footWorld.y < hipsWorld.y);
     }
+  }
+});
+
+test('real Mixamo rest frames preserve signed standing and seated joint angles', () => {
+  const load = (name) => {
+    const bytes = fs.readFileSync(new URL(`fixtures/${name}`, import.meta.url));
+    return new FBXLoader().parse(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), '');
+  };
+  const mockVrm0 = () => {
+    const scene = new THREE.Group();
+    scene.rotation.y = Math.PI;
+    const nodes = {};
+    const bone = (name, parent, position) => {
+      const node = new THREE.Bone();
+      node.name = `Normalized_${name}`;
+      node.position.fromArray(position);
+      (parent ?? scene).add(node);
+      nodes[name] = node;
+      return node;
+    };
+    const hips = bone('hips', null, [0, 0.9, 0]);
+    const spine = bone('spine', hips, [0, 0.1, 0]);
+    const chest = bone('chest', spine, [0, 0.15, 0]);
+    const upperChest = bone('upperChest', chest, [0, 0.1, 0]);
+    const neck = bone('neck', upperChest, [0, 0.15, 0]);
+    bone('head', neck, [0, 0.1, 0]);
+    for (const [side, direction] of [['left', -1], ['right', 1]]) {
+      const shoulder = bone(`${side}Shoulder`, upperChest, [direction * 0.05, 0.1, 0]);
+      const upperArm = bone(`${side}UpperArm`, shoulder, [direction * 0.1, 0, 0]);
+      const lowerArm = bone(`${side}LowerArm`, upperArm, [direction * 0.25, 0, 0]);
+      bone(`${side}Hand`, lowerArm, [direction * 0.25, 0, 0]);
+      const upperLeg = bone(`${side}UpperLeg`, hips, [direction * 0.1, -0.05, 0]);
+      const lowerLeg = bone(`${side}LowerLeg`, upperLeg, [0, -0.4, 0]);
+      const foot = bone(`${side}Foot`, lowerLeg, [0, -0.4, 0]);
+      bone(`${side}Toes`, foot, [0, -0.05, 0.1]);
+    }
+    return { scene, nodes, meta: { metaVersion: '0' }, humanoid: { getNormalizedBoneNode: (name) => nodes[name], getRawBoneNode: (name) => nodes[name] } };
+  };
+  const position = (node) => node.getWorldPosition(new THREE.Vector3());
+  const signedAngle = (first, second) => THREE.MathUtils.radToDeg(Math.atan2(first.clone().cross(second).x, first.dot(second)));
+  const measurements = (nodes) => {
+    const torsoDown = position(nodes.hips).sub(position(nodes.spine));
+    const torsoUp = torsoDown.clone().negate();
+    const arm = position(nodes.leftLowerArm).sub(position(nodes.leftUpperArm));
+    const thigh = position(nodes.leftLowerLeg).sub(position(nodes.leftUpperLeg));
+    const shin = position(nodes.leftFoot).sub(position(nodes.leftLowerLeg));
+    return { arm: signedAngle(arm, torsoDown), knee: signedAngle(thigh, shin), hip: signedAngle(torsoUp, thigh) };
+  };
+  const sourceNodes = (source) => Object.fromEntries([
+    ['hips', 'mixamorigHips'], ['spine', 'mixamorigSpine'], ['leftUpperArm', 'mixamorigLeftArm'],
+    ['leftLowerArm', 'mixamorigLeftForeArm'], ['leftUpperLeg', 'mixamorigLeftUpLeg'],
+    ['leftLowerLeg', 'mixamorigLeftLeg'], ['leftFoot', 'mixamorigLeftFoot'],
+  ].map(([key, name]) => [key, source.getObjectByName(name)]));
+  for (const name of ['mixamo-standing.fbx', 'mixamo-seated.fbx']) {
+    const source = load(name);
+    const sourceHipsRestY = source.getObjectByName('mixamorigHips').position.y;
+    const vrm = mockVrm0();
+    vrm.scene.updateMatrixWorld(true);
+    const clip = retargetMixamoClip(source, vrm);
+    const sourceMixer = new THREE.AnimationMixer(source);
+    const targetMixer = new THREE.AnimationMixer(vrm.scene);
+    sourceMixer.clipAction(source.animations[0]).play();
+    targetMixer.clipAction(clip).play();
+    sourceMixer.setTime(2);
+    targetMixer.setTime(2);
+    source.updateMatrixWorld(true);
+    vrm.scene.updateMatrixWorld(true);
+    const expected = measurements(sourceNodes(source));
+    const actual = measurements(vrm.nodes);
+    for (const joint of ['arm', 'knee', 'hip']) {
+      assert.ok(Math.abs(actual[joint] - expected[joint]) < 5, `${name} ${joint}: ${actual[joint]} versus ${expected[joint]}`);
+    }
+    const hipsTrack = clip.tracks.find((track) => track.name === 'Normalized_hips.position');
+    const sourceTrack = source.animations[0].tracks.find((track) => track.name.endsWith('mixamorigHips.position'));
+    assert.ok(Math.abs(hipsTrack.values[1] - sourceTrack.values[1] * 0.9 / sourceHipsRestY) < 1e-5);
   }
 });
 

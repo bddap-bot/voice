@@ -39,10 +39,13 @@ export function retargetMixamoClip(source, vrm) {
   const clip = source.animations?.[0];
   if (!clip) throw new Error('FBX has no animation clip');
   source.updateMatrixWorld?.(true);
+  vrm.scene?.updateMatrixWorld?.(true);
   const tracks = [];
   const restRotationInverse = new THREE.Quaternion();
   const parentRestWorldRotation = new THREE.Quaternion();
   const rotation = new THREE.Quaternion();
+  const sourcePosition = new THREE.Vector3();
+  const targetPosition = new THREE.Vector3();
   for (const track of clip.tracks) {
     const humanoidName = mixamoBoneName(track.name);
     const node = humanoidName && vrm.humanoid?.getNormalizedBoneNode(humanoidName);
@@ -65,7 +68,14 @@ export function retargetMixamoClip(source, vrm) {
       const target = new THREE.QuaternionKeyframeTrack(`${node.name}.quaternion`, track.times, values);
       tracks.push(target);
     } else if (humanoidName === 'hips' && track.name.endsWith('.position')) {
-      const values = Float32Array.from(track.values, (value, index) => value * 0.01 * (vrm.meta?.metaVersion === '0' && index % 3 !== 1 ? -1 : 1));
+      const sourceName = track.name.slice(0, track.name.lastIndexOf('.')).replace(/^.*\[|\]$/g, '');
+      const sourceNode = source.getObjectByName?.(sourceName);
+      const rawHips = vrm.humanoid?.getRawBoneNode?.('hips');
+      sourcePosition.copy(sourceNode?.position ?? new THREE.Vector3(0, 100, 0));
+      rawHips?.getWorldPosition(targetPosition);
+      vrm.scene?.worldToLocal?.(targetPosition);
+      const scale = sourcePosition.y ? Math.abs(targetPosition.y) / Math.abs(sourcePosition.y) : 0.01;
+      const values = Float32Array.from(track.values, (value, index) => value * scale * (vrm.meta?.metaVersion === '0' && index % 3 !== 1 ? -1 : 1));
       tracks.push(new THREE.VectorKeyframeTrack(`${node.name}.position`, track.times, values));
     }
   }

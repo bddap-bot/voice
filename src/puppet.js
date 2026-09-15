@@ -21,7 +21,8 @@ const GESTURES = {
   waiting: { spine: [-0.08, 0.12, 0], head: [0.12, -0.18, 0.08], leftUpperArm: [-0.28, 0, -0.15], rightUpperArm: [-0.58, 0, 0.4], rightLowerArm: [-0.92, 0, 0.26] },
 };
 
-const CLIP_GESTURES = new Set(['point', 'nod', 'shrug', 'think', 'wave']);
+const CLIP_GESTURES = new Set(['point', 'nod', 'shrug', 'think', 'wave', 'no', 'laugh', 'clap', 'bow', 'thumbs-up', 'stretch', 'look-around']);
+const IDLE_CLIPS = { stand: ['idle', 'idle-2', 'idle-3'], sit: ['sit-idle', 'sit-idle-2'] };
 
 const GAZE_POINTS = {
   camera: [0, 1.25, 6.4],
@@ -186,6 +187,8 @@ export class PuppetRuntime {
     this.clipAction = null;
     this.clipFallback = null;
     this.clipGesture = null;
+    this.idleClip = null;
+    this.nextIdleAt = Infinity;
     this.clock = new THREE.Clock();
     this.poseName = 'sit';
     this.bones = new Map();
@@ -289,7 +292,7 @@ export class PuppetRuntime {
     this.clips.clear();
     this.clips.set(initialClip.action, preparedClip);
     this.idleRoot.add(vrm.scene);
-    this.playClip('idle', 'idle');
+    this.playIdle();
     return true;
   }
   async loadClips(entries) {
@@ -377,6 +380,7 @@ export class PuppetRuntime {
     if (resolved === 'point_at') this.setGaze('panel', 2200);
     if (resolved === 'think') this.setGaze('away', 1800);
     if (CLIP_GESTURES.has(resolved)) {
+      if (this.poseName === 'sit' && this.clipStance(resolved) === 'stand') return false;
       this.gestureState = null;
       this.gestureOffsets = {};
       this.playClip(resolved, this.poseName === 'sit' ? 'sit-idle' : 'idle');
@@ -386,6 +390,25 @@ export class PuppetRuntime {
       this.clipGesture = null;
       this.beginGesture(resolved, false);
     }
+    return true;
+  }
+  clipStance(name) {
+    const position = this.clips.get(name)?.tracks.find((track) => track.name.endsWith('.position'));
+    const stand = this.clips.get('idle')?.tracks.find((track) => track.name.endsWith('.position'));
+    const sit = this.clips.get('sit-idle')?.tracks.find((track) => track.name.endsWith('.position'));
+    if (!position || !stand || !sit) return 'stand';
+    const height = position.values[1];
+    return Math.abs(height - sit.values[1]) < Math.abs(height - stand.values[1]) ? 'sit' : 'stand';
+  }
+  playIdle(now = performance.now()) {
+    const pose = this.poseName === 'sit' ? 'sit' : 'stand';
+    const available = IDLE_CLIPS[pose].filter((name) => this.clips.has(name));
+    const choices = available.filter((name) => name !== this.idleClip);
+    const name = choices[Math.floor(Math.random() * choices.length)] ?? available[0];
+    if (!name) return;
+    this.idleClip = name;
+    this.nextIdleAt = available.length > 1 ? now + 7000 + Math.random() * 7000 : Infinity;
+    this.playClip(name, name);
   }
   playClip(name, fallback) {
     const clip = this.clips.get(name);
@@ -426,12 +449,15 @@ export class PuppetRuntime {
     this.moodStarted = performance.now();
   }
   updatePose(now) {
+    if (this.clipAction?.isRunning() && this.clipFallback === this.idleClip && now >= this.nextIdleAt) {
+      this.playIdle(now);
+      return;
+    }
     if (this.clipAction && !this.clipAction.isRunning() && this.clipFallback) {
-      const fallback = this.clipFallback;
       this.clipAction = null;
       this.clipFallback = null;
       this.clipGesture = null;
-      this.playClip(fallback, fallback);
+      this.playIdle(now);
       if (this.waitingForHub) this.beginGesture('waiting', true);
     }
   }

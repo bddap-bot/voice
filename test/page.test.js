@@ -114,7 +114,7 @@ const browserSetup = `
 window.addEventListener('error', (event) => { document.body.dataset.browserError = event.message; });
 window.addEventListener('unhandledrejection', (event) => { document.body.dataset.browserError = String(event.reason?.stack || event.reason); });
 globalThis.__voiceLoadEmbedder = async () => async (texts) => texts.map((text) => {
-  const labels = [/yes|correct|agree|ahead/, /know|either|preference/, /reason|consider|moment|think/, /look|notice|detail/, /hello|goodbye|welcome/, /sorry|forgive|fault|mistake/, /unexpected|astonish|believe/, /hilarious|funny|joke|laugh/, /delight|excellent|wonderful/, /understand|confus|sense/, /convinced|doubt|question/, /considering|think|perhaps|approach/, /careful|warning|danger/, /exhaust|sleep|drowsy|rest/, /wonder|why|learn/];
+  const labels = [/yes|correct|agree|ahead/, /know|either|preference/, /reason|consider|moment|think/, /look|notice|detail/, /hello|goodbye|welcome/, /disagree|reject|incorrect/, /laughing|laughed/, /clap|applaud/, /honor|respect/, /thumbs up|endorsement/, /stretch|loosen/, /around|surroundings/, /sorry|forgive|fault|mistake/, /unexpected|astonish|believe/, /hilarious|funny|joke|laugh/, /delight|excellent|wonderful/, /understand|confus|sense/, /convinced|doubt|question/, /considering|think|perhaps|approach/, /careful|warning|danger/, /exhaust|sleep|drowsy|rest/, /wonder|why|learn/];
   const lower = text.toLowerCase();
   const vector = labels.map((pattern) => pattern.test(lower) ? 1 : 0.001);
   return vector;
@@ -493,6 +493,17 @@ window.addEventListener('test-ready', () => {
 `);
   const encoded = /data-driver-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   assert.deepEqual(JSON.parse(encoded ?? 'null'), [['waiting', true], ['mood', 'apologetic']], stderr);
+});
+
+test('output transcript can reach a catalog clip action', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.output_transcript.delta', delta: 'Let us applaud that achievement.' }) }));
+  setTimeout(() => { document.body.dataset.catalogActionTest = JSON.stringify(testPuppet.calls.filter(([name]) => name === 'gesture')); }, 20);
+});
+`);
+  const encoded = /data-catalog-action-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), [['gesture', 'clap', null]], stderr);
 });
 
 test('a classified point is dropped until the display has a target', async () => {

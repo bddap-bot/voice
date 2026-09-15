@@ -88,7 +88,7 @@ test('waiting holds a readable gesture until the hub result releases it', () => 
 
 test('explicit gestures replace a hub wait and beats cannot replace either', () => {
   const played = [];
-  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), { waitingForHub: true, gestureState: { name: 'waiting' }, gestureOffsets: { head: [1, 0, 0] }, clips: new Map(), clipGesture: null, poseName: 'sit', gazeDestination: new THREE.Vector3(), playClip: (name) => played.push(name) });
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), { waitingForHub: true, gestureState: { name: 'waiting' }, gestureOffsets: { head: [1, 0, 0] }, clips: new Map(), clipGesture: null, poseName: 'stand', gazeDestination: new THREE.Vector3(), playClip: (name) => played.push(name) });
   runtime.gesture('beat');
   assert.equal(runtime.gestureState.name, 'waiting');
   runtime.gesture('nod');
@@ -101,9 +101,46 @@ test('explicit gestures replace a hub wait and beats cannot replace either', () 
   runtime.gesture('point', 'panel');
   assert.equal(runtime.gestureState.name, 'point_at');
   assert.equal(runtime.clipGesture, null);
-  assert.deepEqual(played, ['nod', 'sit-idle']);
+  assert.deepEqual(played, ['nod', 'idle']);
   runtime.gesture('beat');
   assert.equal(runtime.gestureState.name, 'point_at');
+});
+
+test('standing clips are refused while seated from their root height', () => {
+  const clip = (name, height) => new THREE.AnimationClip(name, 1, [new THREE.NumberKeyframeTrack('.position[y]', [0], [height])]);
+  const played = [];
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+    waitingForHub: false,
+    gestureState: null,
+    gestureOffsets: {},
+    clips: new Map([['idle', clip('idle', 1)], ['sit-idle', clip('sit-idle', 0.5)], ['clap', clip('clap', 0.95)]]),
+    clipGesture: null,
+    poseName: 'sit',
+    playClip: (name) => played.push(name),
+  });
+  assert.equal(runtime.gesture('clap'), false);
+  assert.deepEqual(played, []);
+});
+
+test('idle variants use random dwell and never repeat consecutively', () => {
+  const played = [];
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+    clips: new Map(['idle', 'idle-2', 'idle-3'].map((name) => [name, {}])),
+    poseName: 'stand',
+    idleClip: 'idle',
+    playClip: (name) => played.push(name),
+  });
+  const random = Math.random;
+  Math.random = () => 0;
+  try {
+    runtime.playIdle(1000);
+    const firstDeadline = runtime.nextIdleAt;
+    runtime.playIdle(firstDeadline);
+  } finally {
+    Math.random = random;
+  }
+  assert.deepEqual(played, ['idle-2', 'idle']);
+  assert.equal(runtime.nextIdleAt, 15000);
 });
 
 test('the look-at target glances to a fresh panel and returns to camera dwell', () => {
@@ -172,6 +209,9 @@ test('a hub wait resumes after an explicit clip finishes', () => {
     clipFallback: 'sit-idle',
     gestureState: null,
     gestureOffsets: {},
+    clips: new Map([['sit-idle', {}]]),
+    poseName: 'sit',
+    idleClip: null,
     playClip() {},
   });
   runtime.updatePose(performance.now());

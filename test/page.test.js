@@ -157,17 +157,19 @@ globalThis.RTCPeerConnection = FakePeerConnection;
 globalThis.sentLiveEvents = [];
 window.addEventListener('load', () => {
   const poll = globalThis.setInterval.bind(globalThis);
+  globalThis.statusTextWrites = [];
+  new MutationObserver(() => statusTextWrites.push(document.querySelector('#status').textContent)).observe(document.querySelector('#status'), { childList: true, characterData: true, subtree: true });
   document.querySelector('#token').value = btoa(JSON.stringify({ endpoint_id: 'test', secret: 'test' }));
   document.querySelector('#connect').click();
   const ready = poll(() => {
-    if (document.querySelector('#status').textContent !== 'ready' || document.querySelector('#puppet').getAttribute('aria-disabled') === 'true') return;
+    if (document.querySelector('#puppet').getAttribute('aria-disabled') === 'true') return;
     clearInterval(ready);
     document.querySelector('#puppet').click();
     const started = poll(() => {
       const status = document.querySelector('#status').textContent;
-      if (status !== 'live' && !status.startsWith('conversation could not start:')) return;
+      if (document.querySelector('#puppet').getAttribute('aria-pressed') !== 'true' && !status.startsWith('conversation could not start:')) return;
       clearInterval(started);
-      document.body.dataset.startTest = status;
+      document.body.dataset.startTest = status || 'puppet';
       window.dispatchEvent(new Event('test-ready'));
     }, 10);
   }, 10);
@@ -176,9 +178,9 @@ window.addEventListener('load', () => {
 
 const appendEntries = `
 const append = (type, delta) => testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type, delta }) }));
-for (let index = 0; index < 5; index++) {
-  append('session.input_transcript.delta', 'heard ' + index);
-  append('session.output_transcript.delta', 'spoken ' + index);
+for (let index = 0; index < 10; index++) {
+  append('session.input_transcript.delta', 'question ' + index);
+  testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.delegation.created', delegation: { id: 'scroll_' + index } }) }));
 }
 `;
 
@@ -362,7 +364,7 @@ for (const viewport of layoutViewports) test(`stage UI stays outside the puppet 
   const index = await readFile(new URL('../docs/index.html', import.meta.url), 'utf8');
   const style = /<style>[\s\S]*?<\/style>/.exec(index)[0];
   const main = /<main[\s\S]*?<\/main>/.exec(index)[0].replace('class="hidden"', '');
-  const chrome = '<header><h1>voice</h1><span id="status">ready</span></header><section id="saved" class="saved"><span>device authenticated</span><button>Forget token</button></section>';
+  const chrome = '<header><h1>voice</h1><span id="status"></span></header><section id="saved" class="saved"><span>device authenticated</span><button>Forget token</button></section>';
   const { stdout, stderr } = await runPuppetPage(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">${style}</head><body>${chrome}${main}<script>
   document.documentElement.style.setProperty('--visual-viewport-height', Math.round(visualViewport?.height ?? innerHeight) + 'px');
   document.querySelector('main').style.setProperty('--stage-height', Math.round(visualViewport?.height ?? innerHeight) + 'px');
@@ -421,9 +423,41 @@ window.addEventListener('test-ready', () => {
 });
 `);
   const observed = /data-start-test="([^"]*)"/.exec(stdout)?.[1] ?? 'start path did not settle';
-  assert.equal(observed, 'live', `${observed}\n${stderr}`);
+  assert.equal(observed, 'puppet', `${observed}\n${stderr}`);
   const encoded = /data-puppet-toggle-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   assert.deepEqual(JSON.parse(encoded ?? 'null'), ['stand', 'listen', 'sit'], stderr);
+});
+
+for (const viewport of layoutViewports) test(`puppet states have no duplicate text at ${viewport.name} size`, async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  const text = () => document.body.innerText;
+  const listening = text();
+  testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.input_transcript.delta', delta: 'Where is the report?' }) }));
+  testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.delegation.created', delegation: { id: 'state_1' } }) }));
+  const waiting = text();
+  deliverRelay(new TextEncoder().encode('hub\\n' + JSON.stringify({ id: 'state_1', reply: 'On the display.', timing_ms: 12, stamp: 'state_stamp' })));
+  setTimeout(() => {
+    const answered = text();
+    document.querySelector('#puppet').click();
+    setTimeout(() => { document.body.dataset.stateTextTest = JSON.stringify({ states: { listening, waiting, answered, ended: text() }, statusTextWrites }); }, 30);
+  }, 30);
+});
+`, { scale: viewport.scale, size: `${viewport.width},${viewport.height}`, mobile: viewport.mobile });
+  const encoded = /data-state-text-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  const result = JSON.parse(encoded ?? 'null');
+  assert.ok(result, stderr);
+  const states = result.states;
+  const removed = ['ready', 'opening microphone', 'live', 'conversation off', 'session ended', 'listening', 'waiting for the hub', 'waiting…'];
+  for (const [state, text] of Object.entries(states)) {
+    for (const value of removed) assert.equal(text.toLowerCase().includes(value.toLowerCase()), false, `${viewport.name} ${state} exposes ${value}: ${text}`);
+  }
+  for (const text of result.statusTextWrites) {
+    for (const value of removed) assert.equal(text.toLowerCase().includes(value.toLowerCase()), false, `${viewport.name} header exposed ${value}: ${text}`);
+  }
+  assert.match(states.waiting, /question: Where is the report\?/);
+  assert.doesNotMatch(states.waiting, /answer:/);
+  assert.match(states.answered, /question: Where is the report\?[\s\S]*answer: On the display\./);
 });
 
 test('a forced page error reaches the fleet catcher line in headless Chromium', async () => {
@@ -524,6 +558,7 @@ window.addEventListener('test-ready', () => {
   log.dispatchEvent(new Event('scroll'));
   const before = log.scrollTop;
   append('session.input_transcript.delta', 'newest');
+  testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.delegation.created', delegation: { id: 'scroll_newest' } }) }));
   document.body.dataset.pauseTest = String(log.scrollTop === before);
 });
 `);

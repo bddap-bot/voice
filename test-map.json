@@ -12,7 +12,7 @@
       "why": "the browser puppet runtime, authenticated transfer/cache client, page wiring, and reproducible Three/VRM bundle"
     },
     {
-      "paths": ["docs/live.js", "test/**", "test-map.json"],
+      "paths": ["docs/live.js", "test/**", "scripts/smoke.mjs", ".github/workflows/smoke.yml", "test-map.json"],
       "tests": ["node --test test/*.test.js"],
       "why": "the continuous-conversation core: cap shutoff and the complete delegated-versus-alone turn ledger"
     },

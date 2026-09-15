@@ -6,6 +6,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
+import { assessSmoke, smokeLimits, smokeViewports } from './smoke-measurements.js';
 
 const execute = promisify(execFile);
 
@@ -354,11 +355,18 @@ test('the puppet canvas keeps one layout height across resize-observer ticks', a
   assert.equal(result.afterBufferChange, result.settled, 'layout height must not follow the drawing buffer');
 });
 
-const layoutViewports = [
-  { name: 'phone', width: 390, height: 844, scale: 3, mobile: true },
-  { name: 'laptop', width: 1440, height: 900, scale: 1, mobile: false },
-  { name: 'tv', width: 1920, height: 1080, scale: 1, mobile: false },
-];
+const layoutViewports = smokeViewports;
+
+test('smoke assessment rejects every measured browser failure and accepts a clean run', () => {
+  const clean = { cls: smokeLimits.cumulativeLayoutShift, moves: [], overlaps: [], heights: [{ canvas: 100, stage: 200 }, { canvas: 101, stage: 201 }], blankFrames: [], frameGaps: [], errors: [], telemetryRejections: [] };
+  assert.equal(assessSmoke(clean).pass, true);
+  for (const mutation of [
+    { cls: smokeLimits.cumulativeLayoutShift + 0.001 },
+    { moves: [{}] }, { overlaps: [{}] },
+    { heights: [{ canvas: 100, stage: 200 }, { canvas: 102, stage: 200 }] },
+    { blankFrames: [1] }, { frameGaps: [51] }, { errors: ['fault'] }, { telemetryRejections: ['rejected'] },
+  ]) assert.equal(assessSmoke({ ...clean, ...mutation }).pass, false, JSON.stringify(mutation));
+});
 
 for (const viewport of layoutViewports) test(`stage UI stays outside the puppet projection at ${viewport.name} size`, async () => {
   const index = await readFile(new URL('../docs/index.html', import.meta.url), 'utf8');

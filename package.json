@@ -3,6 +3,7 @@
   "type": "module",
   "scripts": {
     "build": "esbuild src/puppet.js --bundle --format=esm --minify --legal-comments=none --outfile=docs/puppet.js",
+    "smoke": "node scripts/smoke.mjs",
     "test": "node --test test/*.test.js"
   },
   "dependencies": {

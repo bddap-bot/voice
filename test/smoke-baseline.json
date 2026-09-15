@@ -1,0 +1,5 @@
+{
+  "phone": ["transitionFrames"],
+  "laptop": ["overlaps"],
+  "tv": ["overlaps"]
+}

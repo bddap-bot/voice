@@ -23,3 +23,5 @@ Hub replies can add markdown, a tappable link, or an image to the adjacent displ
 Speech received after a hub reply is tagged “model after hub reply,” a chronological claim rather than proof that the model consumed that reply. The adjacent delegation record remains the authoritative record of what went to the hub and what came back.
 
 Generate the device credential with `voice-web token` on bothouse. Run the page tests with `node --test test/*.test.js`.
+
+Run `npm run smoke -- --output smoke-artifacts` for the public browser smoke. It records a pass/fail table, JSON measurements, viewport frames, and a short GIF for phone, laptop, and TV layouts. The workflow uses the checked-in known-failure baseline so new regressions fail the job while open layout findings remain visible in its artifact. A hub with an authenticated local bridge can run the same measurements with `--private`.

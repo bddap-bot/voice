@@ -29,6 +29,21 @@ function binaryFrame(id, bytes) {
   return frame;
 }
 
+function clipBinaryFrame(id, bytes) {
+  const prefix = new TextEncoder().encode(`clip-chunk\n${id}\n`);
+  const frame = new Uint8Array(prefix.length + bytes.length);
+  frame.set(prefix);
+  frame.set(bytes, prefix.length);
+  return frame;
+}
+
+async function deliverClip(channel, entry, original) {
+  const compressed = gzipSync(original);
+  await channel.receive(puppetFrame('clip-start', JSON.stringify({ id: entry.name, size: compressed.length, originalSize: original.length, contentHash: entry.contentHash, encoding: 'gzip' })));
+  await channel.receive(clipBinaryFrame(entry.name, compressed));
+  await channel.receive(puppetFrame('clip-end', entry.name));
+}
+
 async function deliverPuppet(channel, id, original, contentHash = '') {
   const compressed = gzipSync(original);
   await channel.receive(puppetFrame('puppet-start', JSON.stringify({ id, size: compressed.length, originalSize: original.length, contentHash, encoding: 'gzip' })));
@@ -72,6 +87,28 @@ test('private puppet caches are isolated by authenticated endpoint', async () =>
   await new Promise((resolve) => setImmediate(resolve));
   await deliverPuppet(channel, '42', Uint8Array.of(2));
   assert.deepEqual(new Uint8Array(await second), Uint8Array.of(2));
+  assert.equal(cache.entries.size, 2);
+});
+
+test('clips reuse the puppet cache by content hash and changed content refetches', async () => {
+  const sent = [];
+  const cache = cacheStorage();
+  const channel = new PuppetChannel(async (value) => sent.push(value), cache, () => 'scope');
+  const firstEntry = { name: 'idle.fbx', format: 'fbx', contentHash: 'idle-a' };
+  const first = channel.clipBytes(firstEntry);
+  await new Promise((resolve) => setImmediate(resolve));
+  await deliverClip(channel, firstEntry, Uint8Array.of(1, 2));
+  assert.deepEqual(new Uint8Array(await first), Uint8Array.of(1, 2));
+  await new Promise((resolve) => setImmediate(resolve));
+  const before = sent.length;
+  assert.deepEqual(new Uint8Array(await channel.clipBytes(firstEntry)), Uint8Array.of(1, 2));
+  assert.equal(sent.length, before);
+  const changedEntry = { ...firstEntry, contentHash: 'idle-b' };
+  const changed = channel.clipBytes(changedEntry);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sent.at(-1), 'clip\n{"id":"idle.fbx","encodings":["gzip"]}');
+  await deliverClip(channel, changedEntry, Uint8Array.of(3));
+  assert.deepEqual(new Uint8Array(await changed), Uint8Array.of(3));
   assert.equal(cache.entries.size, 2);
 });
 

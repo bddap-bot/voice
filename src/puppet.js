@@ -227,7 +227,7 @@ export class PuppetRuntime {
     cancelAnimationFrame(this.frame);
     this.frame = 0;
   }
-  async load(bytes, valid = () => true, beforeCommit = async () => {}) {
+  async load(bytes, initialClip, valid = () => true, beforeCommit = async () => {}) {
     const loader = new GLTFLoader();
     loader.register((parser) => new VRMLoaderPlugin(parser));
     const url = URL.createObjectURL(new Blob([bytes], { type: 'model/gltf-binary' }));
@@ -250,10 +250,6 @@ export class PuppetRuntime {
       VRMUtils.deepDispose(vrm.scene);
       return false;
     }
-    if (this.vrm) {
-      this.idleRoot.remove(this.vrm.scene);
-      VRMUtils.deepDispose(this.vrm.scene);
-    }
     const box = new THREE.Box3().setFromObject(vrm.scene);
     const size = box.getSize(new THREE.Vector3());
     const scale = size.y ? 2.7 / size.y : 1;
@@ -264,7 +260,15 @@ export class PuppetRuntime {
     vrm.scene.position.y -= fitted.min.y;
     vrm.scene.position.z -= center.z;
     vrm.scene.traverse((object) => { object.frustumCulled = false; });
-    this.idleRoot.add(vrm.scene);
+    const preparedClip = await animationClip(initialClip.bytes, initialClip.format, vrm);
+    if (!valid()) {
+      VRMUtils.deepDispose(vrm.scene);
+      return false;
+    }
+    if (this.vrm) {
+      this.idleRoot.remove(this.vrm.scene);
+      VRMUtils.deepDispose(this.vrm.scene);
+    }
     this.vrm = vrm;
     if (vrm.lookAt) vrm.lookAt.target = this.gazeTarget;
     this.bones.clear();
@@ -282,11 +286,13 @@ export class PuppetRuntime {
         expression.overrideLookAt = 'none';
       }
     }
-    this.pose(this.poseName);
+    this.clips.clear();
+    this.clips.set(initialClip.action, preparedClip);
+    this.idleRoot.add(vrm.scene);
+    this.playClip('idle', 'idle');
     return true;
   }
   async loadClips(entries) {
-    this.clips.clear();
     for (const entry of entries) this.clips.set(entry.action, await animationClip(entry.bytes, entry.format, this.vrm));
     this.pose(this.poseName);
   }
@@ -522,7 +528,7 @@ export class PuppetRuntime {
     this.updateGesture(now);
     this.updateFace(now);
     this.vrm?.update(delta);
-    this.renderer.render(this.scene, this.camera);
+    if (this.clipAction) this.renderer.render(this.scene, this.camera);
     this.frame = requestAnimationFrame(this.animate);
   }
   dispose() {

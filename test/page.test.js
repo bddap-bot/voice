@@ -365,23 +365,48 @@ for (const viewport of layoutViewports) test(`stage UI stays outside the puppet 
   const style = /<style>[\s\S]*?<\/style>/.exec(index)[0];
   const main = /<main[\s\S]*?<\/main>/.exec(index)[0].replace('class="hidden"', '');
   const chrome = '<header><h1>voice</h1><span id="status"></span></header><section id="saved" class="saved"><span>device authenticated</span><button>Forget token</button></section>';
-  const { stdout, stderr } = await runPuppetPage(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">${style}</head><body>${chrome}${main}<script>
-  document.documentElement.style.setProperty('--visual-viewport-height', Math.round(visualViewport?.height ?? innerHeight) + 'px');
-  document.querySelector('main').style.setProperty('--stage-height', Math.round(visualViewport?.height ?? innerHeight) + 'px');
-  const puppet = document.querySelector('#puppet').getBoundingClientRect();
-  const selectors = ['header', '#saved', '.puppet-picker', '#puppet-credit', '#elapsed', '.share', '.display', '.ledger'];
+  const { stdout, stderr } = await runPuppetPage(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">${style}</head><body>${chrome}${main}<script type="module">
+  import { PuppetRuntime } from '/puppet.js';
+  const stageHeight = Math.round(visualViewport?.height ?? innerHeight);
+  document.documentElement.style.setProperty('--visual-viewport-height', stageHeight + 'px');
+  document.querySelector('main').style.setProperty('--stage-height', stageHeight + 'px');
+  const runtime = new PuppetRuntime(document.querySelector('#puppet'));
+  runtime.pause();
+  runtime.camera.updateMatrixWorld();
+  const origin = runtime.camera.position.clone().set(0, 0, 0);
+  const feet = origin.project(runtime.camera);
+  runtime.dispose();
   const rect = (element) => { const value = element.getBoundingClientRect(); return { left: value.left, right: value.right, top: value.top, bottom: value.bottom }; };
+  const puppet = rect(document.querySelector('#puppet'));
+  const figure = { ...puppet, bottom: puppet.top + (1 - feet.y) / 2 * (puppet.bottom - puppet.top) };
+  const selectors = ['header', '#saved', '.puppet-picker', '#puppet-credit', '#elapsed', '.share', '.display', '.ledger'];
   const overlaps = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
-  const result = selectors.map((selector) => ({ selector, rect: rect(document.querySelector(selector)) })).filter((item) => overlaps(item.rect, puppet));
-  document.body.dataset.overlapTest = JSON.stringify({ puppet: rect(document.querySelector('#puppet')), result, pageHeight: document.documentElement.scrollHeight });
+  const intrusions = () => selectors.map((selector) => ({ selector, rect: rect(document.querySelector(selector)) })).filter((item) => overlaps(item.rect, figure));
+  const result = intrusions();
+  const display = rect(document.querySelector('#display'));
+  const ledger = rect(document.querySelector('.ledger'));
+  document.querySelector('#display').classList.add('fresh');
+  const fresh = { result: intrusions(), display: rect(document.querySelector('#display')) };
+  document.body.dataset.overlapTest = JSON.stringify({ puppet, figure, result, fresh, display, ledger, pageHeight: document.documentElement.scrollHeight, stageHeight });
   </script></body></html>`, { scale: viewport.scale, size: `${viewport.width},${viewport.height}`, mobile: viewport.mobile });
   const encoded = /data-overlap-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   const result = JSON.parse(encoded ?? 'null');
   assert.deepEqual(result?.result, [], `${viewport.name}: ${JSON.stringify(result)}\n${stderr}`);
+  assert.deepEqual(result.fresh.result, [], `${viewport.name} with a fresh display: ${JSON.stringify(result)}`);
   assert.equal(stdout.includes('tap to stand and start voice'), false, `${viewport.name} retains the old button copy`);
   assert.equal(/<button[^>]+id="toggle"/.test(stdout), false, `${viewport.name} retains the old button`);
-  if (viewport.name !== 'phone') assert.ok(result.pageHeight <= viewport.height, `${viewport.name} must remain one screen: ${result.pageHeight}`);
-  else assert.ok(result.pageHeight > viewport.height, 'phone controls should continue below the first screen');
+  const puppetWidth = result.puppet.right - result.puppet.left;
+  assert.ok(result.figure.bottom > result.puppet.top + 0.8 * (result.puppet.bottom - result.puppet.top), `${viewport.name} projected feet must sit near the canvas bottom: ${JSON.stringify(result.figure)}`);
+  if (viewport.name !== 'phone') {
+    assert.ok(result.pageHeight <= viewport.height, `${viewport.name} must remain one screen: ${result.pageHeight}`);
+    assert.equal(result.puppet.top, 0, `${viewport.name} puppet must start at the top of the stage`);
+    assert.equal(result.puppet.bottom, result.stageHeight, `${viewport.name} puppet must take the full stage height: ${result.puppet.bottom} of ${result.stageHeight}`);
+    for (const wing of [result.display, result.ledger]) assert.ok(wing.right - wing.left < puppetWidth, `${viewport.name} wing wider than the puppet: ${JSON.stringify(wing)}`);
+    assert.ok(result.fresh.display.right - result.fresh.display.left > result.display.right - result.display.left, `${viewport.name} fresh display must grow: ${JSON.stringify(result.fresh.display)}`);
+  } else {
+    assert.ok(result.pageHeight > viewport.height, 'phone controls should continue below the first screen');
+    assert.deepEqual(result.fresh.display, result.display, 'phone display must not move when fresh');
+  }
 });
 
 test('Android DPR 3 keeps the visual stage height stable and renders after sixty seconds', async () => {
@@ -517,6 +542,7 @@ window.addEventListener('test-ready', () => {
 });
 
 test('a display payload appears newest first and points the puppet while a plain hub reply adds nothing', async () => {
+  const freshMs = Number(/DISPLAY_FRESH_MS = (\d+)/.exec(await readFile(new URL('../docs/index.html', import.meta.url), 'utf8'))[1]);
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   const enc = new TextEncoder();
@@ -527,11 +553,15 @@ window.addEventListener('test-ready', () => {
   deliverRelay(enc.encode('hub\\n' + JSON.stringify({ id: 'unknown', reply: 'plain', timing_ms: 1 })));
   deliverRelay(frame);
   deliverRelay(enc.encode('display\\n' + JSON.stringify({ markdown: 'Newest' }) + '\\n'));
-  setTimeout(() => { document.body.dataset.displayTest = JSON.stringify({ count: document.querySelectorAll('.display-item').length, first: document.querySelector('.display-item')?.textContent, link: document.querySelector('.display-item:last-child a')?.href, image: Boolean(document.querySelector('.display-item:last-child img')), pointed: testPuppet.calls.some((call) => call[0] === 'gesture' && call[1] === 'point' && call[2] === 'panel') }); }, 40);
+  const fresh = () => document.querySelector('#display').classList.contains('fresh');
+  setTimeout(() => {
+    const arrived = fresh();
+    setTimeout(() => { document.body.dataset.displayTest = JSON.stringify({ count: document.querySelectorAll('.display-item').length, first: document.querySelector('.display-item')?.textContent, link: document.querySelector('.display-item:last-child a')?.href, image: Boolean(document.querySelector('.display-item:last-child img')), pointed: testPuppet.calls.some((call) => call[0] === 'gesture' && call[1] === 'point' && call[2] === 'panel'), arrived, settled: !fresh() }); }, ${freshMs + 1000});
+  }, 40);
 });
-`);
+`, { budget: freshMs + 5000 });
   const encoded = /data-display-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { count: 2, first: 'Newest', link: 'https://example.test/result', image: true, pointed: true }, stderr);
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { count: 2, first: 'Newest', link: 'https://example.test/result', image: true, pointed: true, arrived: true, settled: true }, stderr);
 });
 
 test('the delegation log keeps the last of ten appended entries visible', async () => {

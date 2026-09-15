@@ -8,7 +8,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
 <style>
-  :root { color-scheme: dark; }
+  :root { color-scheme: dark; --stage-column: 32%; --feet: .892; --desk: 80px; }
   * { box-sizing: border-box; }
   html { background: #08090d; }
   body { margin: 0; min-height: 100vh; background: #08090d; color: #f4eee5; font: 15px/1.45 system-ui, sans-serif; overflow: hidden; }
@@ -16,33 +16,31 @@
   h1 { font-size: 18px; margin: 0; letter-spacing: .05em; }
   #status { color: #a5a5aa; } #status.err { color: #ff8585; } #status.ok { color: #75dc8b; }
   .hidden { display: none !important; }
-  .entry, .saved { position: fixed; z-index: 9; top: 76px; left: 22px; width: min(31vw, 430px); padding: 12px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; background: #171619e6; border: 1px solid #51493f; }
+  .entry, .saved { position: fixed; z-index: 9; top: 76px; left: 22px; width: min(var(--stage-column) - 2 * 22px, 430px); padding: 12px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; background: #171619e6; border: 1px solid #51493f; }
   textarea { flex: 1 1 440px; min-height: 72px; background: #151517; color: inherit; border: 1px solid #39393f; border-radius: 8px; padding: 10px; }
   button { background: #1d1d20; color: inherit; border: 1px solid #414148; border-radius: 8px; padding: 9px 14px; font: inherit; }
   button.primary { background: #315ee8; border-color: #315ee8; }
-  main { --stage-height: 100vh; position: relative; height: var(--stage-height); min-height: 540px; overflow: hidden; isolation: isolate; background: radial-gradient(ellipse at 50% 34%, #51443d 0, #29252a 40%, #111219 72%); }
+  main { --stage-height: 100vh; --canvas-height: min(100%, (100% - var(--desk)) / var(--feet)); position: relative; height: var(--stage-height); min-height: 540px; overflow: hidden; isolation: isolate; background: radial-gradient(ellipse at 50% 34%, #51443d 0, #29252a 40%, #111219 72%); }
   main::before, main::after { content: ''; position: absolute; z-index: -1; top: 0; bottom: 0; width: 34%; background: linear-gradient(105deg, #0b0d13, #252027); border-right: 1px solid #70604c55; clip-path: polygon(0 0, 100% 13%, 100% 87%, 0 100%); }
   main::after { right: 0; transform: scaleX(-1); }
-  .control, .display, .ledger { background: linear-gradient(145deg, #201e22ee, #111217ee); border: 1px solid #6d5c49; border-radius: 4px; box-shadow: 0 18px 42px #0008, inset 0 0 35px #8a684111; }
-  .control { position: static; }
-  .control::before { content: ''; position: absolute; z-index: 1; left: 33%; top: 72%; width: 34%; height: 20%; background: linear-gradient(#665746, #252127); clip-path: polygon(12% 0, 88% 0, 100% 100%, 0 100%); }
-  #puppet { position: absolute; z-index: 2; left: 34%; top: 5%; width: 32%; height: 62%; touch-action: manipulation; cursor: pointer; }
-  .puppet-picker { position: absolute; z-index: 4; left: 37%; top: 74%; width: 26%; display: flex; gap: 10px; align-items: center; justify-content: center; }
+  .display, .ledger { background: linear-gradient(145deg, #201e22ee, #111217ee); border: 1px solid #6d5c49; border-radius: 4px; box-shadow: 0 18px 42px #0008, inset 0 0 35px #8a684111; }
+  .control::before { content: ''; position: absolute; z-index: 1; left: 30%; top: calc(var(--feet) * var(--canvas-height)); bottom: 0; width: 40%; background: linear-gradient(#665746, #252127); clip-path: polygon(12% 0, 88% 0, 100% 100%, 0 100%); }
+  #puppet { position: absolute; z-index: 2; left: var(--stage-column); top: 0; width: calc(100% - 2 * var(--stage-column)); height: var(--canvas-height); touch-action: manipulation; cursor: pointer; }
+  .puppet-picker { position: absolute; z-index: 4; left: 3%; top: calc(100% - 150px); width: 20%; display: flex; gap: 10px; align-items: center; justify-content: center; }
   #puppet-choice { min-width: 150px; background: #1d1d20; color: inherit; border: 1px solid #414148; border-radius: 8px; padding: 8px; }
-  #puppet-credit { position: absolute; z-index: 4; left: 35%; top: 79%; width: 30%; min-height: 21px; color: #cfc4b6; text-align: center; font-size: 13px; }
-  #elapsed { position: absolute; z-index: 4; left: 40%; top: 82%; width: 20%; text-align: center; font: 24px/1 ui-monospace, monospace; color: #ded0bd; min-height: 28px; }
-  .share { position: absolute; z-index: 3; left: 15%; right: 15%; bottom: 1%; display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 8px; background: #171619ee; border: 1px solid #594d40; box-shadow: 0 12px 30px #0009; }
-  .share textarea { min-height: 52px; max-height: 72px; resize: none; }
-  .share-actions { grid-column: 1 / -1; }
-  #share-target { grid-column: 2; grid-row: 1; }
-  .share-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  #puppet-credit { position: absolute; z-index: 4; left: 3%; top: calc(100% - 106px); width: 20%; min-height: 21px; color: #cfc4b6; text-align: center; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #elapsed { position: absolute; z-index: 4; right: 3%; top: calc(100% - 124px); width: 20%; text-align: center; font: 24px/1 ui-monospace, monospace; color: #ded0bd; min-height: 28px; }
+  .share { position: absolute; z-index: 3; left: 20%; right: 20%; bottom: 10px; display: grid; grid-template-columns: 1fr auto auto; gap: 8px; padding: 8px; background: #171619ee; border: 1px solid #594d40; box-shadow: 0 12px 30px #0009; }
+  .share textarea { min-height: 52px; max-height: 72px; min-width: 0; resize: none; }
+  .share-actions { display: flex; gap: 8px; align-items: center; flex-wrap: nowrap; }
   .share-actions label { background: #1d1d20; border: 1px solid #414148; border-radius: 8px; padding: 9px 14px; cursor: pointer; }
   #share-file { position: absolute; width: 1px; height: 1px; opacity: 0; }
-  #share-image { color: #bdbdc3; flex: 1; overflow-wrap: anywhere; }
+  #share-image { color: #bdbdc3; width: 140px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #share-target { border: 1px dashed #414148; border-radius: 8px; padding: 8px; text-align: center; color: #a5a5aa; }
   #share-target.over { border-color: #8eabff; color: #ececed; }
-  .display, .ledger { position: absolute; z-index: 3; top: 22%; width: 27%; height: 48%; padding: 18px; overflow: hidden; }
+  .display, .ledger { position: absolute; z-index: 3; top: 200px; bottom: 160px; --wing-width: 20%; width: var(--wing-width); padding: 18px; overflow: hidden; }
   .display { right: 3%; transform: perspective(900px) rotateY(-4deg); }
+  .display.fresh { --wing-width: 28%; }
   .ledger { left: 3%; transform: perspective(900px) rotateY(4deg); }
   .display h2, .ledger h2 { margin: 0 0 12px; font-size: 14px; text-transform: uppercase; letter-spacing: .08em; color: #a5a5aa; }
   #display-items { display: flex; flex-direction: column; gap: 12px; max-height: calc(100% - 30px); overflow: auto; }
@@ -67,7 +65,8 @@
     .puppet-picker { left: 8%; top: calc(var(--stage-height) + 26px); width: 84%; }
     #puppet-credit { left: 5%; top: calc(var(--stage-height) + 80px); width: 90%; }
     #elapsed { left: 25%; top: calc(var(--stage-height) + 116px); width: 50%; }
-    .share { left: 12px; right: 12px; top: calc(var(--stage-height) + 166px); bottom: auto; }
+    .share { left: 12px; right: 12px; top: calc(var(--stage-height) + 166px); bottom: auto; grid-template-columns: 1fr auto; }
+    .share-actions { grid-column: 1 / -1; flex-wrap: wrap; }
     .display, .ledger { left: 12px; right: 12px; width: auto; height: 260px; transform: none; }
     .display { top: calc(var(--stage-height) + 380px); }
     .ledger { top: calc(var(--stage-height) + 670px); }
@@ -95,7 +94,7 @@
       <div class="share-actions"><label for="share-file"><span class="button">Choose image</span></label><input id="share-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" capture="environment"><button id="share-remove" class="hidden">Remove image</button><span id="share-image">No image selected</span><button id="share-send" class="primary">Send</button></div>
     </section>
   </section>
-  <section class="display" aria-label="hub display"><h2>from the hub</h2><div id="display-items" aria-live="polite"></div></section>
+  <section id="display" class="display" aria-label="hub display"><h2>from the hub</h2><div id="display-items" aria-live="polite"></div></section>
   <section class="ledger"><h2>delegation log</h2><div id="log" aria-live="polite"></div></section>
 </main>
 <audio id="speaker" autoplay></audio>
@@ -109,6 +108,7 @@ import { PuppetRuntime } from './puppet.js';
 
 const KEY = 'voice.token';
 const ALPN = 'voice-web/1';
+const DISPLAY_FRESH_MS = 45000;
 const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -138,6 +138,7 @@ let puppetEpoch = 0;
 let puppetRequest;
 let puppetLoading = false;
 let puppetReady = false;
+let displayFreshTimer;
 let puppetActive;
 let puppetScope;
 let puppetRuntime;
@@ -417,6 +418,9 @@ function receiveDisplay(raw) {
   if (!item.childNodes.length) return;
   $('display-items').prepend(item);
   while ($('display-items').childNodes.length > 20) { const removed = $('display-items').lastChild; if (removed.imageUrl) URL.revokeObjectURL(removed.imageUrl); removed.remove(); }
+  $('display').classList.add('fresh');
+  clearTimeout(displayFreshTimer);
+  displayFreshTimer = setTimeout(() => $('display').classList.remove('fresh'), DISPLAY_FRESH_MS);
   puppetRuntime?.gesture('point', 'panel');
 }
 function receiveShare(result) {

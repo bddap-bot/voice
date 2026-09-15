@@ -1,16 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { VRMAnimationLoaderPlugin, createVRMAnimationClip } from '@pixiv/three-vrm-animation';
-
-const MIXAMO_BONES = {
-  hips: 'hips', spine: 'spine', spine1: 'chest', spine2: 'upperChest', neck: 'neck', head: 'head',
-  leftshoulder: 'leftShoulder', leftarm: 'leftUpperArm', leftforearm: 'leftLowerArm', lefthand: 'leftHand',
-  rightshoulder: 'rightShoulder', rightarm: 'rightUpperArm', rightforearm: 'rightLowerArm', righthand: 'rightHand',
-  leftupleg: 'leftUpperLeg', leftleg: 'leftLowerLeg', leftfoot: 'leftFoot', lefttoebase: 'leftToes',
-  rightupleg: 'rightUpperLeg', rightleg: 'rightLowerLeg', rightfoot: 'rightFoot', righttoebase: 'rightToes',
-};
 
 const VISEMES = ['aa', 'ih', 'ou', 'ee', 'oh'];
 const MOOD_EXPRESSIONS = ['happy', 'angry', 'sad', 'relaxed', 'surprised'];
@@ -29,65 +20,6 @@ const GAZE_POINTS = {
   panel: [2.8, 1.35, 2.4],
   away: [-1.8, 1.8, 2.8],
 };
-
-function mixamoBoneName(trackName) {
-  const source = trackName.slice(0, trackName.lastIndexOf('.')).replace(/^.*\[|\]$/g, '').split(':').at(-1).replace(/^mixamorig/i, '').toLowerCase();
-  return MIXAMO_BONES[source];
-}
-
-export function retargetMixamoClip(source, vrm) {
-  const clip = source.animations?.[0];
-  if (!clip) throw new Error('FBX has no animation clip');
-  source.updateMatrixWorld?.(true);
-  vrm.scene?.updateMatrixWorld?.(true);
-  const tracks = [];
-  const restRotationInverse = new THREE.Quaternion();
-  const parentRestWorldRotation = new THREE.Quaternion();
-  const rotation = new THREE.Quaternion();
-  const sourcePosition = new THREE.Vector3();
-  const targetPosition = new THREE.Vector3();
-  for (const track of clip.tracks) {
-    const humanoidName = mixamoBoneName(track.name);
-    const node = humanoidName && vrm.humanoid?.getNormalizedBoneNode(humanoidName);
-    if (!node) continue;
-    if (track.name.endsWith('.quaternion')) {
-      const sourceName = track.name.slice(0, track.name.lastIndexOf('.')).replace(/^.*\[|\]$/g, '');
-      const sourceNode = source.getObjectByName?.(sourceName);
-      if (!sourceNode?.parent) continue;
-      sourceNode.getWorldQuaternion(restRotationInverse).invert();
-      sourceNode.parent.getWorldQuaternion(parentRestWorldRotation);
-      const values = Float32Array.from(track.values);
-      for (let index = 0; index < values.length; index += 4) {
-        rotation.fromArray(values, index).premultiply(parentRestWorldRotation).multiply(restRotationInverse).normalize();
-        if (vrm.meta?.metaVersion === '0') {
-          rotation.x = -rotation.x;
-          rotation.z = -rotation.z;
-        }
-        rotation.toArray(values, index);
-      }
-      const target = new THREE.QuaternionKeyframeTrack(`${node.name}.quaternion`, track.times, values);
-      tracks.push(target);
-    } else if (humanoidName === 'hips' && track.name.endsWith('.position')) {
-      const sourceName = track.name.slice(0, track.name.lastIndexOf('.')).replace(/^.*\[|\]$/g, '');
-      const sourceNode = source.getObjectByName?.(sourceName);
-      const rawHips = vrm.humanoid?.getRawBoneNode?.('hips');
-      sourcePosition.copy(sourceNode?.position ?? new THREE.Vector3(0, 100, 0));
-      rawHips?.getWorldPosition(targetPosition);
-      vrm.scene?.worldToLocal?.(targetPosition);
-      const scale = sourcePosition.y ? Math.abs(targetPosition.y) / Math.abs(sourcePosition.y) : 0.01;
-      const values = Float32Array.from(track.values, (value, index) => value * scale * (vrm.meta?.metaVersion === '0' && index % 3 !== 1 ? -1 : 1));
-      tracks.push(new THREE.VectorKeyframeTrack(`${node.name}.position`, track.times, values));
-    }
-  }
-  if (!tracks.some((track) => track.name.endsWith('.quaternion'))) throw new Error('FBX has no mapped humanoid rotation tracks');
-  const retargeted = new THREE.AnimationClip(clip.name || 'Clip', clip.duration, tracks);
-  retargeted.userData.poseTracks = tracks.filter((track) => track.name.endsWith('.quaternion') || track.name.endsWith('.position')).map((track) => ({
-    name: track.name,
-    valueSize: track.getValueSize(),
-    interpolant: track.createInterpolant(),
-  }));
-  return retargeted;
-}
 
 function handoverFor(from, to) {
   const fromTracks = new Map((from.userData.poseTracks ?? []).map((track) => [track.name, track]));
@@ -122,7 +54,20 @@ export async function animationClip(bytes, format, vrm) {
       return createVRMAnimationClip(animation, vrm);
     } finally { URL.revokeObjectURL(url); }
   }
-  if (format === 'fbx') return retargetMixamoClip(new FBXLoader().parse(bytes, ''), vrm);
+  if (format === 'tracks') {
+    const value = JSON.parse(new TextDecoder().decode(bytes));
+    if (!value || typeof value.name !== 'string' || !Number.isFinite(value.duration) || !Array.isArray(value.tracks)) throw new Error('invalid animation tracks');
+    const tracks = value.tracks.map((track) => {
+      if (typeof track?.name !== 'string' || !Array.isArray(track.times) || !Array.isArray(track.values)) throw new Error('invalid animation track');
+      return track.name.endsWith('.quaternion')
+        ? new THREE.QuaternionKeyframeTrack(track.name, track.times, track.values)
+        : new THREE.VectorKeyframeTrack(track.name, track.times, track.values);
+    });
+    if (!tracks.some((track) => track.name.endsWith('.quaternion'))) throw new Error('animation has no rotation tracks');
+    const clip = new THREE.AnimationClip(value.name, value.duration, tracks);
+    clip.userData.poseTracks = tracks.map((track) => ({ name: track.name, valueSize: track.getValueSize(), interpolant: track.createInterpolant() }));
+    return clip;
+  }
   throw new Error(`unsupported animation format ${format}`);
 }
 

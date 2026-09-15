@@ -1,9 +1,7 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import test from 'node:test';
 import * as THREE from 'three';
-import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
-import { MOOD_TABLE, PuppetRuntime, audioEnergy, audioVisemes, retargetMixamoClip, shouldBeat } from '../src/puppet.js';
+import { MOOD_TABLE, PuppetRuntime, animationClip, audioEnergy, audioVisemes, shouldBeat } from '../src/puppet.js';
 
 function waveform(amplitude) {
   return Uint8Array.from({ length: 256 }, (_, index) => 128 + Math.round(Math.sin(index / 3) * amplitude));
@@ -338,144 +336,10 @@ test('sit and stand transitions keep model-root and head velocity bounded', () =
   assert.ok(runtime.handovers.get('stand:idle').duration > runtime.handovers.get('sit:sit-idle').duration);
 });
 
-test('Mixamo rest rotations preserve an upright VRM bone-space invariant', () => {
-  const source = new THREE.Group();
-  const rig = new THREE.Bone();
-  rig.name = 'mixamorigRoot';
-  const hips = new THREE.Bone();
-  hips.name = 'mixamorigHips';
-  rig.rotation.set(0.35, -0.2, 0.7);
-  hips.rotation.set(-0.4, 0.3, 1.1);
-  source.add(rig);
-  rig.add(hips);
-  source.updateMatrixWorld(true);
-  const rest = hips.quaternion.toArray();
-  const rotation = new THREE.QuaternionKeyframeTrack('mixamorigHips.quaternion', [0, 1], [...rest, ...rest]);
-  const position = new THREE.VectorKeyframeTrack('mixamorigHips.position', [0, 1], [0, 100, 0, 0, 110, 0]);
-  source.animations = [new THREE.AnimationClip('Idle', 1, [rotation, position])];
-
-  const target = new THREE.Group();
-  const targetHips = new THREE.Bone();
-  targetHips.name = 'NormalizedHips';
-  const head = new THREE.Bone();
-  head.position.y = 1;
-  const leftFoot = new THREE.Bone();
-  leftFoot.position.set(-0.2, -1, 0);
-  const rightFoot = new THREE.Bone();
-  rightFoot.position.set(0.2, -1, 0);
-  target.add(targetHips);
-  targetHips.add(head, leftFoot, rightFoot);
-  const clip = retargetMixamoClip(source, { humanoid: { getNormalizedBoneNode: (name) => name === 'hips' ? targetHips : null } });
-  assert.deepEqual(clip.tracks.map((track) => track.name), ['NormalizedHips.quaternion', 'NormalizedHips.position']);
-  assert.ok(Math.abs(clip.tracks[1].values[4] - 1.1) < 1e-6);
-
-  const mixer = new THREE.AnimationMixer(target);
-  mixer.clipAction(clip).play();
-  const hipsWorld = new THREE.Vector3();
-  const headWorld = new THREE.Vector3();
-  const footWorld = new THREE.Vector3();
-  for (const time of [0, 0.25, 0.5, 0.75, 1]) {
-    mixer.setTime(time);
-    target.updateMatrixWorld(true);
-    targetHips.getWorldPosition(hipsWorld);
-    head.getWorldPosition(headWorld);
-    assert.ok(headWorld.clone().sub(hipsWorld).angleTo(new THREE.Vector3(0, 1, 0)) < 1e-5);
-    for (const foot of [leftFoot, rightFoot]) {
-      foot.getWorldPosition(footWorld);
-      assert.ok(footWorld.y < hipsWorld.y);
-    }
-  }
-});
-
-test('real Mixamo rest frames preserve signed standing and seated joint angles', () => {
-  const load = (name) => {
-    const bytes = fs.readFileSync(new URL(`fixtures/${name}`, import.meta.url));
-    return new FBXLoader().parse(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), '');
-  };
-  const mockVrm0 = () => {
-    const scene = new THREE.Group();
-    scene.rotation.y = Math.PI;
-    const nodes = {};
-    const bone = (name, parent, position) => {
-      const node = new THREE.Bone();
-      node.name = `Normalized_${name}`;
-      node.position.fromArray(position);
-      (parent ?? scene).add(node);
-      nodes[name] = node;
-      return node;
-    };
-    const hips = bone('hips', null, [0, 0.9, 0]);
-    const spine = bone('spine', hips, [0, 0.1, 0]);
-    const chest = bone('chest', spine, [0, 0.15, 0]);
-    const upperChest = bone('upperChest', chest, [0, 0.1, 0]);
-    const neck = bone('neck', upperChest, [0, 0.15, 0]);
-    bone('head', neck, [0, 0.1, 0]);
-    for (const [side, direction] of [['left', -1], ['right', 1]]) {
-      const shoulder = bone(`${side}Shoulder`, upperChest, [direction * 0.05, 0.1, 0]);
-      const upperArm = bone(`${side}UpperArm`, shoulder, [direction * 0.1, 0, 0]);
-      const lowerArm = bone(`${side}LowerArm`, upperArm, [direction * 0.25, 0, 0]);
-      bone(`${side}Hand`, lowerArm, [direction * 0.25, 0, 0]);
-      const upperLeg = bone(`${side}UpperLeg`, hips, [direction * 0.1, -0.05, 0]);
-      const lowerLeg = bone(`${side}LowerLeg`, upperLeg, [0, -0.4, 0]);
-      const foot = bone(`${side}Foot`, lowerLeg, [0, -0.4, 0]);
-      bone(`${side}Toes`, foot, [0, -0.05, 0.1]);
-    }
-    return { scene, nodes, meta: { metaVersion: '0' }, humanoid: { getNormalizedBoneNode: (name) => nodes[name], getRawBoneNode: (name) => nodes[name] } };
-  };
-  const position = (node) => node.getWorldPosition(new THREE.Vector3());
-  const signedAngle = (first, second) => THREE.MathUtils.radToDeg(Math.atan2(first.clone().cross(second).x, first.dot(second)));
-  const measurements = (nodes) => {
-    const torsoDown = position(nodes.hips).sub(position(nodes.spine));
-    const torsoUp = torsoDown.clone().negate();
-    const arm = position(nodes.leftLowerArm).sub(position(nodes.leftUpperArm));
-    const thigh = position(nodes.leftLowerLeg).sub(position(nodes.leftUpperLeg));
-    const shin = position(nodes.leftFoot).sub(position(nodes.leftLowerLeg));
-    return { arm: signedAngle(arm, torsoDown), knee: signedAngle(thigh, shin), hip: signedAngle(torsoUp, thigh) };
-  };
-  const sourceNodes = (source) => Object.fromEntries([
-    ['hips', 'mixamorigHips'], ['spine', 'mixamorigSpine'], ['leftUpperArm', 'mixamorigLeftArm'],
-    ['leftLowerArm', 'mixamorigLeftForeArm'], ['leftUpperLeg', 'mixamorigLeftUpLeg'],
-    ['leftLowerLeg', 'mixamorigLeftLeg'], ['leftFoot', 'mixamorigLeftFoot'],
-  ].map(([key, name]) => [key, source.getObjectByName(name)]));
-  for (const name of ['mixamo-standing.fbx', 'mixamo-seated.fbx']) {
-    const source = load(name);
-    const sourceHipsRestY = source.getObjectByName('mixamorigHips').position.y;
-    const vrm = mockVrm0();
-    vrm.scene.updateMatrixWorld(true);
-    const clip = retargetMixamoClip(source, vrm);
-    const sourceMixer = new THREE.AnimationMixer(source);
-    const targetMixer = new THREE.AnimationMixer(vrm.scene);
-    sourceMixer.clipAction(source.animations[0]).play();
-    targetMixer.clipAction(clip).play();
-    sourceMixer.setTime(2);
-    targetMixer.setTime(2);
-    source.updateMatrixWorld(true);
-    vrm.scene.updateMatrixWorld(true);
-    const expected = measurements(sourceNodes(source));
-    const actual = measurements(vrm.nodes);
-    for (const joint of ['arm', 'knee', 'hip']) {
-      assert.ok(Math.abs(actual[joint] - expected[joint]) < 5, `${name} ${joint}: ${actual[joint]} versus ${expected[joint]}`);
-    }
-    const hipsTrack = clip.tracks.find((track) => track.name === 'Normalized_hips.position');
-    const sourceTrack = source.animations[0].tracks.find((track) => track.name.endsWith('mixamorigHips.position'));
-    assert.ok(Math.abs(hipsTrack.values[1] - sourceTrack.values[1] * 0.9 / sourceHipsRestY) < 1e-5);
-  }
-});
-
-test('VRM0 retarget flips quaternion and root-motion x/z axes', () => {
-  const source = new THREE.Group();
-  const hips = new THREE.Bone();
-  hips.name = 'mixamorigHips';
-  source.add(hips);
-  const rotation = new THREE.QuaternionKeyframeTrack('mixamorigHips.quaternion', [0], [0.1, 0.2, 0.3, 0.9]);
-  const position = new THREE.VectorKeyframeTrack('mixamorigHips.position', [0], [100, 200, 300]);
-  source.animations = [new THREE.AnimationClip('Move', 1, [rotation, position])];
-  const target = new THREE.Bone();
-  target.name = 'NormalizedHips';
-  const clip = retargetMixamoClip(source, { meta: { metaVersion: '0' }, humanoid: { getNormalizedBoneNode: () => target } });
-  const expected = new THREE.Quaternion(0.1, 0.2, 0.3, 0.9).normalize();
-  assert.ok(Math.abs(clip.tracks[0].values[0] + expected.x) < 1e-6);
-  assert.ok(Math.abs(clip.tracks[0].values[1] - expected.y) < 1e-6);
-  assert.ok(Math.abs(clip.tracks[0].values[2] + expected.z) < 1e-6);
-  assert.deepEqual(Array.from(clip.tracks[1].values), [-1, 2, -3]);
+test('ready-to-play tracks decode without FBX parsing', async () => {
+  const payload = new TextEncoder().encode(JSON.stringify({ name: 'Idle', duration: 1, tracks: [{ name: 'Hips.quaternion', times: [0, 1], values: [0, 0, 0, 1, 0, 0, 0, 1] }] }));
+  const clip = await animationClip(payload, 'tracks', {});
+  assert.equal(clip.name, 'Idle');
+  assert.equal(clip.tracks[0].name, 'Hips.quaternion');
+  assert.equal(clip.userData.poseTracks[0].valueSize, 4);
 });

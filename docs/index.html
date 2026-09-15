@@ -892,14 +892,14 @@ async function loadPuppet(id, epoch, request, valid) {
   const clipCatalog = await puppetChannel.clips();
   const idle = clipCatalog.clips.find((entry) => entry.action === 'idle');
   if (!idle) throw new Error('standing idle clip is unavailable');
-  const idleClip = { ...idle, bytes: await puppetChannel.clipBytes(idle) };
+  const idleClip = idle.format === 'fbx' ? { ...idle, format: 'tracks', bytes: await puppetChannel.trackBytes(avatar.contentHash, idle) } : { ...idle, bytes: await puppetChannel.clipBytes(idle) };
   const bytes = await puppetChannel.bytes(id, avatar.contentHash);
   if (!current()) throw new Error('puppet load replaced');
   if (!puppetRuntime) throw new Error('puppet renderer unavailable');
   const loaded = await puppetRuntime.load(bytes, idleClip, current, () => puppetChannel.select(id));
   if (!loaded) throw new Error('puppet load replaced');
   const clips = [];
-  for (const entry of clipCatalog.clips) if (entry !== idle) clips.push({ ...entry, bytes: await puppetChannel.clipBytes(entry) });
+  for (const entry of clipCatalog.clips) if (entry !== idle) clips.push(entry.format === 'fbx' ? { ...entry, format: 'tracks', bytes: await puppetChannel.trackBytes(avatar.contentHash, entry) } : { ...entry, bytes: await puppetChannel.clipBytes(entry) });
   if (!current()) throw new Error('puppet load replaced');
   await puppetRuntime.loadClips(clips);
   if (!current()) throw new Error('puppet load replaced');

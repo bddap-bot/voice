@@ -62,10 +62,13 @@ export class PuppetChannel {
   clipBytes(entry) {
     return this.transferBytes('clip', entry.name, entry.contentHash, entry.format);
   }
+  trackBytes(modelHash, entry) {
+    return this.transferBytes('track', entry.name, `${modelHash}-${entry.contentHash}`, 'json', { modelHash, clipHash: entry.contentHash });
+  }
   async bytes(id, contentHash = '') {
     return this.transferBytes('puppet', id, contentHash, 'vrm');
   }
-  async transferBytes(kind, id, contentHash, format) {
+  async transferBytes(kind, id, contentHash, format, fields = {}) {
     const epoch = this.epoch;
     const cache = await this.cacheStorage.open('voice-puppets-v1');
     const request = kind === 'puppet' ? this.cacheRequest(contentHash || id) : new Request(new URL(`.private-motion/${encodeURIComponent(this.cacheScope())}/${encodeURIComponent(contentHash || id)}.${format}`, location.href));
@@ -80,7 +83,7 @@ export class PuppetChannel {
       const encodings = ['br', 'gzip'].filter((encoding) => {
         try { new DecompressionStream(encoding); return true; } catch { return false; }
       });
-      await this.send(`${kind}\n${JSON.stringify({ id, encodings })}`);
+      await this.send(`${kind}\n${JSON.stringify({ id, encodings, ...fields })}`);
       return await waiting.promise;
     } finally {
       clearTimeout(timer);
@@ -90,7 +93,7 @@ export class PuppetChannel {
   async receive(raw) {
     const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
     const [verb, offset] = line(bytes);
-    if (!verb.startsWith('puppet') && !verb.startsWith('clip')) return false;
+    if (!verb.startsWith('puppet') && !verb.startsWith('clip') && !verb.startsWith('track')) return false;
     if (verb === 'clips') {
       const waiter = this.clipCatalogWaiter;
       this.clipCatalogWaiter = null;
@@ -122,7 +125,7 @@ export class PuppetChannel {
       else this.selectionWaiter?.reject(new Error(value.message));
       return true;
     }
-    if (verb === 'puppet-start' || verb === 'clip-start') {
+    if (verb === 'puppet-start' || verb === 'clip-start' || verb === 'track-start') {
       const value = JSON.parse(decoder.decode(bytes.subarray(offset)));
       if (!this.transfer || verb !== `${this.transfer.kind}-start` || value.id !== this.transfer.id || !Number.isSafeInteger(value.size) || value.size <= 0 || !Number.isSafeInteger(value.originalSize) || value.originalSize <= 0 || !['br', 'gzip'].includes(value.encoding) || value.contentHash !== this.transfer.contentHash) throw new Error('invalid transfer');
       this.transfer.size = value.size;
@@ -130,7 +133,7 @@ export class PuppetChannel {
       this.transfer.encoding = value.encoding;
       return true;
     }
-    if (verb === 'puppet-chunk' || verb === 'clip-chunk') {
+    if (verb === 'puppet-chunk' || verb === 'clip-chunk' || verb === 'track-chunk') {
       const [id, body] = line(bytes, offset);
       if (!this.transfer || verb !== `${this.transfer.kind}-chunk` || id !== this.transfer.id || this.transfer.size === null) throw new Error('unexpected transfer chunk');
       const chunk = bytes.slice(body);
@@ -139,7 +142,7 @@ export class PuppetChannel {
       this.transfer.chunks.push(chunk);
       return true;
     }
-    if (verb === 'puppet-end' || verb === 'clip-end') {
+    if (verb === 'puppet-end' || verb === 'clip-end' || verb === 'track-end') {
       const id = decoder.decode(bytes.subarray(offset));
       const transfer = this.transfer;
       this.transfer = null;
@@ -163,7 +166,7 @@ export class PuppetChannel {
       transfer.cache.put(transfer.request, new Response(decoded, { headers: { 'content-type': 'model/gltf-binary' } })).catch(() => {});
       return true;
     }
-    if (verb === 'puppet-error' || verb === 'clip-error') {
+    if (verb === 'puppet-error' || verb === 'clip-error' || verb === 'track-error') {
       const value = JSON.parse(decoder.decode(bytes.subarray(offset)));
       if (value.code !== 'busy' && this.transfer && (!value.id || value.id === this.transfer.id)) {
         const transfer = this.transfer;

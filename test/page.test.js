@@ -46,18 +46,19 @@ export async function send_only(bytes) {
   }
   else if (frame === 'puppets') deliver(enc.encode('puppets\\n' + JSON.stringify({ active: '42', avatars: ['42', '43', '44'].map((id) => ({ id, size: 3, contentHash: 'hash-' + id, creditLine: '', licenseFlags: { creditRequired: false } })) })));
   else if (frame === 'clips') deliver(enc.encode('clips\\n' + JSON.stringify({ clips: [{ action: 'sit', name: 'sit.fbx', format: 'fbx', contentHash: 'sit-hash' }, { action: 'idle', name: 'idle.fbx', format: 'fbx', contentHash: 'idle-hash' }] })));
-  else if (frame.startsWith('clip\\n')) {
-    const id = JSON.parse(frame.slice(frame.indexOf('\\n') + 1)).id;
+  else if (frame.startsWith('track\\n')) {
+    const request = JSON.parse(frame.slice(frame.indexOf('\\n') + 1));
+    const id = request.id;
     globalThis.transferOrder.push(id);
-    const hash = id === 'idle.fbx' ? 'idle-hash' : 'sit-hash';
+    const hash = request.modelHash + '-' + request.clipHash;
     const compressed = new Uint8Array(await new Response(new Blob([Uint8Array.from([7, 8, 9])]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
-    deliver(enc.encode('clip-start\\n' + JSON.stringify({ id, size: compressed.length, originalSize: 3, contentHash: hash, encoding: 'gzip' })));
-    const prefix = enc.encode('clip-chunk\\n' + id + '\\n');
+    deliver(enc.encode('track-start\\n' + JSON.stringify({ id, size: compressed.length, originalSize: 3, contentHash: hash, encoding: 'gzip' })));
+    const prefix = enc.encode('track-chunk\\n' + id + '\\n');
     const chunk = new Uint8Array(prefix.length + compressed.length);
     chunk.set(prefix);
     chunk.set(compressed, prefix.length);
     deliver(chunk);
-    deliver(enc.encode('clip-end\\n' + id));
+    deliver(enc.encode('track-end\\n' + id));
   }
   else if (frame.startsWith('puppet\\n')) {
     const id = JSON.parse(frame.slice(frame.indexOf('\\n') + 1)).id;
@@ -444,7 +445,7 @@ window.addEventListener('test-ready', () => setTimeout(() => {
 }, 100));
 `);
   const encoded = /data-preload-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { requests: ['42', '43', '44'], cacheKeys: ['idle-hash.fbx', 'hash-42.vrm', 'sit-hash.fbx', 'hash-43.vrm', 'hash-44.vrm'], clipMovement: { before: 3, after: 6, loaded: [['sit', 'fbx']] }, firstVisible: { playable: 'idle', order: ['idle.fbx', '42'] } }, stderr);
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { requests: ['42', '43', '44'], cacheKeys: ['hash-42-idle-hash.json', 'hash-42.vrm', 'hash-42-sit-hash.json', 'hash-43.vrm', 'hash-44.vrm'], clipMovement: { before: 3, after: 6, loaded: [['sit', 'tracks']] }, firstVisible: { playable: 'idle', order: ['idle.fbx', '42'] } }, stderr);
 });
 
 test('authenticated text box sends a URL verbatim and informs an open Live session', async () => {

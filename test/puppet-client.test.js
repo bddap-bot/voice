@@ -125,6 +125,12 @@ test('an incomplete transfer is rejected and never cached', async () => {
   assert.equal(cache.entries.size, 0);
 });
 
+test('a stalled mobile transfer reports a timeout and releases the request', async () => {
+  const channel = new PuppetChannel(async () => {}, cacheStorage(), () => '', 10);
+  await assert.rejects(channel.bytes('7'), /puppet transfer timed out/);
+  await assert.rejects(channel.bytes('7'), /puppet transfer timed out/);
+});
+
 test('selection acknowledges the requested puppet and rejects overlap', async () => {
   const sent = [];
   const channel = new PuppetChannel(async (value) => sent.push(value), cacheStorage());

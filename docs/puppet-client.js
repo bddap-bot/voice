@@ -13,10 +13,11 @@ function deferred() {
 }
 
 export class PuppetChannel {
-  constructor(send, cache = caches, cacheScope = () => '') {
+  constructor(send, cache = caches, cacheScope = () => '', transferTimeout = 30000) {
     this.send = send;
     this.cacheStorage = cache;
     this.cacheScope = cacheScope;
+    this.transferTimeout = transferTimeout;
     this.catalogWaiter = null;
     this.clipCatalogWaiter = null;
     this.selectionWaiter = null;
@@ -74,6 +75,7 @@ export class PuppetChannel {
     if (this.transfer) throw new Error('another puppet is loading');
     const waiting = deferred();
     this.transfer = { kind, id, contentHash, size: null, originalSize: null, encoding: null, total: 0, chunks: [], waiting, cache, request };
+    const timer = setTimeout(() => waiting.reject(new Error('puppet transfer timed out')), this.transferTimeout);
     try {
       const encodings = ['br', 'gzip'].filter((encoding) => {
         try { new DecompressionStream(encoding); return true; } catch { return false; }
@@ -81,6 +83,7 @@ export class PuppetChannel {
       await this.send(`${kind}\n${JSON.stringify({ id, encodings })}`);
       return await waiting.promise;
     } finally {
+      clearTimeout(timer);
       if (this.transfer?.waiting === waiting) this.transfer = null;
     }
   }

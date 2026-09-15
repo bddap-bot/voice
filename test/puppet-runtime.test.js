@@ -249,7 +249,7 @@ test('sit and stand transitions keep model-root and head velocity bounded', () =
   assert.ok(peakHeadVelocity < 3, `peak head velocity ${peakHeadVelocity}`);
 });
 
-test('Mixamo rest rotations preserve an upright VRM bone-space invariant', () => {
+test('Mixamo rest rotations produce an identity normalized delta', () => {
   const source = new THREE.Group();
   const rig = new THREE.Bone();
   rig.name = 'mixamorigRoot';
@@ -285,17 +285,105 @@ test('Mixamo rest rotations preserve an upright VRM bone-space invariant', () =>
   const hipsWorld = new THREE.Vector3();
   const headWorld = new THREE.Vector3();
   const footWorld = new THREE.Vector3();
+  const sourceUp = new THREE.Vector3(0, 1, 0);
   for (const time of [0, 0.25, 0.5, 0.75, 1]) {
     mixer.setTime(time);
     target.updateMatrixWorld(true);
     targetHips.getWorldPosition(hipsWorld);
     head.getWorldPosition(headWorld);
-    assert.ok(headWorld.clone().sub(hipsWorld).angleTo(new THREE.Vector3(0, 1, 0)) < 1e-5);
+    assert.ok(headWorld.clone().sub(hipsWorld).angleTo(sourceUp) < 1e-5);
     for (const foot of [leftFoot, rightFoot]) {
       foot.getWorldPosition(footWorld);
       assert.ok(footWorld.y < hipsWorld.y);
     }
   }
+});
+
+test('Mixamo standing geometry and hips height match the source clip', () => {
+  const source = new THREE.Group();
+  const sourceRig = new THREE.Bone();
+  const sourceHips = new THREE.Bone();
+  const sourceSpine = new THREE.Bone();
+  const sourceUpperLeg = new THREE.Bone();
+  const sourceLowerLeg = new THREE.Bone();
+  const sourceFoot = new THREE.Bone();
+  sourceRig.name = 'mixamorigRoot';
+  sourceHips.name = 'mixamorigHips';
+  sourceSpine.name = 'mixamorigSpine';
+  sourceUpperLeg.name = 'mixamorigLeftUpLeg';
+  sourceLowerLeg.name = 'mixamorigLeftLeg';
+  sourceFoot.name = 'mixamorigLeftFoot';
+  sourceRig.rotation.y = 0.17;
+  sourceHips.position.y = 100;
+  sourceHips.rotation.x = -0.11;
+  sourceSpine.position.y = 40;
+  sourceSpine.rotation.x = 0.08;
+  sourceUpperLeg.position.set(-10, -5, 0);
+  sourceUpperLeg.rotation.x = -0.23;
+  sourceLowerLeg.position.y = -45;
+  sourceLowerLeg.rotation.x = 0.19;
+  sourceFoot.position.y = -45;
+  source.add(sourceRig);
+  sourceRig.add(sourceHips);
+  sourceHips.add(sourceSpine, sourceUpperLeg);
+  sourceUpperLeg.add(sourceLowerLeg);
+  sourceLowerLeg.add(sourceFoot);
+  const keyed = [
+    [sourceHips, -0.04], [sourceSpine, 0.06], [sourceUpperLeg, -0.12], [sourceLowerLeg, 0.09], [sourceFoot, 0.03],
+  ];
+  const tracks = keyed.map(([bone, angle]) => new THREE.QuaternionKeyframeTrack(`${bone.name}.quaternion`, [0], new THREE.Quaternion().setFromEuler(new THREE.Euler(angle, 0, 0)).toArray()));
+  tracks.push(new THREE.VectorKeyframeTrack('mixamorigHips.position', [0], [0, 110, 0]));
+  source.animations = [new THREE.AnimationClip('Standing', 1, tracks)];
+
+  const target = new THREE.Group();
+  const targetHips = new THREE.Bone();
+  const targetSpine = new THREE.Bone();
+  const targetUpperLeg = new THREE.Bone();
+  const targetLowerLeg = new THREE.Bone();
+  const targetFoot = new THREE.Bone();
+  targetHips.name = 'NormalizedHips';
+  targetSpine.name = 'NormalizedSpine';
+  targetUpperLeg.name = 'NormalizedLeftUpperLeg';
+  targetLowerLeg.name = 'NormalizedLeftLowerLeg';
+  targetFoot.name = 'NormalizedLeftFoot';
+  targetHips.position.y = 2;
+  targetSpine.position.y = 0.8;
+  targetUpperLeg.position.set(-0.2, -0.1, 0);
+  targetLowerLeg.position.y = -0.9;
+  targetFoot.position.y = -0.9;
+  target.add(targetHips);
+  targetHips.add(targetSpine, targetUpperLeg);
+  targetUpperLeg.add(targetLowerLeg);
+  targetLowerLeg.add(targetFoot);
+  const nodes = { hips: targetHips, spine: targetSpine, leftUpperLeg: targetUpperLeg, leftLowerLeg: targetLowerLeg, leftFoot: targetFoot };
+  const vrm = { scene: target, humanoid: { getNormalizedBoneNode: (name) => nodes[name], getRawBoneNode: (name) => nodes[name] } };
+  const clip = retargetMixamoClip(source, vrm);
+  for (let index = 0; index < keyed.length; index++) {
+    const [bone, angle] = keyed[index];
+    const expected = bone.quaternion.clone().invert().multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(angle, 0, 0)));
+    const actual = new THREE.Quaternion().fromArray(clip.tracks[index].values);
+    assert.ok(actual.angleTo(expected) < 0.001, `${index}: ${actual.angleTo(expected)}`);
+  }
+  const sourceMixer = new THREE.AnimationMixer(source);
+  const targetMixer = new THREE.AnimationMixer(target);
+  sourceMixer.clipAction(source.animations[0]).play();
+  targetMixer.clipAction(clip).play();
+  sourceMixer.setTime(0);
+  targetMixer.setTime(0);
+  source.updateMatrixWorld(true);
+  target.updateMatrixWorld(true);
+  const angle = (a, b, c) => {
+    const first = b.getWorldPosition(new THREE.Vector3()).sub(a.getWorldPosition(new THREE.Vector3()));
+    const second = c.getWorldPosition(new THREE.Vector3()).sub(b.getWorldPosition(new THREE.Vector3()));
+    return THREE.MathUtils.radToDeg(first.angleTo(second));
+  };
+  const sourceKnee = angle(sourceUpperLeg, sourceLowerLeg, sourceFoot);
+  const targetKnee = angle(targetUpperLeg, targetLowerLeg, targetFoot);
+  const sourceHip = angle(sourceSpine, sourceHips, sourceLowerLeg);
+  const targetHip = angle(targetSpine, targetHips, targetLowerLeg);
+  assert.ok(Math.abs(targetKnee - sourceKnee) < 1, `${targetKnee} versus ${sourceKnee}`);
+  assert.ok(Math.abs(targetHip - sourceHip) < 1, `${targetHip} versus ${sourceHip}`);
+  assert.ok(Math.abs(clip.tracks.find((track) => track.name.endsWith('.position')).values[1] - 2.2) < 1e-6);
 });
 
 test('VRM0 retarget flips quaternion and root-motion x/z axes', () => {

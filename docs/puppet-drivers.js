@@ -33,21 +33,6 @@ const LABELS = {
   },
 };
 
-const EXPLICIT_GESTURES = [
-  ['look-around', /\b(?:look(?:ing)? around|survey(?:ing)? (?:the |our )?surroundings)\b/i],
-  ['thumbs-up', /\bthumbs? up\b/i],
-  ['no', /\b(?:head shake|shak(?:e|ing) (?:my |the )?head)\b/i],
-  ['wave', /\bwav(?:e|ing)\b/i],
-  ['nod', /\bnod(?:ding)?\b/i],
-  ['shrug', /\bshrug(?:ging)?\b/i],
-  ['think', /\bthink(?:ing)?\b/i],
-  ['point', /\bpoint(?:ing)?\b/i],
-  ['laugh', /\blaugh(?:ing)?\b/i],
-  ['clap', /\bclap(?:ping)?\b/i],
-  ['bow', /\bbow(?:ing)?\b/i],
-  ['stretch', /\bstretch(?:ing)?\b/i],
-];
-
 const KEYWORDS = {
   apologetic: /sorry|fault|forgive/, surprised: /wow|unexpected|astonish/, amused: /funny|joke|laugh/,
   pleased: /great|excellent|wonderful/, puzzled: /confus|understand|sense/, skeptical: /doubt|convinced|question/,
@@ -103,8 +88,6 @@ export class EmbeddingActionClassifier {
   }
   async classify(text) {
     await this.ready;
-    const explicit = EXPLICIT_GESTURES.find(([, pattern]) => pattern.test(text));
-    if (explicit) return { kind: 'gesture', name: explicit[0], score: 1 };
     if (/\b(?:sit(?:ting)?|stand(?:ing)?|back up)\b/i.test(text)) return { kind: 'none', name: 'neutral', score: 1 };
     const [vector] = await this.embed([text]);
     return this.centroids.reduce((best, candidate) => {

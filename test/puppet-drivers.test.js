@@ -40,13 +40,15 @@ test('the keyword baseline only emits moods', () => {
 
 test('the spoken demonstration list reaches the intended actions through completed sentences', async () => {
   const expected = [
-    ['I am doing wave, now.', 'gesture', 'wave'], ['I am doing nod, now.', 'gesture', 'nod'],
-    ['I am doing shrug, now.', 'gesture', 'shrug'], ['I am doing think, now.', 'gesture', 'think'],
-    ['I am doing point, now.', 'gesture', 'point'], ['I am doing head shake, now.', 'gesture', 'no'],
-    ['I am doing laugh, now.', 'gesture', 'laugh'], ['I am doing clap, now.', 'gesture', 'clap'],
-    ['I am doing bow, now.', 'gesture', 'bow'], ['I am doing thumbs up, now.', 'gesture', 'thumbs-up'],
-    ['I am doing stretch, now.', 'gesture', 'stretch'], ['I am doing look around, now.', 'gesture', 'look-around'],
-    ['I am doing sit, now.', 'none', 'neutral'], ['I am doing stand, now.', 'none', 'neutral'],
+    ['Yes.', 'gesture', 'nod'],
+    ['No idea.', 'gesture', 'shrug'],
+    ['Hmm.', 'mood', 'thinking'],
+    ['Happy.', 'mood', 'pleased'],
+    ['Sad.', 'mood', 'sad'],
+    ['Angry.', 'mood', 'angry'],
+    ['Relaxed.', 'mood', 'relaxed'],
+    ['Surprised.', 'mood', 'surprised'],
+    ['Pointing at the panel.', 'gesture', 'point'],
   ];
   const classifier = { classify: async (text) => {
     const [, kind, name] = expected.find(([sentence]) => sentence === text);
@@ -57,17 +59,6 @@ test('the spoken demonstration list reaches the intended actions through complet
   for (const [sentence] of expected) driver.push(sentence);
   await driver.tail;
   assert.deepEqual(applied, expected.map(([, kind, name]) => [kind, name]));
-});
-
-test('natural gesture names override the embedding path while pose words do not', async () => {
-  const classifier = new EmbeddingActionClassifier(loadEmbedder);
-  const expected = [
-    ['Waving hello.', 'wave'], ['A little nod.', 'nod'], ['Quick shrug.', 'shrug'], ['Thinking a second.', 'think'],
-    ['Pointing it out.', 'point'], ['Shaking my head.', 'no'], ['A small laugh.', 'laugh'], ['Clap, clap.', 'clap'],
-    ['A polite bow.', 'bow'], ['Thumbs up.', 'thumbs-up'], ['Quick stretch.', 'stretch'], ['Looking around.', 'look-around'],
-  ];
-  for (const [sentence, name] of expected) assert.deepEqual(await classifier.classify(sentence), { kind: 'gesture', name, score: 1 });
-  for (const sentence of ['I am doing sit, now.', 'I am doing stand, now.', 'Sitting down.', 'And back up.', '2 poses, sit and stand.']) assert.deepEqual(await classifier.classify(sentence), { kind: 'none', name: 'neutral', score: 1 });
 });
 
 test('applied actions include sentence and audio scheduling evidence', async () => {

@@ -160,9 +160,9 @@ window.addEventListener('load', () => {
   document.querySelector('#token').value = btoa(JSON.stringify({ endpoint_id: 'test', secret: 'test' }));
   document.querySelector('#connect').click();
   const ready = poll(() => {
-    if (document.querySelector('#status').textContent !== 'ready' || document.querySelector('#toggle').disabled) return;
+    if (document.querySelector('#status').textContent !== 'ready' || document.querySelector('#puppet').getAttribute('aria-disabled') === 'true') return;
     clearInterval(ready);
-    document.querySelector('#toggle').click();
+    document.querySelector('#puppet').click();
     const started = poll(() => {
       const status = document.querySelector('#status').textContent;
       if (status !== 'live' && !status.startsWith('conversation could not start:')) return;
@@ -367,7 +367,7 @@ for (const viewport of layoutViewports) test(`stage UI stays outside the puppet 
   document.documentElement.style.setProperty('--visual-viewport-height', Math.round(visualViewport?.height ?? innerHeight) + 'px');
   document.querySelector('main').style.setProperty('--stage-height', Math.round(visualViewport?.height ?? innerHeight) + 'px');
   const puppet = document.querySelector('#puppet').getBoundingClientRect();
-  const selectors = ['header', '#saved', '#toggle', '.puppet-picker', '#puppet-credit', '#elapsed', '.share', '.display', '.ledger'];
+  const selectors = ['header', '#saved', '.puppet-picker', '#puppet-credit', '#elapsed', '.share', '.display', '.ledger'];
   const rect = (element) => { const value = element.getBoundingClientRect(); return { left: value.left, right: value.right, top: value.top, bottom: value.bottom }; };
   const overlaps = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
   const result = selectors.map((selector) => ({ selector, rect: rect(document.querySelector(selector)) })).filter((item) => overlaps(item.rect, puppet));
@@ -376,6 +376,8 @@ for (const viewport of layoutViewports) test(`stage UI stays outside the puppet 
   const encoded = /data-overlap-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   const result = JSON.parse(encoded ?? 'null');
   assert.deepEqual(result?.result, [], `${viewport.name}: ${JSON.stringify(result)}\n${stderr}`);
+  assert.equal(stdout.includes('tap to stand and start voice'), false, `${viewport.name} retains the old button copy`);
+  assert.equal(/<button[^>]+id="toggle"/.test(stdout), false, `${viewport.name} retains the old button`);
   if (viewport.name !== 'phone') assert.ok(result.pageHeight <= viewport.height, `${viewport.name} must remain one screen: ${result.pageHeight}`);
   else assert.ok(result.pageHeight > viewport.height, 'phone controls should continue below the first screen');
 });
@@ -411,10 +413,17 @@ test('the real page runtime moves its look-at target to the panel and back over 
   assert.ok(result.returned.x < 0.3, stderr);
 });
 
-test('the page toggle completes its start path in headless Chromium', async () => {
-  const { stdout, stderr } = await runPage();
+test('tapping the puppet starts standing and tapping it again stops sitting', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  document.querySelector('#puppet').click();
+  setTimeout(() => { document.body.dataset.puppetToggleTest = JSON.stringify(testPuppet.calls.filter(([name]) => name === 'pose').map(([, pose]) => pose)); }, 30);
+});
+`);
   const observed = /data-start-test="([^"]*)"/.exec(stdout)?.[1] ?? 'start path did not settle';
   assert.equal(observed, 'live', `${observed}\n${stderr}`);
+  const encoded = /data-puppet-toggle-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), ['stand', 'listen', 'sit'], stderr);
 });
 
 test('a forced page error reaches the fleet catcher line in headless Chromium', async () => {
@@ -431,7 +440,7 @@ window.addEventListener('test-ready', () => {
 test('session open and close arrive as two batched telemetry events', async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
-  document.querySelector('#toggle').click();
+  document.querySelector('#puppet').click();
   setTimeout(() => { document.body.dataset.telemetrySessionTest = JSON.stringify(telemetryBatches.flat().filter((event) => event.kind === 'session').map((event) => event.name)); }, 300);
 });
 `);

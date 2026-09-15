@@ -26,10 +26,7 @@
   .control, .display, .ledger { background: linear-gradient(145deg, #201e22ee, #111217ee); border: 1px solid #6d5c49; border-radius: 4px; box-shadow: 0 18px 42px #0008, inset 0 0 35px #8a684111; }
   .control { position: static; }
   .control::before { content: ''; position: absolute; z-index: 1; left: 33%; top: 72%; width: 34%; height: 20%; background: linear-gradient(#665746, #252127); clip-path: polygon(12% 0, 88% 0, 100% 100%, 0 100%); }
-  #puppet { position: absolute; z-index: 2; left: 34%; top: 5%; width: 32%; height: 62%; }
-  #toggle { position: absolute; z-index: 4; left: 37%; top: 68%; width: 26%; height: 40px; padding: 0; touch-action: manipulation; background: linear-gradient(#443b35, #17171b); }
-  #toggle.on { border-color: #50c878; box-shadow: inset 0 0 40px #173e2a; }
-  #puppet-state { white-space: nowrap; font-weight: 650; pointer-events: none; }
+  #puppet { position: absolute; z-index: 2; left: 34%; top: 5%; width: 32%; height: 62%; touch-action: manipulation; cursor: pointer; }
   .puppet-picker { position: absolute; z-index: 4; left: 37%; top: 74%; width: 26%; display: flex; gap: 10px; align-items: center; justify-content: center; }
   #puppet-choice { min-width: 150px; background: #1d1d20; color: inherit; border: 1px solid #414148; border-radius: 8px; padding: 8px; }
   #puppet-credit { position: absolute; z-index: 4; left: 35%; top: 79%; width: 30%; min-height: 21px; color: #cfc4b6; text-align: center; font-size: 13px; }
@@ -66,7 +63,6 @@
     body:has(main.hidden) .entry, body:has(main.hidden) .saved { top: 66px; }
     main { --stage-height: 100svh; height: auto; min-height: calc(var(--stage-height) + 940px); overflow: hidden; }
     #puppet { left: 5%; top: 3%; width: 90%; height: calc(var(--stage-height) - 14%); }
-    #toggle { left: 8%; top: calc(var(--stage-height) - 9%); width: 84%; height: 44px; }
     .control::before { left: 5%; top: calc(var(--stage-height) + 12px); width: 90%; height: 150px; }
     .puppet-picker { left: 8%; top: calc(var(--stage-height) + 26px); width: 84%; }
     #puppet-credit { left: 5%; top: calc(var(--stage-height) + 80px); width: 90%; }
@@ -89,7 +85,7 @@
 </section>
 <main id="conversation" class="hidden">
   <section class="control">
-    <canvas id="puppet"></canvas><button id="toggle" aria-pressed="false" aria-label="start conversation" disabled><span id="puppet-state">loading puppet…</span></button>
+    <canvas id="puppet" role="button" tabindex="0" aria-pressed="false" aria-label="start conversation" aria-disabled="true"></canvas>
     <label class="puppet-picker">appearance <select id="puppet-choice" aria-label="puppet appearance"></select></label>
     <div id="puppet-credit"></div>
     <div id="elapsed" aria-live="polite">00:00 / 30:00</div>
@@ -202,11 +198,10 @@ function savedState(saved) {
 }
 function syncPuppetUi() {
   const active = Boolean(conversation);
-  $('toggle').classList.toggle('on', active);
-  $('toggle').disabled = !puppetReady && !active && !starting;
-  $('toggle').setAttribute('aria-pressed', String(active));
-  $('toggle').setAttribute('aria-label', active || starting ? 'stop conversation' : 'start conversation');
-  $('puppet-state').textContent = puppetLoading ? 'loading puppet…' : hubWaiting.size ? 'waiting for hub…' : active ? 'tap to sit and stop voice' : starting ? 'standing… tap to stop' : puppetRuntime ? 'tap to stand and start voice' : 'puppet renderer unavailable';
+  const disabled = !puppetReady && !active && !starting;
+  $('puppet').setAttribute('aria-disabled', String(disabled));
+  $('puppet').setAttribute('aria-pressed', String(active));
+  $('puppet').setAttribute('aria-label', active || starting ? 'stop conversation' : 'start conversation');
 }
 try {
   puppetRuntime = new PuppetRuntime($('puppet'));
@@ -845,6 +840,7 @@ async function finishStop(reason, remoteClosed) {
   setStatus(reason, reason === 'conversation off' ? 'ok' : 'err');
 }
 async function toggleConversation() {
+  if ($('puppet').getAttribute('aria-disabled') === 'true') return;
   try {
     if (starting) cancelStarting();
     else if (conversation) await stopConversation();
@@ -930,7 +926,12 @@ async function loadPrivatePuppets() {
   puppetChannel.preload(puppetCatalog.avatars, puppetCatalog.active).catch(() => {});
 }
 
-$('toggle').addEventListener('click', toggleConversation);
+$('puppet').addEventListener('click', toggleConversation);
+$('puppet').addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  event.preventDefault();
+  toggleConversation();
+});
 $('share-file').addEventListener('change', () => { try { chooseImage($('share-file').files[0]); } catch (error) { chooseImage(); setStatus(error.message, 'err'); } });
 $('share-remove').addEventListener('click', () => { $('share-file').value = ''; chooseImage(); });
 $('share-text').addEventListener('paste', (event) => {

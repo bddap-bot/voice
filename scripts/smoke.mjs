@@ -111,7 +111,8 @@ async function makeServer() {
 
 async function connectCdp(port) {
   let targets;
-  for (let index = 0; index < 80; index++) { try { targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json(); break; } catch { await new Promise((resolve) => setTimeout(resolve, 100)); } }
+  for (let index = 0; index < 300; index++) { try { targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json(); break; } catch { await new Promise((resolve) => setTimeout(resolve, 100)); } }
+  if (!targets) throw new Error('Chromium DevTools did not become ready within 30 seconds');
   const socket = new WebSocket(targets.find((target) => target.type === 'page').webSocketDebuggerUrl);
   await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject; });
   let id = 0;
@@ -126,7 +127,7 @@ async function connectCdp(port) {
 async function runViewport(viewport, executable, server) {
   const scratch = await mkdtemp(path.join(root, '.smoke-'));
   const devPort = await new Promise((resolve) => { const listener=net.createServer().listen(0,'127.0.0.1',()=>{const value=listener.address().port;listener.close(()=>resolve(value))}); });
-  const args=['--headless=new','--no-sandbox','--use-angle=swiftshader','--enable-unsafe-swiftshader','--ignore-gpu-blocklist','--hide-scrollbars',`--window-size=${viewport.width},${viewport.height}`,`--force-device-scale-factor=${viewport.scale}`,`--user-data-dir=${path.join(scratch,'profile')}`,`--remote-debugging-port=${devPort}`,...(viewport.mobile?['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36']:[]),'about:blank'];
+  const args=['--headless=new','--no-sandbox','--use-angle=swiftshader','--enable-unsafe-swiftshader','--ignore-gpu-blocklist','--hide-scrollbars',`--window-size=${viewport.width},${viewport.height}`,`--force-device-scale-factor=${viewport.scale}`,`--user-data-dir=${path.join(scratch,'profile')}`,`--remote-debugging-port=${devPort}`,'--remote-debugging-address=127.0.0.1',...(viewport.mobile?['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36']:[]),'about:blank'];
   const chrome=spawn(executable,args,{stdio:['ignore','ignore','pipe']});
   let chromeError='';chrome.stderr.on('data',(chunk)=>{chromeError+=chunk});
   const cdp=await connectCdp(devPort);

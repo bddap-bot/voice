@@ -1,4 +1,7 @@
 const LABELS = {
+  none: {
+    neutral: ['the available colors are red, green, and blue', 'the choices are small, medium, and large', 'the expressions include happy, sad, angry, and surprised', 'the list includes alpha, beta, gamma, and delta', 'first is setup, second is execution, and third is review'],
+  },
   gesture: {
     nod: ['yes, I agree', 'that is correct', 'absolutely, go ahead'],
     shrug: ['I do not know', 'it could be either way', 'I have no preference'],
@@ -10,13 +13,20 @@ const LABELS = {
     apologetic: ['I am sorry', 'please forgive my mistake', 'that was my fault'],
     surprised: ['that is completely unexpected', 'what an astonishing result', 'I cannot believe it'],
     amused: ['that is hilarious', 'what a funny joke', 'this makes me laugh'],
-    pleased: ['I am delighted with the result', 'excellent work', 'this turned out wonderfully'],
+    pleased: ['I am delighted with the result', 'excellent work', 'this turned out wonderfully', 'I feel happy today'],
+    sad: ['I feel sad about what happened', 'this news has left me unhappy', 'I am feeling down today'],
+    angry: ['I am angry about what happened', 'this situation makes me furious', 'I feel upset and mad'],
     puzzled: ['I do not understand this', 'this is confusing', 'that does not make sense'],
     skeptical: ['I am not convinced', 'that claim seems doubtful', 'I question whether that is true'],
     thinking: ['I am considering the problem', 'let me think this through', 'perhaps there is another approach'],
     alert: ['please be careful', 'this is an urgent warning', 'watch out for danger'],
     sleepy: ['I am exhausted and need sleep', 'I feel drowsy', 'it is time to rest'],
+    relaxed: ['I feel relaxed and at ease', 'everything feels calm and peaceful', 'I can finally unwind'],
     curious: ['I wonder how that works', 'why did this happen', 'I would like to learn more'],
+  },
+  pose: {
+    sit: ['I am sitting down now', 'let me take a seat', 'I will sit in this chair'],
+    stand: ['I am standing up now', 'let me get to my feet', 'I will stand here'],
   },
 };
 
@@ -84,32 +94,46 @@ export class EmbeddingActionClassifier {
 }
 
 export class TranscriptActionDriver {
-  constructor(apply, classifier = new EmbeddingActionClassifier()) {
+  constructor(apply, classifier = new EmbeddingActionClassifier(), timing = {}) {
     this.apply = apply;
     this.classifier = classifier;
+    this.now = timing.now ?? (() => performance.now());
+    this.schedule = timing.schedule ?? ((apply, delay) => setTimeout(apply, delay));
+    this.minimumMs = timing.minimumMs ?? 900;
     this.epoch = 0;
     this.pending = '';
+    this.nextAt = 0;
+    this.tail = Promise.resolve();
   }
-  push(delta) {
+  push(delta, playAt = this.now()) {
     this.pending += delta;
     const sentences = this.pending.match(/[^.!?]+[.!?]+/g) ?? [];
     const consumed = sentences.reduce((length, sentence) => length + sentence.length, 0);
     this.pending = this.pending.slice(consumed);
-    for (const sentence of sentences) this.dispatch(sentence.trim());
+    for (const sentence of sentences) this.dispatch(sentence.trim(), playAt);
   }
   flush() {
     if (this.pending.trim()) this.dispatch(this.pending);
     this.pending = '';
   }
-  async dispatch(text) {
+  dispatch(text, playAt = this.now()) {
     const epoch = this.epoch;
-    const result = await this.classifier.classify(text);
-    if (epoch === this.epoch) this.apply(result);
-    return result;
+    const operation = this.tail.then(async () => {
+      const result = await this.classifier.classify(text);
+      if (epoch !== this.epoch) return result;
+      const at = Math.max(playAt, this.nextAt, this.now());
+      this.nextAt = at + this.minimumMs;
+      await new Promise((resolve) => this.schedule(resolve, Math.max(0, at - this.now())));
+      if (epoch === this.epoch) this.apply(result);
+      return result;
+    });
+    this.tail = operation.catch(() => {});
+    return operation;
   }
   reset() {
     this.epoch++;
     this.pending = '';
+    this.nextAt = 0;
   }
 }
 

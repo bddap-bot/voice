@@ -465,3 +465,14 @@ window.addEventListener('test-ready', () => {
   const encoded = /data-driver-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   assert.deepEqual(JSON.parse(encoded ?? 'null'), [['waiting', true], ['mood', 'apologetic']], stderr);
 });
+
+test('a classified point is dropped until the display has a target', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.output_transcript.delta', delta: 'Look at the important detail.' }) }));
+  setTimeout(() => { document.body.dataset.pointTest = JSON.stringify(testPuppet.calls.filter(([name]) => name === 'gesture')); }, 20);
+});
+`);
+  const encoded = /data-point-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), [], stderr);
+});

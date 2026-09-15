@@ -25,6 +25,7 @@ test('complete streamed sentences dispatch once and reset invalidates old work',
   const driver = new TranscriptActionDriver((action) => applied.push(action), classifier);
   driver.push('First sen');
   driver.push('tence. Second');
+  await Promise.resolve();
   assert.equal(waiting.length, 1);
   driver.reset();
   waiting[0].resolve({ kind: 'gesture', name: 'nod' });
@@ -35,4 +36,48 @@ test('complete streamed sentences dispatch once and reset invalidates old work',
 test('the keyword baseline only emits moods', () => {
   assert.deepEqual(keywordMood('This is an urgent warning'), { kind: 'mood', name: 'alert' });
   assert.equal(keywordMood('I concur with that conclusion'), null);
+});
+
+test('the spoken demonstration list reaches the intended actions through completed sentences', async () => {
+  const expected = [
+    ['Yes.', 'gesture', 'nod'],
+    ['No idea.', 'gesture', 'shrug'],
+    ['Hmm.', 'mood', 'thinking'],
+    ['Happy.', 'mood', 'pleased'],
+    ['Sad.', 'mood', 'sad'],
+    ['Angry.', 'mood', 'angry'],
+    ['Relaxed.', 'mood', 'relaxed'],
+    ['Surprised.', 'mood', 'surprised'],
+    ['Pointing at the panel.', 'gesture', 'point'],
+    ['Sitting.', 'pose', 'sit'],
+    ['And standing.', 'pose', 'stand'],
+  ];
+  const classifier = { classify: async (text) => {
+    const [, kind, name] = expected.find(([sentence]) => sentence === text);
+    return { kind, name };
+  } };
+  const applied = [];
+  const driver = new TranscriptActionDriver((action) => applied.push([action.kind, action.name]), classifier, { minimumMs: 0, schedule: (apply) => apply() });
+  for (const [sentence] of expected) driver.push(sentence);
+  await driver.tail;
+  assert.deepEqual(applied, expected.map(([, kind, name]) => [kind, name]));
+});
+
+test('transcript-ahead actions wait for audio and retain a minimum spoken-order dwell', async () => {
+  let now = 1000;
+  const scheduled = [];
+  const applied = [];
+  const classifier = { classify: async (text) => ({ kind: 'mood', name: text.startsWith('First') ? 'pleased' : 'sad' }) };
+  const driver = new TranscriptActionDriver((action) => applied.push(action.name), classifier, { now: () => now, minimumMs: 900, schedule: (apply, delay) => scheduled.push({ apply, delay }) });
+  driver.push('First. Second.', 1500);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(scheduled[0].delay, 500);
+  now = 1500;
+  scheduled.shift().apply();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(scheduled[0].delay, 900);
+  now = 2400;
+  scheduled.shift().apply();
+  await driver.tail;
+  assert.deepEqual(applied, ['pleased', 'sad']);
 });

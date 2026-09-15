@@ -26,7 +26,7 @@ test('spectral bands choose different VRM visemes', () => {
 });
 
 test('every mood has bounded expressions and a head or shoulder pose', () => {
-  assert.deepEqual(Object.keys(MOOD_TABLE), ['curious', 'amused', 'puzzled', 'thinking', 'pleased', 'apologetic', 'alert', 'sleepy', 'surprised', 'skeptical']);
+  assert.deepEqual(Object.keys(MOOD_TABLE), ['curious', 'amused', 'puzzled', 'thinking', 'pleased', 'sad', 'angry', 'apologetic', 'alert', 'sleepy', 'relaxed', 'surprised', 'skeptical']);
   for (const mood of Object.values(MOOD_TABLE)) {
     assert.ok(Object.values(mood.expressions).every((value) => value >= 0 && value <= 1));
     assert.ok(['head', 'leftShoulder', 'rightShoulder'].some((bone) => bone in mood.bones));

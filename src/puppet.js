@@ -94,9 +94,12 @@ export const MOOD_TABLE = {
   puzzled: { expressions: { sad: 0.2, surprised: 0.12 }, bones: { head: [0.04, 0.14, 0.1], leftShoulder: [0, 0, 0.08] } },
   thinking: { expressions: { relaxed: 0.28 }, bones: { head: [0.08, -0.12, 0.04], rightShoulder: [0.03, 0, -0.05] } },
   pleased: { expressions: { happy: 0.76 }, bones: { head: [-0.04, 0, -0.03], leftShoulder: [0, 0, 0.04], rightShoulder: [0, 0, -0.04] } },
+  sad: { expressions: { sad: 0.78 }, bones: { head: [0.13, 0, 0.06], leftShoulder: [0.09, 0, 0.06], rightShoulder: [0.09, 0, -0.06] } },
+  angry: { expressions: { angry: 0.78 }, bones: { head: [0.03, -0.1, -0.08], spine: [-0.05, 0, 0] } },
   apologetic: { expressions: { sad: 0.48 }, bones: { head: [0.09, 0, 0.04], leftShoulder: [0.06, 0, 0.03], rightShoulder: [0.06, 0, -0.03] } },
   alert: { expressions: { surprised: 0.35 }, bones: { head: [-0.08, 0, 0], spine: [-0.04, 0, 0] } },
   sleepy: { expressions: { relaxed: 0.68 }, bones: { head: [0.16, -0.08, 0.08], spine: [0.08, 0, 0] } },
+  relaxed: { expressions: { relaxed: 0.78 }, bones: { head: [0.06, 0.05, 0.04], leftShoulder: [0.07, 0, 0.05], rightShoulder: [0.07, 0, -0.05] } },
   surprised: { expressions: { surprised: 0.9 }, bones: { head: [-0.12, 0, 0], leftShoulder: [-0.08, 0, 0.08], rightShoulder: [-0.08, 0, -0.08] } },
   skeptical: { expressions: { angry: 0.18 }, bones: { head: [0.02, -0.16, -0.11], rightShoulder: [0, 0, -0.06] } },
 };

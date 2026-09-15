@@ -118,7 +118,13 @@ let puppetTools;
 let selectedImage;
 let sharing = false;
 const shareWaiters = new Map();
-const actionDriver = new TranscriptActionDriver((action) => action.kind === 'mood' ? puppetRuntime?.mood(action.name) : puppetRuntime?.gesture(action.name));
+function applyTranscriptAction(action) {
+  if (action.kind === 'none') return;
+  if (action.kind === 'mood') puppetRuntime?.mood(action.name);
+  else if (action.kind === 'pose') puppetRuntime?.pose(action.name);
+  else if (action.name !== 'point' || $('display-items').childElementCount) puppetRuntime?.gesture(action.name, action.name === 'point' ? 'panel' : undefined);
+}
+const actionDriver = new TranscriptActionDriver(applyTranscriptAction);
 const hubWaiting = new Set();
 const completedToolCalls = new Set();
 const telemetryWaiters = new Map();
@@ -592,7 +598,8 @@ function onLiveEvent(message, source) {
   }
   else if (event.type === 'session.output_transcript.delta') {
     trace.spoke(event.delta ?? '', event.start_ms, event.end_ms);
-    actionDriver.push(event.delta ?? '');
+    const audioNow = $('speaker').currentTime * 1000;
+    actionDriver.push(event.delta ?? '', performance.now() + Math.max(0, (event.start_ms ?? audioNow) - audioNow));
     conversation?.transcript?.add('model', event.delta ?? '');
   }
   else if (toolCall) {

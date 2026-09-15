@@ -205,7 +205,7 @@ function syncPuppetUi() {
   $('puppet').setAttribute('aria-label', active || starting ? 'stop conversation' : 'start conversation');
 }
 try {
-  puppetRuntime = new PuppetRuntime($('puppet'));
+  puppetRuntime = new PuppetRuntime($('puppet'), $('display'));
   puppetRuntime.pause();
   puppetTools = new PuppetTools(puppetRuntime, () => puppetCatalog?.avatars ?? [], () => puppetActive, (id, valid) => showPuppet(id, valid));
 } catch (error) {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as THREE from 'three';
-import { MOOD_TABLE, PuppetRuntime, animationClip, audioEnergy, audioVisemes, shouldBeat } from '../src/puppet.js';
+import { MOOD_TABLE, PuppetRuntime, animationClip, audioEnergy, audioVisemes, pointAtOffsets, screenTarget, shouldBeat } from '../src/puppet.js';
 
 function waveform(amplitude) {
   return Uint8Array.from({ length: 256 }, (_, index) => 128 + Math.round(Math.sin(index / 3) * amplitude));
@@ -262,6 +262,60 @@ test('the look-at target glances to a fresh panel and returns to camera dwell', 
   assert.ok(target.position.x < panelX * 0.1);
   assert.ok(panelHeadYaw > 0.08);
   assert.ok(Math.abs(head.rotation.y) < panelHeadYaw * 0.1);
+});
+
+test('point-at uses the near hand for panels on either side', () => {
+  const camera = new THREE.PerspectiveCamera(28, 1, 0.05, 30);
+  camera.position.set(0, 1.25, 6.4);
+  camera.lookAt(0, 1.25, 0);
+  camera.updateMatrixWorld();
+  camera.updateProjectionMatrix();
+  const viewport = { left: 300, top: 0, width: 400, height: 700 };
+  const panels = [
+    { rect: { left: 720, top: 200, width: 250, height: 340 }, near: 'left', far: 'right' },
+    { rect: { left: 30, top: 180, width: 220, height: 360 }, near: 'right', far: 'left' },
+  ];
+  for (const { rect, near, far } of panels) {
+    const target = screenTarget(camera, viewport, rect);
+    const torso = new THREE.Object3D();
+    const hands = {};
+    const shoulders = {};
+    const bones = new Map();
+    for (const side of ['left', 'right']) {
+      const upper = new THREE.Object3D();
+      const lower = new THREE.Object3D();
+      const hand = new THREE.Object3D();
+      upper.position.set(side === 'left' ? 0.2 : -0.2, 1.35, 0);
+      lower.position.y = 0.45;
+      hand.position.y = 0.42;
+      upper.rotation.set(0.25, side === 'left' ? -0.35 : 0.35, side === 'left' ? 0.4 : -0.4);
+      torso.add(upper);
+      upper.add(lower);
+      lower.add(hand);
+      bones.set(`${side}UpperArm`, { node: upper });
+      bones.set(`${side}LowerArm`, { node: lower });
+      hands[side] = hand;
+      shoulders[side] = upper;
+    }
+    torso.updateMatrixWorld(true);
+    const offsets = pointAtOffsets(target, bones);
+    assert.ok(`${near}UpperArm` in offsets);
+    assert.ok(!(`${far}UpperArm` in offsets));
+    const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+      bones, gestureRotation: new THREE.Quaternion(), gestureOffsets: offsets,
+      gestureState: { from: {}, to: offsets, started: 0, releaseAt: Infinity, releasing: false },
+    });
+    runtime.updateGesture(1000);
+    torso.updateMatrixWorld(true);
+    const nearPosition = hands[near].getWorldPosition(new THREE.Vector3());
+    const farPosition = hands[far].getWorldPosition(new THREE.Vector3());
+    const shoulderPosition = shoulders[near].getWorldPosition(new THREE.Vector3());
+    const handDirection = nearPosition.clone().sub(shoulderPosition).normalize();
+    const targetDirection = target.clone().sub(shoulderPosition).normalize();
+    assert.ok(Math.sign(nearPosition.x) === Math.sign(target.x));
+    assert.ok(Math.abs(nearPosition.x - target.x) < Math.abs(farPosition.x - target.x));
+    assert.ok(handDirection.angleTo(targetDirection) < 0.12);
+  }
 });
 
 test('gaze is inert when a puppet has no look-at rig', () => {

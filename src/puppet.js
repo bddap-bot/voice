@@ -75,7 +75,7 @@ export function retargetMixamoClip(source, vrm) {
       rawHips?.getWorldPosition(targetPosition);
       vrm.scene?.worldToLocal?.(targetPosition);
       const scale = sourcePosition.y ? Math.abs(targetPosition.y) / Math.abs(sourcePosition.y) : 0.01;
-      const values = Float32Array.from(track.values, (value, index) => value * scale * (vrm.meta?.metaVersion === '0' && index % 3 !== 1 ? -1 : 1));
+      const values = Float32Array.from(track.values, (value, index) => index % 3 === 1 ? value * scale : 0);
       tracks.push(new THREE.VectorKeyframeTrack(`${node.name}.position`, track.times, values));
     }
   }

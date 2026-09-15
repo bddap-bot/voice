@@ -237,21 +237,8 @@ async function runPage(testSetup = '') {
   }
 }
 
-async function runGazePage() {
+async function runPuppetPage(html, { scale = 1, size = '390,844' } = {}) {
   const puppet = await readFile(new URL('../docs/puppet.js', import.meta.url));
-  const html = `<!doctype html><canvas id="puppet" style="width:390px;height:844px"></canvas><script type="module">
-import { PuppetRuntime } from '/puppet.js';
-const runtime = new PuppetRuntime(document.querySelector('#puppet'));
-runtime.pause();
-runtime.vrm = { lookAt: {} };
-runtime.setGaze('panel', 2200, 0);
-for (let frame = 0; frame < 30; frame++) runtime.updateGaze(100 + frame * 16);
-const panel = { mode: runtime.gazeMode, x: runtime.gazeTarget.position.x };
-Math.random = () => 0.5;
-for (let frame = 0; frame < 30; frame++) runtime.updateGaze(2201 + frame * 16);
-document.body.dataset.gazeTest = JSON.stringify({ panel, returned: { mode: runtime.gazeMode, x: runtime.gazeTarget.position.x } });
-runtime.dispose();
-</script>`;
   const scratch = await mkdtemp(join(process.cwd(), '.chromium-'));
   const profile = join(scratch, 'profile');
   const temporary = join(scratch, 'tmp');
@@ -269,6 +256,8 @@ runtime.dispose();
       '--no-sandbox',
       '--use-angle=swiftshader',
       '--enable-unsafe-swiftshader',
+      `--force-device-scale-factor=${scale}`,
+      `--window-size=${size}`,
       `--user-data-dir=${profile}`,
       '--virtual-time-budget=3000',
       '--dump-dom',
@@ -279,6 +268,55 @@ runtime.dispose();
     await rm(scratch, { recursive: true, force: true });
   }
 }
+
+function runGazePage() {
+  return runPuppetPage(`<!doctype html><canvas id="puppet" style="width:390px;height:844px"></canvas><script type="module">
+import { PuppetRuntime } from '/puppet.js';
+const runtime = new PuppetRuntime(document.querySelector('#puppet'));
+runtime.pause();
+runtime.vrm = { lookAt: {} };
+runtime.setGaze('panel', 2200, 0);
+for (let frame = 0; frame < 30; frame++) runtime.updateGaze(100 + frame * 16);
+const panel = { mode: runtime.gazeMode, x: runtime.gazeTarget.position.x };
+Math.random = () => 0.5;
+for (let frame = 0; frame < 30; frame++) runtime.updateGaze(2201 + frame * 16);
+document.body.dataset.gazeTest = JSON.stringify({ panel, returned: { mode: runtime.gazeMode, x: runtime.gazeTarget.position.x } });
+runtime.dispose();
+</script>`);
+}
+
+async function runLayoutPage() {
+  const index = await readFile(new URL('../docs/index.html', import.meta.url), 'utf8');
+  const style = /<style>[\s\S]*?<\/style>/.exec(index)[0];
+  const main = /<main[\s\S]*?<\/main>/.exec(index)[0].replace('class="hidden"', '');
+  return runPuppetPage(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">${style}</head><body>${main}<script type="module">
+import { PuppetRuntime } from '/puppet.js';
+const canvas = document.querySelector('#puppet');
+const heights = [];
+const errors = [];
+new ResizeObserver(() => heights.push(canvas.clientHeight)).observe(canvas);
+window.addEventListener('error', (event) => errors.push(event.message));
+const runtime = new PuppetRuntime(canvas);
+setTimeout(() => {
+  runtime.dispose();
+  const settled = canvas.clientHeight;
+  canvas.width = 100;
+  canvas.height = 1000;
+  document.body.dataset.layoutTest = JSON.stringify({ heights, errors, settled, filled: document.querySelector('#toggle').clientHeight, afterBufferChange: canvas.clientHeight });
+}, 1500);
+</script></body></html>`, { scale: 1.25, size: '1000,700' });
+}
+
+test('the puppet canvas keeps one layout height across resize-observer ticks', async () => {
+  const { stdout, stderr } = await runLayoutPage();
+  const encoded = /data-layout-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  const result = JSON.parse(encoded ?? 'null');
+  assert.ok(result?.heights.length >= 1, stderr);
+  assert.deepEqual(result.heights, result.heights.map(() => result.heights[0]), `heights across observer ticks: ${result.heights.join(' ')}`);
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.settled, result.filled, 'canvas must fill the toggle');
+  assert.equal(result.afterBufferChange, result.settled, 'layout height must not follow the drawing buffer');
+});
 
 test('the real page runtime moves its look-at target to the panel and back over time', async () => {
   const { stdout, stderr } = await runGazePage();

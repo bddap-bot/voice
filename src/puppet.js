@@ -80,7 +80,34 @@ export function retargetMixamoClip(source, vrm) {
     }
   }
   if (!tracks.some((track) => track.name.endsWith('.quaternion'))) throw new Error('FBX has no mapped humanoid rotation tracks');
-  return new THREE.AnimationClip(clip.name || 'Clip', clip.duration, tracks);
+  const retargeted = new THREE.AnimationClip(clip.name || 'Clip', clip.duration, tracks);
+  retargeted.userData.poseTracks = tracks.filter((track) => track.name.endsWith('.quaternion') || track.name.endsWith('.position')).map((track) => ({
+    name: track.name,
+    valueSize: track.getValueSize(),
+    interpolant: track.createInterpolant(),
+  }));
+  return retargeted;
+}
+
+function handoverFor(from, to) {
+  const fromTracks = new Map((from.userData.poseTracks ?? []).map((track) => [track.name, track]));
+  const pairs = (to.userData.poseTracks ?? []).flatMap((track) => fromTracks.has(track.name) ? [[fromTracks.get(track.name), track]] : []);
+  if (!pairs.length) return { offset: 0, duration: 1.5 };
+  const samples = Math.max(2, Math.ceil(to.duration * 60));
+  let best = { offset: 0, distance: Infinity };
+  for (let sample = 0; sample < samples; sample++) {
+    const offset = sample * to.duration / samples;
+    let square = 0;
+    for (const [left, right] of pairs) {
+      const a = left.interpolant.evaluate(from.duration);
+      const b = right.interpolant.evaluate(offset);
+      if (left.valueSize === 4) square += new THREE.Quaternion().fromArray(a).angleTo(new THREE.Quaternion().fromArray(b)) ** 2;
+      else square += new THREE.Vector3().fromArray(a).distanceToSquared(new THREE.Vector3().fromArray(b));
+    }
+    const distance = Math.sqrt(square / pairs.length);
+    if (distance < best.distance) best = { offset, distance };
+  }
+  return { offset: best.offset, duration: THREE.MathUtils.clamp(1.5 + best.distance * 4, 1.5, 2.5) };
 }
 
 export async function animationClip(bytes, format, vrm) {
@@ -194,6 +221,7 @@ export class PuppetRuntime {
     ]);
     this.mixer.clipAction(idle).play();
     this.clips = new Map();
+    this.handovers = new Map();
     this.clipAction = null;
     this.clipFallback = null;
     this.clipGesture = null;
@@ -301,14 +329,32 @@ export class PuppetRuntime {
       }
     }
     this.clips.clear();
+    preparedClip.userData.action = initialClip.action;
     this.clips.set(initialClip.action, preparedClip);
+    this.prepareHandovers();
     this.idleRoot.add(vrm.scene);
     this.playIdle();
     return true;
   }
   async loadClips(entries) {
-    for (const entry of entries) this.clips.set(entry.action, await animationClip(entry.bytes, entry.format, this.vrm));
+    for (const entry of entries) {
+      const clip = await animationClip(entry.bytes, entry.format, this.vrm);
+      clip.userData.action = entry.action;
+      this.clips.set(entry.action, clip);
+    }
+    this.prepareHandovers();
     this.pose(this.poseName);
+  }
+  prepareHandovers() {
+    this.handovers.clear();
+    for (const [transition, idles] of [['stand', IDLE_CLIPS.stand], ['sit', IDLE_CLIPS.sit]]) {
+      const from = this.clips.get(transition);
+      if (!from) continue;
+      for (const idle of idles) {
+        const to = this.clips.get(idle);
+        if (to) this.handovers.set(`${transition}:${idle}`, handoverFor(from, to));
+      }
+    }
   }
   clear() {
     if (!this.vrm) return;
@@ -428,8 +474,13 @@ export class PuppetRuntime {
   playClip(name, fallback) {
     const clip = this.clips.get(name);
     if (!clip) return;
-    this.clipAction?.fadeOut(0.18);
-    const action = this.mixer.clipAction(clip, this.vrm.scene).reset().fadeIn(0.18).play();
+    const previous = this.clipAction;
+    const handover = previous && this.handovers?.get(`${previous.getClip().userData.action}:${name}`);
+    const duration = handover?.duration ?? 0.18;
+    previous?.fadeOut(duration);
+    const action = this.mixer.clipAction(clip, this.vrm.scene).reset();
+    if (handover) action.time = handover.offset;
+    action.fadeIn(duration).play();
     action.setLoop(name === fallback ? THREE.LoopRepeat : THREE.LoopOnce, name === fallback ? Infinity : 1);
     action.clampWhenFinished = name !== fallback;
     this.clipAction = action;
@@ -469,7 +520,6 @@ export class PuppetRuntime {
       return;
     }
     if (this.clipAction && !this.clipAction.isRunning() && this.clipFallback) {
-      this.clipAction = null;
       this.clipFallback = null;
       this.clipGesture = null;
       if (this.pendingGesture) {

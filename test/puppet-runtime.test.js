@@ -277,11 +277,15 @@ test('sit and stand transitions keep model-root and head velocity bounded', () =
   model.add(hips);
   stage.add(model);
   const clips = new Map([
-    ['idle', new THREE.AnimationClip('idle', 1, [new THREE.NumberKeyframeTrack(`${hips.uuid}.position[y]`, [0, 1], [1.4, 1.4])])],
-    ['sit-idle', new THREE.AnimationClip('sit-idle', 1, [new THREE.NumberKeyframeTrack(`${hips.uuid}.position[y]`, [0, 1], [0.75, 0.75])])],
-    ['sit', new THREE.AnimationClip('sit', 0.8, [new THREE.NumberKeyframeTrack(`${hips.uuid}.position[y]`, [0, 0.8], [1.4, 0.75])])],
-    ['stand', new THREE.AnimationClip('stand', 0.8, [new THREE.NumberKeyframeTrack(`${hips.uuid}.position[y]`, [0, 0.8], [0.75, 1.4])])],
+    ['idle', new THREE.AnimationClip('idle', 1, [new THREE.VectorKeyframeTrack(`${hips.uuid}.position`, [0, 0.35, 1], [0, 1.34, 0, 0, 1.38, 0, 0, 1.34, 0])])],
+    ['sit-idle', new THREE.AnimationClip('sit-idle', 1, [new THREE.VectorKeyframeTrack(`${hips.uuid}.position`, [0, 0.6, 1], [0, 0.69, 0, 0, 0.74, 0, 0, 0.69, 0])])],
+    ['sit', new THREE.AnimationClip('sit', 0.8, [new THREE.VectorKeyframeTrack(`${hips.uuid}.position`, [0, 0.5, 0.8], [0, 1.4, 0, 0, 0.75, 0, 0, 0.75, 0])])],
+    ['stand', new THREE.AnimationClip('stand', 0.8, [new THREE.VectorKeyframeTrack(`${hips.uuid}.position`, [0, 0.5, 0.8], [0, 0.75, 0, 0, 1.4, 0, 0, 1.4, 0])])],
   ]);
+  for (const [name, clip] of clips) {
+    clip.userData.action = name;
+    clip.userData.poseTracks = clip.tracks.map((track) => ({ name: track.name, valueSize: track.getValueSize(), interpolant: track.createInterpolant() }));
+  }
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
     stage,
     vrm: { scene: model },
@@ -291,12 +295,17 @@ test('sit and stand transitions keep model-root and head velocity bounded', () =
     clipFallback: null,
     clipGesture: null,
     poseName: 'stand',
+    idleClip: 'idle',
+    nextIdleAt: Infinity,
+    handovers: new Map(),
   });
+  runtime.prepareHandovers();
   const modelPosition = new THREE.Vector3();
   const headPosition = new THREE.Vector3();
   const previousModel = new THREE.Vector3();
   const previousHead = new THREE.Vector3();
   const velocities = [];
+  const handoverVelocities = [];
   const sample = () => {
     stage.updateMatrixWorld(true);
     model.getWorldPosition(modelPosition);
@@ -316,12 +325,17 @@ test('sit and stand transitions keep model-root and head velocity bounded', () =
       runtime.mixer.update(1 / 60);
       runtime.updatePose(frame * 1000 / 60);
       sample();
+      if (frame >= 30) handoverVelocities.push(velocities.at(-1));
     }
   }
   assert.equal(stage.position.y, 0);
   assert.ok(Math.max(...velocities.map(({ model: velocity }) => velocity)) < 0.001);
-  const peakHeadVelocity = Math.max(...velocities.map(({ head: velocity }) => velocity));
-  assert.ok(peakHeadVelocity < 3, `peak head velocity ${peakHeadVelocity}`);
+  const peakHeadVelocity = Math.max(...handoverVelocities.map(({ head: velocity }) => velocity));
+  assert.ok(peakHeadVelocity < 0.3, `peak head velocity ${peakHeadVelocity}`);
+  assert.ok(runtime.handovers.get('sit:sit-idle').offset > 0.3, JSON.stringify(runtime.handovers.get('sit:sit-idle')));
+  assert.ok(runtime.handovers.get('stand:idle').offset > 0.3, JSON.stringify(runtime.handovers.get('stand:idle')));
+  assert.ok(runtime.handovers.get('sit:sit-idle').duration > 1.5);
+  assert.ok(runtime.handovers.get('stand:idle').duration > runtime.handovers.get('sit:sit-idle').duration);
 });
 
 test('Mixamo rest rotations preserve an upright VRM bone-space invariant', () => {

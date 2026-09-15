@@ -31,11 +31,22 @@ const LABELS = {
     relaxed: ['I feel relaxed and at ease', 'everything feels calm and peaceful', 'I can finally unwind'],
     curious: ['I wonder how that works', 'why did this happen', 'I would like to learn more'],
   },
-  pose: {
-    sit: ['I am sitting down now', 'let me take a seat', 'I will sit in this chair'],
-    stand: ['I am standing up now', 'let me get to my feet', 'I will stand here'],
-  },
 };
+
+const EXPLICIT_GESTURES = [
+  ['look-around', /\b(?:look(?:ing)? around|survey(?:ing)? (?:the |our )?surroundings)\b/i],
+  ['thumbs-up', /\bthumbs? up\b/i],
+  ['no', /\b(?:head shake|shak(?:e|ing) (?:my |the )?head)\b/i],
+  ['wave', /\bwav(?:e|ing)\b/i],
+  ['nod', /\bnod(?:ding)?\b/i],
+  ['shrug', /\bshrug(?:ging)?\b/i],
+  ['think', /\bthink(?:ing)?\b/i],
+  ['point', /\bpoint(?:ing)?\b/i],
+  ['laugh', /\blaugh(?:ing)?\b/i],
+  ['clap', /\bclap(?:ping)?\b/i],
+  ['bow', /\bbow(?:ing)?\b/i],
+  ['stretch', /\bstretch(?:ing)?\b/i],
+];
 
 const KEYWORDS = {
   apologetic: /sorry|fault|forgive/, surprised: /wow|unexpected|astonish/, amused: /funny|joke|laugh/,
@@ -92,6 +103,9 @@ export class EmbeddingActionClassifier {
   }
   async classify(text) {
     await this.ready;
+    const explicit = EXPLICIT_GESTURES.find(([, pattern]) => pattern.test(text));
+    if (explicit) return { kind: 'gesture', name: explicit[0], score: 1 };
+    if (/\b(?:sit(?:ting)?|stand(?:ing)?|back up)\b/i.test(text)) return { kind: 'none', name: 'neutral', score: 1 };
     const [vector] = await this.embed([text]);
     return this.centroids.reduce((best, candidate) => {
       const score = cosine(vector, candidate.centroid);
@@ -130,8 +144,9 @@ export class TranscriptActionDriver {
       if (epoch !== this.epoch) return result;
       const at = Math.max(playAt, this.nextAt, this.now());
       this.nextAt = at + this.minimumMs;
-      await new Promise((resolve) => this.schedule(resolve, Math.max(0, at - this.now())));
-      if (epoch === this.epoch) this.apply(result);
+      const playAtMinusNow = Math.max(0, at - this.now());
+      await new Promise((resolve) => this.schedule(resolve, playAtMinusNow));
+      if (epoch === this.epoch) this.apply(result, { sentence: text, playAtMinusNow });
       return result;
     });
     this.tail = operation.catch(() => {});

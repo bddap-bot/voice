@@ -118,11 +118,13 @@ let puppetTools;
 let selectedImage;
 let sharing = false;
 const shareWaiters = new Map();
-function applyTranscriptAction(action) {
+function applyTranscriptAction(action, timing) {
   if (action.kind === 'none') return;
+  const pose = puppetRuntime?.poseName ?? null;
+  let played = Boolean(puppetRuntime);
   if (action.kind === 'mood') puppetRuntime?.mood(action.name);
-  else if (action.kind === 'pose') puppetRuntime?.pose(action.name);
-  else if (action.name !== 'point' || $('display-items').childElementCount) puppetRuntime?.gesture(action.name, action.name === 'point' ? 'panel' : undefined);
+  else if (action.kind === 'gesture') played = Boolean(action.name !== 'point' || $('display-items').childElementCount) && Boolean(puppetRuntime?.gesture(action.name, action.name === 'point' ? 'panel' : undefined));
+  recordSession('transcript-action', JSON.stringify({ sentence: timing.sentence, token: `${action.kind}:${action.name}`, score: action.score, pose, outcome: played ? 'played' : 'refused', playAtMinusNow: timing.playAtMinusNow }));
 }
 const actionDriver = new TranscriptActionDriver(applyTranscriptAction);
 const hubWaiting = new Set();

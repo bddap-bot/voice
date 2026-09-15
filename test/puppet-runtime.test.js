@@ -108,7 +108,20 @@ test('explicit gestures replace a hub wait and beats cannot replace either', () 
   assert.equal(runtime.gestureState.name, 'point_at');
 });
 
-test('standing clips are refused while seated from their root height', () => {
+test('named clip gestures play during a pending hub wait', () => {
+  const played = [];
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+    waitingForHub: true, gestureState: { name: 'waiting' }, gestureOffsets: { head: [0.2, 0, 0] },
+    clips: new Map(), clipGesture: null, pendingGesture: null, poseName: 'stand',
+    playClip: (name) => played.push(name),
+  });
+  assert.equal(runtime.gesture('wave'), true);
+  assert.deepEqual(played, ['wave']);
+  assert.equal(runtime.gestureState, null);
+  assert.equal(runtime.clipGesture, 'wave');
+});
+
+test('a standing gesture requested while seated stands first and then plays', () => {
   const clip = (name, height) => new THREE.AnimationClip(name, 1, [new THREE.NumberKeyframeTrack('.position[y]', [0], [height])]);
   const played = [];
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
@@ -117,11 +130,31 @@ test('standing clips are refused while seated from their root height', () => {
     gestureOffsets: {},
     clips: new Map([['idle', clip('idle', 1)], ['sit-idle', clip('sit-idle', 0.5)], ['clap', clip('clap', 0.95)]]),
     clipGesture: null,
+    pendingGesture: null,
     poseName: 'sit',
-    playClip: (name) => played.push(name),
+    playClip(name, fallback) { played.push(name); this.clipAction = { isRunning: () => false }; this.clipFallback = fallback; },
+    idleClip: null,
   });
-  assert.equal(runtime.gesture('clap'), false);
-  assert.deepEqual(played, []);
+  assert.equal(runtime.gesture('clap'), true);
+  assert.deepEqual(played, ['stand']);
+  assert.equal(runtime.poseName, 'stand');
+  runtime.updatePose(1000);
+  assert.deepEqual(played, ['stand', 'clap']);
+  assert.equal(runtime.clipGesture, 'clap');
+});
+
+test('procedural mood rotation composes on a running clip pose', () => {
+  const bone = new THREE.Object3D();
+  const clipRotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.4, 0.2, -0.1));
+  bone.quaternion.copy(clipRotation);
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+    moodName: 'thinking', moodFrom: {}, moodBones: {}, moodStarted: 0,
+    moodValues: Object.fromEntries(['happy', 'angry', 'sad', 'relaxed', 'surprised'].map((name) => [name, 0])),
+    bones: new Map([['head', { node: bone }]]), gestureRotation: new THREE.Quaternion(),
+  });
+  runtime.updateMood(1000, { setValue() {} });
+  assert.ok(bone.quaternion.angleTo(clipRotation) > 0.01);
+  assert.ok(bone.quaternion.angleTo(new THREE.Quaternion().setFromEuler(new THREE.Euler(...MOOD_TABLE.thinking.bones.head))) > 0.01);
 });
 
 test('idle variants use random dwell and never repeat consecutively', () => {

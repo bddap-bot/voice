@@ -28,8 +28,6 @@ export const evaluation = [
   ['mood','sleepy','I can barely keep my eyes open.'], ['mood','sleepy','A nap sounds irresistible right now.'], ['mood','sleepy','My energy is fading fast.'],
   ['mood','relaxed','I feel relaxed and at ease.'], ['mood','relaxed','Everything feels calm and peaceful.'], ['mood','relaxed','I can finally unwind.'],
   ['mood','curious','What causes this behavior?'], ['mood','curious','I would love to discover what comes next.'], ['mood','curious','Tell me more about the mechanism.'],
-  ['pose','sit','I am sitting down now.'], ['pose','sit','Let me take a seat.'], ['pose','sit','I will sit in this chair.'],
-  ['pose','stand','I am standing up now.'], ['pose','stand','Let me get to my feet.'], ['pose','stand','I will stand here.'],
   ['gesture','nod','I am fully on board.'], ['gesture','shrug','It makes no difference to me.'], ['mood','pleased','I could not be happier with it.'], ['mood','puzzled','This has me completely stumped.'],
 ];
 
@@ -49,7 +47,7 @@ export async function evaluate(loadEmbedder) {
     if (hit) row.hits++;
   }
   for (const row of rows.values()) assert.ok(row.hits, `unreachable action token: ${row.token}`);
-  for (const [sentence, token] of [['Yes.', 'gesture:nod'], ['No idea.', 'gesture:shrug'], ['Hmm.', 'mood:thinking'], ['Happy.', 'mood:pleased'], ['Sad.', 'mood:sad'], ['Angry.', 'mood:angry'], ['Relaxed.', 'mood:relaxed'], ['Surprised.', 'mood:surprised'], ['Pointing at the panel.', 'gesture:point'], ['Sitting.', 'pose:sit'], ['And standing.', 'pose:stand']]) {
+  for (const [sentence, token] of [['Yes.', 'gesture:nod'], ['No idea.', 'gesture:shrug'], ['Hmm.', 'mood:thinking'], ['Happy.', 'mood:pleased'], ['Sad.', 'mood:sad'], ['Angry.', 'mood:angry'], ['Relaxed.', 'mood:relaxed'], ['Surprised.', 'mood:surprised'], ['Pointing at the panel.', 'gesture:point']]) {
     const result = await classifier.classify(sentence);
     assert.equal(`${result.kind}:${result.name}`, token, `short sentence ${sentence}`);
   }

@@ -197,6 +197,7 @@ export class PuppetRuntime {
     this.clipAction = null;
     this.clipFallback = null;
     this.clipGesture = null;
+    this.pendingGesture = null;
     this.idleClip = null;
     this.nextIdleAt = Infinity;
     this.clock = new THREE.Clock();
@@ -390,7 +391,11 @@ export class PuppetRuntime {
     if (resolved === 'point_at') this.setGaze('panel', 2200);
     if (resolved === 'think') this.setGaze('away', 1800);
     if (CLIP_GESTURES.has(resolved)) {
-      if (this.poseName === 'sit' && this.clipStance(resolved) === 'stand') return false;
+      if (this.poseName === 'sit' && this.clipStance(resolved) === 'stand') {
+        this.pendingGesture = { name, target };
+        this.pose('stand');
+        return true;
+      }
       this.gestureState = null;
       this.gestureOffsets = {};
       this.playClip(resolved, this.poseName === 'sit' ? 'sit-idle' : 'idle');
@@ -467,6 +472,12 @@ export class PuppetRuntime {
       this.clipAction = null;
       this.clipFallback = null;
       this.clipGesture = null;
+      if (this.pendingGesture) {
+        const pending = this.pendingGesture;
+        this.pendingGesture = null;
+        this.gesture(pending.name, pending.target);
+        return;
+      }
       this.playIdle(now);
       if (this.waitingForHub) this.beginGesture('waiting', true);
     }

@@ -450,9 +450,10 @@ for (const viewport of layoutViewports) test(`stage UI stays outside the puppet 
   const result = intrusions();
   const display = rect(document.querySelector('#display'));
   const ledger = rect(document.querySelector('.ledger'));
+  const share = rect(document.querySelector('.share'));
   document.querySelector('#display').classList.add('fresh');
   const fresh = { result: intrusions(), display: rect(document.querySelector('#display')) };
-  document.body.dataset.overlapTest = JSON.stringify({ puppet, figure, result, fresh, display, ledger, pageHeight: document.documentElement.scrollHeight, stageHeight });
+  document.body.dataset.overlapTest = JSON.stringify({ puppet, figure, result, fresh, display, ledger, share, pageHeight: document.documentElement.scrollHeight, stageHeight });
   </script></body></html>`, { scale: viewport.scale, size: `${viewport.width},${viewport.height}`, mobile: viewport.mobile });
   const encoded = /data-overlap-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   const result = JSON.parse(encoded ?? 'null');
@@ -465,7 +466,8 @@ for (const viewport of layoutViewports) test(`stage UI stays outside the puppet 
   if (viewport.name !== 'phone') {
     assert.ok(result.pageHeight <= viewport.height, `${viewport.name} must remain one screen: ${result.pageHeight}`);
     assert.equal(result.puppet.top, 0, `${viewport.name} puppet must start at the top of the stage`);
-    assert.equal(result.puppet.bottom, result.stageHeight, `${viewport.name} puppet must take the full stage height: ${result.puppet.bottom} of ${result.stageHeight}`);
+    assert.equal(result.puppet.bottom, result.stageHeight - 90, `${viewport.name} puppet must end above the desk: ${result.puppet.bottom} of ${result.stageHeight}`);
+    assert.ok(result.share.top >= result.puppet.bottom, `${viewport.name} share control intersects the puppet canvas: ${JSON.stringify(result)}`);
     for (const wing of [result.display, result.ledger]) assert.ok(wing.right - wing.left < puppetWidth, `${viewport.name} wing wider than the puppet: ${JSON.stringify(wing)}`);
     assert.ok(result.fresh.display.right - result.fresh.display.left > result.display.right - result.display.left, `${viewport.name} fresh display must grow: ${JSON.stringify(result.fresh.display)}`);
   } else {

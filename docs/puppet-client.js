@@ -22,6 +22,7 @@ export class PuppetChannel {
     this.clipCatalogWaiter = null;
     this.selectionWaiter = null;
     this.transfer = null;
+    this.transferTail = Promise.resolve();
     this.epoch = 0;
   }
   cacheRequest(id) {
@@ -68,14 +69,18 @@ export class PuppetChannel {
   async bytes(id, contentHash = '') {
     return this.transferBytes('puppet', id, contentHash, 'vrm');
   }
-  async transferBytes(kind, id, contentHash, format, fields = {}) {
+  transferBytes(kind, id, contentHash, format, fields = {}) {
     const epoch = this.epoch;
+    const operation = this.transferTail.then(() => this.runTransfer(kind, id, contentHash, format, fields, epoch));
+    this.transferTail = operation.catch(() => {});
+    return operation;
+  }
+  async runTransfer(kind, id, contentHash, format, fields, epoch) {
     const cache = await this.cacheStorage.open('voice-puppets-v1');
     const request = kind === 'puppet' ? this.cacheRequest(contentHash || id) : new Request(new URL(`.private-motion/${encodeURIComponent(this.cacheScope())}/${encodeURIComponent(contentHash || id)}.${format}`, location.href));
     const saved = await cache.match(request);
     if (epoch !== this.epoch) throw new Error('connection replaced');
     if (saved) return saved.arrayBuffer();
-    if (this.transfer) throw new Error('another puppet is loading');
     const waiting = deferred();
     this.transfer = { kind, id, contentHash, size: null, originalSize: null, encoding: null, total: 0, chunks: [], waiting, cache, request };
     const timer = setTimeout(() => waiting.reject(new Error('puppet transfer timed out')), this.transferTimeout);

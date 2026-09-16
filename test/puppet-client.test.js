@@ -131,6 +131,28 @@ test('a stalled mobile transfer reports a timeout and releases the request', asy
   await assert.rejects(channel.bytes('7'), /puppet transfer timed out/);
 });
 
+test('a puppet request queued during preload runs before the next preload item', async () => {
+  const sent = [];
+  const channel = new PuppetChannel(async (value) => sent.push(value), cacheStorage());
+  const preload = channel.preload([
+    { id: '1', contentHash: 'hash-1' },
+    { id: '2', contentHash: 'hash-2' },
+    { id: '4', contentHash: 'hash-4' },
+  ], '1');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sent.at(-1), 'puppet\n{"id":"2","encodings":["gzip"]}');
+  const selected = channel.bytes('3', 'hash-3');
+  await deliverPuppet(channel, '2', Uint8Array.of(2), 'hash-2');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sent.at(-1), 'puppet\n{"id":"3","encodings":["gzip"]}');
+  await deliverPuppet(channel, '3', Uint8Array.of(3), 'hash-3');
+  assert.deepEqual(new Uint8Array(await selected), Uint8Array.of(3));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sent.at(-1), 'puppet\n{"id":"4","encodings":["gzip"]}');
+  await deliverPuppet(channel, '4', Uint8Array.of(4), 'hash-4');
+  await preload;
+});
+
 test('selection acknowledges the requested puppet and rejects overlap', async () => {
   const sent = [];
   const channel = new PuppetChannel(async (value) => sent.push(value), cacheStorage());
@@ -174,4 +196,16 @@ test('connection replacement cancels a download before its delayed cache lookup 
   release();
   await assert.rejects(result, /connection replaced/);
   assert.deepEqual(sent, []);
+});
+
+test('connection replacement cancels a transfer waiting in the queue', async () => {
+  const sent = [];
+  const channel = new PuppetChannel(async (value) => sent.push(value), cacheStorage());
+  const first = channel.bytes('1');
+  const second = channel.bytes('2');
+  await new Promise((resolve) => setImmediate(resolve));
+  channel.fail(new Error('connection replaced'));
+  await assert.rejects(first, /connection replaced/);
+  await assert.rejects(second, /connection replaced/);
+  assert.deepEqual(sent, ['puppet\n{"id":"1","encodings":["gzip"]}']);
 });

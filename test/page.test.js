@@ -10,6 +10,12 @@ import { assessSmoke, clipClearsStage, evidenceRegion, smokeLimits, smokeStatusT
 
 const execute = promisify(execFile);
 
+test('private smoke uses the same authenticated relay transport as the page', async () => {
+  const source = await readFile(new URL('../scripts/smoke.mjs', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /bridge-wasm|net\.connect\(4321/);
+  assert.match(source, /voice-web', \['token'\]/);
+});
+
 test('transition frame sampling excludes work outside each transition window', () => {
   const callbacks = new Map();
   let nextId = 0;

@@ -63,51 +63,27 @@ globalThis.__voiceLoadEmbedder=async()=>async(texts)=>texts.map(()=>[1]);
 const cache=new Map();Object.defineProperty(globalThis,'caches',{value:{open:async()=>({match:async(r)=>cache.get(r.url)?.clone(),put:async(r,v)=>cache.set(r.url,v.clone())})}});
 `;
 
-function frame(value) { const body = Buffer.from(value); const header = Buffer.alloc(4); header.writeUInt32LE(body.length); return Buffer.concat([header, body]); }
-
 async function makeServer() {
   let index = await readFile(path.join(root, 'docs/index.html'), 'utf8');
   let token;
-  let tcp;
-  let tcpBuffer = Buffer.alloc(0);
-  let queue = [];
-  let waiters = [];
-  let authPending = false;
-  let closed = false;
-  const push = (value) => { queue.push(value); waiters.shift()?.(); };
   if (mode === 'public') {
     index = index.replace('https://bddap-bot.github.io/botq/botq_dash_wasm.js', '/smoke-wasm.js').replace('./puppet.js', '/smoke-puppet.js').replace('</head>', `<script>${browserMocks}</script></head>`);
     token = Buffer.from(JSON.stringify({ endpoint_id: 'smoke', secret: 'smoke' })).toString('base64url');
   } else {
     const { stdout } = await execute('voice-web', ['token']);
     token = stdout.trim();
-    const secret = JSON.parse(Buffer.from(token, 'base64url').toString()).secret;
-    index = index.replace('https://bddap-bot.github.io/botq/botq_dash_wasm.js', '/bridge-wasm.js').replace('puppetRuntime = new PuppetRuntime($(\'puppet\'), $(\'display\'));', "puppetRuntime = new PuppetRuntime($('puppet'), $('display')); globalThis.__smokeRuntime = puppetRuntime;");
-    const connect = () => new Promise((resolve, reject) => {
-      tcp?.destroy();
-      queue = []; tcpBuffer = Buffer.alloc(0); closed = false;
-      tcp = net.connect(4321, '127.0.0.1');
-      tcp.once('connect', () => { tcp.write(frame(JSON.stringify({ auth: secret }))); authPending = true; resolve(); });
-      tcp.once('error', reject);
-      tcp.on('data', (chunk) => { tcpBuffer = Buffer.concat([tcpBuffer, chunk]); while (tcpBuffer.length >= 4 && tcpBuffer.length >= tcpBuffer.readUInt32LE(0) + 4) { const length = tcpBuffer.readUInt32LE(0); push(tcpBuffer.subarray(4, length + 4)); tcpBuffer = tcpBuffer.subarray(length + 4); } });
-      tcp.on('close', () => { closed = true; waiters.splice(0).forEach((resolve) => resolve()); });
-    });
-    globalThis.privateBridge = { connect, get tcp() { return tcp; }, get authPending() { return authPending; }, set authPending(value) { authPending = value; }, get closed() { return closed; }, get queue() { return queue; }, waiters };
+    index = index.replace('puppetRuntime = new PuppetRuntime($(\'puppet\'), $(\'display\'));', "puppetRuntime = new PuppetRuntime($('puppet'), $('display')); globalThis.__smokeRuntime = puppetRuntime;");
   }
   index = index.replace('</head>', `<script>localStorage.setItem('voice.token', ${JSON.stringify(token)});</script></head>`);
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, 'http://localhost');
     if (url.pathname === '/smoke-wasm.js') return response.writeHead(200, { 'content-type': 'text/javascript' }).end(mockWasm);
     if (url.pathname === '/smoke-puppet.js') return response.writeHead(200, { 'content-type': 'text/javascript' }).end(neutralSilhouettePuppet);
-    if (url.pathname === '/bridge-wasm.js') return response.writeHead(200, { 'content-type': 'text/javascript' }).end(`export default async function(){} export async function init(){} export async function connect(){const r=await fetch('/bridge/connect',{method:'POST'});if(!r.ok)throw new Error(await r.text())} export async function send_only(v){const r=await fetch('/bridge/send',{method:'POST',body:v});if(!r.ok)throw new Error(await r.text())} export async function recv(){for(;;){const r=await fetch('/bridge/recv');if(r.status===200)return new Uint8Array(await r.arrayBuffer());if(r.status!==204)throw new Error('bridge closed')}}`);
-    if (url.pathname === '/bridge/connect') { try { await privateBridge.connect(); response.writeHead(200).end(); } catch (error) { response.writeHead(500).end(error.message); } return; }
-    if (url.pathname === '/bridge/send') { const chunks=[];for await(const chunk of request)chunks.push(chunk);const body=Buffer.concat(chunks);if(privateBridge.authPending){privateBridge.authPending=false;push(Buffer.from('{"ok":true}'));response.writeHead(200).end();return}if(!privateBridge.tcp||privateBridge.closed){response.writeHead(410).end();return}privateBridge.tcp.write(frame(body));response.writeHead(200).end();return; }
-    if (url.pathname === '/bridge/recv') { if(!queue.length&&!privateBridge.closed)await new Promise((resolve)=>{privateBridge.waiters.push(resolve);setTimeout(resolve,20000)});if(queue.length)response.writeHead(200).end(queue.shift());else if(privateBridge.closed)response.writeHead(410).end();else response.writeHead(204).end();return; }
     const relative = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
     try { const body = relative === 'index.html' ? index : await readFile(path.join(root, 'docs', relative)); response.writeHead(200, { 'content-type': relative.endsWith('.js') ? 'text/javascript' : relative.endsWith('.html') ? 'text/html' : 'application/octet-stream' }).end(body); } catch { response.writeHead(404).end(); }
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  return { server, url: `http://127.0.0.1:${server.address().port}/`, close: () => { tcp?.destroy(); server.close(); } };
+  return { server, url: `http://127.0.0.1:${server.address().port}/`, close: () => server.close() };
 }
 
 async function connectCdp(port) {

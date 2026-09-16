@@ -108,7 +108,7 @@
 import wbgInit, { init as wasmInit, connect, send_only, recv } from 'https://bddap-bot.github.io/botq/botq_dash_wasm.js';
 import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, SessionClock, TranscriptBatcher, errorEvent, formatElapsed, formatStartError, isOfferFor, shareFrame } from './live.js';
 import { PuppetChannel } from './puppet-client.js';
-import { ListeningReactionDriver, TranscriptActionDriver } from './puppet-drivers.js';
+import { ListeningReactionDriver, TranscriptActionDriver, webGpuAdapter } from './puppet-drivers.js';
 import { PuppetTools, completedToolCall } from './puppet-tools.js';
 import { PuppetRuntime } from './puppet.js';
 import { disposeRenderer, renderChart, renderMath, renderMermaid } from './lib/render.js';
@@ -174,7 +174,10 @@ const telemetry = new EventBatcher(sendTelemetry);
 const persistenceUploads = new AckUploader(sendBytes, { maximumBytes: 128 * 1024 * 1024, onOverflow: () => recordPageError(new Error('session upload queue is full')) });
 
 function sessionId() { return conversation?.id ?? starting?.offerId ?? null; }
-function recordPageError(error, id = sessionId()) { telemetry.add(errorEvent(error, id)); }
+function recordPageError(error, id = sessionId()) {
+  const at = Date.now();
+  webGpuAdapter().then((adapter) => telemetry.add(errorEvent(error, id, at, { userAgent: navigator.userAgent, webgpuAdapter: Boolean(adapter) })));
+}
 function recordSession(name, detail = '', id = sessionId()) { telemetry.add({ kind: 'session', session_id: id, name, detail: String(detail).slice(0, 2048), at: Date.now() }); }
 window.addEventListener('error', (event) => recordPageError(event.error || Object.assign(new Error(event.message), { stack: `${event.filename || ''}:${event.lineno || 0}:${event.colno || 0}` })));
 window.addEventListener('unhandledrejection', (event) => recordPageError(event.reason));

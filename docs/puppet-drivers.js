@@ -60,10 +60,17 @@ export function keywordMood(text) {
   return null;
 }
 
+let webGpuAdapterPromise;
+
+export function webGpuAdapter() {
+  webGpuAdapterPromise ??= Promise.resolve(navigator.gpu?.requestAdapter()).catch(() => null);
+  return webGpuAdapterPromise;
+}
+
 export async function browserEmbedder() {
   const { env, pipeline } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.3');
   env.allowLocalModels = false;
-  const adapter = await navigator.gpu?.requestAdapter().catch(() => null);
+  const adapter = await webGpuAdapter();
   const extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { dtype: 'q8', device: adapter ? 'webgpu' : 'wasm' });
   return async (texts) => (await extractor(texts, { pooling: 'mean', normalize: true })).tolist();
 }

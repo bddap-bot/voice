@@ -579,11 +579,25 @@ test('a forced page error reaches the fleet catcher line in headless Chromium', 
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   setTimeout(() => { throw new TypeError('forced page fault'); }, 0);
-  setTimeout(() => { document.body.dataset.telemetryErrorTest = JSON.stringify(fleetLines); }, 300);
+  setTimeout(() => { document.body.dataset.telemetryErrorTest = JSON.stringify(fleetLines); }, 600);
 });
 `);
   const encoded = /data-telemetry-error-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   assert.deepEqual(JSON.parse(encoded ?? 'null'), ['fleet-error: voice/page — TypeError: forced page fault'], stderr);
+});
+
+test('a forced page error carries browser and WebGPU identity', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  setTimeout(() => { throw new TypeError('identified page fault'); }, 0);
+  setTimeout(() => { document.body.dataset.telemetryIdentityTest = JSON.stringify(telemetryBatches.flat().find((event) => event.message === 'identified page fault')); }, 600);
+});
+`);
+  const encoded = /data-telemetry-identity-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  const event = JSON.parse(encoded ?? 'null');
+  assert.ok(event, stderr);
+  assert.match(event.user_agent, /Chrome/);
+  assert.equal(typeof event.webgpu_adapter, 'boolean');
 });
 
 test('session open and close arrive as two batched telemetry events', async () => {

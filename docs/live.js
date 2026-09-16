@@ -33,7 +33,7 @@ export function shareFrame({ id, text, mime = null, image = new Uint8Array() }) 
   return frame;
 }
 
-export function errorEvent(error, sessionId = null, at = Date.now()) {
+export function errorEvent(error, sessionId = null, at = Date.now(), { userAgent = '', webgpuAdapter = false } = {}) {
   const value = error && typeof error === 'object' ? error : new Error(String(error));
   return {
     kind: 'error',
@@ -41,6 +41,8 @@ export function errorEvent(error, sessionId = null, at = Date.now()) {
     name: boundedValue(value.name || 'Error', 160),
     message: boundedValue(value.message || error || 'unknown page error', 2048),
     stack: boundedValue(value.stack || '', 16384),
+    user_agent: boundedValue(userAgent, 2048),
+    webgpu_adapter: Boolean(webgpuAdapter),
     at,
   };
 }

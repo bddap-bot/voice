@@ -578,16 +578,16 @@ window.addEventListener('test-ready', () => {
   const result = JSON.parse(encoded ?? 'null');
   assert.ok(result, stderr);
   const states = result.states;
-  const removed = ['ready', 'opening microphone', 'live', 'conversation off', 'session ended', 'listening', 'waiting for the hub', 'waiting…'];
+  const removed = ['ready', 'opening microphone', 'live', 'conversation off', 'session ended', 'listening', 'waiting for the hub'];
   for (const [state, text] of Object.entries(states)) {
     for (const value of removed) assert.equal(text.toLowerCase().includes(value.toLowerCase()), false, `${viewport.name} ${state} exposes ${value}: ${text}`);
   }
   for (const text of result.statusTextWrites) {
     for (const value of removed) assert.equal(text.toLowerCase().includes(value.toLowerCase()), false, `${viewport.name} header exposed ${value}: ${text}`);
   }
-  assert.match(states.waiting, /question: Where is the report\?/);
-  assert.doesNotMatch(states.waiting, /answer:/);
-  assert.match(states.answered, /question: Where is the report\?[\s\S]*answer: On the display\./);
+  assert.match(states.waiting, /sent to hub: Where is the report\?/);
+  assert.match(states.waiting, /hub reply: waiting…/);
+  assert.match(states.answered, /sent to hub: Where is the report\?[\s\S]*hub reply: On the display\./);
 });
 
 test('a forced page error reaches the fleet catcher line in headless Chromium', async () => {
@@ -707,11 +707,27 @@ window.addEventListener('test-ready', () => {
   const last = log.lastElementChild;
   const lastBox = last.getBoundingClientRect();
   const logBox = log.getBoundingClientRect();
-  document.body.dataset.followTest = String(lastBox.bottom <= logBox.bottom + 1 && lastBox.top >= logBox.top - 1);
+  document.body.dataset.followTest = String(lastBox.bottom <= logBox.bottom + 1 && lastBox.bottom >= logBox.top - 1);
 });
 `);
   const observed = /data-follow-test="([^"]*)"/.exec(stdout)?.[1] ?? 'follow test did not run';
   assert.equal(observed, 'true', `${observed}\n${stderr}`);
+});
+
+test('the delegation log renders every trace kind and delegation field', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  const emit = (event) => testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(event) }));
+  emit({ type: 'session.output_transcript.delta', delta: 'I will inspect the fixture.', start_ms: 0, end_ms: 20 });
+  emit({ type: 'session.input_transcript.delta', delta: 'Check the fixture stream.' });
+  emit({ type: 'session.delegation.created', delegation: { id: 'fixture' } });
+  deliverRelay(new TextEncoder().encode('hub\\n' + JSON.stringify({ id: 'fixture', reply: 'The fixture is complete.', timing_ms: 42, stamp: 'fixture' })));
+  setTimeout(() => { document.body.dataset.delegationLogTest = document.querySelector('#log').innerText; }, 30);
+});
+`, { size: '1440,900' });
+  const observed = /data-delegation-log-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"') ?? '';
+  const expected = ['MODEL ALONE', 'spoke: I will inspect the fixture.', 'MODEL HEARD', 'heard: Check the fixture stream.', 'DELEGATED', 'sent to hub: Check the fixture stream.', 'context sent: [{"speaker":"live","text":"I will inspect the fixture."}]', 'hub reply: The fixture is complete.', 'hub timing: 42 ms'];
+  for (const value of expected) assert.ok(observed.includes(value), `${value}\n${observed}\n${stderr}`);
 });
 
 test('the delegation log does not move when an entry arrives after scrolling to the top', async () => {

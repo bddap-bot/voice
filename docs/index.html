@@ -263,14 +263,13 @@ function updateFollowing() {
 }
 $('log').addEventListener('scroll', updateFollowing);
 function render(entries) {
-  const delegations = entries.filter((entry) => entry.kind === 'delegation');
-  if (!delegations.length) {
+  if (!entries.length) {
     $('log').replaceChildren();
     logNodes = new WeakMap();
     updateFollowing();
     return;
   }
-  for (const entry of delegations) {
+  for (const entry of entries) {
     let record = logNodes.get(entry);
     if (!record) {
     const node = document.createElement('article');
@@ -283,9 +282,12 @@ function render(entries) {
       record = { node, tag, body };
       logNodes.set(entry, record);
     }
-    record.tag.className = 'tag';
-    record.tag.textContent = 'delegated';
-    const lines = [['question', entry.sent], ...(entry.reply ? [['answer', entry.reply]] : [])];
+    const name = entry.kind === 'heard' ? 'model heard' : entry.kind === 'spoken' ? entry.source : 'delegated';
+    record.tag.className = `tag${name === 'model alone' ? ' alone' : ''}`;
+    record.tag.textContent = name;
+    const lines = entry.kind === 'heard' ? [['heard', entry.text]]
+      : entry.kind === 'spoken' ? [['spoke', entry.text]]
+      : [['sent to hub', entry.sent], ['context sent', JSON.stringify(entry.context)], ['hub reply', entry.reply || 'waiting…'], ['hub timing', entry.timing === null ? 'waiting…' : `${entry.timing} ms`]];
     record.body.replaceChildren(...lines.map(([key, value]) => {
       const line = document.createElement('div');
       line.className = 'line';

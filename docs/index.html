@@ -59,24 +59,34 @@
   .tag.alone { color: #d4ae68; }
   .line { margin-top: 5px; } .key { color: #8f8f96; }
   @media (max-width: 720px), (max-height: 540px) {
-    body { display: flex; flex-direction: column; overflow: auto; }
+    body { height: 100svh; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
     header, .entry, .saved { position: static; width: auto; margin: 10px 10px 0; }
-    header { order: 2; font-size: 12px; }
-    .entry, .saved { order: 3; }
-    main { order: 1; flex: none; }
-    body:has(main.hidden) header { order: initial; }
-    body:has(main.hidden) .entry, body:has(main.hidden) .saved { order: initial; }
-    main { --stage-height: 100svh; height: auto; min-height: calc(var(--stage-height) + 940px); overflow: hidden; }
-    #puppet { left: 5%; top: 3%; width: 90%; height: calc(var(--stage-height) - 14%); }
-    .control::before { left: 5%; top: calc(var(--stage-height) + 12px); width: 90%; height: 150px; }
-    .puppet-picker { left: 8%; top: calc(var(--stage-height) + 26px); width: 84%; }
-    #puppet-credit { left: 5%; top: calc(var(--stage-height) + 80px); width: 90%; }
-    #elapsed { left: 25%; top: calc(var(--stage-height) + 116px); width: 50%; }
-    .share { left: 12px; right: 12px; top: calc(var(--stage-height) + 166px); bottom: auto; grid-template-columns: 1fr auto; }
-    .share-actions { grid-column: 1 / -1; flex-wrap: wrap; }
-    .display, .ledger { left: 12px; right: 12px; width: auto; height: 260px; transform: none; }
-    .display { top: calc(var(--stage-height) + 380px); }
-    .ledger { top: calc(var(--stage-height) + 670px); }
+    header { font-size: 12px; }
+    main { --stage-height: auto; height: auto; min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(0, 46fr) minmax(0, 54fr); grid-template-rows: 26px 12px 18px clamp(36px, 12svh, 100px) minmax(0, 1fr) minmax(0, 1fr); gap: 5px 8px; padding: 8px; }
+    .control { display: contents; }
+    #puppet { position: static; grid-column: 1; grid-row: 1 / -1; place-self: center; width: min(100%, calc((100svh - 160px) * .75)); height: auto; aspect-ratio: 3 / 4; }
+    .control::before { display: none; }
+    .puppet-picker, #puppet-credit, #elapsed, .share, .display, .ledger { position: static; width: auto; height: auto; min-width: 0; transform: none; }
+    .puppet-picker { grid-column: 2; grid-row: 1; justify-content: flex-start; gap: 5px; font-size: 11px; }
+    #puppet-choice { min-width: 0; width: 100%; padding: 5px; }
+    #puppet-credit { grid-column: 2; grid-row: 2; min-height: 0; height: 100%; overflow: hidden; text-align: left; font-size: 10px; line-height: 12px; }
+    #elapsed { grid-column: 2; grid-row: 3; min-height: 0; overflow: hidden; text-align: left; font-size: 15px; line-height: 18px; }
+    .share { grid-column: 2; grid-row: 4; grid-template-columns: minmax(0, 1fr) auto; padding: 6px; gap: 5px; overflow: auto; }
+    .share textarea { min-height: 0; height: 100%; }
+    #share-target { display: none; }
+    #share-image { width: 64px; font-size: 10px; }
+    .share-actions { gap: 4px; flex-wrap: nowrap; }
+    .share-actions label, .share-actions button { padding: 4px 6px; font-size: 11px; }
+    .display, .ledger { grid-column: 2; min-height: 0; height: 100%; padding: 0; overflow: auto; }
+    .display { grid-row: 5; }
+    .ledger { grid-row: 6; }
+    .display h2, .ledger h2 { margin: 0; padding: 4px; font-size: 11px; }
+    #display-items, #log { max-height: none; }
+  }
+  @media (max-width: 720px) {
+    .share { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) auto; }
+    .share-actions { justify-content: space-between; }
+    .share-actions label, .share-actions button { padding: 2px 4px; font-size: 10px; }
   }
 </style>
 </head>

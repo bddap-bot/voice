@@ -1,0 +1,208 @@
+{
+  "viewport": "phone-landscape",
+  "pass": true,
+  "checks": {
+    "layoutShift": true,
+    "unexplainedMovement": true,
+    "overlaps": true,
+    "canvasGrowth": true,
+    "canvasAspect": true,
+    "stageViewport": true,
+    "paintedPuppet": true,
+    "browserErrors": true,
+    "telemetry": true,
+    "transitionFrames": true
+  },
+  "metrics": {
+    "cumulativeLayoutShift": 0,
+    "canvasHeightDrift": 0,
+    "stageHeightDrift": 0,
+    "maximumFrameGapMs": 0
+  },
+  "failures": [],
+  "state": {
+    "cls": 0,
+    "moves": [],
+    "overlaps": [],
+    "heights": [
+      {
+        "second": 1,
+        "canvas": 230,
+        "stage": 254.15625
+      },
+      {
+        "second": 2,
+        "canvas": 230,
+        "stage": 254.15625
+      },
+      {
+        "second": 3,
+        "canvas": 230,
+        "stage": 254.15625
+      },
+      {
+        "second": 4,
+        "canvas": 230,
+        "stage": 254.15625
+      },
+      {
+        "second": 5,
+        "canvas": 230,
+        "stage": 254.15625
+      },
+      {
+        "second": 6,
+        "canvas": 230,
+        "stage": 254.15625
+      },
+      {
+        "second": 7,
+        "canvas": 230,
+        "stage": 254.15625
+      },
+      {
+        "second": 8,
+        "canvas": 230,
+        "stage": 254.15625
+      },
+      {
+        "second": 9,
+        "canvas": 230,
+        "stage": 254.15625
+      },
+      {
+        "second": 10,
+        "canvas": 230,
+        "stage": 254.15625
+      }
+    ],
+    "aspects": [
+      {
+        "cssWidth": 172.5,
+        "cssHeight": 230,
+        "bufferWidth": 173,
+        "bufferHeight": 230
+      },
+      {
+        "cssWidth": 172.5,
+        "cssHeight": 230,
+        "bufferWidth": 173,
+        "bufferHeight": 230
+      },
+      {
+        "cssWidth": 172.5,
+        "cssHeight": 230,
+        "bufferWidth": 173,
+        "bufferHeight": 230
+      },
+      {
+        "cssWidth": 172.5,
+        "cssHeight": 230,
+        "bufferWidth": 173,
+        "bufferHeight": 230
+      },
+      {
+        "cssWidth": 172.5,
+        "cssHeight": 230,
+        "bufferWidth": 173,
+        "bufferHeight": 230
+      },
+      {
+        "cssWidth": 172.5,
+        "cssHeight": 230,
+        "bufferWidth": 173,
+        "bufferHeight": 230
+      },
+      {
+        "cssWidth": 172.5,
+        "cssHeight": 230,
+        "bufferWidth": 173,
+        "bufferHeight": 230
+      },
+      {
+        "cssWidth": 172.5,
+        "cssHeight": 230,
+        "bufferWidth": 173,
+        "bufferHeight": 230
+      },
+      {
+        "cssWidth": 172.5,
+        "cssHeight": 230,
+        "bufferWidth": 173,
+        "bufferHeight": 230
+      },
+      {
+        "cssWidth": 172.5,
+        "cssHeight": 230,
+        "bufferWidth": 173,
+        "bufferHeight": 230
+      }
+    ],
+    "stages": [
+      {
+        "top": 135.84375,
+        "bottom": 390,
+        "height": 254.15625,
+        "viewportHeight": 390
+      },
+      {
+        "top": 135.84375,
+        "bottom": 390,
+        "height": 254.15625,
+        "viewportHeight": 390
+      },
+      {
+        "top": 135.84375,
+        "bottom": 390,
+        "height": 254.15625,
+        "viewportHeight": 390
+      },
+      {
+        "top": 135.84375,
+        "bottom": 390,
+        "height": 254.15625,
+        "viewportHeight": 390
+      },
+      {
+        "top": 135.84375,
+        "bottom": 390,
+        "height": 254.15625,
+        "viewportHeight": 390
+      },
+      {
+        "top": 135.84375,
+        "bottom": 390,
+        "height": 254.15625,
+        "viewportHeight": 390
+      },
+      {
+        "top": 135.84375,
+        "bottom": 390,
+        "height": 254.15625,
+        "viewportHeight": 390
+      },
+      {
+        "top": 135.84375,
+        "bottom": 390,
+        "height": 254.15625,
+        "viewportHeight": 390
+      },
+      {
+        "top": 135.84375,
+        "bottom": 390,
+        "height": 254.15625,
+        "viewportHeight": 390
+      },
+      {
+        "top": 135.84375,
+        "bottom": 390,
+        "height": 254.15625,
+        "viewportHeight": 390
+      }
+    ],
+    "blankFrames": [],
+    "frameGaps": [],
+    "errors": [],
+    "telemetryRejections": []
+  }
+}

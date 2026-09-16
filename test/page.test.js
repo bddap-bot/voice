@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
-import { assessSmoke, clipClearsStage, evidenceRegion, smokeLimits, smokeStatusText, smokeViewports, transitionFrameSampler } from './smoke-measurements.js';
+import { assessSmoke, canvasAspectMatches, clipClearsStage, evidenceRegion, installSmokeMeasurements, smokeLimits, smokeStatusText, smokeViewports, transitionFrameSampler } from './smoke-measurements.js';
 
 const execute = promisify(execFile);
 
@@ -416,14 +416,47 @@ const layoutViewports = [
 ];
 
 test('smoke assessment rejects every measured browser failure and accepts a clean run', () => {
-  const clean = { cls: smokeLimits.cumulativeLayoutShift, moves: [], overlaps: [], heights: [{ canvas: 100, stage: 200 }, { canvas: 101, stage: 201 }], blankFrames: [], frameGaps: [], errors: [], telemetryRejections: [] };
+  const clean = { cls: smokeLimits.cumulativeLayoutShift, moves: [], overlaps: [], heights: [{ canvas: 100, stage: 200 }, { canvas: 101, stage: 201 }], aspects: [{ cssWidth: 300, cssHeight: 400, bufferWidth: 600, bufferHeight: 800 }], stages: [{ top: 100, bottom: 500, height: 400, viewportHeight: 500 }], blankFrames: [], frameGaps: [], errors: [], telemetryRejections: [] };
   assert.equal(assessSmoke(clean).pass, true);
   for (const mutation of [
     { cls: smokeLimits.cumulativeLayoutShift + 0.001 },
     { moves: [{}] }, { overlaps: [{}] },
     { heights: [{ canvas: 100, stage: 200 }, { canvas: 102, stage: 200 }] },
+    { aspects: [{ cssWidth: 330, cssHeight: 400, bufferWidth: 600, bufferHeight: 800 }] },
+    { stages: [{ top: 100, bottom: 501, height: 401, viewportHeight: 500 }] },
     { blankFrames: [1] }, { frameGaps: [51] }, { errors: ['fault'] }, { telemetryRejections: ['rejected'] },
   ]) assert.equal(assessSmoke({ ...clean, ...mutation }).pass, false, JSON.stringify(mutation));
+});
+
+test('canvas aspect comparison rejects either non-uniform stretch and accepts restoration', () => {
+  const original = { cssWidth: 300, cssHeight: 400, bufferWidth: 600, bufferHeight: 800 };
+  assert.equal(canvasAspectMatches(original), true);
+  assert.equal(canvasAspectMatches({ ...original, cssWidth: 330 }), false);
+  assert.equal(canvasAspectMatches({ ...original, cssHeight: 440 }), false);
+  assert.equal(canvasAspectMatches(original), true);
+});
+
+test('smoke sampling rejects a stretched canvas and passes after browser geometry is restored', async () => {
+  const { stdout, stderr } = await runPuppetPage(`<!doctype html><main><canvas id="puppet" width="600" height="800" style="width:300px;height:400px"></canvas></main><script>
+  const smokeLimits = ${JSON.stringify(smokeLimits)};
+  const transitionFrameSampler = ${transitionFrameSampler.toString()};
+  const canvasAspectMatches = ${canvasAspectMatches.toString()};
+  const smoke = (${installSmokeMeasurements.toString()})();
+  smoke.sample();
+  const canvas = document.querySelector('#puppet');
+  canvas.style.width = '330px';
+  smoke.sample();
+  canvas.style.width = '300px';
+  canvas.style.height = '440px';
+  smoke.sample();
+  canvas.style.height = '400px';
+  smoke.sample();
+  document.body.dataset.aspectTest = JSON.stringify(smoke.state.aspects);
+  </script></body>`, { size: '500,500' });
+  const encoded = /data-aspect-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  const aspects = JSON.parse(encoded ?? 'null');
+  assert.ok(aspects, `${stdout}\n${stderr}`);
+  assert.deepEqual(aspects.map(canvasAspectMatches), [true, false, false, true]);
 });
 
 test('evidence crops follow the stage canvas rect and clear it at every smoke viewport', () => {
@@ -487,9 +520,11 @@ for (const viewport of layoutViewports) test(`stage UI stays outside the puppet 
   const display = rect(document.querySelector('#display'));
   const ledger = rect(document.querySelector('.ledger'));
   const share = rect(document.querySelector('.share'));
+  const shareControls = [...document.querySelectorAll('.share textarea, .share-actions label, .share-actions button, #share-image')].filter((element) => !element.classList.contains('hidden')).map(rect);
   document.querySelector('#display').classList.add('fresh');
   const fresh = { result: intrusions(), display: rect(document.querySelector('#display')) };
-  document.body.dataset.overlapTest = JSON.stringify({ puppet, figure, result, fresh, collisions, display, ledger, share, pageHeight: document.documentElement.scrollHeight, stageHeight });
+  const stage = rect(document.querySelector('main'));
+  document.body.dataset.overlapTest = JSON.stringify({ puppet, figure, result, fresh, collisions, display, ledger, share, shareControls, pageHeight: document.documentElement.scrollHeight, viewportHeight: innerHeight, stageHeight, stage });
   </script></body></html>`, { scale: viewport.scale, size: `${viewport.width},${viewport.height}`, mobile: viewport.mobile });
   const encoded = /data-overlap-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   const result = JSON.parse(encoded ?? 'null');
@@ -508,7 +543,7 @@ for (const viewport of layoutViewports) test(`stage UI stays outside the puppet 
     for (const wing of [result.display, result.ledger]) assert.ok(wing.right - wing.left < puppetWidth, `${viewport.name} wing wider than the puppet: ${JSON.stringify(wing)}`);
     assert.ok(result.fresh.display.right - result.fresh.display.left > result.display.right - result.display.left, `${viewport.name} fresh display must grow: ${JSON.stringify(result.fresh.display)}`);
   } else {
-    assert.ok(result.pageHeight > viewport.height, 'phone controls should continue below the first screen');
+    for (const control of result.shareControls) assert.ok(control.left >= result.share.left && control.right <= result.share.right && control.top >= result.share.top && control.bottom <= result.share.bottom, `${viewport.name} share control is clipped: ${JSON.stringify({ control, share: result.share })}`);
     assert.deepEqual(result.fresh.display, result.display, 'phone display must not move when fresh');
   }
 });
@@ -539,7 +574,7 @@ test('Android DPR 3 keeps the visual stage height stable and renders after sixty
   setTimeout(() => {
       const canvas = document.querySelector('#puppet');
       const pixel = canvas.getContext('2d').getImageData(Math.floor(canvas.width / 2), Math.floor(canvas.height / 2), 1, 1).data;
-      document.body.dataset.androidTest = JSON.stringify({ viewportHeight: Math.round(visualViewport.height), stageHeight: document.querySelector('#conversation').clientHeight - 940, heights, initial, settled: canvas.clientHeight, loaded: testPuppet.humanoidBone > 0, visible: pixel[3] > 0 });
+      document.body.dataset.androidTest = JSON.stringify({ viewportHeight: Math.round(visualViewport.height), stageHeight: document.querySelector('#conversation').clientHeight, heights, initial, settled: canvas.clientHeight, loaded: testPuppet.humanoidBone > 0, visible: pixel[3] > 0 });
   }, 60000);
   });
   `, { scale: 3, size: '390,844', budget: 65000, mobile: true });
@@ -547,7 +582,7 @@ test('Android DPR 3 keeps the visual stage height stable and renders after sixty
   const result = JSON.parse(encoded ?? 'null');
   assert.ok(result?.loaded && result.visible, `${JSON.stringify(result)}\n${stderr}`);
   assert.equal(result.settled, result.initial);
-  assert.equal(result.stageHeight, result.viewportHeight);
+  assert.ok(result.stageHeight > 0 && result.stageHeight <= result.viewportHeight);
   assert.deepEqual(result.heights, result.heights.map(() => result.settled));
 });
 

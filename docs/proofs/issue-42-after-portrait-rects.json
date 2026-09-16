@@ -1,0 +1,208 @@
+{
+  "viewport": "phone",
+  "pass": true,
+  "checks": {
+    "layoutShift": true,
+    "unexplainedMovement": true,
+    "overlaps": true,
+    "canvasGrowth": true,
+    "canvasAspect": true,
+    "stageViewport": true,
+    "paintedPuppet": true,
+    "browserErrors": true,
+    "telemetry": true,
+    "transitionFrames": true
+  },
+  "metrics": {
+    "cumulativeLayoutShift": 0,
+    "canvasHeightDrift": 0,
+    "stageHeightDrift": 0,
+    "maximumFrameGapMs": 0
+  },
+  "failures": [],
+  "state": {
+    "cls": 0,
+    "moves": [],
+    "overlaps": [],
+    "heights": [
+      {
+        "second": 1,
+        "canvas": 224.46875,
+        "stage": 676.40625
+      },
+      {
+        "second": 2,
+        "canvas": 224.46875,
+        "stage": 676.40625
+      },
+      {
+        "second": 3,
+        "canvas": 224.46875,
+        "stage": 676.40625
+      },
+      {
+        "second": 4,
+        "canvas": 224.46875,
+        "stage": 676.40625
+      },
+      {
+        "second": 5,
+        "canvas": 224.46875,
+        "stage": 676.40625
+      },
+      {
+        "second": 6,
+        "canvas": 224.46875,
+        "stage": 676.40625
+      },
+      {
+        "second": 7,
+        "canvas": 224.46875,
+        "stage": 676.40625
+      },
+      {
+        "second": 8,
+        "canvas": 224.46875,
+        "stage": 676.40625
+      },
+      {
+        "second": 9,
+        "canvas": 224.46875,
+        "stage": 676.40625
+      },
+      {
+        "second": 10,
+        "canvas": 224.46875,
+        "stage": 676.40625
+      }
+    ],
+    "aspects": [
+      {
+        "cssWidth": 168.359375,
+        "cssHeight": 224.46875,
+        "bufferWidth": 168,
+        "bufferHeight": 224
+      },
+      {
+        "cssWidth": 168.359375,
+        "cssHeight": 224.46875,
+        "bufferWidth": 168,
+        "bufferHeight": 224
+      },
+      {
+        "cssWidth": 168.359375,
+        "cssHeight": 224.46875,
+        "bufferWidth": 168,
+        "bufferHeight": 224
+      },
+      {
+        "cssWidth": 168.359375,
+        "cssHeight": 224.46875,
+        "bufferWidth": 168,
+        "bufferHeight": 224
+      },
+      {
+        "cssWidth": 168.359375,
+        "cssHeight": 224.46875,
+        "bufferWidth": 168,
+        "bufferHeight": 224
+      },
+      {
+        "cssWidth": 168.359375,
+        "cssHeight": 224.46875,
+        "bufferWidth": 168,
+        "bufferHeight": 224
+      },
+      {
+        "cssWidth": 168.359375,
+        "cssHeight": 224.46875,
+        "bufferWidth": 168,
+        "bufferHeight": 224
+      },
+      {
+        "cssWidth": 168.359375,
+        "cssHeight": 224.46875,
+        "bufferWidth": 168,
+        "bufferHeight": 224
+      },
+      {
+        "cssWidth": 168.359375,
+        "cssHeight": 224.46875,
+        "bufferWidth": 168,
+        "bufferHeight": 224
+      },
+      {
+        "cssWidth": 168.359375,
+        "cssHeight": 224.46875,
+        "bufferWidth": 168,
+        "bufferHeight": 224
+      }
+    ],
+    "stages": [
+      {
+        "top": 167.59375,
+        "bottom": 844,
+        "height": 676.40625,
+        "viewportHeight": 844
+      },
+      {
+        "top": 167.59375,
+        "bottom": 844,
+        "height": 676.40625,
+        "viewportHeight": 844
+      },
+      {
+        "top": 167.59375,
+        "bottom": 844,
+        "height": 676.40625,
+        "viewportHeight": 844
+      },
+      {
+        "top": 167.59375,
+        "bottom": 844,
+        "height": 676.40625,
+        "viewportHeight": 844
+      },
+      {
+        "top": 167.59375,
+        "bottom": 844,
+        "height": 676.40625,
+        "viewportHeight": 844
+      },
+      {
+        "top": 167.59375,
+        "bottom": 844,
+        "height": 676.40625,
+        "viewportHeight": 844
+      },
+      {
+        "top": 167.59375,
+        "bottom": 844,
+        "height": 676.40625,
+        "viewportHeight": 844
+      },
+      {
+        "top": 167.59375,
+        "bottom": 844,
+        "height": 676.40625,
+        "viewportHeight": 844
+      },
+      {
+        "top": 167.59375,
+        "bottom": 844,
+        "height": 676.40625,
+        "viewportHeight": 844
+      },
+      {
+        "top": 167.59375,
+        "bottom": 844,
+        "height": 676.40625,
+        "viewportHeight": 844
+      }
+    ],
+    "blankFrames": [],
+    "frameGaps": [],
+    "errors": [],
+    "telemetryRejections": []
+  }
+}

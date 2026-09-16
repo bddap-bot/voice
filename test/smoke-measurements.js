@@ -10,8 +10,13 @@ export const smokeStatusText = 'conversation could not start: the microphone per
 export const smokeLimits = {
   cumulativeLayoutShift: 0.1,
   heightDrift: 1,
+  aspectDrift: 0.005,
   droppedFrameMs: 50,
 };
+
+export function canvasAspectMatches({ cssWidth, cssHeight, bufferWidth, bufferHeight }) {
+  return Math.abs(cssWidth / cssHeight - bufferWidth / bufferHeight) <= smokeLimits.aspectDrift;
+}
 
 function stageSafeClip(canvas, viewport) {
   const viewportRight = viewport.x + viewport.width;
@@ -65,7 +70,7 @@ export function transitionFrameSampler(gaps, limit, schedule = requestAnimationF
 
 export function installSmokeMeasurements() {
   const selectors = ['header', '#saved', '#puppet', '.puppet-picker', '#puppet-credit', '#elapsed', '.share', '.display', '.ledger'];
-  const state = { cls: 0, moves: [], overlaps: [], heights: [], blankFrames: [], frameGaps: [], errors: [], telemetryRejections: [] };
+  const state = { cls: 0, moves: [], overlaps: [], heights: [], aspects: [], stages: [], blankFrames: [], frameGaps: [], errors: [], telemetryRejections: [] };
   const canvas = document.querySelector('#puppet');
   const rect = (element) => {
     const value = element.getBoundingClientRect();
@@ -89,9 +94,12 @@ export function installSmokeMeasurements() {
   const sample = () => {
     second++;
     const canvasRect = rect(canvas);
+    state.aspects.push({ cssWidth: canvasRect.width, cssHeight: canvasRect.height, bufferWidth: canvas.width, bufferHeight: canvas.height });
     const status = document.querySelector('#status')?.textContent ?? '';
     if (/telemetry|acknowledgment|unrecognized request/i.test(status) && !state.telemetryRejections.includes(status)) state.telemetryRejections.push(status);
-    state.heights.push({ second, canvas: canvasRect.height, stage: document.querySelector('main').getBoundingClientRect().height });
+    const stageRect = rect(document.querySelector('main'));
+    state.heights.push({ second, canvas: canvasRect.height, stage: stageRect.height });
+    state.stages.push({ top: stageRect.top, bottom: stageRect.bottom, height: stageRect.height, viewportHeight: innerHeight });
     const visible = [];
     for (const selector of selectors) {
       const element = document.querySelector(selector);
@@ -133,6 +141,8 @@ export function assessSmoke(state) {
     unexplainedMovement: state.moves.length === 0,
     overlaps: state.overlaps.length === 0,
     canvasGrowth: drift(canvasHeights) <= smokeLimits.heightDrift && drift(stageHeights) <= smokeLimits.heightDrift,
+    canvasAspect: state.aspects.every(canvasAspectMatches),
+    stageViewport: state.stages.every(({ top, bottom, height, viewportHeight }) => top >= 0 && bottom <= viewportHeight + 0.5 && height <= viewportHeight),
     paintedPuppet: state.blankFrames.length === 0,
     browserErrors: state.errors.length === 0,
     telemetry: state.telemetryRejections.length === 0,

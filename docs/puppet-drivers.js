@@ -90,6 +90,34 @@ export class EmbeddingActionClassifier {
   }
 }
 
+const BRACKET = /\s*\[([^\[\]]*)\]/g;
+const BRACKET_ACTIONS = Object.fromEntries(Object.entries(LABELS).flatMap(([kind, labels]) => kind === 'none' ? [] : Object.keys(labels).map((name) => [name, kind])));
+
+function completedSentences(text) {
+  const sentences = [];
+  let bracket = false;
+  let start = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '[') bracket = true;
+    else if (text[i] === ']') bracket = false;
+    else if (!bracket && /[.!?]/.test(text[i])) {
+      while (/[.!?]/.test(text[i + 1] ?? '')) i++;
+      sentences.push(text.slice(start, i + 1));
+      start = i + 1;
+    }
+  }
+  return { sentences, pending: text.slice(start) };
+}
+
+export function bracketAction(token) {
+  const name = token.trim().toLowerCase().replace(/[\s_]+/g, '-');
+  return { kind: BRACKET_ACTIONS[name] ?? 'unknown', name, source: 'bracket' };
+}
+
+export function stripBrackets(text) {
+  return text.replace(/\s*\[[^\[\]]*(?:\]|$)/g, '');
+}
+
 export class TranscriptActionDriver {
   constructor(apply, classifier = new EmbeddingActionClassifier(), timing = {}) {
     this.apply = apply;
@@ -99,30 +127,55 @@ export class TranscriptActionDriver {
     this.minimumMs = timing.minimumMs ?? 900;
     this.epoch = 0;
     this.pending = '';
+    this.carried = [];
     this.nextAt = 0;
     this.tail = Promise.resolve();
   }
   push(delta, playAt = this.now()) {
     this.pending += delta;
-    const sentences = this.pending.match(/[^.!?]+[.!?]+/g) ?? [];
-    const consumed = sentences.reduce((length, sentence) => length + sentence.length, 0);
-    this.pending = this.pending.slice(consumed);
-    for (const sentence of sentences) this.dispatch(sentence.trim(), playAt);
+    const { sentences, pending } = completedSentences(this.pending);
+    this.pending = pending;
+    for (const sentence of sentences) this.sentence(sentence, playAt);
+    const rest = this.extract(this.pending, playAt);
+    this.pending = rest.text;
+    this.carried.push(...rest.brackets);
   }
   flush() {
-    if (this.pending.trim()) this.dispatch(this.pending);
+    this.sentence(this.pending);
     this.pending = '';
   }
-  dispatch(text, playAt = this.now()) {
+  sentence(raw, playAt = this.now()) {
+    const found = this.extract(raw, playAt);
+    const brackets = [...this.carried.splice(0), ...found.brackets];
+    if (found.text.replace(/[.!?\s]/g, '')) this.dispatch(found.text.trim(), playAt, brackets);
+  }
+  extract(text, playAt) {
+    const brackets = [];
+    const stripped = text.replace(BRACKET, (token, inner) => {
+      const action = bracketAction(inner);
+      if (action.kind !== 'unknown') brackets.push(action.name);
+      this.run(() => action, playAt, { token: token.trim() });
+      return '';
+    });
+    return { text: stripped, brackets };
+  }
+  dispatch(text, playAt = this.now(), brackets = []) {
+    return this.run(async () => ({ ...await this.classifier.classify(text), source: 'classifier' }), playAt, { sentence: text, brackets, shadowed: brackets.length > 0 });
+  }
+  run(produce, playAt, detail) {
     const epoch = this.epoch;
     const operation = this.tail.then(async () => {
-      const result = await this.classifier.classify(text);
+      const result = await produce();
       if (epoch !== this.epoch) return result;
+      if (detail.shadowed) {
+        this.apply(result, { ...detail, playAtMinusNow: null });
+        return result;
+      }
       const at = Math.max(playAt, this.nextAt, this.now());
       this.nextAt = at + this.minimumMs;
       const playAtMinusNow = Math.max(0, at - this.now());
       await new Promise((resolve) => this.schedule(resolve, playAtMinusNow));
-      if (epoch === this.epoch) this.apply(result, { sentence: text, playAtMinusNow });
+      if (epoch === this.epoch) this.apply(result, { ...detail, playAtMinusNow });
       return result;
     });
     this.tail = operation.catch(() => {});
@@ -131,6 +184,7 @@ export class TranscriptActionDriver {
   reset() {
     this.epoch++;
     this.pending = '';
+    this.carried = [];
     this.nextAt = 0;
   }
 }

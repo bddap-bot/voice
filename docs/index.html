@@ -149,12 +149,15 @@ let selectedImage;
 let sharing = false;
 const shareWaiters = new Map();
 function applyTranscriptAction(action, timing) {
-  if (action.kind === 'none') return;
+  if (action.kind === 'none' && !timing.shadowed) return;
   const pose = puppetRuntime?.poseName ?? null;
-  let played = Boolean(puppetRuntime);
-  if (action.kind === 'mood') puppetRuntime?.mood(action.name);
-  else if (action.kind === 'gesture') played = Boolean(action.name !== 'point' || $('display-items').childElementCount) && Boolean(puppetRuntime?.gesture(action.name, action.name === 'point' ? 'panel' : undefined));
-  recordSession('transcript-action', JSON.stringify({ sentence: timing.sentence, token: `${action.kind}:${action.name}`, score: action.score, pose, outcome: played ? 'played' : 'refused', playAtMinusNow: timing.playAtMinusNow }));
+  let outcome = timing.shadowed ? 'shadowed' : action.kind === 'unknown' ? 'unknown' : puppetRuntime ? 'played' : 'refused';
+  if (outcome === 'played' && action.kind === 'mood') puppetRuntime.mood(action.name);
+  else if (outcome === 'played' && action.kind === 'gesture') {
+    const target = action.name === 'point' ? 'panel' : undefined;
+    if ((target && !$('display-items').childElementCount) || !puppetRuntime.gesture(action.name, target)) outcome = 'refused';
+  }
+  recordSession('transcript-action', JSON.stringify({ source: action.source, sentence: timing.sentence, token: timing.token, action: `${action.kind}:${action.name}`, score: action.score, brackets: timing.brackets, pose, outcome, playAtMinusNow: timing.playAtMinusNow }));
 }
 const actionDriver = new TranscriptActionDriver(applyTranscriptAction);
 const listeningDriver = new ListeningReactionDriver((motion) => puppetRuntime?.listening(motion));

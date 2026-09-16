@@ -280,3 +280,13 @@ test('failed and cancelled delegations remain visible', () => {
     { reply: 'cancelled', failed: true },
   ]);
 });
+
+test('delegation context strips bracketed stage directions from spoken turns only', () => {
+  const trace = new ConversationTrace();
+  trace.heard('what about [this]');
+  trace.delegated('d0');
+  trace.spoke('Yes [nod], the [thumbs up] build is green [shru');
+  trace.heard('and now');
+  const entry = trace.delegated('d1');
+  assert.deepEqual(entry.context, [{ speaker: 'user', text: 'what about [this]' }, { speaker: 'live', text: 'Yes, the build is green' }]);
+});

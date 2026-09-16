@@ -1,0 +1,82 @@
+{
+  "viewport": "phone",
+  "pass": true,
+  "checks": {
+    "layoutShift": true,
+    "unexplainedMovement": true,
+    "overlaps": true,
+    "canvasGrowth": true,
+    "paintedPuppet": true,
+    "browserErrors": true,
+    "telemetry": true,
+    "transitionFrames": true
+  },
+  "metrics": {
+    "cumulativeLayoutShift": 0,
+    "canvasHeightDrift": 0,
+    "stageHeightDrift": 0,
+    "maximumFrameGapMs": 0
+  },
+  "failures": [],
+  "state": {
+    "cls": 0,
+    "moves": [],
+    "overlaps": [],
+    "heights": [
+      {
+        "second": 1,
+        "canvas": 594.234375,
+        "stage": 1784
+      },
+      {
+        "second": 2,
+        "canvas": 594.234375,
+        "stage": 1784
+      },
+      {
+        "second": 3,
+        "canvas": 594.234375,
+        "stage": 1784
+      },
+      {
+        "second": 4,
+        "canvas": 594.234375,
+        "stage": 1784
+      },
+      {
+        "second": 5,
+        "canvas": 594.234375,
+        "stage": 1784
+      },
+      {
+        "second": 6,
+        "canvas": 594.234375,
+        "stage": 1784
+      },
+      {
+        "second": 7,
+        "canvas": 594.234375,
+        "stage": 1784
+      },
+      {
+        "second": 8,
+        "canvas": 594.234375,
+        "stage": 1784
+      },
+      {
+        "second": 9,
+        "canvas": 594.234375,
+        "stage": 1784
+      },
+      {
+        "second": 10,
+        "canvas": 594.234375,
+        "stage": 1784
+      }
+    ],
+    "blankFrames": [],
+    "frameGaps": [],
+    "errors": [],
+    "telemetryRejections": []
+  }
+}

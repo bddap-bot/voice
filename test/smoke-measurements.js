@@ -1,5 +1,6 @@
 export const smokeViewports = [
   { name: 'phone', width: 390, height: 844, scale: 3, mobile: true },
+  { name: 'phone-landscape', width: 844, height: 390, scale: 3, mobile: true },
   { name: 'laptop', width: 1440, height: 900, scale: 1, mobile: false },
   { name: 'tv', width: 1920, height: 1080, scale: 1, mobile: false },
 ];
@@ -63,7 +64,7 @@ export function transitionFrameSampler(gaps, limit, schedule = requestAnimationF
 }
 
 export function installSmokeMeasurements() {
-  const selectors = ['header', '#saved', '.puppet-picker', '#puppet-credit', '#elapsed', '.share', '.display', '.ledger'];
+  const selectors = ['header', '#saved', '#puppet', '.puppet-picker', '#puppet-credit', '#elapsed', '.share', '.display', '.ledger'];
   const state = { cls: 0, moves: [], overlaps: [], heights: [], blankFrames: [], frameGaps: [], errors: [], telemetryRejections: [] };
   const canvas = document.querySelector('#puppet');
   const rect = (element) => {
@@ -91,14 +92,19 @@ export function installSmokeMeasurements() {
     const status = document.querySelector('#status')?.textContent ?? '';
     if (/telemetry|acknowledgment|unrecognized request/i.test(status) && !state.telemetryRejections.includes(status)) state.telemetryRejections.push(status);
     state.heights.push({ second, canvas: canvasRect.height, stage: document.querySelector('main').getBoundingClientRect().height });
+    const visible = [];
     for (const selector of selectors) {
       const element = document.querySelector(selector);
       if (!element || element.classList.contains('hidden')) continue;
       const value = rect(element);
+      if (!value.width || !value.height) continue;
+      visible.push({ selector, rect: value });
       const before = previous.get(selector);
       if (before && (Math.abs(before.left - value.left) > 1 || Math.abs(before.top - value.top) > 1 || Math.abs(before.width - value.width) > 1 || Math.abs(before.height - value.height) > 1) && element.getAnimations({ subtree: true }).length === 0) state.moves.push({ second, selector, before, after: value });
       previous.set(selector, value);
-      if (intersects(canvasRect, value)) state.overlaps.push({ second, selector });
+    }
+    for (let left = 0; left < visible.length; left++) for (let right = left + 1; right < visible.length; right++) {
+      if (intersects(visible[left].rect, visible[right].rect)) state.overlaps.push({ second, left: visible[left], right: visible[right] });
     }
     try {
       const blank = document.createElement('canvas');

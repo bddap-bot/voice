@@ -400,7 +400,11 @@ test('the puppet canvas keeps one layout height across resize-observer ticks', a
   assert.equal(result.afterBufferChange, result.settled, 'layout height must not follow the drawing buffer');
 });
 
-const layoutViewports = smokeViewports;
+const layoutViewports = [
+  ...smokeViewports,
+  { name: 'minimum-phone', width: 320, height: 568, scale: 2, mobile: true },
+  { name: 'minimum-phone-landscape', width: 568, height: 320, scale: 2, mobile: true },
+];
 
 test('smoke assessment rejects every measured browser failure and accepts a clean run', () => {
   const clean = { cls: smokeLimits.cumulativeLayoutShift, moves: [], overlaps: [], heights: [{ canvas: 100, stage: 200 }, { canvas: 101, stage: 201 }], blankFrames: [], frameGaps: [], errors: [], telemetryRejections: [] };
@@ -468,23 +472,26 @@ for (const viewport of layoutViewports) test(`stage UI stays outside the puppet 
   const selectors = ['header', '#saved', '.puppet-picker', '#puppet-credit', '#elapsed', '.share', '.display', '.ledger'];
   const overlaps = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
   const intrusions = () => selectors.map((selector) => ({ selector, rect: rect(document.querySelector(selector)) })).filter((item) => overlaps(item.rect, figure));
+  const regions = ['header', '#saved', '#puppet', '.puppet-picker', '#puppet-credit', '#elapsed', '.share', '.display', '.ledger'].map((selector) => ({ selector, rect: rect(document.querySelector(selector)) })).filter(({ rect }) => rect.right > rect.left && rect.bottom > rect.top);
+  const collisions = regions.flatMap((left, index) => regions.slice(index + 1).filter((right) => overlaps(left.rect, right.rect)).map((right) => ({ left, right })));
   const result = intrusions();
   const display = rect(document.querySelector('#display'));
   const ledger = rect(document.querySelector('.ledger'));
   const share = rect(document.querySelector('.share'));
   document.querySelector('#display').classList.add('fresh');
   const fresh = { result: intrusions(), display: rect(document.querySelector('#display')) };
-  document.body.dataset.overlapTest = JSON.stringify({ puppet, figure, result, fresh, display, ledger, share, pageHeight: document.documentElement.scrollHeight, stageHeight });
+  document.body.dataset.overlapTest = JSON.stringify({ puppet, figure, result, fresh, collisions, display, ledger, share, pageHeight: document.documentElement.scrollHeight, stageHeight });
   </script></body></html>`, { scale: viewport.scale, size: `${viewport.width},${viewport.height}`, mobile: viewport.mobile });
   const encoded = /data-overlap-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   const result = JSON.parse(encoded ?? 'null');
   assert.deepEqual(result?.result, [], `${viewport.name}: ${JSON.stringify(result)}\n${stderr}`);
   assert.deepEqual(result.fresh.result, [], `${viewport.name} with a fresh display: ${JSON.stringify(result)}`);
+  assert.deepEqual(result.collisions, [], `${viewport.name}: ${JSON.stringify(result.collisions)}`);
   assert.equal(stdout.includes('tap to stand and start voice'), false, `${viewport.name} retains the old button copy`);
   assert.equal(/<button[^>]+id="toggle"/.test(stdout), false, `${viewport.name} retains the old button`);
   const puppetWidth = result.puppet.right - result.puppet.left;
   assert.ok(result.figure.bottom > result.puppet.top + 0.8 * (result.puppet.bottom - result.puppet.top), `${viewport.name} projected feet must sit near the canvas bottom: ${JSON.stringify(result.figure)}`);
-  if (viewport.name !== 'phone') {
+  if (!viewport.mobile) {
     assert.ok(result.pageHeight <= viewport.height, `${viewport.name} must remain one screen: ${result.pageHeight}`);
     assert.equal(result.puppet.top, 0, `${viewport.name} puppet must start at the top of the stage`);
     assert.equal(result.puppet.bottom, result.stageHeight - 90, `${viewport.name} puppet must end above the desk: ${result.puppet.bottom} of ${result.stageHeight}`);

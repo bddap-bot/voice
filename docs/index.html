@@ -58,13 +58,14 @@
   .tag { color: #8eabff; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
   .tag.alone { color: #d4ae68; }
   .line { margin-top: 5px; } .key { color: #8f8f96; }
-  @media (max-width: 720px), (max-height: 540px) and (pointer: coarse) {
-    body { overflow: auto; }
-    header, .entry, .saved { position: absolute; left: 10px; width: calc(100% - 20px); }
-    header { top: calc(var(--visual-viewport-height) + 10px); font-size: 12px; }
-    .entry, .saved { top: calc(var(--visual-viewport-height) + 66px); }
-    body:has(main.hidden) header { top: 10px; }
-    body:has(main.hidden) .entry, body:has(main.hidden) .saved { top: 66px; }
+  @media (max-width: 720px), (max-height: 540px) {
+    body { display: flex; flex-direction: column; overflow: auto; }
+    header, .entry, .saved { position: static; width: auto; margin: 10px 10px 0; }
+    header { order: 2; font-size: 12px; }
+    .entry, .saved { order: 3; }
+    main { order: 1; flex: none; }
+    body:has(main.hidden) header { order: initial; }
+    body:has(main.hidden) .entry, body:has(main.hidden) .saved { order: initial; }
     main { --stage-height: 100svh; height: auto; min-height: calc(var(--stage-height) + 940px); overflow: hidden; }
     #puppet { left: 5%; top: 3%; width: 90%; height: calc(var(--stage-height) - 14%); }
     .control::before { left: 5%; top: calc(var(--stage-height) + 12px); width: 90%; height: 150px; }

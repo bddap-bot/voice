@@ -1,0 +1,835 @@
+{
+  "viewport": "phone",
+  "pass": false,
+  "checks": {
+    "layoutShift": true,
+    "unexplainedMovement": true,
+    "overlaps": false,
+    "canvasGrowth": true,
+    "paintedPuppet": true,
+    "browserErrors": true,
+    "telemetry": true,
+    "transitionFrames": true
+  },
+  "metrics": {
+    "cumulativeLayoutShift": 0,
+    "canvasHeightDrift": 0,
+    "stageHeightDrift": 0,
+    "maximumFrameGapMs": 0
+  },
+  "failures": [
+    "overlaps"
+  ],
+  "state": {
+    "cls": 0,
+    "moves": [],
+    "overlaps": [
+      {
+        "second": 1,
+        "left": {
+          "selector": "header",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 854,
+            "bottom": 902.09375,
+            "width": 370,
+            "height": 48.09375
+          }
+        },
+        "right": {
+          "selector": ".puppet-picker",
+          "rect": {
+            "left": 31.1875,
+            "right": 358.78125,
+            "top": 870,
+            "bottom": 905,
+            "width": 327.59375,
+            "height": 35
+          }
+        }
+      },
+      {
+        "second": 1,
+        "left": {
+          "selector": "#saved",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 910,
+            "bottom": 1009.5,
+            "width": 370,
+            "height": 99.5
+          }
+        },
+        "right": {
+          "selector": "#puppet-credit",
+          "rect": {
+            "left": 19.5,
+            "right": 370.5,
+            "top": 924,
+            "bottom": 945,
+            "width": 351,
+            "height": 21
+          }
+        }
+      },
+      {
+        "second": 1,
+        "left": {
+          "selector": "#saved",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 910,
+            "bottom": 1009.5,
+            "width": 370,
+            "height": 99.5
+          }
+        },
+        "right": {
+          "selector": "#elapsed",
+          "rect": {
+            "left": 97.5,
+            "right": 292.5,
+            "top": 960,
+            "bottom": 988,
+            "width": 195,
+            "height": 28
+          }
+        }
+      },
+      {
+        "second": 2,
+        "left": {
+          "selector": "header",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 854,
+            "bottom": 902.09375,
+            "width": 370,
+            "height": 48.09375
+          }
+        },
+        "right": {
+          "selector": ".puppet-picker",
+          "rect": {
+            "left": 31.1875,
+            "right": 358.78125,
+            "top": 870,
+            "bottom": 905,
+            "width": 327.59375,
+            "height": 35
+          }
+        }
+      },
+      {
+        "second": 2,
+        "left": {
+          "selector": "#saved",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 910,
+            "bottom": 1009.5,
+            "width": 370,
+            "height": 99.5
+          }
+        },
+        "right": {
+          "selector": "#puppet-credit",
+          "rect": {
+            "left": 19.5,
+            "right": 370.5,
+            "top": 924,
+            "bottom": 945,
+            "width": 351,
+            "height": 21
+          }
+        }
+      },
+      {
+        "second": 2,
+        "left": {
+          "selector": "#saved",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 910,
+            "bottom": 1009.5,
+            "width": 370,
+            "height": 99.5
+          }
+        },
+        "right": {
+          "selector": "#elapsed",
+          "rect": {
+            "left": 97.5,
+            "right": 292.5,
+            "top": 960,
+            "bottom": 988,
+            "width": 195,
+            "height": 28
+          }
+        }
+      },
+      {
+        "second": 3,
+        "left": {
+          "selector": "header",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 854,
+            "bottom": 902.09375,
+            "width": 370,
+            "height": 48.09375
+          }
+        },
+        "right": {
+          "selector": ".puppet-picker",
+          "rect": {
+            "left": 31.1875,
+            "right": 358.78125,
+            "top": 870,
+            "bottom": 905,
+            "width": 327.59375,
+            "height": 35
+          }
+        }
+      },
+      {
+        "second": 3,
+        "left": {
+          "selector": "#saved",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 910,
+            "bottom": 1009.5,
+            "width": 370,
+            "height": 99.5
+          }
+        },
+        "right": {
+          "selector": "#puppet-credit",
+          "rect": {
+            "left": 19.5,
+            "right": 370.5,
+            "top": 924,
+            "bottom": 945,
+            "width": 351,
+            "height": 21
+          }
+        }
+      },
+      {
+        "second": 3,
+        "left": {
+          "selector": "#saved",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 910,
+            "bottom": 1009.5,
+            "width": 370,
+            "height": 99.5
+          }
+        },
+        "right": {
+          "selector": "#elapsed",
+          "rect": {
+            "left": 97.5,
+            "right": 292.5,
+            "top": 960,
+            "bottom": 988,
+            "width": 195,
+            "height": 28
+          }
+        }
+      },
+      {
+        "second": 4,
+        "left": {
+          "selector": "header",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 854,
+            "bottom": 902.09375,
+            "width": 370,
+            "height": 48.09375
+          }
+        },
+        "right": {
+          "selector": ".puppet-picker",
+          "rect": {
+            "left": 31.1875,
+            "right": 358.78125,
+            "top": 870,
+            "bottom": 905,
+            "width": 327.59375,
+            "height": 35
+          }
+        }
+      },
+      {
+        "second": 4,
+        "left": {
+          "selector": "#saved",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 910,
+            "bottom": 1009.5,
+            "width": 370,
+            "height": 99.5
+          }
+        },
+        "right": {
+          "selector": "#puppet-credit",
+          "rect": {
+            "left": 19.5,
+            "right": 370.5,
+            "top": 924,
+            "bottom": 945,
+            "width": 351,
+            "height": 21
+          }
+        }
+      },
+      {
+        "second": 4,
+        "left": {
+          "selector": "#saved",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 910,
+            "bottom": 1009.5,
+            "width": 370,
+            "height": 99.5
+          }
+        },
+        "right": {
+          "selector": "#elapsed",
+          "rect": {
+            "left": 97.5,
+            "right": 292.5,
+            "top": 960,
+            "bottom": 988,
+            "width": 195,
+            "height": 28
+          }
+        }
+      },
+      {
+        "second": 5,
+        "left": {
+          "selector": "header",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 854,
+            "bottom": 902.09375,
+            "width": 370,
+            "height": 48.09375
+          }
+        },
+        "right": {
+          "selector": ".puppet-picker",
+          "rect": {
+            "left": 31.1875,
+            "right": 358.78125,
+            "top": 870,
+            "bottom": 905,
+            "width": 327.59375,
+            "height": 35
+          }
+        }
+      },
+      {
+        "second": 5,
+        "left": {
+          "selector": "#saved",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 910,
+            "bottom": 1009.5,
+            "width": 370,
+            "height": 99.5
+          }
+        },
+        "right": {
+          "selector": "#puppet-credit",
+          "rect": {
+            "left": 19.5,
+            "right": 370.5,
+            "top": 924,
+            "bottom": 945,
+            "width": 351,
+            "height": 21
+          }
+        }
+      },
+      {
+        "second": 5,
+        "left": {
+          "selector": "#saved",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 910,
+            "bottom": 1009.5,
+            "width": 370,
+            "height": 99.5
+          }
+        },
+        "right": {
+          "selector": "#elapsed",
+          "rect": {
+            "left": 97.5,
+            "right": 292.5,
+            "top": 960,
+            "bottom": 988,
+            "width": 195,
+            "height": 28
+          }
+        }
+      },
+      {
+        "second": 6,
+        "left": {
+          "selector": "header",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 854,
+            "bottom": 902.09375,
+            "width": 370,
+            "height": 48.09375
+          }
+        },
+        "right": {
+          "selector": ".puppet-picker",
+          "rect": {
+            "left": 31.1875,
+            "right": 358.78125,
+            "top": 870,
+            "bottom": 905,
+            "width": 327.59375,
+            "height": 35
+          }
+        }
+      },
+      {
+        "second": 6,
+        "left": {
+          "selector": "#saved",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 910,
+            "bottom": 1009.5,
+            "width": 370,
+            "height": 99.5
+          }
+        },
+        "right": {
+          "selector": "#puppet-credit",
+          "rect": {
+            "left": 19.5,
+            "right": 370.5,
+            "top": 924,
+            "bottom": 945,
+            "width": 351,
+            "height": 21
+          }
+        }
+      },
+      {
+        "second": 6,
+        "left": {
+          "selector": "#saved",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 910,
+            "bottom": 1009.5,
+            "width": 370,
+            "height": 99.5
+          }
+        },
+        "right": {
+          "selector": "#elapsed",
+          "rect": {
+            "left": 97.5,
+            "right": 292.5,
+            "top": 960,
+            "bottom": 988,
+            "width": 195,
+            "height": 28
+          }
+        }
+      },
+      {
+        "second": 7,
+        "left": {
+          "selector": "header",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 854,
+            "bottom": 902.09375,
+            "width": 370,
+            "height": 48.09375
+          }
+        },
+        "right": {
+          "selector": ".puppet-picker",
+          "rect": {
+            "left": 31.1875,
+            "right": 358.78125,
+            "top": 870,
+            "bottom": 905,
+            "width": 327.59375,
+            "height": 35
+          }
+        }
+      },
+      {
+        "second": 7,
+        "left": {
+          "selector": "#saved",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 910,
+            "bottom": 1009.5,
+            "width": 370,
+            "height": 99.5
+          }
+        },
+        "right": {
+          "selector": "#puppet-credit",
+          "rect": {
+            "left": 19.5,
+            "right": 370.5,
+            "top": 924,
+            "bottom": 945,
+            "width": 351,
+            "height": 21
+          }
+        }
+      },
+      {
+        "second": 7,
+        "left": {
+          "selector": "#saved",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 910,
+            "bottom": 1009.5,
+            "width": 370,
+            "height": 99.5
+          }
+        },
+        "right": {
+          "selector": "#elapsed",
+          "rect": {
+            "left": 97.5,
+            "right": 292.5,
+            "top": 960,
+            "bottom": 988,
+            "width": 195,
+            "height": 28
+          }
+        }
+      },
+      {
+        "second": 8,
+        "left": {
+          "selector": "header",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 854,
+            "bottom": 902.09375,
+            "width": 370,
+            "height": 48.09375
+          }
+        },
+        "right": {
+          "selector": ".puppet-picker",
+          "rect": {
+            "left": 31.1875,
+            "right": 358.78125,
+            "top": 870,
+            "bottom": 905,
+            "width": 327.59375,
+            "height": 35
+          }
+        }
+      },
+      {
+        "second": 8,
+        "left": {
+          "selector": "#saved",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 910,
+            "bottom": 1009.5,
+            "width": 370,
+            "height": 99.5
+          }
+        },
+        "right": {
+          "selector": "#puppet-credit",
+          "rect": {
+            "left": 19.5,
+            "right": 370.5,
+            "top": 924,
+            "bottom": 945,
+            "width": 351,
+            "height": 21
+          }
+        }
+      },
+      {
+        "second": 8,
+        "left": {
+          "selector": "#saved",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 910,
+            "bottom": 1009.5,
+            "width": 370,
+            "height": 99.5
+          }
+        },
+        "right": {
+          "selector": "#elapsed",
+          "rect": {
+            "left": 97.5,
+            "right": 292.5,
+            "top": 960,
+            "bottom": 988,
+            "width": 195,
+            "height": 28
+          }
+        }
+      },
+      {
+        "second": 9,
+        "left": {
+          "selector": "header",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 854,
+            "bottom": 902.09375,
+            "width": 370,
+            "height": 48.09375
+          }
+        },
+        "right": {
+          "selector": ".puppet-picker",
+          "rect": {
+            "left": 31.1875,
+            "right": 358.78125,
+            "top": 870,
+            "bottom": 905,
+            "width": 327.59375,
+            "height": 35
+          }
+        }
+      },
+      {
+        "second": 9,
+        "left": {
+          "selector": "#saved",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 910,
+            "bottom": 1009.5,
+            "width": 370,
+            "height": 99.5
+          }
+        },
+        "right": {
+          "selector": "#puppet-credit",
+          "rect": {
+            "left": 19.5,
+            "right": 370.5,
+            "top": 924,
+            "bottom": 945,
+            "width": 351,
+            "height": 21
+          }
+        }
+      },
+      {
+        "second": 9,
+        "left": {
+          "selector": "#saved",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 910,
+            "bottom": 1009.5,
+            "width": 370,
+            "height": 99.5
+          }
+        },
+        "right": {
+          "selector": "#elapsed",
+          "rect": {
+            "left": 97.5,
+            "right": 292.5,
+            "top": 960,
+            "bottom": 988,
+            "width": 195,
+            "height": 28
+          }
+        }
+      },
+      {
+        "second": 10,
+        "left": {
+          "selector": "header",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 854,
+            "bottom": 902.09375,
+            "width": 370,
+            "height": 48.09375
+          }
+        },
+        "right": {
+          "selector": ".puppet-picker",
+          "rect": {
+            "left": 31.1875,
+            "right": 358.78125,
+            "top": 870,
+            "bottom": 905,
+            "width": 327.59375,
+            "height": 35
+          }
+        }
+      },
+      {
+        "second": 10,
+        "left": {
+          "selector": "#saved",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 910,
+            "bottom": 1009.5,
+            "width": 370,
+            "height": 99.5
+          }
+        },
+        "right": {
+          "selector": "#puppet-credit",
+          "rect": {
+            "left": 19.5,
+            "right": 370.5,
+            "top": 924,
+            "bottom": 945,
+            "width": 351,
+            "height": 21
+          }
+        }
+      },
+      {
+        "second": 10,
+        "left": {
+          "selector": "#saved",
+          "rect": {
+            "left": 10,
+            "right": 380,
+            "top": 910,
+            "bottom": 1009.5,
+            "width": 370,
+            "height": 99.5
+          }
+        },
+        "right": {
+          "selector": "#elapsed",
+          "rect": {
+            "left": 97.5,
+            "right": 292.5,
+            "top": 960,
+            "bottom": 988,
+            "width": 195,
+            "height": 28
+          }
+        }
+      }
+    ],
+    "heights": [
+      {
+        "second": 1,
+        "canvas": 594.234375,
+        "stage": 1784
+      },
+      {
+        "second": 2,
+        "canvas": 594.234375,
+        "stage": 1784
+      },
+      {
+        "second": 3,
+        "canvas": 594.234375,
+        "stage": 1784
+      },
+      {
+        "second": 4,
+        "canvas": 594.234375,
+        "stage": 1784
+      },
+      {
+        "second": 5,
+        "canvas": 594.234375,
+        "stage": 1784
+      },
+      {
+        "second": 6,
+        "canvas": 594.234375,
+        "stage": 1784
+      },
+      {
+        "second": 7,
+        "canvas": 594.234375,
+        "stage": 1784
+      },
+      {
+        "second": 8,
+        "canvas": 594.234375,
+        "stage": 1784
+      },
+      {
+        "second": 9,
+        "canvas": 594.234375,
+        "stage": 1784
+      },
+      {
+        "second": 10,
+        "canvas": 594.234375,
+        "stage": 1784
+      }
+    ],
+    "blankFrames": [],
+    "frameGaps": [],
+    "errors": [],
+    "telemetryRejections": []
+  }
+}

@@ -10,6 +10,13 @@ import { assessSmoke, clipClearsStage, evidenceRegion, smokeLimits, smokeStatusT
 
 const execute = promisify(execFile);
 
+test('display-only hub messages are acknowledged without prompting Live', async () => {
+  const source = await readFile(new URL('../docs/index.html', import.meta.url), 'utf8');
+  const handler = source.slice(source.indexOf('async function receiveHub(result)'), source.indexOf('async function receiveHubError(result)'));
+  assert.match(handler, /if \(result\.reply === ''\) \{[\s\S]*hub-ack[\s\S]*return;/);
+  assert.ok(handler.indexOf("result.reply === ''") < handler.indexOf('session.commentary.append'));
+});
+
 test('private smoke uses the same authenticated relay transport as the page', async () => {
   const source = await readFile(new URL('../scripts/smoke.mjs', import.meta.url), 'utf8');
   assert.doesNotMatch(source, /bridge-wasm|net\.connect\(4321/);

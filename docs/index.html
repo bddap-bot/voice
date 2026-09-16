@@ -724,6 +724,10 @@ function finishHubWait(id) {
   syncPuppetUi();
 }
 async function receiveHub(result) {
+  if (result.reply === '') {
+    await sendFrame(`hub-ack\n${JSON.stringify({ id: result.id, stamp: result.stamp })}`);
+    return;
+  }
   finishHubWait(result.id);
   if (!conversation?.channel || !trace.hub(result.id, result.reply, result.timing_ms)) return;
   recordSession('delegation_end', `${result.id}: ok`);

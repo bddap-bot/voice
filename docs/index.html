@@ -545,9 +545,19 @@ async function dial() {
   connected = false;
   resetPuppetConnection(new Error('connection replaced'), Boolean(puppetScope && puppetScope !== token.endpoint_id));
   generation++;
-  await connect(token.relay_url ? `${token.endpoint_id}@${token.relay_url}` : token.endpoint_id, ALPN);
-  await sendFrame(JSON.stringify({ auth: token.secret }));
-  if (!JSON.parse(dec.decode(await recv())).ok) throw new Error('wrong token');
+  try {
+    await connect(token.relay_url ? `${token.endpoint_id}@${token.relay_url}` : token.endpoint_id, ALPN);
+  } catch (error) {
+    throw new Error(`relay transport failed: ${error.message}`);
+  }
+  let reply;
+  try {
+    await sendFrame(JSON.stringify({ auth: token.secret }));
+    reply = JSON.parse(dec.decode(await recv()));
+  } catch (error) {
+    throw new Error(`authentication transport failed: ${error.message}`);
+  }
+  if (!reply.ok) throw new Error('token rejected');
   connected = true;
   everConnected = true;
   listener = listen(generation);

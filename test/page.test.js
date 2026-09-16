@@ -23,9 +23,18 @@ test('private smoke uses the same authenticated relay transport as the page', as
   assert.match(source, /voice-web', \['token'\]/);
 });
 
+test('connection errors identify transport, authentication transport, and token rejection', async () => {
+  const source = await readFile(new URL('../docs/index.html', import.meta.url), 'utf8');
+  const dial = source.slice(source.indexOf('async function dial()'), source.indexOf('function waitForAnswer'));
+  assert.match(dial, /relay transport failed:/);
+  assert.match(dial, /authentication transport failed:/);
+  assert.match(dial, /token rejected/);
+  assert.doesNotMatch(dial, /wrong token/);
+});
+
 test('private smoke poses the puppet directly instead of toggling a conversation on the deployed pair', async () => {
   const source = await readFile(new URL('../scripts/smoke.mjs', import.meta.url), 'utf8');
-  assert.match(source, /const transitions = mode === 'private'\n\s+\? \["__smokeRuntime\.pose\('stand'\)", "__smokeRuntime\.pose\('sit'\)"\]\n\s+: \["document\.querySelector\('#puppet'\)\.click\(\)", "document\.querySelector\('#puppet'\)\.click\(\)"\];/);
+  assert.match(source, /const transitions = mode === 'private' && !live\n\s+\? \["__smokeRuntime\.pose\('stand'\)", "__smokeRuntime\.pose\('sit'\)"\]\n\s+: \["document\.querySelector\('#puppet'\)\.click\(\)", "document\.querySelector\('#puppet'\)\.click\(\)"\];/);
   assert.equal(source.match(/#puppet'\)\.click\(\)/g).length, 2);
   assert.match(source, /__smoke\.startTransition\(\);\$\{transitions\[0\]\}/);
   assert.match(source, /__smoke\.startTransition\(\);\$\{transitions\[1\]\}/);

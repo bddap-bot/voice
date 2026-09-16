@@ -9,8 +9,10 @@ import { assessSmoke, clipClearsStage, evidenceRegion, installSmokeMeasurements,
 
 const execute = promisify(execFile);
 const mode = process.argv.includes('--private') ? 'private' : 'public';
+const live = process.argv.includes('--live');
+const deployed = process.argv.includes('--deployed');
 const neutralSilhouette = mode === 'public';
-const transitions = mode === 'private'
+const transitions = mode === 'private' && !live
   ? ["__smokeRuntime.pose('stand')", "__smokeRuntime.pose('sit')"]
   : ["document.querySelector('#puppet').click()", "document.querySelector('#puppet').click()"];
 const outputFlag = process.argv.indexOf('--output');
@@ -22,6 +24,7 @@ const selectedViewports = viewportFlag >= 0 ? smokeViewports.filter((viewport) =
 const baselineFlag = process.argv.indexOf('--baseline');
 const baseline = baselineFlag >= 0 ? JSON.parse(await readFile(process.argv[baselineFlag + 1], 'utf8')) : {};
 const root = path.resolve(new URL('..', import.meta.url).pathname);
+const wasmRoot = process.env.VOICE_WASM_DIR ? path.resolve(process.env.VOICE_WASM_DIR) : null;
 await mkdir(output, { recursive: true });
 
 async function chromiumExecutable() {
@@ -69,6 +72,7 @@ const cache=new Map();Object.defineProperty(globalThis,'caches',{value:{open:asy
 
 async function makeServer() {
   let index = await readFile(path.join(root, 'docs/index.html'), 'utf8');
+  if (wasmRoot) index = index.replace('https://bddap-bot.github.io/botq/botq_dash_wasm.js', '/botq_dash_wasm.js');
   let token;
   if (mode === 'public') {
     index = index.replace('https://bddap-bot.github.io/botq/botq_dash_wasm.js', '/smoke-wasm.js').replace('./puppet.js', '/smoke-puppet.js').replace('</head>', `<script>${browserMocks}</script></head>`);
@@ -78,16 +82,21 @@ async function makeServer() {
     token = stdout.trim();
     index = index.replace('puppetRuntime = new PuppetRuntime($(\'puppet\'), $(\'display\'));', "puppetRuntime = new PuppetRuntime($('puppet'), $('display')); globalThis.__smokeRuntime = puppetRuntime;");
   }
+  if (deployed) return { url: 'https://bddap-bot.github.io/voice/', token, close() {} };
   index = index.replace('</head>', `<script>localStorage.setItem('voice.token', ${JSON.stringify(token)});</script></head>`);
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, 'http://localhost');
+    if (wasmRoot && (url.pathname === '/botq_dash_wasm.js' || url.pathname === '/botq_dash_wasm_bg.wasm')) {
+      const body = await readFile(path.join(wasmRoot, url.pathname.slice(1)));
+      return response.writeHead(200, { 'content-type': url.pathname.endsWith('.wasm') ? 'application/wasm' : 'text/javascript' }).end(body);
+    }
     if (url.pathname === '/smoke-wasm.js') return response.writeHead(200, { 'content-type': 'text/javascript' }).end(mockWasm);
     if (url.pathname === '/smoke-puppet.js') return response.writeHead(200, { 'content-type': 'text/javascript' }).end(neutralSilhouettePuppet);
     const relative = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
     try { const body = relative === 'index.html' ? index : await readFile(path.join(root, 'docs', relative)); response.writeHead(200, { 'content-type': relative.endsWith('.js') ? 'text/javascript' : relative.endsWith('.html') ? 'text/html' : 'application/octet-stream' }).end(body); } catch { response.writeHead(404).end(); }
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  return { server, url: `http://127.0.0.1:${server.address().port}/`, close: () => server.close() };
+  return { server, url: `http://127.0.0.1:${server.address().port}/`, token, close: () => server.close() };
 }
 
 async function connectCdp(port) {
@@ -108,15 +117,15 @@ async function connectCdp(port) {
 async function runViewport(viewport, executable, server) {
   const scratch = await mkdtemp(path.join(root, '.smoke-'));
   const devPort = await new Promise((resolve) => { const listener=net.createServer().listen(0,'127.0.0.1',()=>{const value=listener.address().port;listener.close(()=>resolve(value))}); });
-  const args=['--headless=new','--no-sandbox','--disable-background-timer-throttling','--disable-renderer-backgrounding','--hide-scrollbars',`--window-size=${viewport.width},${viewport.height}`,`--user-data-dir=${path.join(scratch,'profile')}`,`--remote-debugging-port=${devPort}`,'--remote-debugging-address=127.0.0.1',...(viewport.mobile?['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36']:[]),'about:blank'];
+  const args=['--headless=new','--no-sandbox','--disable-background-timer-throttling','--disable-renderer-backgrounding','--hide-scrollbars','--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream',`--window-size=${viewport.width},${viewport.height}`,`--user-data-dir=${path.join(scratch,'profile')}`,`--remote-debugging-port=${devPort}`,'--remote-debugging-address=127.0.0.1',...(viewport.mobile?['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36']:[]),'about:blank'];
   const chrome=spawn(executable,args,{stdio:['ignore','ignore','pipe']});
   let chromeError='';chrome.stderr.on('data',(chunk)=>{chromeError+=chunk});
   const cdp=await connectCdp(devPort);
   try {
-    await cdp.call('Page.enable');await cdp.call('Runtime.enable');await cdp.call('Emulation.setDeviceMetricsOverride',{width:viewport.width,height:viewport.height,deviceScaleFactor:viewport.scale,mobile:viewport.mobile});await cdp.call('Page.navigate',{url:server.url});
+    await cdp.call('Page.enable');await cdp.call('Runtime.enable');await cdp.call('Page.addScriptToEvaluateOnNewDocument',{source:`localStorage.setItem('voice.token', ${JSON.stringify(server.token)})`});await cdp.call('Emulation.setDeviceMetricsOverride',{width:viewport.width,height:viewport.height,deviceScaleFactor:viewport.scale,mobile:viewport.mobile});await cdp.call('Page.navigate',{url:server.url});
     const deadline=Date.now()+180000;
     let ready=false;
-    while(Date.now()<deadline){try{ready=await cdp.evaluate("document.querySelector('#puppet')?.getAttribute('aria-disabled')==='false'");if(ready)break}catch{}await new Promise((resolve)=>setTimeout(resolve,250));}
+    while(Date.now()<deadline){try{const page=JSON.parse(await cdp.evaluate("JSON.stringify({ready:document.querySelector('#puppet')?.getAttribute('aria-disabled')==='false',status:document.querySelector('#status')?.textContent,error:document.querySelector('#status')?.classList.contains('err')})"));ready=page.ready;if(ready)break;if(page.error)throw new Error(`page connection failed: ${page.status}`)}catch(error){if(error.message?.startsWith('page connection failed:'))throw error}await new Promise((resolve)=>setTimeout(resolve,250));}
     if(!ready){const probe=await cdp.evaluate(`JSON.stringify({status:document.querySelector('#status')?.textContent,disabled:document.querySelector('#puppet')?.getAttribute('aria-disabled'),body:document.body?.innerText?.slice(0,500)})`);throw new Error(`page did not become ready: ${probe} ${cdp.consoleErrors.join('; ')} ${chromeError.slice(-500)}`)}
     await cdp.evaluate(`const smokeLimits = ${JSON.stringify(smokeLimits)}; const transitionFrameSampler = ${transitionFrameSampler.toString()}; globalThis.__smoke = (${installSmokeMeasurements.toString()})()`);
     const stageGeometry = async () => JSON.parse(await cdp.evaluate("JSON.stringify((() => { const box = document.querySelector('#puppet').getBoundingClientRect(); return { canvas: { left: box.left + scrollX, right: box.right + scrollX, top: box.top + scrollY, bottom: box.bottom + scrollY }, viewport: { x: scrollX, y: scrollY, width: innerWidth, height: innerHeight } }; })())"));

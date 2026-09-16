@@ -4,11 +4,11 @@ import test from 'node:test';
 import { chartConfig } from '../docs/lib/render.js';
 
 test('a chart block parses CSV into a line config and scatter points, and refuses ragged rows', () => {
-  assert.deepEqual(chartConfig('step,reward,loss\n1,0.5,2\n2,0.75,1.5'), { type: 'line', data: { labels: ['1', '2'], datasets: [{ label: 'reward', data: [0.5, 0.75] }, { label: 'loss', data: [2, 1.5] }] } });
+  assert.deepEqual(chartConfig('step,reward,loss\n"January, 2026",0.5,2\nFebruary,"0.75",1.5'), { type: 'line', data: { labels: ['January, 2026', 'February'], datasets: [{ label: 'reward', data: [0.5, 0.75] }, { label: 'loss', data: [2, 1.5] }] } });
   assert.deepEqual(chartConfig('x,y\n1,2\n3,4', 'scatter'), { type: 'scatter', data: { datasets: [{ label: 'y', data: [{ x: 1, y: 2 }, { x: 3, y: 4 }] }] } });
   assert.deepEqual(chartConfig('a,b\n1,2', 'bar').type, 'bar');
   assert.deepEqual(chartConfig(' {"type":"pie","data":{"labels":["a"],"datasets":[{"data":[1]}]}} ').type, 'pie');
-  for (const bad of ['a,b\n1', 'a,b\n1,x', 'a\n1', 'a,b', '{']) assert.throws(() => chartConfig(bad), bad);
+  for (const bad of ['a,b\n1', 'a,b\n1,x', 'a\n1', 'a,b', 'a,b\n"1,2', '{']) assert.throws(() => chartConfig(bad), bad);
 });
 
 test('the initial page bundle references the renderers only through lazy imports of hashed files', async () => {

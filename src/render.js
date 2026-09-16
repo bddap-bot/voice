@@ -28,6 +28,7 @@ export function adopt(target, markup, mime) {
 
 let mermaidReady;
 export async function renderMermaid(target, source) {
+  if (/\bimg\s*:/i.test(source)) throw new Error('mermaid image sources are not supported');
   mermaidReady ??= import('mermaid').then(({ default: mermaid }) => { mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'dark', layout: 'dagre', fontFamily: 'system-ui, sans-serif' }); return mermaid; });
   const mermaid = await mermaidReady;
   const { svg } = await mermaid.render(`diagram-${Math.random().toString(36).slice(2)}`, source);
@@ -48,10 +49,26 @@ export async function renderMath(target, source, display) {
 }
 
 const NUMBER = /^-?\d+(\.\d+)?(e[-+]?\d+)?$/i;
+function csvRows(text) {
+  const rows = [[]];
+  let cell = '';
+  let quoted = false;
+  for (let index = 0; index < text.length; index++) {
+    const character = text[index];
+    if (quoted && character === '"' && text[index + 1] === '"') { cell += '"'; index++; }
+    else if (character === '"' && (!cell || quoted)) quoted = !quoted;
+    else if (!quoted && character === ',') { rows.at(-1).push(cell.trim()); cell = ''; }
+    else if (!quoted && character === '\n') { rows.at(-1).push(cell.trim()); rows.push([]); cell = ''; }
+    else if (character !== '\r') cell += character;
+  }
+  if (quoted) throw new Error('chart CSV: unclosed quote');
+  rows.at(-1).push(cell.trim());
+  return rows;
+}
 export function chartConfig(source, kind = 'line') {
   const text = source.trim();
   if (text.startsWith('{')) return JSON.parse(text);
-  const rows = text.split('\n').map((line) => line.split(',').map((cell) => cell.trim()));
+  const rows = csvRows(text);
   const [header, ...body] = rows;
   const scatter = kind === 'scatter';
   const labels = body.map((row) => row[0]);
@@ -73,7 +90,14 @@ export async function renderChart(target, source, kind) {
     return Chart;
   });
   const Chart = await chartReady;
+  if (target.rendererDisposed) return;
   const canvas = document.createElement('canvas');
   target.replaceChildren(canvas);
-  new Chart(canvas, config);
+  const chart = new Chart(canvas, config);
+  target.destroyRenderer = () => chart.destroy();
+}
+
+export function disposeRenderer(target) {
+  target.rendererDisposed = true;
+  target.destroyRenderer?.();
 }

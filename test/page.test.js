@@ -791,6 +791,22 @@ window.addEventListener('test-ready', () => {
   assert.ok(lazy.some((path) => path.includes('mermaid')) && lazy.some((path) => path.includes('katex')) && lazy.some((path) => path.includes('auto-')), lazy.join(' '));
 });
 
+test('unknown inherited fence names remain code and Mermaid image sources do not load', async () => {
+  const markdown = '```constructor\nplain text\n```\n```mermaid\nflowchart LR\nA@{ img: "https://example.invalid/tracker.png" }\n```';
+  const { stdout, stderr, requests } = await runPage(`
+window.mermaidImageRequests = [];
+const NativeImage = window.Image;
+window.Image = class extends NativeImage { set src(value) { window.mermaidImageRequests.push(value); super.src = value; } get src() { return super.src; } };
+window.addEventListener('test-ready', () => {
+  const enc = new TextEncoder();
+  deliverRelay(enc.encode('display\\n' + JSON.stringify({ markdown: ${JSON.stringify(markdown)} }) + '\\n'));
+  setTimeout(() => { document.body.dataset.renderTest = JSON.stringify({ code: document.querySelector('.display-item pre code')?.textContent, diagram: document.querySelector('.display-item .mermaid')?.textContent, images: window.mermaidImageRequests }); }, 1000);
+});`);
+  const encoded = /data-render-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { code: 'plain text', diagram: 'flowchart LR\nA@{ img: "https://example.invalid/tracker.png" }', images: [] }, stderr);
+  assert.equal(requests.some((path) => path.includes('tracker')), false);
+});
+
 test('a display without diagrams, math or charts fetches no renderer, and prose keeps its dollars and links its bare URLs', async () => {
   const { stdout, stderr, requests } = await runPage(`
 window.addEventListener('test-ready', () => {

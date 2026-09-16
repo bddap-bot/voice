@@ -111,7 +111,7 @@ import { PuppetChannel } from './puppet-client.js';
 import { ListeningReactionDriver, TranscriptActionDriver } from './puppet-drivers.js';
 import { PuppetTools, completedToolCall } from './puppet-tools.js';
 import { PuppetRuntime } from './puppet.js';
-import { renderChart, renderMath, renderMermaid } from './lib/render.js';
+import { disposeRenderer, renderChart, renderMath, renderMermaid } from './lib/render.js';
 
 const KEY = 'voice.token';
 const ALPN = 'voice-web/1';
@@ -396,14 +396,15 @@ function appendInline(parent, text) {
 const FENCES = { mermaid: (node, source) => renderMermaid(node, source), chart: (node, source, kind) => renderChart(node, source, kind) };
 function appendFence(parent, info, source) {
   const [kind, argument] = info.split(/\s+/);
-  const node = document.createElement(FENCES[kind] ? 'div' : 'pre');
+  const renderer = Object.hasOwn(FENCES, kind) ? FENCES[kind] : null;
+  const node = document.createElement(renderer ? 'div' : 'pre');
   const content = document.createElement('code');
   content.textContent = source;
   node.append(content);
   parent.append(node);
-  if (!FENCES[kind]) return;
+  if (!renderer) return;
   node.className = kind;
-  FENCES[kind](node, source, argument).catch((error) => { node.replaceChildren(content); recordPageError(error); });
+  renderer(node, source, argument).catch((error) => { node.replaceChildren(content); recordPageError(error); });
 }
 function appendMarkdown(parent, markdown) {
   const lines = markdown.split('\n');
@@ -454,7 +455,7 @@ function receiveDisplay(raw) {
   }
   if (!item.childNodes.length) return;
   $('display-items').prepend(item);
-  while ($('display-items').childNodes.length > 20) { const removed = $('display-items').lastChild; if (removed.imageUrl) URL.revokeObjectURL(removed.imageUrl); removed.remove(); }
+  while ($('display-items').childNodes.length > 20) { const removed = $('display-items').lastChild; if (removed.imageUrl) URL.revokeObjectURL(removed.imageUrl); for (const renderer of removed.querySelectorAll('.chart')) disposeRenderer(renderer); removed.remove(); }
   $('display').classList.add('fresh');
   clearTimeout(displayFreshTimer);
   displayFreshTimer = setTimeout(() => $('display').classList.remove('fresh'), DISPLAY_FRESH_MS);

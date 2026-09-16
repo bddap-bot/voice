@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
-import { assessSmoke, clipClearsStage, evidenceRegion, smokeLimits, smokeViewports, transitionFrameSampler } from './smoke-measurements.js';
+import { assessSmoke, clipClearsStage, evidenceRegion, smokeLimits, smokeStatusText, smokeViewports, transitionFrameSampler } from './smoke-measurements.js';
 
 const execute = promisify(execFile);
 
@@ -468,6 +468,23 @@ for (const viewport of layoutViewports) test(`stage UI stays outside the puppet 
     assert.ok(result.pageHeight > viewport.height, 'phone controls should continue below the first screen');
     assert.deepEqual(result.fresh.display, result.display, 'phone display must not move when fresh');
   }
+});
+
+for (const viewport of layoutViewports) test(`the status header keeps one box across every status text at ${viewport.name} size`, async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  const status = document.querySelector('#status');
+  const box = () => { const value = document.querySelector('header').getBoundingClientRect(); return [value.left, value.top, value.width, value.height]; };
+  const boxes = {};
+  for (const [name, text] of Object.entries({ empty: '', short: 'sent', long: ${JSON.stringify(smokeStatusText)}, longer: ${JSON.stringify(smokeStatusText.repeat(3))} })) { status.textContent = text; boxes[name] = box(); }
+  document.body.dataset.headerBoxTest = JSON.stringify({ boxes, viewportWidth: innerWidth });
+});
+`, { scale: viewport.scale, size: `${viewport.width},${viewport.height}`, mobile: viewport.mobile });
+  const encoded = /data-header-box-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  const result = JSON.parse(encoded ?? 'null');
+  assert.ok(result, stderr);
+  for (const [name, box] of Object.entries(result.boxes)) assert.deepEqual(box, result.boxes.empty, `${viewport.name} header box changes with ${name} status text: ${JSON.stringify(result.boxes)}`);
+  assert.ok(result.boxes.empty[2] >= 300 && result.boxes.empty[2] < result.viewportWidth, `${viewport.name} header width: ${result.boxes.empty[2]}`);
 });
 
 test('Android DPR 3 keeps the visual stage height stable and renders after sixty seconds', async () => {

@@ -4,6 +4,8 @@ export const smokeViewports = [
   { name: 'tv', width: 1920, height: 1080, scale: 1, mobile: false },
 ];
 
+export const smokeStatusText = 'conversation could not start: the microphone permission prompt was dismissed before the session offer completed, so nothing was sent';
+
 export const smokeLimits = {
   cumulativeLayoutShift: 0.1,
   heightDrift: 1,

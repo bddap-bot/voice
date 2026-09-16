@@ -5,7 +5,7 @@ import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { assessSmoke, clipClearsStage, evidenceRegion, installSmokeMeasurements, smokeLimits, smokeViewports, transitionFrameSampler } from '../test/smoke-measurements.js';
+import { assessSmoke, clipClearsStage, evidenceRegion, installSmokeMeasurements, smokeLimits, smokeStatusText, smokeViewports, transitionFrameSampler } from '../test/smoke-measurements.js';
 
 const execute = promisify(execFile);
 const mode = process.argv.includes('--private') ? 'private' : 'public';
@@ -145,6 +145,7 @@ async function runViewport(viewport, executable, server) {
     let measuringTransition=false;
     for(let second=0;second<duration;second++){
       if(second===1){measuringTransition=true;await cdp.evaluate(`__smoke.startTransition();document.querySelector('#puppet').click()`)}
+      if(second===3)await cdp.evaluate(`document.querySelector('#status').textContent=${JSON.stringify(smokeStatusText)}`);
       if(second===6){measuringTransition=false;await cdp.evaluate(`__smoke.stopTransition()`)}
       if(second===Math.max(8,duration-6)){measuringTransition=true;await cdp.evaluate(`__smoke.startTransition();document.querySelector('#puppet').click()`)}
       if(second===duration-1){measuringTransition=false;await cdp.evaluate(`__smoke.stopTransition()`)}

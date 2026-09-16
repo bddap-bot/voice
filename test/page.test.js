@@ -13,7 +13,7 @@ const execute = promisify(execFile);
 test('display-only hub messages are acknowledged without prompting Live', async () => {
   const source = await readFile(new URL('../docs/index.html', import.meta.url), 'utf8');
   const handler = source.slice(source.indexOf('async function receiveHub(result)'), source.indexOf('async function receiveHubError(result)'));
-  assert.match(handler, /if \(result\.reply === ''\) \{[\s\S]*hub-ack[\s\S]*return;/);
+  assert.match(handler, /if \(result\.reply === ''\) \{\s*await sendFrame\(`hub-ack[^;]+;\s*return;\s*\}/);
   assert.ok(handler.indexOf("result.reply === ''") < handler.indexOf('session.commentary.append'));
 });
 

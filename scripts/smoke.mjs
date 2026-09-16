@@ -165,7 +165,10 @@ async function runViewport(viewport, executable, server) {
       chrome.kill('SIGKILL');
       await exited;
     }
-    await rm(scratch,{recursive:true,force:true});
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try { await rm(scratch,{recursive:true,force:true,maxRetries:3,retryDelay:100}); break; }
+      catch (error) { if (attempt === 4) throw error; await new Promise((resolve) => setTimeout(resolve, 250)); }
+    }
   }
 }
 

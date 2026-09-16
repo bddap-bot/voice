@@ -6,9 +6,29 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
-import { assessSmoke, smokeLimits, smokeViewports } from './smoke-measurements.js';
+import { assessSmoke, smokeLimits, smokeViewports, transitionFrameSampler } from './smoke-measurements.js';
 
 const execute = promisify(execFile);
+
+test('transition frame sampling excludes work outside each transition window', () => {
+  const callbacks = new Map();
+  let nextId = 0;
+  const sampler = transitionFrameSampler([], 50, (callback) => {
+    callbacks.set(++nextId, callback);
+    return nextId;
+  }, (id) => callbacks.delete(id));
+  sampler.start();
+  const first = callbacks.get(1);
+  callbacks.delete(1);
+  first(0);
+  assert.equal(callbacks.size, 1);
+  sampler.stop();
+  assert.equal(callbacks.size, 0);
+  sampler.start();
+  assert.equal(callbacks.size, 1);
+  sampler.stop();
+  assert.equal(callbacks.size, 0);
+});
 
 const mockWasm = `
 const enc = new TextEncoder();

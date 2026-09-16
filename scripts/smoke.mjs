@@ -5,7 +5,7 @@ import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { assessSmoke, installSmokeMeasurements, smokeViewports } from '../test/smoke-measurements.js';
+import { assessSmoke, installSmokeMeasurements, smokeViewports, transitionFrameSampler } from '../test/smoke-measurements.js';
 
 const execute = promisify(execFile);
 const mode = process.argv.includes('--private') ? 'private' : 'public';
@@ -49,7 +49,7 @@ export class PuppetRuntime {
   constructor(canvas) { this.canvas=canvas; this.poseName='sit'; globalThis.__smokeRuntime=this; }
   async load(bytes, clip, valid, beforeCommit) { await beforeCommit(); this.draw(false); return valid(); }
   async loadClips() {} start() {} pause() {} clear() {} dispose() {} async attachAudio() {} async detachAudio() {}
-  draw(standing) { const c=this.canvas, x=c.getContext('2d'); c.width=Math.max(1,c.clientWidth); c.height=Math.max(1,c.clientHeight); x.clearRect(0,0,c.width,c.height); x.fillStyle='#b9bdc7'; const cx=c.width/2, head=c.height*.2; x.beginPath(); x.arc(cx,head,c.height*.055,0,Math.PI*2); x.fill(); x.lineWidth=Math.max(8,c.width*.025); x.strokeStyle='#b9bdc7'; x.beginPath(); x.moveTo(cx,head+c.height*.06); x.lineTo(cx,standing?c.height*.58:c.height*.52); x.moveTo(cx,head+c.height*.15); x.lineTo(cx-c.width*.1,c.height*.42); x.moveTo(cx,head+c.height*.15); x.lineTo(cx+c.width*.1,c.height*.42); x.moveTo(cx,standing?c.height*.58:c.height*.52); x.lineTo(cx-c.width*.07,standing?c.height*.82:c.height*.65); x.moveTo(cx,standing?c.height*.58:c.height*.52); x.lineTo(cx+c.width*.07,standing?c.height*.82:c.height*.65); x.stroke(); }
+  draw(standing) { const c=this.canvas, width=Math.max(1,c.clientWidth), height=Math.max(1,c.clientHeight); if(c.width!==width)c.width=width;if(c.height!==height)c.height=height;const x=c.getContext('2d'); x.clearRect(0,0,c.width,c.height); x.fillStyle='#b9bdc7'; const cx=c.width/2, head=c.height*.2; x.beginPath(); x.arc(cx,head,c.height*.055,0,Math.PI*2); x.fill(); x.lineWidth=Math.max(8,c.width*.025); x.strokeStyle='#b9bdc7'; x.beginPath(); x.moveTo(cx,head+c.height*.06); x.lineTo(cx,standing?c.height*.58:c.height*.52); x.moveTo(cx,head+c.height*.15); x.lineTo(cx-c.width*.1,c.height*.42); x.moveTo(cx,head+c.height*.15); x.lineTo(cx+c.width*.1,c.height*.42); x.moveTo(cx,standing?c.height*.58:c.height*.52); x.lineTo(cx-c.width*.07,standing?c.height*.82:c.height*.65); x.moveTo(cx,standing?c.height*.58:c.height*.52); x.lineTo(cx+c.width*.07,standing?c.height*.82:c.height*.65); x.stroke(); }
   pose(name) { this.poseName=name; this.draw(name!=='sit'); } gesture() { return true; } look() {} mood() {} waiting() {} listening() {}
 }`;
 
@@ -127,17 +127,17 @@ async function connectCdp(port) {
 async function runViewport(viewport, executable, server) {
   const scratch = await mkdtemp(path.join(root, '.smoke-'));
   const devPort = await new Promise((resolve) => { const listener=net.createServer().listen(0,'127.0.0.1',()=>{const value=listener.address().port;listener.close(()=>resolve(value))}); });
-  const args=['--headless=new','--no-sandbox','--use-angle=swiftshader','--enable-unsafe-swiftshader','--ignore-gpu-blocklist','--hide-scrollbars',`--window-size=${viewport.width},${viewport.height}`,`--force-device-scale-factor=${viewport.scale}`,`--user-data-dir=${path.join(scratch,'profile')}`,`--remote-debugging-port=${devPort}`,'--remote-debugging-address=127.0.0.1',...(viewport.mobile?['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36']:[]),'about:blank'];
+  const args=['--headless=new','--no-sandbox','--disable-background-timer-throttling','--disable-renderer-backgrounding','--hide-scrollbars',`--window-size=${viewport.width},${viewport.height}`,`--user-data-dir=${path.join(scratch,'profile')}`,`--remote-debugging-port=${devPort}`,'--remote-debugging-address=127.0.0.1',...(viewport.mobile?['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36']:[]),'about:blank'];
   const chrome=spawn(executable,args,{stdio:['ignore','ignore','pipe']});
   let chromeError='';chrome.stderr.on('data',(chunk)=>{chromeError+=chunk});
   const cdp=await connectCdp(devPort);
   try {
-    await cdp.call('Page.enable');await cdp.call('Runtime.enable');await cdp.call('Page.navigate',{url:server.url});
+    await cdp.call('Page.enable');await cdp.call('Runtime.enable');await cdp.call('Emulation.setDeviceMetricsOverride',{width:viewport.width,height:viewport.height,deviceScaleFactor:viewport.scale,mobile:viewport.mobile});await cdp.call('Page.navigate',{url:server.url});
     const deadline=Date.now()+180000;
     let ready=false;
     while(Date.now()<deadline){try{ready=await cdp.evaluate("document.querySelector('#puppet')?.getAttribute('aria-disabled')==='false'");if(ready)break}catch{}await new Promise((resolve)=>setTimeout(resolve,250));}
     if(!ready){const probe=await cdp.evaluate(`JSON.stringify({status:document.querySelector('#status')?.textContent,disabled:document.querySelector('#puppet')?.getAttribute('aria-disabled'),body:document.body?.innerText?.slice(0,500)})`);throw new Error(`page did not become ready: ${probe} ${cdp.consoleErrors.join('; ')} ${chromeError.slice(-500)}`)}
-    await cdp.evaluate(`const smokeLimits = ${JSON.stringify({ cumulativeLayoutShift: 0.1, heightDrift: 1, droppedFrameMs: 50 })}; globalThis.__smoke = (${installSmokeMeasurements.toString()})()`);
+    await cdp.evaluate(`const smokeLimits = ${JSON.stringify({ cumulativeLayoutShift: 0.1, heightDrift: 1, droppedFrameMs: 50 })}; const transitionFrameSampler = ${transitionFrameSampler.toString()}; globalThis.__smoke = (${installSmokeMeasurements.toString()})()`);
     const frames=[];
     let measuringTransition=false;
     for(let second=0;second<duration;second++){
@@ -149,7 +149,7 @@ async function runViewport(viewport, executable, server) {
       if(measuringTransition)await cdp.evaluate('__smoke.stopTransition()');
       const shot=await cdp.call('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});
       const file=path.join(output,`${viewport.name}-${String(second).padStart(3,'0')}.png`);await writeFile(file,Buffer.from(shot.result.data,'base64'));frames.push(file);
-      if(measuringTransition)await cdp.evaluate('__smoke.startTransition()');
+      if(measuringTransition)await cdp.evaluate('new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))).then(() => __smoke.startTransition())');
       await new Promise((resolve)=>setTimeout(resolve,1000));
     }
     const state=JSON.parse(await cdp.evaluate('JSON.stringify(__smoke.state)'));

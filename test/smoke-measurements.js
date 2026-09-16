@@ -10,6 +10,28 @@ export const smokeLimits = {
   droppedFrameMs: 50,
 };
 
+export function transitionFrameSampler(gaps, limit, schedule = requestAnimationFrame, cancel = cancelAnimationFrame) {
+  let frameId;
+  let lastFrame;
+  const frame = (now) => {
+    if (lastFrame !== undefined && now - lastFrame > limit) gaps.push(Math.round(now - lastFrame));
+    lastFrame = now;
+    frameId = schedule(frame);
+  };
+  return {
+    start() {
+      if (frameId !== undefined) cancel(frameId);
+      lastFrame = undefined;
+      frameId = schedule(frame);
+    },
+    stop() {
+      if (frameId !== undefined) cancel(frameId);
+      frameId = undefined;
+      lastFrame = undefined;
+    },
+  };
+}
+
 export function installSmokeMeasurements() {
   const selectors = ['header', '#saved', '.puppet-picker', '#puppet-credit', '#elapsed', '.share', '.display', '.ledger'];
   const state = { cls: 0, moves: [], overlaps: [], heights: [], blankFrames: [], frameGaps: [], errors: [], telemetryRejections: [] };
@@ -21,8 +43,6 @@ export function installSmokeMeasurements() {
   const intersects = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
   let previous = new Map();
   let second = 0;
-  let lastFrame;
-  let sampling = false;
   new PerformanceObserver((list) => {
     for (const entry of list.getEntries()) if (!entry.hadRecentInput) state.cls += entry.value;
   }).observe({ type: 'layout-shift', buffered: true });
@@ -34,12 +54,7 @@ export function installSmokeMeasurements() {
     if (/telemetry|acknowledgment|unrecognized request/i.test(line)) state.telemetryRejections.push(line);
     originalWarn(...values);
   };
-  const frame = (now) => {
-    if (sampling && lastFrame !== undefined && now - lastFrame > smokeLimits.droppedFrameMs) state.frameGaps.push(Math.round(now - lastFrame));
-    lastFrame = now;
-    requestAnimationFrame(frame);
-  };
-  requestAnimationFrame(frame);
+  const transitionFrames = transitionFrameSampler(state.frameGaps, smokeLimits.droppedFrameMs);
   const sample = () => {
     second++;
     const canvasRect = rect(canvas);
@@ -68,8 +83,8 @@ export function installSmokeMeasurements() {
   return {
     state,
     sample,
-    startTransition() { sampling = true; lastFrame = undefined; },
-    stopTransition() { sampling = false; },
+    startTransition() { transitionFrames.start(); },
+    stopTransition() { transitionFrames.stop(); },
   };
 }
 

@@ -124,6 +124,7 @@ export class PuppetRuntime {
   mood(...args) { this.calls.push(['mood', ...args]); }
   waiting(...args) { this.calls.push(['waiting', ...args]); }
   listening(...args) { this.calls.push(['listening', ...args]); }
+  speak(...args) { this.calls.push(['speak', ...args]); }
   start() {}
   pause() {}
   clear() {}
@@ -697,11 +698,11 @@ window.addEventListener('test-ready', () => {
   event({ type: 'session.output_transcript.delta', delta: 'Sorry, that was my fault.' });
   event({ type: 'session.input_transcript.delta', delta: 'check it' });
   event({ type: 'session.delegation.created', delegation: { id: 'wait_1' } });
-  setTimeout(() => { document.body.dataset.driverTest = JSON.stringify(testPuppet.calls.filter(([name]) => name === 'mood' || name === 'waiting')); }, 20);
+  setTimeout(() => { document.body.dataset.driverTest = JSON.stringify(testPuppet.calls.filter(([name]) => name === 'mood' || name === 'waiting' || name === 'speak').map(([name, value]) => [name, value])); }, 20);
 });
 `);
   const encoded = /data-driver-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), [['waiting', true], ['mood', 'apologetic']], stderr);
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), [['speak', 'Sorry, that was my fault.'], ['waiting', true], ['mood', 'apologetic']], stderr);
 });
 
 test('synthetic input activity drives a bounded listening envelope without a clip gesture', async () => {

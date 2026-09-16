@@ -670,7 +670,9 @@ function onLiveEvent(message, source) {
   else if (event.type === 'session.output_transcript.delta') {
     trace.spoke(event.delta ?? '', event.start_ms, event.end_ms);
     const audioNow = $('speaker').currentTime * 1000;
-    actionDriver.push(event.delta ?? '', performance.now() + Math.max(0, (event.start_ms ?? audioNow) - audioNow));
+    const playAt = performance.now() + Math.max(0, (event.start_ms ?? audioNow) - audioNow);
+    puppetRuntime?.speak(event.delta ?? '', playAt);
+    actionDriver.push(event.delta ?? '', playAt);
     conversation?.transcript?.add('model', event.delta ?? '');
   }
   else if (toolCall) {

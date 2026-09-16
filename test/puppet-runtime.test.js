@@ -1,28 +1,34 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as THREE from 'three';
-import { MOOD_TABLE, PuppetRuntime, animationClip, audioEnergy, audioVisemes, pointAtOffsets, screenTarget, shouldBeat } from '../src/puppet.js';
+import { MOOD_TABLE, PuppetRuntime, animationClip, audioEnergy, loudnessViseme, pointAtOffsets, screenTarget, shouldBeat, transcriptVisemes } from '../src/puppet.js';
 
 function waveform(amplitude) {
   return Uint8Array.from({ length: 256 }, (_, index) => 128 + Math.round(Math.sin(index / 3) * amplitude));
 }
 
-test('silence closes every viseme', () => {
-  const values = audioVisemes(waveform(0), new Uint8Array(128).fill(255), 48000, 256);
+test('silence closes every transcript-selected viseme', () => {
+  const values = loudnessViseme('aa', waveform(0));
   assert.deepEqual(values, { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 });
 });
 
-test('spectral bands choose different VRM visemes', () => {
-  const low = new Uint8Array(128);
-  low[2] = 255;
-  const high = new Uint8Array(128);
-  high[15] = 255;
-  const lowValues = audioVisemes(waveform(32), low, 48000, 256);
-  const highValues = audioVisemes(waveform(32), high, 48000, 256);
-  assert.equal(Object.entries(lowValues).sort((left, right) => right[1] - left[1])[0][0], 'ou');
-  assert.equal(Object.entries(highValues).sort((left, right) => right[1] - left[1])[0][0], 'ih');
-  assert.ok(lowValues.ou > 0.7);
-  assert.ok(highValues.ih > 0.7);
+test('transcript vowels select all five VRM visemes over the loudness envelope', () => {
+  assert.deepEqual(transcriptVisemes('A I U E O'), ['aa', null, 'ih', null, 'ou', null, 'ee', null, 'oh']);
+  for (const name of ['aa', 'ih', 'ou', 'ee', 'oh']) {
+    const values = loudnessViseme(name, waveform(32));
+    assert.ok(values[name] > 0.7);
+    assert.equal(Object.values(values).filter(Boolean).length, 1);
+  }
+});
+
+test('speech deltas queue text shapes at their audio time and preserve chunk order', () => {
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), { speech: [], speechUntil: 0 });
+  runtime.speak('ai', 100);
+  runtime.speak('u', 120);
+  assert.deepEqual(runtime.speech, [{ name: 'aa', at: 100 }, { name: 'ih', at: 172 }, { name: 'ou', at: 244 }]);
+  assert.equal(runtime.speechUntil, 316);
+  runtime.speak('e', 500);
+  assert.deepEqual(runtime.speech, [{ name: 'ee', at: 500 }]);
 });
 
 test('every mood has bounded expressions and a head or shoulder pose', () => {
@@ -56,6 +62,7 @@ test('audio beats never replace an active explicit gesture', () => {
     waveform: new Uint8Array(256),
     spectrum: new Uint8Array(128),
   };
+  runtime.speech = [{ name: 'aa', at: 0 }];
   runtime.mouthValues = { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 };
   runtime.previousEnergy = 0;
   runtime.waitingForHub = false;

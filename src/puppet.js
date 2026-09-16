@@ -130,32 +130,15 @@ function blendOffsets(from, to, amount) {
   return Object.fromEntries([...names].map((name) => [name, [0, 1, 2].map((axis) => THREE.MathUtils.lerp(from[name]?.[axis] ?? 0, to[name]?.[axis] ?? 0, amount))]));
 }
 
-function bandEnergy(spectrum, sampleRate, fftSize, low, high) {
-  const first = Math.max(1, Math.ceil(low * fftSize / sampleRate));
-  const last = Math.min(spectrum.length - 1, Math.floor(high * fftSize / sampleRate));
-  let total = 0;
-  for (let index = first; index <= last; index++) total += spectrum[index];
-  return total / Math.max(1, last - first + 1) / 255;
+const LETTER_VISEMES = { a: 'aa', i: 'ih', u: 'ou', e: 'ee', y: 'ee', o: 'oh', w: 'oh' };
+
+export function transcriptVisemes(text) {
+  return [...text.toLowerCase()].map((letter) => LETTER_VISEMES[letter] ?? null);
 }
 
-export function audioVisemes(waveform, spectrum, sampleRate, fftSize) {
-  let square = 0;
-  for (const sample of waveform) {
-    const centered = (sample - 128) / 128;
-    square += centered * centered;
-  }
-  const rms = Math.sqrt(square / waveform.length);
-  const gate = THREE.MathUtils.smoothstep(rms, 0.018, 0.16);
-  const raw = {
-    aa: bandEnergy(spectrum, sampleRate, fftSize, 800, 1300),
-    ih: bandEnergy(spectrum, sampleRate, fftSize, 2400, 4000),
-    ou: bandEnergy(spectrum, sampleRate, fftSize, 180, 420),
-    ee: bandEnergy(spectrum, sampleRate, fftSize, 1300, 2400),
-    oh: bandEnergy(spectrum, sampleRate, fftSize, 420, 800),
-  };
-  const shaped = Object.fromEntries(VISEMES.map((name) => [name, raw[name] * raw[name]]));
-  const total = Math.max(Object.values(shaped).reduce((sum, value) => sum + value, 0), 0.001);
-  return Object.fromEntries(VISEMES.map((name) => [name, gate * shaped[name] / total * 0.82]));
+export function loudnessViseme(name, waveform) {
+  const amount = THREE.MathUtils.smoothstep(audioEnergy(waveform), 0.018, 0.16) * 0.82;
+  return Object.fromEntries(VISEMES.map((viseme) => [viseme, viseme === name ? amount : 0]));
 }
 
 export function audioEnergy(waveform) {
@@ -224,6 +207,8 @@ export class PuppetRuntime {
     this.blinkStart = 0;
     this.audio = null;
     this.audioEpoch = 0;
+    this.speech = [];
+    this.speechUntil = 0;
     this.mouthValues = Object.fromEntries(VISEMES.map((name) => [name, 0]));
     this.moodValues = Object.fromEntries(MOOD_EXPRESSIONS.map((name) => [name, 0]));
     this.moodName = null;
@@ -366,7 +351,6 @@ export class PuppetRuntime {
         analyser,
         owner,
         waveform: new Uint8Array(analyser.fftSize),
-        spectrum: new Uint8Array(analyser.frequencyBinCount),
       };
       this.audio = audio;
       await context.resume();
@@ -389,6 +373,8 @@ export class PuppetRuntime {
     this.audioEpoch++;
     const audio = this.audio;
     this.audio = null;
+    this.speech = [];
+    this.speechUntil = 0;
     audio?.source.disconnect();
     for (const name of VISEMES) {
       this.mouthValues[name] = 0;
@@ -485,6 +471,13 @@ export class PuppetRuntime {
   }
   listening(motion) {
     this.listeningMotion = motion;
+  }
+  speak(text, playAt = performance.now()) {
+    if (playAt > this.speechUntil) this.speech = [];
+    const start = Math.max(playAt, this.speechUntil);
+    const cadence = 72;
+    this.speech.push(...transcriptVisemes(text).map((name, index) => ({ name, at: start + index * cadence })));
+    this.speechUntil = start + text.length * cadence;
   }
   releaseGesture(now) {
     this.gestureState = { name: this.gestureState?.name, from: copyOffsets(this.gestureOffsets), to: {}, started: now, releaseAt: Infinity, releasing: true };
@@ -598,7 +591,7 @@ export class PuppetRuntime {
         }
       }
       this.updateMood(now, manager);
-      this.updateMouth(manager);
+      this.updateMouth(manager, now);
     }
     this.updateGaze(now);
   }
@@ -624,12 +617,13 @@ export class PuppetRuntime {
     this.gazeRotation.setFromEuler(new THREE.Euler(pitch, yaw, 0));
     head.quaternion.multiply(this.gazeRotation);
   }
-  updateMouth(manager) {
+  updateMouth(manager, now = performance.now()) {
     let targets;
     if (this.audio) {
       this.audio.analyser.getByteTimeDomainData(this.audio.waveform);
-      this.audio.analyser.getByteFrequencyData(this.audio.spectrum);
-      targets = audioVisemes(this.audio.waveform, this.audio.spectrum, this.audio.context.sampleRate, this.audio.analyser.fftSize);
+      while (this.speech[1]?.at <= now) this.speech.shift();
+      const name = this.speech[0]?.at <= now && now < this.speechUntil ? this.speech[0].name : null;
+      targets = loudnessViseme(name, this.audio.waveform);
       const energy = audioEnergy(this.audio.waveform);
       if (shouldBeat(energy, this.previousEnergy, this.waitingForHub)) this.gesture('beat');
       this.previousEnergy = energy;

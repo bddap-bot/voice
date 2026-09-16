@@ -1,5 +1,5 @@
 {
-  "phone": ["transitionFrames"],
+  "phone": ["layoutShift", "transitionFrames"],
   "laptop": ["overlaps"],
   "tv": ["overlaps"]
 }

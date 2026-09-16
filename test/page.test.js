@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { access, mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
@@ -231,7 +231,7 @@ async function runPage(testSetup = '', { scale = 1, size = '390,844', budget = 3
   const index = (await readFile(new URL('../docs/index.html', import.meta.url), 'utf8'))
     .replace('https://bddap-bot.github.io/botq/botq_dash_wasm.js', '/botq_dash_wasm.js')
     .replace('./puppet.js', '/fake-puppet.js')
-    .replace('</head>', `<script>${browserSetup}${testSetup}</script></head>`);
+    .replace('</head>', () => `<script>${browserSetup}${testSetup}</script></head>`);
   const live = await readFile(new URL('../docs/live.js', import.meta.url));
   const puppetClient = await readFile(new URL('../docs/puppet-client.js', import.meta.url));
   const puppetTools = await readFile(new URL('../docs/puppet-tools.js', import.meta.url));
@@ -240,11 +240,14 @@ async function runPage(testSetup = '', { scale = 1, size = '390,844', budget = 3
   const profile = join(scratch, 'profile');
   const temporary = join(scratch, 'tmp');
   await Promise.all([mkdir(profile), mkdir(temporary)]);
-  const server = createServer((request, response) => {
+  const requests = [];
+  const server = createServer(async (request, response) => {
     const path = new URL(request.url, 'http://localhost').pathname;
-    const body = path === '/botq_dash_wasm.js' ? mockWasm : path === '/fake-puppet.js' ? fakePuppet : path === '/puppet-client.js' ? puppetClient : path === '/puppet-drivers.js' ? puppetDrivers : path === '/puppet-tools.js' ? puppetTools : path === '/live.js' ? live : index;
-    response.writeHead(200, { 'content-type': path.endsWith('.js') ? 'text/javascript' : 'text/html' });
-    response.end(body);
+    requests.push(path);
+    const served = path === '/botq_dash_wasm.js' ? mockWasm : path === '/fake-puppet.js' ? fakePuppet : path === '/puppet-client.js' ? puppetClient : path === '/puppet-drivers.js' ? puppetDrivers : path === '/puppet-tools.js' ? puppetTools : path === '/live.js' ? live : path === '/' ? index : await readFile(new URL(`../docs${path}`, import.meta.url)).catch(() => null);
+    if (served === null) { response.writeHead(404); response.end(); return; }
+    response.writeHead(200, { 'content-type': path.endsWith('.js') ? 'text/javascript' : path.endsWith('.css') ? 'text/css' : path.endsWith('.woff2') ? 'font/woff2' : 'text/html' });
+    response.end(served);
   });
   try {
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -261,7 +264,7 @@ async function runPage(testSetup = '', { scale = 1, size = '390,844', budget = 3
       '--dump-dom',
       `http://127.0.0.1:${server.address().port}/`,
     ], { timeout: 15000, killSignal: 'SIGKILL', env: { ...process.env, TMPDIR: temporary } });
-    return { stdout, stderr };
+    return { stdout, stderr, requests };
   } finally {
     if (server.listening) await new Promise((resolve) => server.close(resolve));
     await rm(scratch, { recursive: true, force: true });
@@ -737,4 +740,91 @@ window.addEventListener('test-ready', () => {
 `);
   const encoded = /data-point-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   assert.deepEqual(JSON.parse(encoded ?? 'null'), [], stderr);
+});
+
+async function libBytes(paths) {
+  const sizes = await Promise.all(paths.filter((path) => path.startsWith('/lib/')).map(async (path) => (await stat(new URL(`../docs${path}`, import.meta.url))).size));
+  return sizes.reduce((total, size) => total + size, 0);
+}
+
+test('a display renders a mermaid diagram, math and a chart, fetching each renderer only on first use', async () => {
+  const markdown = [
+    'Loss $L = \\sum_i (y_i - \\hat y_i)^2$ fell.',
+    '$$',
+    '\\frac{a}{b}',
+    '$$',
+    '```mermaid',
+    'graph LR',
+    '  A[hub] --> B[page]',
+    '```',
+    '```chart bar',
+    'step,reward',
+    '1,0.5',
+    '2,0.9',
+    '```',
+  ].join('\n');
+  const { stdout, stderr, requests } = await runPage(`
+window.addEventListener('test-ready', () => {
+  const enc = new TextEncoder();
+  const before = performance.getEntriesByType('resource').map((entry) => new URL(entry.name).pathname);
+  deliverRelay(enc.encode('display\\n' + JSON.stringify({ markdown: ${JSON.stringify(markdown)} }) + '\\n'));
+  const painted = (canvas) => { const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data; let count = 0; for (let index = 3; index < pixels.length; index += 4) if (pixels[index]) count++; return count; };
+  setTimeout(() => {
+    const item = document.querySelector('.display-item');
+    const canvas = item.querySelector('.chart canvas');
+    document.body.dataset.renderTest = JSON.stringify({
+      before: before.filter((path) => path.startsWith('/lib/')),
+      inline: item.querySelector('p .math .katex') !== null,
+      block: item.querySelector('.math-block .katex-display') !== null,
+      diagram: item.querySelectorAll('.mermaid svg g').length > 0 && item.querySelector('.mermaid code') === null,
+      chart: Boolean(canvas) && canvas.width > 0 && painted(canvas) > 100,
+      stylesheet: [...document.styleSheets].some((sheet) => /katex-[A-Z0-9]{8}\\.css$/.test(sheet.href ?? '')),
+    });
+  }, 6000);
+});
+`, { budget: 9000 });
+  const encoded = /data-render-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  const { before, ...rendered } = JSON.parse(encoded ?? 'null') ?? {};
+  assert.deepEqual(rendered, { inline: true, block: true, diagram: true, chart: true, stylesheet: true }, stderr + stdout.slice(0, 2000));
+  assert.ok(await libBytes(before) < 8192, before.join(' '));
+  const lazy = requests.filter((path) => /^\/lib\/.+-[A-Z0-9]{8}\.(js|css)$/.test(path));
+  assert.ok(lazy.some((path) => path.includes('mermaid')) && lazy.some((path) => path.includes('katex')) && lazy.some((path) => path.includes('auto-')), lazy.join(' '));
+});
+
+test('a display without diagrams, math or charts fetches no renderer, and prose keeps its dollars and links its bare URLs', async () => {
+  const { stdout, stderr, requests } = await runPage(`
+window.addEventListener('test-ready', () => {
+  const enc = new TextEncoder();
+  deliverRelay(enc.encode('display\\n' + JSON.stringify({ markdown: 'Spent $9 on the pizza and $3 more, see https://example.test/receipt?id=1). Ended.' }) + '\\n'));
+  setTimeout(() => {
+    const item = document.querySelector('.display-item');
+    document.body.dataset.linkTest = JSON.stringify({ text: item.textContent, links: [...item.querySelectorAll('a')].map((a) => [a.href, a.rel]), math: item.querySelectorAll('.math').length });
+  }, 500);
+});
+`);
+  const encoded = /data-link-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { text: 'Spent $9 on the pizza and $3 more, see https://example.test/receipt?id=1). Ended.', links: [['https://example.test/receipt?id=1', 'noopener noreferrer']], math: 0 }, stderr);
+  assert.ok(await libBytes(requests) < 8192, requests.join(' '));
+});
+
+test('adopted renderer output loses scripts, handlers, remote references and unsafe links in both SVG and HTML', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  const { adopt } = await import('/lib/render.js');
+  const svg = document.createElement('div');
+  adopt(svg, '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" onload="alert(1)"><script>alert(2)<\\/script><style>.a{fill:red}</style><a href="javascript:alert(3)"><text onclick="x()">t</text></a><a href="https://ok.test/"><text>k</text></a><use xlink:href="https://evil.test/x.svg#y"/><use href="#local"/><image href="https://evil.test/a.png"/><foreignObject><div onmouseover="y()">f</div></foreignObject></svg>', 'image/svg+xml');
+  const html = document.createElement('div');
+  adopt(html, '<span class="katex"><img src="x" onerror="alert(4)"><a href="https://ok.test/">k</a><a href="data:text/html,x">d</a><iframe srcdoc="x"></iframe></span>', 'text/html');
+  let unparseable = false;
+  try { adopt(document.createElement('div'), '<svg', 'image/svg+xml'); } catch { unparseable = true; }
+  document.body.dataset.adoptTest = JSON.stringify({ svg: svg.innerHTML, html: html.innerHTML, unparseable });
+});
+`);
+  const encoded = /data-adopt-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"').replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&amp;', '&');
+  const result = JSON.parse(encoded ?? 'null');
+  assert.ok(result, stderr);
+  assert.equal(result.unparseable, true);
+  for (const forbidden of ['script', 'onload', 'onclick', 'onmouseover', 'onerror', 'javascript:', 'evil.test', '<image', '<iframe', 'srcdoc', 'data:']) assert.equal(result.svg.includes(forbidden) || result.html.includes(forbidden), false, forbidden + ': ' + result.svg + result.html);
+  for (const kept of ['<style>.a{fill:red}</style>', 'href="https://ok.test/" target="_blank" rel="noopener noreferrer"', 'href="#local"', '<foreignObject><div>f</div></foreignObject>']) assert.ok(result.svg.includes(kept), kept + ': ' + result.svg);
+  assert.ok(result.html.includes('href="https://ok.test/" target="_blank" rel="noopener noreferrer"') && result.html.includes('<img>'), result.html);
 });

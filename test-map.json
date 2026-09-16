@@ -7,7 +7,7 @@
       "why": "the real embedding model must reach every action token from natural conversational sentences"
     },
     {
-      "paths": ["src/**", "package.json", "package-lock.json", "docs/index.html", "docs/puppet-client.js", "docs/puppet-drivers.js", "docs/puppet-tools.js", "docs/puppet.js", "docs/sw.js", "DESIGN.md"],
+      "paths": ["src/**", "scripts/build.mjs", "package.json", "package-lock.json", "docs/index.html", "docs/lib/**", "docs/puppet-client.js", "docs/puppet-drivers.js", "docs/puppet-tools.js", "docs/puppet.js", "docs/sw.js", "DESIGN.md"],
       "tests": ["npm test", "npm run build"],
       "why": "the browser puppet runtime, authenticated transfer/cache client, page wiring, and reproducible Three/VRM bundle"
     },

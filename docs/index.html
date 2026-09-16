@@ -49,6 +49,10 @@
   .display-item > :first-child { margin-top: 0; } .display-item > :last-child { margin-bottom: 0; }
   .display-item img { display: block; width: 100%; height: auto; max-height: 52dvh; object-fit: contain; margin-top: 10px; border-radius: 6px; background: #0b0b0c; }
   .display-item a { color: #8eabff; }
+  .display-item .mermaid svg { display: block; max-width: 100%; height: auto; margin: 0 auto; }
+  .display-item .chart { position: relative; height: 220px; }
+  .display-item .math-block, .display-item .mermaid { overflow-x: auto; }
+  .display-item pre { overflow-x: auto; }
   #log { display: flex; flex-direction: column; gap: 10px; max-height: calc(100% - 30px); overflow: auto; }
   .turn, .usage { padding: 11px 12px; background: #1b1b1e; border-radius: 8px; overflow-wrap: anywhere; }
   .tag { color: #8eabff; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
@@ -107,6 +111,7 @@ import { PuppetChannel } from './puppet-client.js';
 import { ListeningReactionDriver, TranscriptActionDriver } from './puppet-drivers.js';
 import { PuppetTools, completedToolCall } from './puppet-tools.js';
 import { PuppetRuntime } from './puppet.js';
+import { renderChart, renderMath, renderMermaid } from './lib/render.js';
 
 const KEY = 'voice.token';
 const ALPN = 'voice-web/1';
@@ -361,30 +366,57 @@ async function listen(mine) {
     else setStatus('connection lost', 'err');
   }
 }
+function appendUrl(parent, url) {
+  const link = document.createElement('a');
+  link.href = url; link.textContent = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+  parent.append(link);
+}
+function appendMath(parent, source, display) {
+  const node = document.createElement(display ? 'div' : 'span');
+  node.className = display ? 'math-block' : 'math';
+  node.textContent = source;
+  parent.append(node);
+  renderMath(node, source, display).catch(recordPageError);
+}
 function appendInline(parent, text) {
-  const pattern = /(\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|\*\*([^*]+)\*\*|\*([^*]+)\*|`([^`]+)`)/g;
+  const pattern = /(\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|\*\*([^*]+)\*\*|\*([^*]+)\*|`([^`]+)`|\$\$([^$]+?)\$\$|\$(\S(?:[^$\n]*?\S)?)\$(?!\d)|https?:\/\/[^\s<>]*[^\s<>.,;:!?'")\]])/g;
   let offset = 0;
   for (const match of text.matchAll(pattern)) {
     parent.append(document.createTextNode(text.slice(offset, match.index)));
+    offset = match.index + match[0].length;
+    if (match[7] !== undefined || match[8] !== undefined) { appendMath(parent, match[7] ?? match[8], match[7] !== undefined); continue; }
+    if (!match[2] && !match[4] && !match[5] && !match[6]) { appendUrl(parent, match[0]); continue; }
     const node = match[2] ? document.createElement('a') : match[4] ? document.createElement('strong') : match[5] ? document.createElement('em') : document.createElement('code');
     node.textContent = match[2] || match[4] || match[5] || match[6];
     if (match[2]) { node.href = match[3]; node.target = '_blank'; node.rel = 'noopener noreferrer'; }
     parent.append(node);
-    offset = match.index + match[0].length;
   }
   parent.append(document.createTextNode(text.slice(offset)));
+}
+const FENCES = { mermaid: (node, source) => renderMermaid(node, source), chart: (node, source, kind) => renderChart(node, source, kind) };
+function appendFence(parent, info, source) {
+  const [kind, argument] = info.split(/\s+/);
+  const node = document.createElement(FENCES[kind] ? 'div' : 'pre');
+  const content = document.createElement('code');
+  content.textContent = source;
+  node.append(content);
+  parent.append(node);
+  if (!FENCES[kind]) return;
+  node.className = kind;
+  FENCES[kind](node, source, argument).catch((error) => { node.replaceChildren(content); recordPageError(error); });
 }
 function appendMarkdown(parent, markdown) {
   const lines = markdown.split('\n');
   for (let index = 0; index < lines.length;) {
     const line = lines[index];
     if (!line.trim()) { index++; continue; }
-    if (line.startsWith('```')) {
-      const code = [];
-      for (index++; index < lines.length && !lines[index].startsWith('```'); index++) code.push(lines[index]);
+    const fence = line.startsWith('```') ? '```' : line.trim() === '$$' ? '$$' : null;
+    if (fence) {
+      const body = [];
+      for (index++; index < lines.length && lines[index].trim() !== fence && !(fence === '```' && lines[index].startsWith(fence)); index++) body.push(lines[index]);
       index += index < lines.length ? 1 : 0;
-      const pre = document.createElement('pre');
-      const content = document.createElement('code'); content.textContent = code.join('\n'); pre.append(content); parent.append(pre);
+      if (fence === '$$') appendMath(parent, body.join('\n'), true);
+      else appendFence(parent, line.slice(3).trim(), body.join('\n'));
       continue;
     }
     if (/^[-*] /.test(line)) {

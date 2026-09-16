@@ -10,6 +10,9 @@ import { assessSmoke, clipClearsStage, evidenceRegion, installSmokeMeasurements,
 const execute = promisify(execFile);
 const mode = process.argv.includes('--private') ? 'private' : 'public';
 const neutralSilhouette = mode === 'public';
+const transitions = mode === 'private'
+  ? ["__smokeRuntime.pose('stand')", "__smokeRuntime.pose('sit')"]
+  : ["document.querySelector('#puppet').click()", "document.querySelector('#puppet').click()"];
 const outputFlag = process.argv.indexOf('--output');
 const output = path.resolve(outputFlag >= 0 ? process.argv[outputFlag + 1] : 'smoke-artifacts');
 const durationFlag = process.argv.indexOf('--duration');
@@ -120,10 +123,10 @@ async function runViewport(viewport, executable, server) {
     const frames=[];
     let measuringTransition=false;
     for(let second=0;second<duration;second++){
-      if(second===1){measuringTransition=true;await cdp.evaluate(`__smoke.startTransition();document.querySelector('#puppet').click()`)}
+      if(second===1){measuringTransition=true;await cdp.evaluate(`__smoke.startTransition();${transitions[0]}`)}
       if(second===3)await cdp.evaluate(`document.querySelector('#status').textContent=${JSON.stringify(smokeStatusText)}`);
       if(second===6){measuringTransition=false;await cdp.evaluate(`__smoke.stopTransition()`)}
-      if(second===Math.max(8,duration-6)){measuringTransition=true;await cdp.evaluate(`__smoke.startTransition();document.querySelector('#puppet').click()`)}
+      if(second===Math.max(8,duration-6)){measuringTransition=true;await cdp.evaluate(`__smoke.startTransition();${transitions[1]}`)}
       if(second===duration-1){measuringTransition=false;await cdp.evaluate(`__smoke.stopTransition()`)}
       await cdp.evaluate('__smoke.sample()');
       if(measuringTransition)await cdp.evaluate('__smoke.stopTransition()');

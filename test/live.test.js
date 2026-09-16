@@ -32,6 +32,7 @@ test('page errors preserve failure and client identity', () => {
   error.stack = 'TypeError: forced failure\n at page.js:1:2';
   assert.deepEqual(errorEvent(error, 'session_1', 42, { userAgent: 'Test Browser/1.0', webgpuAdapter: true }), { kind: 'error', session_id: 'session_1', name: 'TypeError', message: 'forced failure', stack: error.stack, user_agent: 'Test Browser/1.0', webgpu_adapter: true, at: 42 });
   assert.equal(new TextEncoder().encode(errorEvent(new Error('x'.repeat(3000))).message).length, 2048);
+  assert.equal(errorEvent(error).webgpu_adapter, null);
 });
 
 test('telemetry events flush together through one authenticated send', async () => {

@@ -16,6 +16,14 @@ test('private smoke uses the same authenticated relay transport as the page', as
   assert.match(source, /voice-web', \['token'\]/);
 });
 
+test('private smoke poses the puppet directly instead of toggling a conversation on the deployed pair', async () => {
+  const source = await readFile(new URL('../scripts/smoke.mjs', import.meta.url), 'utf8');
+  assert.match(source, /const transitions = mode === 'private'\n\s+\? \["__smokeRuntime\.pose\('stand'\)", "__smokeRuntime\.pose\('sit'\)"\]\n\s+: \["document\.querySelector\('#puppet'\)\.click\(\)", "document\.querySelector\('#puppet'\)\.click\(\)"\];/);
+  assert.equal(source.match(/#puppet'\)\.click\(\)/g).length, 2);
+  assert.match(source, /__smoke\.startTransition\(\);\$\{transitions\[0\]\}/);
+  assert.match(source, /__smoke\.startTransition\(\);\$\{transitions\[1\]\}/);
+});
+
 test('transition frame sampling excludes work outside each transition window', () => {
   const callbacks = new Map();
   let nextId = 0;
@@ -588,6 +596,7 @@ window.addEventListener('test-ready', () => {
 
 test('a forced page error carries browser and WebGPU identity', async () => {
   const { stdout, stderr } = await runPage(`
+Object.defineProperty(navigator, 'gpu', { value: undefined });
 window.addEventListener('test-ready', () => {
   setTimeout(() => { throw new TypeError('identified page fault'); }, 0);
   setTimeout(() => { document.body.dataset.telemetryIdentityTest = JSON.stringify(telemetryBatches.flat().find((event) => event.message === 'identified page fault')); }, 600);
@@ -597,7 +606,22 @@ window.addEventListener('test-ready', () => {
   const event = JSON.parse(encoded ?? 'null');
   assert.ok(event, stderr);
   assert.match(event.user_agent, /Chrome/);
-  assert.equal(typeof event.webgpu_adapter, 'boolean');
+  assert.equal(event.webgpu_adapter, false);
+});
+
+test('a page error is reported while the WebGPU probe is still pending', async () => {
+  const { stdout, stderr } = await runPage(`
+Object.defineProperty(navigator, 'gpu', { value: { requestAdapter: () => new Promise(() => {}) } });
+window.addEventListener('test-ready', () => {
+  setTimeout(() => { throw new TypeError('unprobed page fault'); }, 0);
+  setTimeout(() => { document.body.dataset.telemetryPendingProbeTest = JSON.stringify(telemetryBatches.flat().find((event) => event.message === 'unprobed page fault')); }, 600);
+});
+`);
+  const encoded = /data-telemetry-pending-probe-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  const event = JSON.parse(encoded ?? 'null');
+  assert.ok(event, stderr);
+  assert.match(event.user_agent, /Chrome/);
+  assert.equal(event.webgpu_adapter, null);
 });
 
 test('session open and close arrive as two batched telemetry events', async () => {

@@ -174,10 +174,9 @@ const telemetry = new EventBatcher(sendTelemetry);
 const persistenceUploads = new AckUploader(sendBytes, { maximumBytes: 128 * 1024 * 1024, onOverflow: () => recordPageError(new Error('session upload queue is full')) });
 
 function sessionId() { return conversation?.id ?? starting?.offerId ?? null; }
-function recordPageError(error, id = sessionId()) {
-  const at = Date.now();
-  webGpuAdapter().then((adapter) => telemetry.add(errorEvent(error, id, at, { userAgent: navigator.userAgent, webgpuAdapter: Boolean(adapter) })));
-}
+let webGpuAdapterFound = null;
+webGpuAdapter().then((adapter) => { webGpuAdapterFound = Boolean(adapter); });
+function recordPageError(error, id = sessionId()) { telemetry.add(errorEvent(error, id, Date.now(), { userAgent: navigator.userAgent, webgpuAdapter: webGpuAdapterFound })); }
 function recordSession(name, detail = '', id = sessionId()) { telemetry.add({ kind: 'session', session_id: id, name, detail: String(detail).slice(0, 2048), at: Date.now() }); }
 window.addEventListener('error', (event) => recordPageError(event.error || Object.assign(new Error(event.message), { stack: `${event.filename || ''}:${event.lineno || 0}:${event.colno || 0}` })));
 window.addEventListener('unhandledrejection', (event) => recordPageError(event.reason));

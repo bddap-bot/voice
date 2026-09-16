@@ -5,10 +5,11 @@ import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { assessSmoke, installSmokeMeasurements, smokeViewports, transitionFrameSampler } from '../test/smoke-measurements.js';
+import { assessSmoke, clipClearsStage, evidenceRegion, installSmokeMeasurements, smokeLimits, smokeViewports, transitionFrameSampler } from '../test/smoke-measurements.js';
 
 const execute = promisify(execFile);
 const mode = process.argv.includes('--private') ? 'private' : 'public';
+const neutralSilhouette = mode === 'public';
 const outputFlag = process.argv.indexOf('--output');
 const output = path.resolve(outputFlag >= 0 ? process.argv[outputFlag + 1] : 'smoke-artifacts');
 const durationFlag = process.argv.indexOf('--duration');
@@ -44,7 +45,7 @@ export async function send_only(bytes) {
   else if (value.startsWith('telemetry\\n')) { const batch=JSON.parse(value.slice(value.indexOf('\\n')+1)); push(enc.encode('telemetry-ack\\n'+JSON.stringify({batch_id:batch.batch_id}))); }
 }`;
 
-const fakePuppet = `
+const neutralSilhouettePuppet = `
 export class PuppetRuntime {
   constructor(canvas) { this.canvas=canvas; this.poseName='sit'; globalThis.__smokeRuntime=this; }
   async load(bytes, clip, valid, beforeCommit) { await beforeCommit(); this.draw(false); return valid(); }
@@ -97,7 +98,7 @@ async function makeServer() {
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, 'http://localhost');
     if (url.pathname === '/smoke-wasm.js') return response.writeHead(200, { 'content-type': 'text/javascript' }).end(mockWasm);
-    if (url.pathname === '/smoke-puppet.js') return response.writeHead(200, { 'content-type': 'text/javascript' }).end(fakePuppet);
+    if (url.pathname === '/smoke-puppet.js') return response.writeHead(200, { 'content-type': 'text/javascript' }).end(neutralSilhouettePuppet);
     if (url.pathname === '/bridge-wasm.js') return response.writeHead(200, { 'content-type': 'text/javascript' }).end(`export default async function(){} export async function init(){} export async function connect(){const r=await fetch('/bridge/connect',{method:'POST'});if(!r.ok)throw new Error(await r.text())} export async function send_only(v){const r=await fetch('/bridge/send',{method:'POST',body:v});if(!r.ok)throw new Error(await r.text())} export async function recv(){for(;;){const r=await fetch('/bridge/recv');if(r.status===200)return new Uint8Array(await r.arrayBuffer());if(r.status!==204)throw new Error('bridge closed')}}`);
     if (url.pathname === '/bridge/connect') { try { await privateBridge.connect(); response.writeHead(200).end(); } catch (error) { response.writeHead(500).end(error.message); } return; }
     if (url.pathname === '/bridge/send') { const chunks=[];for await(const chunk of request)chunks.push(chunk);const body=Buffer.concat(chunks);if(privateBridge.authPending){privateBridge.authPending=false;push(Buffer.from('{"ok":true}'));response.writeHead(200).end();return}if(!privateBridge.tcp||privateBridge.closed){response.writeHead(410).end();return}privateBridge.tcp.write(frame(body));response.writeHead(200).end();return; }
@@ -137,7 +138,9 @@ async function runViewport(viewport, executable, server) {
     let ready=false;
     while(Date.now()<deadline){try{ready=await cdp.evaluate("document.querySelector('#puppet')?.getAttribute('aria-disabled')==='false'");if(ready)break}catch{}await new Promise((resolve)=>setTimeout(resolve,250));}
     if(!ready){const probe=await cdp.evaluate(`JSON.stringify({status:document.querySelector('#status')?.textContent,disabled:document.querySelector('#puppet')?.getAttribute('aria-disabled'),body:document.body?.innerText?.slice(0,500)})`);throw new Error(`page did not become ready: ${probe} ${cdp.consoleErrors.join('; ')} ${chromeError.slice(-500)}`)}
-    await cdp.evaluate(`const smokeLimits = ${JSON.stringify({ cumulativeLayoutShift: 0.1, heightDrift: 1, droppedFrameMs: 50 })}; const transitionFrameSampler = ${transitionFrameSampler.toString()}; globalThis.__smoke = (${installSmokeMeasurements.toString()})()`);
+    await cdp.evaluate(`const smokeLimits = ${JSON.stringify(smokeLimits)}; const transitionFrameSampler = ${transitionFrameSampler.toString()}; globalThis.__smoke = (${installSmokeMeasurements.toString()})()`);
+    const stageGeometry = async () => JSON.parse(await cdp.evaluate("JSON.stringify((() => { const box = document.querySelector('#puppet').getBoundingClientRect(); return { canvas: { left: box.left + scrollX, right: box.right + scrollX, top: box.top + scrollY, bottom: box.bottom + scrollY }, viewport: { x: scrollX, y: scrollY, width: innerWidth, height: innerHeight } }; })())"));
+    const region = evidenceRegion({ neutralSilhouette, ...(await stageGeometry()) });
     const frames=[];
     let measuringTransition=false;
     for(let second=0;second<duration;second++){
@@ -147,7 +150,8 @@ async function runViewport(viewport, executable, server) {
       if(second===duration-1){measuringTransition=false;await cdp.evaluate(`__smoke.stopTransition()`)}
       await cdp.evaluate('__smoke.sample()');
       if(measuringTransition)await cdp.evaluate('__smoke.stopTransition()');
-      const shot=await cdp.call('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});
+      if(!neutralSilhouette&&!clipClearsStage(region,(await stageGeometry()).canvas))throw new Error(`the stage canvas reached the evidence crop at second ${second}; this run did not load the neutral silhouette`);
+      const shot=await cdp.call('Page.captureScreenshot',{format:'png',captureBeyondViewport:false,clip:{...region,scale:viewport.scale}});
       const file=path.join(output,`${viewport.name}-${String(second).padStart(3,'0')}.png`);await writeFile(file,Buffer.from(shot.result.data,'base64'));frames.push(file);
       if(measuringTransition)await cdp.evaluate('new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))).then(() => __smoke.startTransition())');
       await new Promise((resolve)=>setTimeout(resolve,1000));

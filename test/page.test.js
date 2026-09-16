@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
-import { assessSmoke, smokeLimits, smokeViewports, transitionFrameSampler } from './smoke-measurements.js';
+import { assessSmoke, clipClearsStage, evidenceRegion, smokeLimits, smokeViewports, transitionFrameSampler } from './smoke-measurements.js';
 
 const execute = promisify(execFile);
 
@@ -386,6 +386,39 @@ test('smoke assessment rejects every measured browser failure and accepts a clea
     { heights: [{ canvas: 100, stage: 200 }, { canvas: 102, stage: 200 }] },
     { blankFrames: [1] }, { frameGaps: [51] }, { errors: ['fault'] }, { telemetryRejections: ['rejected'] },
   ]) assert.equal(assessSmoke({ ...clean, ...mutation }).pass, false, JSON.stringify(mutation));
+});
+
+test('evidence crops follow the stage canvas rect and clear it at every smoke viewport', () => {
+  for (const viewport of smokeViewports) {
+    const page = { x: 0, y: 0, width: viewport.width, height: viewport.height };
+    const canvas = { left: viewport.width * 0.32, right: viewport.width * 0.68, top: 0, bottom: viewport.height * 0.86 };
+    const region = evidenceRegion({ neutralSilhouette: false, canvas, viewport: page });
+    assert.ok(region.width > 0 && region.height > 0, viewport.name);
+    assert.equal(clipClearsStage(region, canvas), true, `${viewport.name}: ${JSON.stringify(region)}`);
+    const shifted = { ...canvas, left: canvas.left + 40, right: canvas.right + 40 };
+    const shiftedRegion = evidenceRegion({ neutralSilhouette: false, canvas: shifted, viewport: page });
+    assert.notDeepEqual(shiftedRegion, region, `${viewport.name}: crop must track the canvas, not a fixed width`);
+    assert.equal(clipClearsStage(shiftedRegion, shifted), true, viewport.name);
+  }
+});
+
+test('evidence crops stay within the visible band of a scrolled page', () => {
+  const viewport = { x: 0, y: 900, width: 390, height: 844 };
+  const canvas = { left: 19.5, right: 370.5, top: 930, bottom: 1600 };
+  const region = evidenceRegion({ neutralSilhouette: false, canvas, viewport });
+  assert.equal(clipClearsStage(region, canvas), true, JSON.stringify(region));
+  assert.ok(region.x >= viewport.x && region.x + region.width <= viewport.x + viewport.width, JSON.stringify(region));
+  assert.ok(region.y >= viewport.y && region.y + region.height <= viewport.y + viewport.height, JSON.stringify(region));
+  const whole = { x: viewport.x, y: viewport.y, width: viewport.width, height: viewport.height };
+  for (const offscreen of [{ left: 19.5, right: 370.5, top: 100, bottom: 200 }, { left: -500.5, right: -100.5, top: 930, bottom: 1600 }])
+    assert.deepEqual(evidenceRegion({ neutralSilhouette: false, canvas: offscreen, viewport }), whole, JSON.stringify(offscreen));
+});
+
+test('a run that did not load the neutral silhouette refuses a full-bleed stage', () => {
+  const viewport = { x: 0, y: 0, width: 1440, height: 900 };
+  const canvas = { left: 0, right: 1440, top: 0, bottom: 900 };
+  assert.throws(() => evidenceRegion({ neutralSilhouette: false, canvas, viewport }), /neutral silhouette/);
+  assert.deepEqual(evidenceRegion({ neutralSilhouette: true, canvas, viewport }), viewport);
 });
 
 for (const viewport of layoutViewports) test(`stage UI stays outside the puppet projection at ${viewport.name} size`, async () => {

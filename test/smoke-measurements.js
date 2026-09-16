@@ -10,6 +10,34 @@ export const smokeLimits = {
   droppedFrameMs: 50,
 };
 
+function stageSafeClip(canvas, viewport) {
+  const viewportRight = viewport.x + viewport.width;
+  const viewportBottom = viewport.y + viewport.height;
+  const clampX = (value) => Math.min(Math.max(value, viewport.x), viewportRight);
+  const clampY = (value) => Math.min(Math.max(value, viewport.y), viewportBottom);
+  const stageLeft = clampX(Math.floor(canvas.left));
+  const stageRight = clampX(Math.ceil(canvas.right));
+  const stageTop = clampY(Math.floor(canvas.top));
+  const stageBottom = clampY(Math.ceil(canvas.bottom));
+  return [
+    { x: viewport.x, y: viewport.y, width: stageLeft - viewport.x, height: viewport.height },
+    { x: stageRight, y: viewport.y, width: viewportRight - stageRight, height: viewport.height },
+    { x: viewport.x, y: viewport.y, width: viewport.width, height: stageTop - viewport.y },
+    { x: viewport.x, y: stageBottom, width: viewport.width, height: viewportBottom - stageBottom },
+  ].filter((band) => band.width > 0 && band.height > 0).sort((a, b) => b.width * b.height - a.width * a.height)[0] ?? null;
+}
+
+export function clipClearsStage(clip, canvas) {
+  return clip.x + clip.width <= canvas.left || clip.x >= canvas.right || clip.y + clip.height <= canvas.top || clip.y >= canvas.bottom;
+}
+
+export function evidenceRegion({ neutralSilhouette, canvas, viewport }) {
+  if (neutralSilhouette) return { ...viewport };
+  const clip = stageSafeClip(canvas, viewport);
+  if (!clip) throw new Error('no part of the viewport clears the stage canvas, and this run did not load the neutral silhouette');
+  return clip;
+}
+
 export function transitionFrameSampler(gaps, limit, schedule = requestAnimationFrame, cancel = cancelAnimationFrame) {
   let frameId;
   let lastFrame;

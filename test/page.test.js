@@ -603,7 +603,7 @@ for (const viewport of layoutViewports) test(`stage UI stays outside the puppet 
   }
 });
 
-for (const viewport of layoutViewports) test(`the token control stays compact and status text remains bounded at ${viewport.name} size`, async () => {
+for (const viewport of layoutViewports) test(`the token control stays within its stage column and stationary across status changes at ${viewport.name} size`, async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   const status = document.querySelector('#status');
@@ -616,9 +616,9 @@ window.addEventListener('test-ready', () => {
   const encoded = /data-header-box-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   const result = JSON.parse(encoded ?? 'null');
   assert.ok(result, stderr);
-  assert.ok(result.boxes.empty[2] < 80, `${viewport.name} empty token control is not compact: ${JSON.stringify(result.boxes.empty)}`);
+  assert.ok(result.boxes.empty[2] <= Math.min(result.viewportWidth * .32 - 44, 430), `${viewport.name} token control exceeds its stage column: ${JSON.stringify(result.boxes.empty)}`);
   for (const [name, box] of Object.entries(result.boxes)) assert.ok(box[2] < result.viewportWidth, `${viewport.name} header overflows with ${name} status text: ${JSON.stringify(box)}`);
-  assert.deepEqual(result.boxes.long, result.boxes.longer, `${viewport.name} long status must ellipsize instead of growing: ${JSON.stringify(result.boxes)}`);
+  for (const [name, box] of Object.entries(result.boxes)) assert.deepEqual(box, result.boxes.empty, `${viewport.name} token control moved with ${name} status text: ${JSON.stringify(result.boxes)}`);
 });
 
 test('Android DPR 3 keeps the visual stage height stable and renders after sixty seconds', async () => {

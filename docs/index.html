@@ -13,7 +13,7 @@
   html { background: #08090d; }
   body { margin: 0; min-height: 100vh; background: #08090d; color: #f4eee5; font: 15px/1.45 system-ui, sans-serif; overflow: hidden; }
   header, .token-panel { position: fixed; z-index: 8; left: 22px; width: min(var(--stage-column) - 2 * 22px, 430px); background: #171619e6; border: 1px solid #51493f; border-radius: 4px; box-shadow: 0 12px 34px #0008; }
-  header { top: 18px; width: auto; max-width: min(calc(var(--stage-column) - 44px), 430px); display: flex; gap: 8px; align-items: center; padding: 5px; }
+  header { top: 18px; display: flex; gap: 8px; align-items: center; padding: 5px; }
   #status { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #a5a5aa; } #status.err { color: #ff8585; } #status.ok { color: #75dc8b; }
   .hidden { display: none !important; }
   #token-toggle { flex: 0 0 auto; width: 34px; height: 34px; padding: 0; font-size: 17px; line-height: 1; }
@@ -61,7 +61,7 @@
   .line { margin-top: 5px; } .key { color: #8f8f96; }
   @media (max-width: 720px), (max-height: 540px) {
     body { height: 100svh; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-    header { position: relative; left: auto; top: auto; width: auto; align-self: flex-start; margin: 6px 8px 0; padding: 2px; font-size: 12px; box-shadow: none; }
+    header { position: relative; left: auto; top: auto; align-self: flex-start; margin: 6px 8px 0; padding: 2px; font-size: 12px; box-shadow: none; }
     .token-panel { left: 8px; top: 44px; width: calc(100% - 16px); }
     main { --stage-height: auto; height: auto; min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(0, 56fr) minmax(0, 44fr); grid-template-rows: 26px 12px 18px 36px clamp(36px, 12svh, 100px) minmax(0, 1fr) minmax(0, 1fr); gap: 5px 8px; padding: 8px; }
     .control { display: contents; }

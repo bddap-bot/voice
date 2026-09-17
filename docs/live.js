@@ -1,4 +1,3 @@
-import { stripBrackets } from './puppet-drivers.js';
 
 export function formatElapsed(seconds) {
   const whole = Math.max(0, Math.floor(seconds));
@@ -337,7 +336,7 @@ export class ConversationTrace {
   delegated(id, now = Date.now()) {
     const pending = this.pendingTurns.map((text) => text.trim()).filter(Boolean);
     const sent = boundedText(pending, 8192);
-    const context = this.entries.filter((item) => item.kind !== 'delegation' && !this.pendingEntries.has(item)).slice(-20).map((item) => ({ speaker: item.kind === 'heard' ? 'user' : 'live', text: item.kind === 'heard' ? item.text : stripBrackets(item.text) }));
+    const context = this.entries.filter((item) => item.kind !== 'delegation' && !this.pendingEntries.has(item)).slice(-20).map((item) => ({ speaker: item.kind === 'heard' ? 'user' : 'live', text: item.text }));
     while (context.length && new TextEncoder().encode(JSON.stringify(context)).length > 8192) context.shift();
     const entry = { kind: 'delegation', id, sent, context, reply: '', timing: null, duration_ms: this.heardAt ? now - this.heardAt : 0 };
     this.entries.push(entry);

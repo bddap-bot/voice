@@ -622,7 +622,8 @@ export class PuppetRuntime {
     if (this.audio) {
       this.audio.analyser.getByteTimeDomainData(this.audio.waveform);
       while (this.speech[1]?.at <= now) this.speech.shift();
-      const name = this.speech[0]?.at <= now && now < this.speechUntil ? this.speech[0].name : null;
+      const speaking = this.speech[0]?.at <= now && now < this.speechUntil;
+      const name = speaking ? this.speech[0].name ?? 'aa' : 'aa';
       targets = loudnessViseme(name, this.audio.waveform);
       const energy = audioEnergy(this.audio.waveform);
       if (shouldBeat(energy, this.previousEnergy, this.waitingForHub)) this.gesture('beat');

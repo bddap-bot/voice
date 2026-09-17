@@ -76,7 +76,7 @@ export class PuppetChannel {
     return operation;
   }
   async runTransfer(kind, id, contentHash, format, fields, epoch) {
-    const cache = await this.cacheStorage.open('voice-puppets-v1');
+    const cache = await this.cacheStorage.open('voice-puppets-v2');
     const request = kind === 'puppet' ? this.cacheRequest(contentHash || id) : new Request(new URL(`.private-motion/${encodeURIComponent(this.cacheScope())}/${encodeURIComponent(contentHash || id)}.${format}`, location.href));
     const saved = await cache.match(request);
     if (epoch !== this.epoch) throw new Error('connection replaced');
@@ -194,7 +194,7 @@ export class PuppetChannel {
     this.transfer = null;
   }
   clearCache() {
-    return this.cacheStorage.delete('voice-puppets-v1');
+    return this.cacheStorage.delete('voice-puppets-v2');
   }
   async preload(avatars, active) {
     for (const avatar of avatars) {

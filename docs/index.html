@@ -171,15 +171,15 @@ let sharing = false;
 let microphoneMuted = false;
 const shareWaiters = new Map();
 function applyTranscriptAction(action, timing) {
-  if (action.kind === 'none' && !timing.shadowed) return;
+  if (action.kind === 'none') return;
   const pose = puppetRuntime?.poseName ?? null;
-  let outcome = timing.shadowed ? 'shadowed' : action.kind === 'unknown' ? 'unknown' : puppetRuntime ? 'played' : 'refused';
+  let outcome = puppetRuntime ? 'played' : 'refused';
   if (outcome === 'played' && action.kind === 'mood') puppetRuntime.mood(action.name);
   else if (outcome === 'played' && action.kind === 'gesture') {
     const target = action.name === 'point' ? 'panel' : undefined;
     if ((target && !$('display-items').childElementCount) || !puppetRuntime.gesture(action.name, target)) outcome = 'refused';
   }
-  recordSession('transcript-action', JSON.stringify({ source: action.source, sentence: timing.sentence, token: timing.token, action: `${action.kind}:${action.name}`, score: action.score, brackets: timing.brackets, pose, outcome, playAtMinusNow: timing.playAtMinusNow }));
+  recordSession('transcript-action', JSON.stringify({ source: action.source, sentence: timing.sentence, action: `${action.kind}:${action.name}`, score: action.score, pose, outcome, playAtMinusNow: timing.playAtMinusNow }));
 }
 const actionDriver = new TranscriptActionDriver(applyTranscriptAction);
 const listeningDriver = new ListeningReactionDriver((motion) => puppetRuntime?.listening(motion));

@@ -31,6 +31,19 @@ test('speech deltas queue text shapes at their audio time and preserve chunk ord
   assert.deepEqual(runtime.speech, [{ name: 'ee', at: 500 }]);
 });
 
+test('live amplitude opens the mouth between transcript vowels', () => {
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+    audio: { analyser: { getByteTimeDomainData: (data) => data.set(waveform(32)) }, waveform: new Uint8Array(256) },
+    speech: [{ name: null, at: 100 }], speechUntil: 200,
+    mouthValues: { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 }, previousEnergy: 0,
+    waitingForHub: true,
+  });
+  const values = {};
+  runtime.updateMouth({ setValue: (name, value) => { values[name] = value; } }, 150);
+  assert.ok(values.aa > 0.4);
+  assert.deepEqual(Object.keys(values).filter((name) => name !== 'aa' && values[name]), []);
+});
+
 test('every mood has bounded expressions and a head or shoulder pose', () => {
   assert.deepEqual(Object.keys(MOOD_TABLE), ['curious', 'amused', 'puzzled', 'thinking', 'pleased', 'sad', 'angry', 'apologetic', 'alert', 'sleepy', 'relaxed', 'surprised', 'skeptical']);
   for (const mood of Object.values(MOOD_TABLE)) {

@@ -4,7 +4,8 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "smoke": "node scripts/smoke.mjs",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "smoke:ci": "npm run smoke -- --output smoke-artifacts --baseline test/smoke-baseline.json"
   },
   "dependencies": {
     "@pixiv/three-vrm": "3.5.5",

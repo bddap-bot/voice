@@ -15,7 +15,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - run: npm run smoke -- --output smoke-artifacts --baseline test/smoke-baseline.json
+      - run: npm run smoke:ci
       - uses: actions/upload-artifact@v4
         if: always()
         with:

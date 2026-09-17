@@ -130,6 +130,10 @@ async function runViewport(viewport, executable, server) {
   try {
     if (development) await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `
       globalThis.__smokeLiveChannels = [];
+      import(location.origin + "/puppet.js").then(({ PuppetRuntime }) => {
+        const load = PuppetRuntime.prototype.load;
+        PuppetRuntime.prototype.load = function(...args) { globalThis.__smokeRuntime = this; return load.apply(this, args); };
+      });
       const Peer = RTCPeerConnection;
       globalThis.RTCPeerConnection = class extends Peer {
         createDataChannel(...args) {

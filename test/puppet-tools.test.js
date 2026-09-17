@@ -1,14 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { PuppetTools, completedToolCall } from '../docs/puppet-tools.js';
-
-test('completed function items are the only executable tool events', () => {
-  const item = { type: 'function_call', call_id: 'call_1', name: 'mood', arguments: '{"name":"amused"}' };
-  assert.equal(completedToolCall({ type: 'response.output_item.done', item }), item);
-  assert.equal(completedToolCall({ type: 'response.function_call_arguments.done', ...item }), null);
-  assert.equal(completedToolCall({ type: 'response.output_item.done', item: { type: 'message' } }), null);
-});
+import { PuppetTools } from '../docs/puppet-tools.js';
 
 test('puppet tools dispatch locally and randomization never exposes an id', async () => {
   const calls = [];

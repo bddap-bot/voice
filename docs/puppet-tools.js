@@ -4,11 +4,6 @@ function indexFromSeed(seed, length) {
   return (hash >>> 0) % length;
 }
 
-export function completedToolCall(event) {
-  const item = event?.type === 'response.output_item.done' ? event.item : null;
-  return item?.type === 'function_call' && item.call_id && item.name ? item : null;
-}
-
 export class PuppetTools {
   constructor(runtime, catalog, active, select) {
     this.runtime = runtime;

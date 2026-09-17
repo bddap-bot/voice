@@ -125,7 +125,8 @@ import wbgInit, { init as wasmInit, connect, send_only, recv } from 'https://bdd
 import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, SessionClock, TranscriptBatcher, errorEvent, formatElapsed, formatStartError, isOfferFor, shareFrame } from './live.js';
 import { PuppetChannel } from './puppet-client.js';
 import { ListeningReactionDriver, TranscriptActionDriver, webGpuAdapter } from './puppet-drivers.js';
-import { PuppetTools, completedToolCall } from './puppet-tools.js';
+import { PuppetTools } from './puppet-tools.js';
+import { ResponsesTools } from './responses-tools.js';
 import { PuppetRuntime } from './puppet.js';
 import { disposeRenderer, renderChart, renderMath, renderMermaid } from './lib/render.js';
 
@@ -186,7 +187,8 @@ function applyTranscriptAction(action, timing) {
 const actionDriver = new TranscriptActionDriver(applyTranscriptAction);
 const listeningDriver = new ListeningReactionDriver((motion) => puppetRuntime?.listening(motion));
 const hubWaiting = new Set();
-const completedToolCalls = new Set();
+let responseTools;
+const hubCalls = new Map();
 const telemetryWaiters = new Map();
 const puppetChannel = new PuppetChannel(sendFrame, caches, () => token?.endpoint_id ?? '', config.transferTimeout);
 const telemetry = new EventBatcher(sendTelemetry);
@@ -519,7 +521,7 @@ function receiveShareError(result) {
 function receiveShareReply(result) {
   trace.hub(result.id, result.reply, result.timing_ms);
   if (conversation?.channel?.readyState === 'open') {
-    conversation.channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: `share_reply_${result.stamp}`, content: result.reply }));
+    conversation.channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: `share_reply_${result.stamp}`, delegation_id: null, content: result.reply }));
   }
   sendFrame(`hub-ack\n${JSON.stringify({ id: result.id, stamp: result.stamp })}`).catch(() => {});
 }
@@ -706,7 +708,15 @@ function onLiveEvent(message, source) {
   if (source !== conversation?.channel && source !== starting?.channel) return;
   let event;
   try { event = JSON.parse(message.data); } catch { return; }
-  const toolCall = completedToolCall(event);
+  if (event.type === 'error') {
+    recordPageError(new Error(event.error?.message ?? 'Live protocol error'));
+    stopConversation('Live protocol error');
+    return;
+  }
+  if (event.type === 'response.event') {
+    Promise.resolve(responseTools?.handle(event)).catch(recordPageError);
+    return;
+  }
   if (event.type === 'session.input_transcript.delta') {
     trace.heard(event.delta ?? '', Date.now(), event.start_ms);
     conversation?.transcript?.add('user', event.delta ?? '');
@@ -721,46 +731,38 @@ function onLiveEvent(message, source) {
     actionDriver.push(event.delta ?? '', playAt);
     conversation?.transcript?.add('model', event.delta ?? '');
   }
-  else if (toolCall) {
-    if (!completedToolCalls.has(toolCall.call_id)) recordSession('tool_call', toolCall.name);
-    handlePuppetTool(toolCall, source).catch((error) => setStatus(`puppet tool failed: ${error.message}`, 'err'));
-  }
-  else if (event.type === 'session.delegation.created') {
-    const id = event.delegation?.id;
-    if (!id) return setStatus('Live delegation had no id', 'err');
-    const turn = trace.delegated(id);
-    if (!turn.sent) return setStatus('Live delegated before producing a transcript', 'err');
-    hubWaiting.add(id);
-    recordSession('delegation_start', id);
-    puppetRuntime?.waiting(true);
-    syncPuppetUi();
-    sendFrame(`delegate\n${JSON.stringify({ id, text: turn.sent, context: turn.context, duration_ms: turn.duration_ms })}`).catch((error) => {
-      finishHubWait(id);
-      recordSession('delegation_end', `${id}: failed`);
-      setStatus(error.message, 'err');
-    });
-  } else if (event.type === 'session.usage.updated') usageSeconds = Number(event.usage?.seconds ?? usageSeconds);
+  else if (event.type === 'session.usage.updated') usageSeconds = Number(event.usage?.seconds ?? usageSeconds);
   else if (event.type === 'session.closed') {
     usageSeconds = Number(event.usage?.seconds ?? usageSeconds);
     if (source === conversation?.channel) stopConversation('', true);
     else cancelStarting();
   }
 }
-async function handlePuppetTool(item, source) {
-  if (completedToolCalls.has(item.call_id)) return;
-  completedToolCalls.add(item.call_id);
-  let output;
-  try {
-    if (!puppetTools) throw new Error('puppet renderer unavailable');
-    output = await puppetTools.execute(item.name, item.arguments, () => source === conversation?.channel || source === starting?.channel);
+async function executeLiveTool(item, source) {
+  recordSession('tool_call', item.name);
+  if (item.name === 'hub') {
+    const args = JSON.parse(item.arguments);
+    if (typeof args.text !== 'string' || !args.text.trim() || new TextEncoder().encode(args.text).length > 8192) throw new Error('invalid hub request');
+    const id = item.call_id;
+    const turn = trace.delegated(id);
+    turn.sent = args.text;
+    render(trace.entries);
+    hubWaiting.add(id);
+    recordSession('delegation_start', id);
+    puppetRuntime?.waiting(true);
+    syncPuppetUi();
+    return new Promise((resolve) => {
+      hubCalls.set(id, { resolve, source, stamp: null });
+      sendFrame(`delegate\n${JSON.stringify({ id, text: args.text, context: turn.context, duration_ms: turn.duration_ms })}`).catch((error) => {
+        hubCalls.delete(id);
+        finishHubWait(id);
+        trace.failed(id, error.message);
+        resolve({ ok: false, error: 'hub request failed' });
+      });
+    });
   }
-  catch (error) {
-    recordPageError(error);
-    output = { ok: false, error: 'puppet action failed' };
-  }
-  if (source !== conversation?.channel && source !== starting?.channel) return;
-  source.send(JSON.stringify({ type: 'conversation.item.create', event_id: `puppet_${crypto.randomUUID()}`, item: { type: 'function_call_output', call_id: item.call_id, output: JSON.stringify(output) } }));
-  source.send(JSON.stringify({ type: 'response.create', event_id: `puppet_continue_${crypto.randomUUID()}` }));
+  if (!puppetTools) throw new Error('puppet renderer unavailable');
+  return puppetTools.execute(item.name, item.arguments, () => source === conversation?.channel || source === starting?.channel);
 }
 function finishHubWait(id) {
   hubWaiting.delete(id);
@@ -768,23 +770,35 @@ function finishHubWait(id) {
   syncPuppetUi();
 }
 async function receiveHub(result) {
-  if (result.reply === '') {
+  if (result.reply === '' && !hubCalls.has(result.id)) {
     await sendFrame(`hub-ack\n${JSON.stringify({ id: result.id, stamp: result.stamp })}`);
     return;
   }
   finishHubWait(result.id);
   if (!conversation?.channel || !trace.hub(result.id, result.reply, result.timing_ms)) return;
   recordSession('delegation_end', `${result.id}: ok`);
-  conversation.channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: `hub_${result.stamp}`, delegation_id: result.id, content: result.reply }));
+  const pending = hubCalls.get(result.id);
+  if (pending) {
+    pending.stamp = result.stamp;
+    pending.resolve({ ok: true, reply: result.reply });
+    responseTools.flush().catch(recordPageError);
+    return;
+  }
+  conversation.channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: `hub_${result.stamp}`, delegation_id: null, content: result.reply }));
   await sendFrame(`hub-ack\n${JSON.stringify({ id: result.id, stamp: result.stamp })}`);
 }
 async function receiveHubError(result) {
   finishHubWait(result.id);
   if (!conversation?.channel || !trace.failed(result.id, result.message)) return;
   recordSession('delegation_end', `${result.id}: failed`);
-  conversation.channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: `hub_error_${Date.now()}`, delegation_id: result.id, content: `The hub could not answer this request: ${result.message}. Say that briefly without inventing.` }));
+  const pending = hubCalls.get(result.id);
+  hubCalls.delete(result.id);
+  pending?.resolve({ ok: false, error: result.message });
 }
 function paintOff() {
+  responseTools?.close();
+  for (const { resolve } of hubCalls.values()) resolve({ ok: false, error: 'session ended' });
+  hubCalls.clear();
   hubWaiting.clear();
   actionDriver.reset();
   listeningDriver.reset();
@@ -830,7 +844,7 @@ async function startConversation() {
     }
     if (attempt.cancelled) return;
     if (!trace.entries.some((entry) => entry.shared && !entry.reply)) trace = new ConversationTrace(render);
-    completedToolCalls.clear();
+
     render(trace.entries);
     usageSeconds = 0;
     setStatus();
@@ -842,6 +856,12 @@ async function startConversation() {
     setMicrophoneMuted(false);
     attempt.pc = new RTCPeerConnection();
     attempt.channel = attempt.pc.createDataChannel('oai-events');
+    responseTools = new ResponsesTools((item) => executeLiveTool(item, attempt.channel), (event) => attempt.channel.send(JSON.stringify(event)),  () => attempt.channel.readyState === 'open' && (attempt.channel === conversation?.channel || attempt.channel === starting?.channel), async (id) => {
+      const pending = hubCalls.get(id);
+      if (!pending?.stamp || pending.source !== attempt.channel) return;
+      await sendFrame(`hub-ack\n${JSON.stringify({ id, stamp: pending.stamp })}`);
+      hubCalls.delete(id);
+    });
     const started = waitData(attempt.channel, (event) => event.type === 'session.started', 30000, attempt);
     started.catch(() => {});
     attempt.channel.addEventListener('message', (event) => onLiveEvent(event, attempt.channel));
@@ -904,6 +924,7 @@ function stopConversation(reason = '', remoteClosed = false) {
 async function finishStop(reason, remoteClosed) {
   const current = conversation;
   if (!current) return;
+  responseTools?.close();
   recordSession('close', reason, current.id);
   await stopRecorders(current.audioOwner);
   current.clock?.stop();

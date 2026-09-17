@@ -13,7 +13,7 @@ const execute = promisify(execFile);
 test('display-only hub messages are acknowledged without prompting Live', async () => {
   const source = await readFile(new URL('../docs/index.html', import.meta.url), 'utf8');
   const handler = source.slice(source.indexOf('async function receiveHub(result)'), source.indexOf('async function receiveHubError(result)'));
-  assert.match(handler, /if \(result\.reply === ''\) \{\s*await sendFrame\(`hub-ack[^;]+;\s*return;\s*\}/);
+  assert.match(handler, /if \(result\.reply === '' && !hubCalls\.has\(result\.id\)\) \{\s*await sendFrame\(`hub-ack[^;]+;\s*return;\s*\}/);
   assert.ok(handler.indexOf("result.reply === ''") < handler.indexOf('session.commentary.append'));
 });
 
@@ -175,6 +175,12 @@ export class PuppetRuntime {
 `;
 
 const browserSetup = `
+globalThis.emitTool = (id, name, args) => {
+  const emit = (event) => testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.event', delegation_id: id, event }) }));
+  emit({ type: 'response.created', response: { id, output: [] } });
+  emit({ type: 'response.output_item.done', item: { type: 'function_call', call_id: id, name, arguments: JSON.stringify(args) } });
+  emit({ type: 'response.completed', response: { id, output: [] } });
+};
 window.addEventListener('error', (event) => { document.body.dataset.browserError = event.message; });
 window.addEventListener('unhandledrejection', (event) => { document.body.dataset.browserError = String(event.reason?.stack || event.reason); });
 globalThis.__voiceLoadEmbedder = async () => async (texts) => texts.map((text) => {
@@ -244,7 +250,7 @@ const appendEntries = `
 const append = (type, delta) => testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type, delta }) }));
 for (let index = 0; index < 10; index++) {
   append('session.input_transcript.delta', 'question ' + index);
-  testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.delegation.created', delegation: { id: 'scroll_' + index } }) }));
+  emitTool('scroll_' + index, 'hub', { text: 'question ' + index });
 }
 `;
 
@@ -682,7 +688,7 @@ window.addEventListener('test-ready', () => {
   const text = () => document.body.innerText;
   const listening = text();
   testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.input_transcript.delta', delta: 'Where is the report?' }) }));
-  testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.delegation.created', delegation: { id: 'state_1' } }) }));
+  emitTool('state_1', 'hub', { text: 'Where is the report?' });
   const waiting = text();
   deliverRelay(new TextEncoder().encode('hub\\n' + JSON.stringify({ id: 'state_1', reply: 'On the display.', timing_ms: 12, stamp: 'state_stamp' })));
   setTimeout(() => {
@@ -838,7 +844,7 @@ window.addEventListener('test-ready', () => {
   const emit = (event) => testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(event) }));
   emit({ type: 'session.output_transcript.delta', delta: 'I will inspect the fixture.', start_ms: 0, end_ms: 20 });
   emit({ type: 'session.input_transcript.delta', delta: 'Check the fixture stream.' });
-  emit({ type: 'session.delegation.created', delegation: { id: 'fixture' } });
+  emitTool('fixture', 'hub', { text: 'Check the fixture stream.' });
   deliverRelay(new TextEncoder().encode('hub\\n' + JSON.stringify({ id: 'fixture', reply: 'The fixture is complete.', timing_ms: 42, stamp: 'fixture' })));
   setTimeout(() => { document.body.dataset.delegationLogTest = document.querySelector('#log').innerText; }, 30);
 });
@@ -857,7 +863,7 @@ window.addEventListener('test-ready', () => {
   log.dispatchEvent(new Event('scroll'));
   const before = log.scrollTop;
   append('session.input_transcript.delta', 'newest');
-  testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.delegation.created', delegation: { id: 'scroll_newest' } }) }));
+  emitTool('scroll_newest', 'hub', { text: 'newest' });
   document.body.dataset.pauseTest = String(log.scrollTop === before);
 });
 `);
@@ -868,14 +874,14 @@ window.addEventListener('test-ready', () => {
 test('completed puppet tool calls execute locally and are acknowledged to Live', async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
-  testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'response.output_item.done', item: { type: 'function_call', call_id: 'call_1', name: 'mood', arguments: '{"name":"amused"}' } }) }));
+  emitTool('call_1', 'mood', { name: 'amused' });
   setTimeout(() => {
-    document.body.dataset.toolTest = JSON.stringify({ calls: testPuppet.calls.filter(([name]) => name === 'mood'), events: sentLiveEvents.filter(({ type }) => type === 'conversation.item.create' || type === 'response.create').map(({ type }) => type) });
+    document.body.dataset.toolTest = JSON.stringify({ calls: testPuppet.calls.filter(([name]) => name === 'mood'), events: sentLiveEvents.filter(({ type }) => type === 'response.item.create' || type === 'response.create').map(({ type }) => type) });
   }, 20);
 });
 `);
   const encoded = /data-tool-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { calls: [['mood', 'amused']], events: ['conversation.item.create', 'response.create'] }, stderr);
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { calls: [['mood', 'amused']], events: ['response.item.create', 'response.create'] }, stderr);
 });
 
 test('output transcript drives mood and delegation drives the waiting pose', async () => {
@@ -884,7 +890,7 @@ window.addEventListener('test-ready', () => {
   const event = (value) => testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(value) }));
   event({ type: 'session.output_transcript.delta', delta: 'Sorry, that was my fault.' });
   event({ type: 'session.input_transcript.delta', delta: 'check it' });
-  event({ type: 'session.delegation.created', delegation: { id: 'wait_1' } });
+  emitTool('wait_1', 'hub', { text: 'check it' });
   setTimeout(() => { document.body.dataset.driverTest = JSON.stringify(testPuppet.calls.filter(([name]) => name === 'mood' || name === 'waiting' || name === 'speak').map(([name, value]) => [name, value])); }, 20);
 });
 `);

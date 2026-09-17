@@ -561,8 +561,7 @@ async function submitShare() {
     sharing = false;
     chooseImage();
     if (conversation?.channel?.readyState === 'open') {
-      conversation.channel.send(JSON.stringify({ type: 'conversation.item.create', event_id: `share_${result.stamp}`, item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: result.summary }] } }));
-      conversation.channel.send(JSON.stringify({ type: 'response.create', event_id: `share_response_${result.stamp}` }));
+      conversation.channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: `share_${result.stamp}`, delegation_id: null, content: result.summary }));
     }
     setStatus('sent', 'ok');
   } finally {
@@ -856,7 +855,7 @@ async function startConversation() {
     setMicrophoneMuted(false);
     attempt.pc = new RTCPeerConnection();
     attempt.channel = attempt.pc.createDataChannel('oai-events');
-    responseTools = new ResponsesTools((item) => executeLiveTool(item, attempt.channel), (event) => attempt.channel.send(JSON.stringify(event)),  () => attempt.channel.readyState === 'open' && (attempt.channel === conversation?.channel || attempt.channel === starting?.channel), async (id) => {
+    responseTools = new ResponsesTools((item) => executeLiveTool(item, attempt.channel), (event) => attempt.channel.send(JSON.stringify(event)), () => attempt.channel.readyState === 'open' && (attempt.channel === conversation?.channel || attempt.channel === starting?.channel), async (id) => {
       const pending = hubCalls.get(id);
       if (!pending?.stamp || pending.source !== attempt.channel) return;
       await sendFrame(`hub-ack\n${JSON.stringify({ id, stamp: pending.stamp })}`);

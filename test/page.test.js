@@ -781,11 +781,11 @@ test('authenticated text box sends a URL verbatim and informs an open Live sessi
 window.addEventListener('test-ready', () => {
   document.querySelector('#share-text').value = 'https://example.test/a?q=one';
   document.querySelector('#share-send').click();
-  setTimeout(() => { document.body.dataset.shareTest = JSON.stringify({ sent: globalThis.sentShare?.metadata?.text, status: document.querySelector('#status').textContent, notices: sentLiveEvents.filter((event) => event.event_id?.startsWith('share_')).map((event) => event.item?.content?.[0]?.text ?? event.type) }); }, 30);
+  setTimeout(() => { document.body.dataset.shareTest = JSON.stringify({ sent: globalThis.sentShare?.metadata?.text, status: document.querySelector('#status').textContent, notices: sentLiveEvents.filter((event) => event.event_id?.startsWith('share_')).map((event) => event.content ?? event.type) }); }, 30);
 });
 `);
   const encoded = /data-share-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { sent: 'https://example.test/a?q=one', status: 'sent', notices: ['A link arrived.', 'response.create'] }, stderr);
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { sent: 'https://example.test/a?q=one', status: 'sent', notices: ['A link arrived.'] }, stderr);
 });
 
 test('a rejected submission immediately restores its controls and reports the reason', async () => {

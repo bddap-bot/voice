@@ -12,12 +12,13 @@
   * { box-sizing: border-box; }
   html { background: #08090d; }
   body { margin: 0; min-height: 100vh; background: #08090d; color: #f4eee5; font: 15px/1.45 system-ui, sans-serif; overflow: hidden; }
-  header, .entry, .saved { position: fixed; left: 22px; width: min(var(--stage-column) - 2 * 22px, 430px); display: flex; background: #171619e6; border: 1px solid #51493f; }
-  header { z-index: 8; top: 18px; gap: 12px; align-items: baseline; padding: 10px 14px; border-radius: 4px; box-shadow: 0 12px 34px #0008; }
-  h1 { font-size: 18px; margin: 0; letter-spacing: .05em; }
+  header, .token-panel { position: fixed; z-index: 8; left: 22px; width: min(var(--stage-column) - 2 * 22px, 430px); background: #171619e6; border: 1px solid #51493f; border-radius: 4px; box-shadow: 0 12px 34px #0008; }
+  header { top: 18px; width: auto; max-width: min(calc(var(--stage-column) - 44px), 430px); display: flex; gap: 8px; align-items: center; padding: 5px; }
   #status { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #a5a5aa; } #status.err { color: #ff8585; } #status.ok { color: #75dc8b; }
   .hidden { display: none !important; }
-  .entry, .saved { z-index: 9; top: 76px; padding: 12px; gap: 10px; flex-wrap: wrap; align-items: center; }
+  #token-toggle { flex: 0 0 auto; width: 34px; height: 34px; padding: 0; font-size: 17px; line-height: 1; }
+  .token-panel { z-index: 9; top: 66px; padding: 12px; }
+  .entry, .saved { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
   textarea { flex: 1 1 440px; min-height: 72px; background: #151517; color: inherit; border: 1px solid #39393f; border-radius: 8px; padding: 10px; }
   button { background: #1d1d20; color: inherit; border: 1px solid #414148; border-radius: 8px; padding: 9px 14px; font: inherit; }
   button.primary { background: #315ee8; border-color: #315ee8; }
@@ -60,11 +61,11 @@
   .line { margin-top: 5px; } .key { color: #8f8f96; }
   @media (max-width: 720px), (max-height: 540px) {
     body { height: 100svh; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-    header, .entry, .saved { position: static; width: auto; margin: 10px 10px 0; }
-    header { font-size: 12px; }
-    main { --stage-height: auto; height: auto; min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(0, 46fr) minmax(0, 54fr); grid-template-rows: 26px 12px 18px clamp(36px, 12svh, 100px) minmax(0, 1fr) minmax(0, 1fr); gap: 5px 8px; padding: 8px; }
+    header { position: relative; left: auto; top: auto; width: auto; align-self: flex-start; margin: 6px 8px 0; padding: 2px; font-size: 12px; box-shadow: none; }
+    .token-panel { left: 8px; top: 44px; width: calc(100% - 16px); }
+    main { --stage-height: auto; height: auto; min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(0, 56fr) minmax(0, 44fr); grid-template-rows: 26px 12px 18px clamp(36px, 12svh, 100px) minmax(0, 1fr) minmax(0, 1fr); gap: 5px 8px; padding: 8px; }
     .control { display: contents; }
-    #puppet { position: static; grid-column: 1; grid-row: 1 / -1; place-self: center; width: min(100%, calc((100svh - 160px) * .75)); height: auto; aspect-ratio: 3 / 4; }
+    #puppet { position: static; grid-column: 1; grid-row: 1 / -1; place-self: center; width: min(100%, calc((100svh - 58px) * .75)); height: auto; aspect-ratio: 3 / 4; }
     .control::before { display: none; }
     .puppet-picker, #puppet-credit, #elapsed, .share, .display, .ledger { position: static; width: auto; height: auto; min-width: 0; transform: none; }
     .puppet-picker { grid-column: 2; grid-row: 1; justify-content: flex-start; gap: 5px; font-size: 11px; }
@@ -91,13 +92,15 @@
 </style>
 </head>
 <body>
-<header><h1>voice</h1><span id="status">paste token to connect</span></header>
-<section id="entry" class="entry">
-  <textarea id="token" placeholder="paste your `voice-web token` here" autocomplete="off" spellcheck="false"></textarea>
-  <button id="connect" class="primary">Connect</button>
-</section>
-<section id="saved" class="saved hidden">
-  <span>🔒 device authenticated</span><button id="reenter">Use another token</button><button id="forget">Forget token</button>
+<header><span id="status">paste token to connect</span><button id="token-toggle" aria-label="token settings" aria-controls="token-panel" aria-expanded="true">⚙</button></header>
+<section id="token-panel" class="token-panel">
+  <div id="entry" class="entry">
+    <textarea id="token" placeholder="paste your `voice-web token` here" autocomplete="off" spellcheck="false"></textarea>
+    <button id="connect" class="primary">Connect</button>
+  </div>
+  <div id="saved" class="saved hidden">
+    <span>🔒 device authenticated</span><button id="reenter">Use another token</button><button id="forget">Forget token</button>
+  </div>
 </section>
 <main id="conversation" class="hidden">
   <section class="control">
@@ -213,10 +216,15 @@ async function sendTelemetry(events) {
 }
 
 function setStatus(text = '', kind = '') { $('status').textContent = text; $('status').title = text; $('status').className = kind; }
+function setTokenPanel(open) {
+  $('token-panel').classList.toggle('hidden', !open);
+  $('token-toggle').setAttribute('aria-expanded', String(open));
+}
 function savedState(saved) {
   $('entry').classList.toggle('hidden', saved);
   $('saved').classList.toggle('hidden', !saved);
   $('conversation').classList.toggle('hidden', !saved);
+  setTokenPanel(!saved);
   if (saved && !document.hidden) puppetRuntime?.start();
   else puppetRuntime?.pause();
 }
@@ -1018,12 +1026,13 @@ $('puppet-choice').addEventListener('change', () => showPuppet($('puppet-choice'
   setStatus(error.message, 'err');
 }));
 $('connect').addEventListener('click', () => start($('token').value).catch((error) => setStatus(error.message, 'err')));
+$('token-toggle').addEventListener('click', () => setTokenPanel($('token-toggle').getAttribute('aria-expanded') !== 'true'));
 $('reenter').addEventListener('click', async () => { await stopConversation(); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); savedState(false); $('token').focus(); });
 $('forget').addEventListener('click', async () => { await stopConversation(); localStorage.removeItem(KEY); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); await sendFrame('bye').catch(() => {}); generation++; connected = false; resetPuppetConnection(new Error('connection replaced'), true); await puppetChannel.clearCache().catch(() => {}); savedState(false); setStatus('token forgotten'); });
 document.addEventListener('visibilitychange', () => { if (document.hidden) puppetRuntime?.pause(); else if (!$('conversation').classList.contains('hidden')) puppetRuntime?.start(); });
 window.addEventListener('beforeunload', () => puppetRuntime?.dispose());
 const saved = localStorage.getItem(KEY);
-if (saved) start(saved).catch((error) => { localStorage.removeItem(KEY); savedState(false); setStatus(error.message, 'err'); });
+if (saved) { setTokenPanel(false); start(saved).catch((error) => { localStorage.removeItem(KEY); savedState(false); setStatus(error.message, 'err'); }); }
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 </script>
 </body>

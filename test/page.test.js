@@ -492,11 +492,36 @@ test('a run that did not load the neutral silhouette refuses a full-bleed stage'
   assert.deepEqual(evidenceRegion({ neutralSilhouette: true, canvas, viewport }), viewport);
 });
 
+test('token entry is controlled by one compact settings button and the page has no heading', async () => {
+  const index = await readFile(new URL('../docs/index.html', import.meta.url), 'utf8');
+  assert.doesNotMatch(index, /<h1\b/i);
+  assert.match(index, /<button id="token-toggle"[^>]+aria-controls="token-panel"[^>]+aria-expanded="true">⚙<\/button>/);
+  assert.match(index, /<section id="token-panel"[\s\S]*?<div id="entry"[\s\S]*?<div id="saved"/);
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  const toggle = document.querySelector('#token-toggle');
+  const panel = document.querySelector('#token-panel');
+  const states = [{ expanded: toggle.getAttribute('aria-expanded'), hidden: panel.classList.contains('hidden') }];
+  toggle.click();
+  states.push({ expanded: toggle.getAttribute('aria-expanded'), hidden: panel.classList.contains('hidden') });
+  toggle.click();
+  states.push({ expanded: toggle.getAttribute('aria-expanded'), hidden: panel.classList.contains('hidden') });
+  document.body.dataset.tokenPanelTest = JSON.stringify(states);
+});
+`);
+  const encoded = /data-token-panel-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), [
+    { expanded: 'false', hidden: true },
+    { expanded: 'true', hidden: false },
+    { expanded: 'false', hidden: true },
+  ], stderr);
+});
+
 for (const viewport of layoutViewports) test(`stage UI stays outside the puppet projection at ${viewport.name} size`, async () => {
   const index = await readFile(new URL('../docs/index.html', import.meta.url), 'utf8');
   const style = /<style>[\s\S]*?<\/style>/.exec(index)[0];
   const main = /<main[\s\S]*?<\/main>/.exec(index)[0].replace('class="hidden"', '');
-  const chrome = '<header><h1>voice</h1><span id="status"></span></header><section id="saved" class="saved"><span>device authenticated</span><button>Forget token</button></section>';
+  const chrome = '<header><span id="status"></span><button id="token-toggle">⚙</button></header><section class="token-panel hidden"><div id="saved" class="saved"><span>device authenticated</span><button>Forget token</button></div></section>';
   const { stdout, stderr } = await runPuppetPage(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">${style}</head><body>${chrome}${main}<script type="module">
   import { PuppetRuntime } from '/puppet.js';
   const stageHeight = Math.round(visualViewport?.height ?? innerHeight);
@@ -548,7 +573,7 @@ for (const viewport of layoutViewports) test(`stage UI stays outside the puppet 
   }
 });
 
-for (const viewport of layoutViewports) test(`the status header keeps one box across every status text at ${viewport.name} size`, async () => {
+for (const viewport of layoutViewports) test(`the token control stays compact and status text remains bounded at ${viewport.name} size`, async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   const status = document.querySelector('#status');
@@ -561,8 +586,9 @@ window.addEventListener('test-ready', () => {
   const encoded = /data-header-box-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   const result = JSON.parse(encoded ?? 'null');
   assert.ok(result, stderr);
-  for (const [name, box] of Object.entries(result.boxes)) assert.deepEqual(box, result.boxes.empty, `${viewport.name} header box changes with ${name} status text: ${JSON.stringify(result.boxes)}`);
-  assert.ok(result.boxes.empty[2] >= 300 && result.boxes.empty[2] < result.viewportWidth, `${viewport.name} header width: ${result.boxes.empty[2]}`);
+  assert.ok(result.boxes.empty[2] < 80, `${viewport.name} empty token control is not compact: ${JSON.stringify(result.boxes.empty)}`);
+  for (const [name, box] of Object.entries(result.boxes)) assert.ok(box[2] < result.viewportWidth, `${viewport.name} header overflows with ${name} status text: ${JSON.stringify(box)}`);
+  assert.deepEqual(result.boxes.long, result.boxes.longer, `${viewport.name} long status must ellipsize instead of growing: ${JSON.stringify(result.boxes)}`);
 });
 
 test('Android DPR 3 keeps the visual stage height stable and renders after sixty seconds', async () => {

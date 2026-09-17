@@ -7,7 +7,7 @@
       "why": "the real embedding model must reach every action token from natural conversational sentences"
     },
     {
-      "paths": ["docs/**", "src/**", "scripts/build.mjs", "scripts/smoke.mjs", "test/**", "package.json", "package-lock.json", ".github/workflows/smoke.yml", "test-map.json", "DESIGN.md"],
+      "paths": ["docs/**", "src/**", "scripts/build.mjs", "scripts/dev.mjs", "scripts/smoke.mjs", "test/**", "package.json", "package-lock.json", ".github/workflows/smoke.yml", "test-map.json", "DESIGN.md"],
       "tests": ["npm test", "npm run build", "npm run smoke:ci"],
       "why": "browser assets, build inputs, smoke measurements, baseline, and gate configuration must pass the same browser smoke as CI"
     },

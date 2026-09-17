@@ -1,5 +1,17 @@
 {
-  "phone": ["layoutShift"],
-  "laptop": ["overlaps"],
-  "tv": ["overlaps"]
+  "phone": [
+    "layoutShift",
+    "unexplainedMovement"
+  ],
+  "laptop": [
+    "overlaps",
+    "unexplainedMovement"
+  ],
+  "tv": [
+    "overlaps",
+    "unexplainedMovement"
+  ],
+  "phone-landscape": [
+    "unexplainedMovement"
+  ]
 }

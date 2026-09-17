@@ -25,3 +25,9 @@ Speech received after a hub reply is tagged “model after hub reply,” a chron
 Generate the device credential with `voice-web token` on bothouse. Run the page tests with `node --test test/*.test.js`.
 
 Run `npm run smoke -- --output smoke-artifacts` for the public browser smoke. It records a pass/fail table, JSON measurements, viewport frames, and a short GIF for phone, laptop, and TV layouts. The workflow uses the checked-in known-failure baseline so new regressions fail the job while open layout findings remain visible in its artifact. A hub with an authenticated local bridge can run the same measurements with `--private`; there the driver poses the real puppet directly, since a conversation toggle would open a Live session on the deployed pair from a browser without a microphone.
+
+For headless development on the backend host, run `npm ci` and `npm run dev`, then open `http://127.0.0.1:5173/`. The server serves the working copy of `docs/`; run `npm run build` after editing `src/`. Stop the server to discard the local deployment. Pages continues to serve main.
+
+The host's `services.voiceDevelopment.enable` Nix option enables the separate development backend pair. The local server obtains its credential from `voice-web token` using the development instance's files. Its runtime `config.js` selects that backend, its puppet catalog, and a separate browser storage key. The credential is served only on loopback, never written into the bundle, and takes precedence over saved or entered credentials. The deployed config retains the existing token flow.
+
+Run `npm run smoke -- --dev --output smoke-artifacts` to exercise real conversation start and stop against the development pair with a fake microphone in headless Chromium. `--dev` cannot be combined with `--deployed`; `--private` alone continues to pose the puppet without opening a conversation. Keep authenticated smoke artifacts outside the repository.

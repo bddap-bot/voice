@@ -129,7 +129,9 @@ import { PuppetTools, completedToolCall } from './puppet-tools.js';
 import { PuppetRuntime } from './puppet.js';
 import { disposeRenderer, renderChart, renderMath, renderMermaid } from './lib/render.js';
 
-const KEY = 'voice.token';
+import config, { configuredToken } from './config.js';
+
+const KEY = config.storageKey;
 const ALPN = 'voice-web/1';
 const DISPLAY_FRESH_MS = 45000;
 const $ = (id) => document.getElementById(id);
@@ -947,6 +949,7 @@ async function toggleConversation() {
   }
 }
 async function start(raw) {
+  raw = configuredToken(config, raw);
   setStatus('decoding token…');
   try { token = decodeToken(raw); } catch { return setStatus('that does not look like a token', 'err'); }
   if (!token.endpoint_id || !token.secret) return setStatus('that token is missing pieces', 'err');
@@ -1046,9 +1049,9 @@ $('reenter').addEventListener('click', async () => { await stopConversation(); s
 $('forget').addEventListener('click', async () => { await stopConversation(); localStorage.removeItem(KEY); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); await sendFrame('bye').catch(() => {}); generation++; connected = false; resetPuppetConnection(new Error('connection replaced'), true); await puppetChannel.clearCache().catch(() => {}); savedState(false); setStatus('token forgotten'); });
 document.addEventListener('visibilitychange', () => { if (document.hidden) puppetRuntime?.pause(); else if (!$('conversation').classList.contains('hidden')) puppetRuntime?.start(); });
 window.addEventListener('beforeunload', () => puppetRuntime?.dispose());
-const saved = localStorage.getItem(KEY);
+const saved = configuredToken(config, localStorage.getItem(KEY));
 if (saved) { setTokenPanel(false); start(saved).catch((error) => { localStorage.removeItem(KEY); savedState(false); setStatus(error.message, 'err'); }); }
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+if (config.serviceWorker && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 </script>
 </body>
 </html>

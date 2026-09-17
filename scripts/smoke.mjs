@@ -8,9 +8,14 @@ import { promisify } from 'node:util';
 import { assessSmoke, clipClearsStage, evidenceRegion, installSmokeMeasurements, smokeLimits, smokeStatusText, smokeViewports, transitionFrameSampler } from '../test/smoke-measurements.js';
 
 const execute = promisify(execFile);
-const mode = process.argv.includes('--private') ? 'private' : 'public';
-const live = process.argv.includes('--live');
+import { serveDevelopment } from './dev.mjs';
+
+const development = process.argv.includes('--dev');
+const mode = (development || process.argv.includes('--private')) ? 'private' : 'public';
+const live = development;
+if (process.argv.includes('--live') && !development) throw new Error('Live smoke requires --dev');
 const deployed = process.argv.includes('--deployed');
+if (development && deployed) throw new Error('--dev and --deployed are exclusive');
 const neutralSilhouette = mode === 'public';
 const transitions = mode === 'private' && !live
   ? ["__smokeRuntime.pose('stand')", "__smokeRuntime.pose('sit')"]
@@ -71,6 +76,7 @@ const cache=new Map();Object.defineProperty(globalThis,'caches',{value:{open:asy
 `;
 
 async function makeServer() {
+  if (development) return serveDevelopment({ port: 0, wasmRoot });
   let index = await readFile(path.join(root, 'docs/index.html'), 'utf8');
   if (wasmRoot) index = index.replace('https://bddap-bot.github.io/botq/botq_dash_wasm.js', '/botq_dash_wasm.js');
   let token;
@@ -122,6 +128,18 @@ async function runViewport(viewport, executable, server) {
   let chromeError='';chrome.stderr.on('data',(chunk)=>{chromeError+=chunk});
   const cdp=await connectCdp(devPort);
   try {
+    if (development) await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `
+      globalThis.__smokeLiveChannels = [];
+      const Peer = RTCPeerConnection;
+      globalThis.RTCPeerConnection = class extends Peer {
+        createDataChannel(...args) {
+          const channel = super.createDataChannel(...args);
+          const events = []; globalThis.__smokeLiveChannels.push(events);
+          channel.addEventListener('message', ({ data }) => { const event = JSON.parse(data); if (['session.started', 'session.closed'].includes(event.type)) events.push(event.type); });
+          return channel;
+        }
+      };
+    ` });
     await cdp.call('Page.enable');await cdp.call('Runtime.enable');await cdp.call('Page.addScriptToEvaluateOnNewDocument',{source:`localStorage.setItem('voice.token', ${JSON.stringify(server.token)})`});await cdp.call('Emulation.setDeviceMetricsOverride',{width:viewport.width,height:viewport.height,deviceScaleFactor:viewport.scale,mobile:viewport.mobile});await cdp.call('Page.navigate',{url:server.url});
     const deadline=Date.now()+180000;
     let ready=false;
@@ -132,8 +150,13 @@ async function runViewport(viewport, executable, server) {
     const region = evidenceRegion({ neutralSilhouette, ...(await stageGeometry()) });
     const frames=[];
     let measuringTransition=false;
+    let liveSessionOpened = false;
     for(let second=0;second<duration;second++){
       if(second===1){measuringTransition=true;await cdp.evaluate(`__smoke.startTransition();${transitions[0]}`);if(mode==='public')await cdp.evaluate(`new Promise(async(resolve)=>{while(!globalThis.__smokeChannel)await new Promise(done=>setTimeout(done,10));const emit=(event)=>__smokeChannel.dispatchEvent(new MessageEvent('message',{data:JSON.stringify(event)}));emit({type:'session.output_transcript.delta',delta:'I will inspect the fixture.',start_ms:0,end_ms:20});emit({type:'session.input_transcript.delta',delta:'Check the fixture stream.'});emit({type:'session.delegation.created',delegation:{id:'fixture'}});setTimeout(resolve,150)})`)}
+      if (development && second === 2) {
+        await cdp.evaluate(`new Promise((resolve, reject) => { const deadline = Date.now() + 60000; const check = () => { if (document.querySelector('#puppet').getAttribute('aria-pressed') === 'true') return resolve(); if (Date.now() > deadline || document.querySelector('#status').classList.contains('err')) return reject(new Error(document.querySelector('#status').textContent)); setTimeout(check, 100); }; check(); })`);
+        liveSessionOpened = true;
+      }
       if(second===3)await cdp.evaluate(`document.querySelector('#status').textContent=${JSON.stringify(smokeStatusText)}`);
       if(second===6){measuringTransition=false;await cdp.evaluate(`__smoke.stopTransition()`)}
       if(second===Math.max(8,duration-6)){measuringTransition=true;await cdp.evaluate(`__smoke.startTransition();${transitions[1]}`)}
@@ -145,6 +168,14 @@ async function runViewport(viewport, executable, server) {
       const file=path.join(output,`${viewport.name}-${String(second).padStart(3,'0')}.png`);await writeFile(file,Buffer.from(shot.result.data,'base64'));frames.push(file);
       if(measuringTransition)await cdp.evaluate('new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))).then(() => __smoke.startTransition())');
       await new Promise((resolve)=>setTimeout(resolve,1000));
+    }
+    if (development) {
+      if (!liveSessionOpened) throw new Error('development smoke did not open a Live session');
+      await cdp.evaluate(`new Promise((resolve, reject) => { const deadline = Date.now() + 30000; const check = () => { if (document.querySelector('#mic-mute').disabled && document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && document.querySelector('#puppet').getAttribute('aria-disabled') === 'false') return resolve(); if (Date.now() > deadline) return reject(new Error('Live session did not close')); setTimeout(check, 100); }; check(); })`);
+      const channels = await cdp.evaluate('__smokeLiveChannels');
+      if (!channels.some(events => events.includes('session.started') && events.includes('session.closed'))) throw new Error('Live did not acknowledge start and close on the same channel');
+      const sessions = { channels, endpoint: JSON.parse(Buffer.from(server.token, 'base64url')).endpoint_id, liveSessionOpened, liveSessionClosed: true };
+      await writeFile(path.join(output, `${viewport.name}-connection.json`), JSON.stringify(sessions, null, 2));
     }
     const state=JSON.parse(await cdp.evaluate('JSON.stringify(__smoke.state)'));
     state.errors.push(...cdp.consoleErrors);
@@ -169,7 +200,7 @@ async function runViewport(viewport, executable, server) {
 const server=await makeServer();
 const executable=await chromiumExecutable();
 const reports=[];
-try { for(const viewport of selectedViewports) reports.push(await runViewport(viewport,executable,server)); } finally { server.close(); }
+try { for(const viewport of selectedViewports) reports.push(await runViewport(viewport,executable,server)); } finally { await server.close(); }
 const unexpected = reports.flatMap((report) => report.failures.filter((failure) => !(baseline[report.viewport] ?? []).includes(failure)).map((failure) => `${report.viewport}:${failure}`));
 await writeFile(path.join(output,'report.json'),JSON.stringify({mode,createdAt:new Date().toISOString(),reports,unexpected},null,2));
 console.log('| viewport | result | failures | CLS | canvas drift | max frame gap |');

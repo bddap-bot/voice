@@ -171,7 +171,7 @@ async function runViewport(viewport, executable, server) {
       await cdp.evaluate('__smoke.sample()');
       if(measuringTransition)await cdp.evaluate('__smoke.stopTransition()');
       if(!neutralSilhouette&&!clipClearsStage(region,(await stageGeometry()).canvas))throw new Error(`the stage canvas reached the evidence crop at second ${second}; this run did not load the neutral silhouette`);
-      const shot=await cdp.call('Page.captureScreenshot',{format:'png',captureBeyondViewport:false,clip:{...region,scale:viewport.scale}});
+      const shot=await cdp.call('Page.captureScreenshot',{format:'png',captureBeyondViewport:false,clip:{...region,scale:1}});
       const file=path.join(output,`${viewport.name}-${String(second).padStart(3,'0')}.png`);await writeFile(file,Buffer.from(shot.result.data,'base64'));frames.push(file);
       if(measuringTransition)await cdp.evaluate('new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))).then(() => __smoke.startTransition())');
       await new Promise((resolve)=>setTimeout(resolve,1000));

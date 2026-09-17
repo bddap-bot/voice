@@ -178,7 +178,9 @@ Object.defineProperty(globalThis, 'caches', { value: { open: async () => ({
   match: async (request) => puppetCache.get(request.url)?.clone(),
   put: async (request, response) => puppetCache.set(request.url, response.clone()),
 }) } });
-const stream = { getTracks: () => [{ stop() {} }] };
+const microphoneTrack = { enabled: true, stop() {} };
+const stream = { getTracks: () => [microphoneTrack], getAudioTracks: () => [microphoneTrack] };
+globalThis.testMicrophoneTrack = microphoneTrack;
 Object.defineProperty(navigator, 'mediaDevices', { value: { getUserMedia: async () => stream } });
 class FakeMediaRecorder extends EventTarget {
   static isTypeSupported(type) { return type === 'audio/webm;codecs=opus'; }
@@ -517,6 +519,34 @@ window.addEventListener('test-ready', () => {
   ], stderr);
 });
 
+test('the live microphone can mute and resume without ending its session', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  const button = document.querySelector('#mic-mute');
+  const puppet = document.querySelector('#puppet');
+  const states = [];
+  const capture = () => states.push({ enabled: testMicrophoneTrack.enabled, muted: button.getAttribute('aria-pressed'), label: button.textContent, live: puppet.getAttribute('aria-pressed'), channel: testChannel.readyState });
+  capture();
+  button.click();
+  capture();
+  button.click();
+  capture();
+  document.body.dataset.microphoneMuteTest = JSON.stringify(states);
+});
+`);
+  const encoded = /data-microphone-mute-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), [
+    { enabled: true, muted: 'false', label: 'Mute mic', live: 'true', channel: 'open' },
+    { enabled: false, muted: 'true', label: 'Unmute mic', live: 'true', channel: 'open' },
+    { enabled: true, muted: 'false', label: 'Mute mic', live: 'true', channel: 'open' },
+  ], stderr);
+});
+
+test('the stage has no decorative wall occluders', async () => {
+  const index = await readFile(new URL('../docs/index.html', import.meta.url), 'utf8');
+  assert.doesNotMatch(index, /main::(?:before|after)/);
+});
+
 for (const viewport of layoutViewports) test(`stage UI stays outside the puppet projection at ${viewport.name} size`, async () => {
   const index = await readFile(new URL('../docs/index.html', import.meta.url), 'utf8');
   const style = /<style>[\s\S]*?<\/style>/.exec(index)[0];
@@ -536,10 +566,10 @@ for (const viewport of layoutViewports) test(`stage UI stays outside the puppet 
   const rect = (element) => { const value = element.getBoundingClientRect(); return { left: value.left, right: value.right, top: value.top, bottom: value.bottom }; };
   const puppet = rect(document.querySelector('#puppet'));
   const figure = { ...puppet, bottom: puppet.top + (1 - feet.y) / 2 * (puppet.bottom - puppet.top) };
-  const selectors = ['header', '#saved', '.puppet-picker', '#puppet-credit', '#elapsed', '.share', '.display', '.ledger'];
+  const selectors = ['header', '#saved', '.puppet-picker', '#puppet-credit', '#elapsed', '#mic-mute', '.share', '.display', '.ledger'];
   const overlaps = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
   const intrusions = () => selectors.map((selector) => ({ selector, rect: rect(document.querySelector(selector)) })).filter((item) => overlaps(item.rect, figure));
-  const regions = ['header', '#saved', '#puppet', '.puppet-picker', '#puppet-credit', '#elapsed', '.share', '.display', '.ledger'].map((selector) => ({ selector, rect: rect(document.querySelector(selector)) })).filter(({ rect }) => rect.right > rect.left && rect.bottom > rect.top);
+  const regions = ['header', '#saved', '#puppet', '.puppet-picker', '#puppet-credit', '#elapsed', '#mic-mute', '.share', '.display', '.ledger'].map((selector) => ({ selector, rect: rect(document.querySelector(selector)) })).filter(({ rect }) => rect.right > rect.left && rect.bottom > rect.top);
   const collisions = regions.flatMap((left, index) => regions.slice(index + 1).filter((right) => overlaps(left.rect, right.rect)).map((right) => ({ left, right })));
   const result = intrusions();
   const display = rect(document.querySelector('#display'));

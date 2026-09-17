@@ -23,8 +23,6 @@
   button { background: #1d1d20; color: inherit; border: 1px solid #414148; border-radius: 8px; padding: 9px 14px; font: inherit; }
   button.primary { background: #315ee8; border-color: #315ee8; }
   main { --stage-height: 100vh; --canvas-height: calc(100% - var(--desk)); position: relative; height: var(--stage-height); min-height: 540px; overflow: hidden; isolation: isolate; background: radial-gradient(ellipse at 50% 34%, #51443d 0, #29252a 40%, #111219 72%); }
-  main::before, main::after { content: ''; position: absolute; z-index: -1; top: 0; bottom: 0; width: 34%; background: linear-gradient(105deg, #0b0d13, #252027); border-right: 1px solid #70604c55; clip-path: polygon(0 0, 100% 13%, 100% 87%, 0 100%); }
-  main::after { right: 0; transform: scaleX(-1); }
   .display, .ledger { background: linear-gradient(145deg, #201e22ee, #111217ee); border: 1px solid #6d5c49; border-radius: 4px; box-shadow: 0 18px 42px #0008, inset 0 0 35px #8a684111; }
   .control::before { content: ''; position: absolute; z-index: 1; left: 30%; top: calc(var(--feet) * var(--canvas-height)); bottom: 0; width: 40%; background: linear-gradient(#665746, #252127); clip-path: polygon(12% 0, 88% 0, 100% 100%, 0 100%); }
   #puppet { position: absolute; z-index: 2; left: var(--stage-column); top: 0; width: calc(100% - 2 * var(--stage-column)); height: var(--canvas-height); touch-action: manipulation; cursor: pointer; }
@@ -32,6 +30,8 @@
   #puppet-choice { min-width: 150px; background: #1d1d20; color: inherit; border: 1px solid #414148; border-radius: 8px; padding: 8px; }
   #puppet-credit { position: absolute; z-index: 4; left: 3%; top: calc(100% - 106px); width: 20%; min-height: 21px; color: #cfc4b6; text-align: center; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #elapsed { position: absolute; z-index: 4; right: 3%; top: calc(100% - 124px); width: 20%; text-align: center; font: 24px/1 ui-monospace, monospace; color: #ded0bd; min-height: 28px; }
+  #mic-mute { position: absolute; z-index: 4; right: 23%; bottom: 110px; width: 9%; min-height: 40px; }
+  #mic-mute[aria-pressed="true"] { background: #8c2f39; border-color: #d7626e; }
   .share { position: absolute; z-index: 3; left: 20%; right: 20%; bottom: 10px; display: grid; grid-template-columns: 1fr auto auto; gap: 8px; padding: 8px; background: #171619ee; border: 1px solid #594d40; box-shadow: 0 12px 30px #0009; }
   .share textarea { min-height: 52px; max-height: 72px; min-width: 0; resize: none; }
   .share-actions { display: flex; gap: 8px; align-items: center; flex-wrap: nowrap; }
@@ -63,24 +63,25 @@
     body { height: 100svh; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
     header { position: relative; left: auto; top: auto; width: auto; align-self: flex-start; margin: 6px 8px 0; padding: 2px; font-size: 12px; box-shadow: none; }
     .token-panel { left: 8px; top: 44px; width: calc(100% - 16px); }
-    main { --stage-height: auto; height: auto; min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(0, 56fr) minmax(0, 44fr); grid-template-rows: 26px 12px 18px clamp(36px, 12svh, 100px) minmax(0, 1fr) minmax(0, 1fr); gap: 5px 8px; padding: 8px; }
+    main { --stage-height: auto; height: auto; min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(0, 56fr) minmax(0, 44fr); grid-template-rows: 26px 12px 18px 36px clamp(36px, 12svh, 100px) minmax(0, 1fr) minmax(0, 1fr); gap: 5px 8px; padding: 8px; }
     .control { display: contents; }
     #puppet { position: static; grid-column: 1; grid-row: 1 / -1; place-self: center; width: min(100%, calc((100svh - 58px) * .75)); height: auto; aspect-ratio: 3 / 4; }
     .control::before { display: none; }
-    .puppet-picker, #puppet-credit, #elapsed, .share, .display, .ledger { position: static; width: auto; height: auto; min-width: 0; transform: none; }
+    .puppet-picker, #puppet-credit, #elapsed, #mic-mute, .share, .display, .ledger { position: static; width: auto; height: auto; min-width: 0; transform: none; }
     .puppet-picker { grid-column: 2; grid-row: 1; justify-content: flex-start; gap: 5px; font-size: 11px; }
     #puppet-choice { min-width: 0; width: 100%; padding: 5px; }
     #puppet-credit { grid-column: 2; grid-row: 2; min-height: 0; height: 100%; overflow: hidden; text-align: left; font-size: 10px; line-height: 12px; }
     #elapsed { grid-column: 2; grid-row: 3; min-height: 0; overflow: hidden; text-align: left; font-size: 15px; line-height: 18px; }
-    .share { grid-column: 2; grid-row: 4; grid-template-columns: minmax(0, 1fr) auto; padding: 6px; gap: 5px; overflow: auto; }
+    #mic-mute { grid-column: 2; grid-row: 4; min-height: 36px; padding: 4px 8px; font-size: 12px; }
+    .share { grid-column: 2; grid-row: 5; grid-template-columns: minmax(0, 1fr) auto; padding: 6px; gap: 5px; overflow: auto; }
     .share textarea { min-height: 0; height: 100%; }
     #share-target { display: none; }
     #share-image { width: 64px; font-size: 10px; }
     .share-actions { gap: 4px; flex-wrap: nowrap; }
     .share-actions label, .share-actions button { padding: 4px 6px; font-size: 11px; }
     .display, .ledger { grid-column: 2; min-height: 0; height: 100%; padding: 0; overflow: auto; }
-    .display { grid-row: 5; }
-    .ledger { grid-row: 6; }
+    .display { grid-row: 6; }
+    .ledger { grid-row: 7; }
     .display h2, .ledger h2 { margin: 0; padding: 4px; font-size: 11px; }
     #display-items, #log { max-height: none; }
   }
@@ -108,6 +109,7 @@
     <label class="puppet-picker">appearance <select id="puppet-choice" aria-label="puppet appearance"></select></label>
     <div id="puppet-credit"></div>
     <div id="elapsed" aria-live="polite">00:00 / 30:00</div>
+    <button id="mic-mute" type="button" aria-pressed="false" disabled>Mute mic</button>
     <section class="share" aria-label="send text or image">
       <textarea id="share-text" maxlength="8192" placeholder="Paste text, a URL, or an image"></textarea>
       <div id="share-target">Drop or paste an image here</div>
@@ -166,6 +168,7 @@ let puppetRuntime;
 let puppetTools;
 let selectedImage;
 let sharing = false;
+let microphoneMuted = false;
 const shareWaiters = new Map();
 function applyTranscriptAction(action, timing) {
   if (action.kind === 'none' && !timing.shadowed) return;
@@ -234,6 +237,14 @@ function syncPuppetUi() {
   $('puppet').setAttribute('aria-disabled', String(disabled));
   $('puppet').setAttribute('aria-pressed', String(active));
   $('puppet').setAttribute('aria-label', active || starting ? 'stop conversation' : 'start conversation');
+}
+function setMicrophoneMuted(muted) {
+  const stream = conversation?.stream ?? starting?.stream;
+  microphoneMuted = Boolean(muted && stream);
+  for (const track of stream?.getAudioTracks?.() ?? stream?.getTracks?.() ?? []) track.enabled = !microphoneMuted;
+  $('mic-mute').disabled = !stream;
+  $('mic-mute').textContent = microphoneMuted ? 'Unmute mic' : 'Mute mic';
+  $('mic-mute').setAttribute('aria-pressed', String(microphoneMuted));
 }
 try {
   puppetRuntime = new PuppetRuntime($('puppet'), $('display'));
@@ -778,6 +789,7 @@ function paintOff() {
   puppetRuntime?.waiting(false);
   puppetRuntime?.pose('sit');
   $('elapsed').textContent = '00:00 / 30:00';
+  setMicrophoneMuted(false);
   syncPuppetUi();
 }
 function cancelOffer(attempt) {
@@ -825,6 +837,7 @@ async function startConversation() {
       for (const track of attempt.stream.getTracks()) track.stop();
       return;
     }
+    setMicrophoneMuted(false);
     attempt.pc = new RTCPeerConnection();
     attempt.channel = attempt.pc.createDataChannel('oai-events');
     const started = waitData(attempt.channel, (event) => event.type === 'session.started', 30000, attempt);
@@ -905,6 +918,7 @@ async function finishStop(reason, remoteClosed) {
   }
   current.transcript.flush();
   conversation = null;
+  setMicrophoneMuted(false);
   syncPuppetUi();
   current.channel.close();
   current.pc.close();
@@ -1027,6 +1041,7 @@ $('puppet-choice').addEventListener('change', () => showPuppet($('puppet-choice'
 }));
 $('connect').addEventListener('click', () => start($('token').value).catch((error) => setStatus(error.message, 'err')));
 $('token-toggle').addEventListener('click', () => setTokenPanel($('token-toggle').getAttribute('aria-expanded') !== 'true'));
+$('mic-mute').addEventListener('click', () => setMicrophoneMuted(!microphoneMuted));
 $('reenter').addEventListener('click', async () => { await stopConversation(); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); savedState(false); $('token').focus(); });
 $('forget').addEventListener('click', async () => { await stopConversation(); localStorage.removeItem(KEY); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); await sendFrame('bye').catch(() => {}); generation++; connected = false; resetPuppetConnection(new Error('connection replaced'), true); await puppetChannel.clearCache().catch(() => {}); savedState(false); setStatus('token forgotten'); });
 document.addEventListener('visibilitychange', () => { if (document.hidden) puppetRuntime?.pause(); else if (!$('conversation').classList.contains('hidden')) puppetRuntime?.start(); });

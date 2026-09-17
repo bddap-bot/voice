@@ -106,10 +106,13 @@ async function makeServer() {
 }
 
 async function connectCdp(port) {
-  let targets;
-  for (let index = 0; index < 300; index++) { try { targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json(); break; } catch { await new Promise((resolve) => setTimeout(resolve, 100)); } }
-  if (!targets) throw new Error('Chromium DevTools did not become ready within 30 seconds');
-  const socket = new WebSocket(targets.find((target) => target.type === 'page').webSocketDebuggerUrl);
+  let page;
+  for (let index = 0; !page && index < 300; index++) {
+    try { page = (await (await fetch(`http://127.0.0.1:${port}/json`)).json()).find((target) => target.type === 'page'); } catch {}
+    if (!page) await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (!page) throw new Error('Chromium DevTools page target did not appear within 30 seconds');
+  const socket = new WebSocket(page.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject; });
   let id = 0;
   const pending = new Map();

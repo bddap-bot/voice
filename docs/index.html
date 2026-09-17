@@ -188,7 +188,7 @@ const listeningDriver = new ListeningReactionDriver((motion) => puppetRuntime?.l
 const hubWaiting = new Set();
 const completedToolCalls = new Set();
 const telemetryWaiters = new Map();
-const puppetChannel = new PuppetChannel(sendFrame, caches, () => token?.endpoint_id ?? '');
+const puppetChannel = new PuppetChannel(sendFrame, caches, () => token?.endpoint_id ?? '', config.transferTimeout);
 const telemetry = new EventBatcher(sendTelemetry);
 const persistenceUploads = new AckUploader(sendBytes, { maximumBytes: 128 * 1024 * 1024, onOverflow: () => recordPageError(new Error('session upload queue is full')) });
 

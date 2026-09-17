@@ -12,16 +12,17 @@ test('deployed config preserves saved and manually entered credentials', () => {
   assert.equal(configuredToken(config, null), null);
   assert.equal(config.storageKey, 'voice.token');
   assert.equal(config.serviceWorker, true);
+  assert.equal(config.transferTimeout, 30000);
 });
 
 test('development config selects its backend over stale or entered credentials', () => {
-  const dev = { token: 'dev-token', storageKey: 'voice.dev.endpoint', serviceWorker: false };
+  const dev = { token: 'dev-token', storageKey: 'voice.dev.endpoint', serviceWorker: false, transferTimeout: 120000 };
   assert.equal(configuredToken(dev, 'deployed-token'), 'dev-token');
   assert.equal(configuredToken(dev, null), 'dev-token');
 });
 
 test('localhost serves the same bundle with private uncached config', async () => {
-  const dev = { token: 'dev-token', storageKey: 'voice.dev.endpoint', serviceWorker: false };
+  const dev = { token: 'dev-token', storageKey: 'voice.dev.endpoint', serviceWorker: false, transferTimeout: 120000 };
   const server = await serveDevelopment({ config: dev, port: 0 });
   try {
     const page = await fetch(server.url);
@@ -41,6 +42,7 @@ test('localhost serves the same bundle with private uncached config', async () =
 test('page uses config for startup, manual connect, storage and service worker', async () => {
   const page = await readFile(new URL('../docs/index.html', import.meta.url), 'utf8');
   assert.match(page, /const KEY = config.storageKey/);
+  assert.match(page, /new PuppetChannel\(sendFrame, caches, .*config.transferTimeout\)/);
   assert.match(page, /async function start\(raw\) \{\s+raw = configuredToken\(config, raw\)/);
   assert.match(page, /const saved = configuredToken\(config, localStorage.getItem\(KEY\)\)/);
   assert.match(page, /if \(config.serviceWorker && 'serviceWorker' in navigator\)/);
@@ -64,7 +66,7 @@ test('development credential command uses only the isolated instance files', asy
   try {
     await writeFile(path.join(scratch, 'voice-web'), '#!' + process.execPath + '\n' + 'if (JSON.stringify(process.argv.slice(2)) !== ' + JSON.stringify(JSON.stringify(args)) + ') process.exit(2); console.log(' + JSON.stringify(token) + ');', { mode: 0o700 });
     process.env.PATH = scratch + path.delimiter + previousPath;
-    assert.deepEqual(await developmentConfig(), { token, storageKey: 'voice.dev.dev-endpoint', serviceWorker: false });
+    assert.deepEqual(await developmentConfig(), { token, storageKey: 'voice.dev.dev-endpoint', serviceWorker: false, transferTimeout: 120000 });
     await writeFile(path.join(scratch, 'voice-web'), '#!' + process.execPath + '\nprocess.exit(1);');
     await assert.rejects(developmentConfig());
   } finally { process.env.PATH = previousPath; await rm(scratch, { recursive: true, force: true }); }

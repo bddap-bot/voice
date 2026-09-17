@@ -15,7 +15,7 @@ export async function developmentConfig() {
   const token = stdout.trim();
   const { endpoint_id, relay_url, secret } = JSON.parse(Buffer.from(token, 'base64url'));
   if (!endpoint_id || !relay_url || !secret) throw new Error('development backend is not ready');
-  return { token, storageKey: `voice.dev.${endpoint_id}`, serviceWorker: false };
+  return { token, storageKey: `voice.dev.${endpoint_id}`, serviceWorker: false, transferTimeout: 120000 };
 }
 
 export async function serveDevelopment({ config, port = 5173, wasmRoot = process.env.VOICE_WASM_DIR } = {}) {

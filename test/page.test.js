@@ -40,22 +40,32 @@ test('private smoke poses the puppet directly instead of toggling a conversation
   assert.match(source, /__smoke\.startTransition\(\);\$\{transitions\[1\]\}/);
 });
 
-test('transition frame sampling excludes work outside each transition window', () => {
+test('transition sampling rejects real stalls and excludes paused evidence work', () => {
   const callbacks = new Map();
+  const gaps = [];
   let nextId = 0;
-  const sampler = transitionFrameSampler([], 50, (callback) => {
+  const sampler = transitionFrameSampler(gaps, 50, (callback) => {
     callbacks.set(++nextId, callback);
     return nextId;
   }, (id) => callbacks.delete(id));
+  const tick = (time) => {
+    const [id, callback] = callbacks.entries().next().value;
+    callbacks.delete(id);
+    callback(time);
+  };
   sampler.start();
-  const first = callbacks.get(1);
-  callbacks.delete(1);
-  first(0);
-  assert.equal(callbacks.size, 1);
+  tick(0);
+  tick(16);
+  tick(83);
+  assert.deepEqual(gaps, [67]);
   sampler.stop();
   assert.equal(callbacks.size, 0);
   sampler.start();
-  assert.equal(callbacks.size, 1);
+  tick(1000);
+  tick(1016);
+  assert.deepEqual(gaps, [67]);
+  tick(1116);
+  assert.deepEqual(gaps, [67, 100]);
   sampler.stop();
   assert.equal(callbacks.size, 0);
 });
@@ -591,6 +601,7 @@ for (const viewport of layoutViewports) test(`stage UI stays outside the puppet 
   const puppetWidth = result.puppet.right - result.puppet.left;
   assert.ok(result.figure.bottom > result.puppet.top + 0.8 * (result.puppet.bottom - result.puppet.top), `${viewport.name} projected feet must sit near the canvas bottom: ${JSON.stringify(result.figure)}`);
   if (!viewport.mobile) {
+    for (const wing of [result.display, result.ledger]) assert.ok(wing.top >= 200 && wing.bottom <= result.stageHeight - 160, `${viewport.name} panel escapes its shared layout bounds: ${JSON.stringify(wing)}`);
     assert.ok(result.pageHeight <= viewport.height, `${viewport.name} must remain one screen: ${result.pageHeight}`);
     assert.equal(result.puppet.top, 0, `${viewport.name} puppet must start at the top of the stage`);
     assert.equal(result.puppet.bottom, result.stageHeight - 90, `${viewport.name} puppet must end above the desk: ${result.puppet.bottom} of ${result.stageHeight}`);

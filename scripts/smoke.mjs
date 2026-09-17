@@ -168,8 +168,7 @@ async function runViewport(viewport, executable, server) {
       if(second===6){measuringTransition=false;await cdp.evaluate(`__smoke.stopTransition()`)}
       if(second===Math.max(8,duration-6)){measuringTransition=true;await cdp.evaluate(`__smoke.startTransition();${transitions[1]}`)}
       if(second===duration-1){measuringTransition=false;await cdp.evaluate(`__smoke.stopTransition()`)}
-      await cdp.evaluate('__smoke.sample()');
-      if(measuringTransition)await cdp.evaluate('__smoke.stopTransition()');
+      await cdp.evaluate('__smoke.stopTransition(); __smoke.sample()');
       if(!neutralSilhouette&&!clipClearsStage(region,(await stageGeometry()).canvas))throw new Error(`the stage canvas reached the evidence crop at second ${second}; this run did not load the neutral silhouette`);
       const shot=await cdp.call('Page.captureScreenshot',{format:'png',captureBeyondViewport:false,clip:{...region,scale:1}});
       const file=path.join(output,`${viewport.name}-${String(second).padStart(3,'0')}.png`);await writeFile(file,Buffer.from(shot.result.data,'base64'));frames.push(file);

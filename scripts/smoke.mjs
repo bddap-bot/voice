@@ -141,7 +141,7 @@ async function runViewport(viewport, executable, server) {
       globalThis.RTCPeerConnection = class extends Peer {
         createDataChannel(...args) {
           const channel = super.createDataChannel(...args);
-          const events = []; globalThis.__smokeLiveChannels.push(events);
+          const events = []; globalThis.__smokeLiveChannels.push({ channel, events });
           channel.addEventListener('message', ({ data }) => { const event = JSON.parse(data); if (['session.started', 'session.closed'].includes(event.type)) events.push(event.type); });
           return channel;
         }
@@ -179,8 +179,8 @@ async function runViewport(viewport, executable, server) {
     if (development) {
       if (!liveSessionOpened) throw new Error('development smoke did not open a Live session');
       await cdp.evaluate(`new Promise((resolve, reject) => { const deadline = Date.now() + 30000; const check = () => { if (document.querySelector('#mic-mute').disabled && document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && document.querySelector('#puppet').getAttribute('aria-disabled') === 'false') return resolve(); if (Date.now() > deadline) return reject(new Error('Live session did not close')); setTimeout(check, 100); }; check(); })`);
-      const channels = await cdp.evaluate('__smokeLiveChannels');
-      if (!channels.some(events => events.includes('session.started') && events.includes('session.closed'))) throw new Error('Live did not acknowledge start and close on the same channel');
+      const channels = await cdp.evaluate('__smokeLiveChannels.map(({ channel, events }) => ({ events, state: channel.readyState }))');
+      if (!channels.some(({ events, state }) => events.includes('session.started') && state === 'closed')) throw new Error('Live did not start and close its channel: ' + JSON.stringify(channels));
       const sessions = { channels, endpoint: JSON.parse(Buffer.from(server.token, 'base64url')).endpoint_id, liveSessionOpened, liveSessionClosed: true };
       await writeFile(path.join(output, `${viewport.name}-connection.json`), JSON.stringify(sessions, null, 2));
     }

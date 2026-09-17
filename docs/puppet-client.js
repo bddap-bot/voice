@@ -82,8 +82,13 @@ export class PuppetChannel {
     if (epoch !== this.epoch) throw new Error('connection replaced');
     if (saved) return saved.arrayBuffer();
     const waiting = deferred();
-    this.transfer = { kind, id, contentHash, size: null, originalSize: null, encoding: null, total: 0, chunks: [], waiting, cache, request };
-    const timer = setTimeout(() => waiting.reject(new Error('puppet transfer timed out')), this.transferTimeout);
+    const transfer = { kind, id, contentHash, size: null, originalSize: null, encoding: null, total: 0, chunks: [], waiting, cache, request, timer: null };
+    transfer.progress = () => {
+      clearTimeout(transfer.timer);
+      transfer.timer = setTimeout(() => waiting.reject(new Error('puppet transfer timed out')), this.transferTimeout);
+    };
+    this.transfer = transfer;
+    transfer.progress();
     try {
       const encodings = ['br', 'gzip'].filter((encoding) => {
         try { new DecompressionStream(encoding); return true; } catch { return false; }
@@ -91,9 +96,19 @@ export class PuppetChannel {
       await this.send(`${kind}\n${JSON.stringify({ id, encodings, ...fields })}`);
       return await waiting.promise;
     } finally {
-      clearTimeout(timer);
-      if (this.transfer?.waiting === waiting) this.transfer = null;
+      clearTimeout(transfer.timer);
+      if (this.transfer === transfer) this.transfer = null;
     }
+  }
+  abandon(transfer, message) {
+    if (this.transfer === transfer) this.transfer = null;
+    clearTimeout(transfer.timer);
+    transfer.waiting.reject(new Error(message));
+    return true;
+  }
+  current(verb, step, id) {
+    const transfer = this.transfer;
+    return transfer && verb === `${transfer.kind}-${step}` && id === transfer.id ? transfer : null;
   }
   async receive(raw) {
     const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
@@ -132,29 +147,33 @@ export class PuppetChannel {
     }
     if (verb === 'puppet-start' || verb === 'clip-start' || verb === 'track-start') {
       const value = JSON.parse(decoder.decode(bytes.subarray(offset)));
-      if (!this.transfer || verb !== `${this.transfer.kind}-start` || value.id !== this.transfer.id || !Number.isSafeInteger(value.size) || value.size <= 0 || !Number.isSafeInteger(value.originalSize) || value.originalSize <= 0 || !['br', 'gzip'].includes(value.encoding) || value.contentHash !== this.transfer.contentHash) throw new Error('invalid transfer');
-      this.transfer.size = value.size;
-      this.transfer.originalSize = value.originalSize;
-      this.transfer.encoding = value.encoding;
+      const transfer = this.current(verb, 'start', value.id);
+      if (!transfer) return true;
+      if (transfer.size !== null || !Number.isSafeInteger(value.size) || value.size <= 0 || !Number.isSafeInteger(value.originalSize) || value.originalSize <= 0 || !['br', 'gzip'].includes(value.encoding) || value.contentHash !== transfer.contentHash) return this.abandon(transfer, 'invalid transfer');
+      transfer.size = value.size;
+      transfer.originalSize = value.originalSize;
+      transfer.encoding = value.encoding;
+      transfer.progress();
       return true;
     }
     if (verb === 'puppet-chunk' || verb === 'clip-chunk' || verb === 'track-chunk') {
       const [id, body] = line(bytes, offset);
-      if (!this.transfer || verb !== `${this.transfer.kind}-chunk` || id !== this.transfer.id || this.transfer.size === null) throw new Error('unexpected transfer chunk');
+      const transfer = this.current(verb, 'chunk', id);
+      if (!transfer) return true;
+      if (transfer.size === null) return this.abandon(transfer, 'transfer chunk before start');
       const chunk = bytes.slice(body);
-      this.transfer.total += chunk.length;
-      if (this.transfer.total > this.transfer.size) throw new Error('puppet exceeds advertised size');
-      this.transfer.chunks.push(chunk);
+      transfer.total += chunk.length;
+      if (transfer.total > transfer.size) return this.abandon(transfer, 'puppet exceeds advertised size');
+      transfer.chunks.push(chunk);
+      transfer.progress();
       return true;
     }
     if (verb === 'puppet-end' || verb === 'clip-end' || verb === 'track-end') {
-      const id = decoder.decode(bytes.subarray(offset));
-      const transfer = this.transfer;
+      const transfer = this.current(verb, 'end', decoder.decode(bytes.subarray(offset)));
+      if (!transfer) return true;
+      if (transfer.total !== transfer.size) return this.abandon(transfer, 'incomplete puppet transfer');
       this.transfer = null;
-      if (!transfer || verb !== `${transfer.kind}-end` || id !== transfer.id || transfer.total !== transfer.size) {
-        transfer?.waiting.reject(new Error('incomplete puppet transfer'));
-        return true;
-      }
+      clearTimeout(transfer.timer);
       const complete = new Uint8Array(transfer.total);
       let at = 0;
       for (const chunk of transfer.chunks) {
@@ -163,21 +182,15 @@ export class PuppetChannel {
       }
       const response = new Response(complete).body.pipeThrough(new DecompressionStream(transfer.encoding));
       const decoded = await new Response(response).arrayBuffer();
-      if (decoded.byteLength !== transfer.originalSize) {
-        transfer.waiting.reject(new Error('invalid decompressed puppet size'));
-        return true;
-      }
+      if (decoded.byteLength !== transfer.originalSize) return this.abandon(transfer, 'invalid decompressed puppet size');
       transfer.waiting.resolve(decoded);
       transfer.cache.put(transfer.request, new Response(decoded, { headers: { 'content-type': 'model/gltf-binary' } })).catch(() => {});
       return true;
     }
     if (verb === 'puppet-error' || verb === 'clip-error' || verb === 'track-error') {
       const value = JSON.parse(decoder.decode(bytes.subarray(offset)));
-      if (value.code !== 'busy' && this.transfer && (!value.id || value.id === this.transfer.id)) {
-        const transfer = this.transfer;
-        this.transfer = null;
-        transfer.waiting.reject(new Error(value.message));
-      }
+      const transfer = this.transfer;
+      if (transfer && value.code !== 'busy' && verb === `${transfer.kind}-error` && (!value.id || value.id === transfer.id)) this.abandon(transfer, value.message);
       return true;
     }
     return true;

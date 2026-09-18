@@ -1,18 +1,48 @@
 {
-  "about": "Touched-path → test-suite map, read by `botq test-map`. First matching rule wins; `tests: []` means consciously untested and must carry its why.",
+  "about": "Touched-path \u2192 test-suite map, read by `botq test-map`. First matching rule wins; `tests: []` means consciously untested and must carry its why.",
   "rules": [
     {
-      "paths": ["test/action-evaluation.js"],
-      "tests": ["node test/action-evaluation.js"],
+      "paths": [
+        "AGENTS.md"
+      ],
+      "tests": [],
+      "why": "Contributor prose; no executable behavior."
+    },
+    {
+      "paths": [
+        "test/action-evaluation.js"
+      ],
+      "tests": [
+        "node test/action-evaluation.js"
+      ],
       "why": "the real embedding model must reach every action token from natural conversational sentences"
     },
     {
-      "paths": ["docs/**", "src/**", "scripts/build.mjs", "scripts/dev.mjs", "scripts/smoke.mjs", "test/**", "package.json", "package-lock.json", ".github/workflows/smoke.yml", "test-map.json", "DESIGN.md"],
-      "tests": ["npm test", "npm run build", "npm run smoke:ci"],
+      "paths": [
+        "docs/**",
+        "src/**",
+        "scripts/build.mjs",
+        "scripts/dev.mjs",
+        "scripts/smoke.mjs",
+        "test/**",
+        "package.json",
+        "package-lock.json",
+        ".github/workflows/smoke.yml",
+        "test-map.json",
+        "DESIGN.md"
+      ],
+      "tests": [
+        "npm test",
+        "npm run build",
+        "npm run smoke:ci"
+      ],
       "why": "browser assets, build inputs, smoke measurements, baseline, and gate configuration must pass the same browser smoke as CI"
     },
     {
-      "paths": ["README.md", ".gitignore"],
+      "paths": [
+        "README.md",
+        ".gitignore"
+      ],
       "tests": [],
       "why": "prose"
     }

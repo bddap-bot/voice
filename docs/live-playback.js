@@ -12,6 +12,12 @@ export class LivePlayback {
     if (this.closed) return null;
     this.node = new AudioWorkletNode(context, 'live-playback', { outputChannelCount: [1], channelCount: 1, channelCountMode: 'explicit' });
     this.node.port.onmessage = ({ data }) => { if (data.error) this.onError(new Error(data.error)); };
+    // Chromium needs a playing media element to decode remote WebRTC audio for Web Audio.
+    this.sink = new Audio();
+    this.sink.muted = true;
+    this.sink.srcObject = stream;
+    await this.sink.play();
+    if (this.closed) return null;
     this.source = context.createMediaStreamSource(stream);
     const destination = context.createMediaStreamDestination();
     this.source.connect(this.node).connect(destination);
@@ -42,6 +48,7 @@ export class LivePlayback {
     this.closed = true;
     this.transcripts.length = 0;
     this.holds.clear();
+    if (this.sink) { this.sink.pause(); this.sink.srcObject = null; }
     this.source?.disconnect();
     this.node?.disconnect();
     await this.context?.close().catch(() => {});

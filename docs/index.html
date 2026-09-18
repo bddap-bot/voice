@@ -127,6 +127,7 @@ import { PuppetChannel } from './puppet-client.js';
 import { ListeningReactionDriver, TranscriptActionDriver, webGpuAdapter } from './puppet-drivers.js';
 import { PuppetTools } from './puppet-tools.js';
 import { ResponsesTools } from './responses-tools.js';
+import { LivePlayback } from './live-playback.js';
 import { PuppetRuntime } from './puppet.js';
 import { disposeRenderer, renderChart, renderMath, renderMermaid } from './lib/render.js';
 
@@ -712,23 +713,24 @@ function onLiveEvent(message, source) {
     stopConversation('Live protocol error');
     return;
   }
+  const playback = (source === starting?.channel ? starting : conversation?.audioOwner)?.playback;
+  if (event.type === 'session.delegation.created' && event.delegation?.target === 'responses') {
+    playback?.hold(event.delegation.id);
+    return;
+  }
   if (event.type === 'response.event') {
     Promise.resolve(responseTools?.handle(event)).catch(recordPageError);
     return;
   }
   if (event.type === 'session.input_transcript.delta') {
+    playback?.interrupt();
     trace.heard(event.delta ?? '', Date.now(), event.start_ms);
     conversation?.transcript?.add('user', event.delta ?? '');
   }
   else if (event.type === 'input_audio_buffer.speech_started') listeningDriver.activity(true);
   else if (event.type === 'input_audio_buffer.speech_stopped') listeningDriver.activity(false);
   else if (event.type === 'session.output_transcript.delta') {
-    trace.spoke(event.delta ?? '', event.start_ms, event.end_ms);
-    const audioNow = $('speaker').currentTime * 1000;
-    const playAt = performance.now() + Math.max(0, (event.start_ms ?? audioNow) - audioNow);
-    puppetRuntime?.speak(event.delta ?? '', playAt);
-    actionDriver.push(event.delta ?? '', playAt);
-    conversation?.transcript?.add('model', event.delta ?? '');
+    playback?.transcript(event);
   }
   else if (event.type === 'session.usage.updated') usageSeconds = Number(event.usage?.seconds ?? usageSeconds);
   else if (event.type === 'session.closed') {
@@ -737,9 +739,18 @@ function onLiveEvent(message, source) {
     else cancelStarting();
   }
 }
-async function executeLiveTool(item, source) {
+function presentTranscript(event) {
+    trace.spoke(event.delta ?? '', event.start_ms, event.end_ms);
+    const audioNow = $('speaker').currentTime * 1000;
+    const playAt = performance.now() + Math.max(0, (event.start_ms ?? audioNow) - audioNow);
+    puppetRuntime?.speak(event.delta ?? '', playAt);
+    actionDriver.push(event.delta ?? '', playAt);
+    conversation?.transcript?.add('model', event.delta ?? '');
+}
+async function executeLiveTool(item, source, delegation) {
   recordSession('tool_call', item.name);
   if (item.name === 'hub') {
+    (source === starting?.channel ? starting : conversation?.audioOwner)?.playback?.release(delegation);
     const args = JSON.parse(item.arguments);
     if (typeof args.text !== 'string' || !args.text.trim() || new TextEncoder().encode(args.text).length > 8192) throw new Error('invalid hub request');
     const id = item.call_id;
@@ -817,6 +828,7 @@ function cancelStarting(reason = '') {
   const attempt = starting;
   starting = null;
   attempt.cancelled = true;
+  attempt.playback?.close();
   attempt.cancelMic?.();
   for (const track of attempt.stream?.getTracks() ?? []) track.stop();
   attempt.cancelData?.();
@@ -831,6 +843,11 @@ function cancelStarting(reason = '') {
 }
 async function startConversation() {
   const attempt = { cancelled: false, offered: false, cancelSent: false, cancelMic: null, cancelIce: null, cancelData: null, stream: null, outputStream: null, recorders: [], pc: null, channel: null };
+  attempt.playback = new LivePlayback(presentTranscript, (error) => {
+    if (attempt.cancelled || (starting !== attempt && conversation?.audioOwner !== attempt)) return;
+    recordPageError(error);
+    stopConversation('Live playback failed');
+  });
   starting = attempt;
   puppetRuntime?.pose('stand');
   syncPuppetUi();
@@ -855,20 +872,27 @@ async function startConversation() {
     setMicrophoneMuted(false);
     attempt.pc = new RTCPeerConnection();
     attempt.channel = attempt.pc.createDataChannel('oai-events');
-    responseTools = new ResponsesTools((item) => executeLiveTool(item, attempt.channel), (event) => attempt.channel.send(JSON.stringify(event)), () => attempt.channel.readyState === 'open' && (attempt.channel === conversation?.channel || attempt.channel === starting?.channel), async (id) => {
+    responseTools = new ResponsesTools((item, delegation) => executeLiveTool(item, attempt.channel, delegation), (event) => attempt.channel.send(JSON.stringify(event)), () => attempt.channel.readyState === 'open' && (attempt.channel === conversation?.channel || attempt.channel === starting?.channel), async (id) => {
       const pending = hubCalls.get(id);
       if (!pending?.stamp || pending.source !== attempt.channel) return;
       await sendFrame(`hub-ack\n${JSON.stringify({ id, stamp: pending.stamp })}`);
       hubCalls.delete(id);
-    });
+    }, (delegation) => attempt.playback.release(delegation));
     const started = waitData(attempt.channel, (event) => event.type === 'session.started', 30000, attempt);
     started.catch(() => {});
     attempt.channel.addEventListener('message', (event) => onLiveEvent(event, attempt.channel));
-    attempt.pc.ontrack = (event) => {
-      attempt.outputStream = event.streams[0] ?? new MediaStream([event.track]);
+    attempt.pc.ontrack = async (event) => {
+      try {
+      attempt.outputStream = await attempt.playback.attach(event.streams[0] ?? new MediaStream([event.track]));
+      if (!attempt.outputStream || attempt.cancelled) return;
       $('speaker').srcObject = attempt.outputStream;
       puppetRuntime?.attachAudio(attempt.outputStream, attempt).catch((error) => setStatus(`mouth unavailable: ${error.message}`, 'err'));
       if (conversation?.audioOwner === attempt) startRecorders(attempt, conversation.id);
+      } catch (error) {
+        if (attempt.cancelled || (starting !== attempt && conversation?.audioOwner !== attempt)) return;
+        recordPageError(error);
+        stopConversation('Live playback failed');
+      }
     };
     for (const track of attempt.stream.getTracks()) attempt.pc.addTrack(track, attempt.stream);
     await attempt.pc.setLocalDescription(await attempt.pc.createOffer());
@@ -910,6 +934,7 @@ async function startConversation() {
       attempt.channel?.close();
       attempt.pc?.close();
       await puppetRuntime?.detachAudio(attempt);
+      await attempt.playback?.close();
     }
     if (starting === attempt) starting = null;
   }
@@ -946,6 +971,7 @@ async function finishStop(reason, remoteClosed) {
   current.pc.close();
   $('speaker').srcObject = null;
   await puppetRuntime?.detachAudio(current.audioOwner);
+  await current.audioOwner.playback.close();
   const cost = usageSeconds * 0.05 / 60;
   const item = document.createElement('div');
   item.className = 'usage';

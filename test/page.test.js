@@ -1038,3 +1038,25 @@ window.addEventListener('test-ready', async () => {
   for (const kept of ['<style>.a{fill:red}</style>', 'href="https://ok.test/" target="_blank" rel="noopener noreferrer"', 'href="#local"', '<foreignObject><div>f</div></foreignObject>']) assert.ok(result.svg.includes(kept), kept + ': ' + result.svg);
   assert.ok(result.html.includes('href="https://ok.test/" target="_blank" rel="noopener noreferrer"') && result.html.includes('<img>'), result.html);
 });
+
+test('Responses delegation holds early speech until the final backend response', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  const emit = (event) => testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(event) }));
+  emit({ type: 'session.delegation.created', delegation: { id: 'd', target: 'responses' } });
+  emit({ type: 'session.output_transcript.delta', delta: 'Okay.' });
+  const early = testPuppet.calls.filter(([name]) => name === 'speak').length;
+  const nested = (event) => emit({ type: 'response.event', delegation_id: 'd', event });
+  nested({ type: 'response.created', response: { id: 'r1' } });
+  nested({ type: 'response.output_item.done', item: { type: 'function_call', call_id: 'a', name: 'mood', arguments: '{"name":"amused"}' } });
+  nested({ type: 'response.completed', response: { id: 'r1', output: [] } });
+  await new Promise(resolve => setTimeout(resolve, 10));
+  const pending = testPuppet.calls.filter(([name]) => name === 'speak').length;
+  nested({ type: 'response.created', response: { id: 'r2' } });
+  nested({ type: 'response.completed', response: { id: 'r2', output: [] } });
+  setTimeout(() => { document.body.dataset.playbackTest = JSON.stringify({ early, pending, calls: testPuppet.calls.filter(([name]) => name === 'mood' || name === 'speak').map(([name, value]) => [name, value]) }); }, 20);
+});
+`);
+  const encoded = /data-playback-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { early: 0, pending: 0, calls: [['mood', 'amused'], ['speak', 'Okay.']] }, stderr);
+});

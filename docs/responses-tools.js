@@ -1,9 +1,10 @@
 export class ResponsesTools {
-  constructor(execute, send, valid = () => true, submitted = () => {}) {
+  constructor(execute, send, valid = () => true, submitted = () => {}, settled = () => {}) {
     this.execute = execute;
     this.send = send;
     this.valid = valid;
     this.submitted = submitted;
+    this.settled = settled;
     this.responses = new Map();
     this.delegations = new Map();
     this.calls = new Set();
@@ -44,7 +45,8 @@ export class ResponsesTools {
   }
   async submit(response) {
     const outputs = await Promise.all(response.calls.map(async ({ item, result }) => ({ call_id: item.call_id, output: JSON.stringify(await result) })));
-    if (!this.active() || !outputs.length) return;
+    if (!this.active()) return;
+    if (!outputs.length) { this.settled(response.delegation); return; }
     while (response.sent < outputs.length) {
       this.send({ type: 'response.item.create', item: { type: 'function_call_output', ...outputs[response.sent] } });
       response.sent++;

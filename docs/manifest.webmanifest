@@ -1,7 +1,7 @@
 {
   "name": "voice",
   "short_name": "voice",
-  "description": "Push-to-talk to the bothouse hub over an end-to-end iroh stream.",
+  "description": "Push-to-talk to the voice hub over an end-to-end iroh stream.",
   "start_url": ".",
   "scope": ".",
   "display": "standalone",

@@ -1,5 +1,5 @@
 {
-  "about": "Touched-path → test-suite map, read by `botq test-map` (bddap/bothouse#236). First matching rule wins; `tests: []` means consciously untested and must carry its why.",
+  "about": "Touched-path → test-suite map, read by `botq test-map`. First matching rule wins; `tests: []` means consciously untested and must carry its why.",
   "rules": [
     {
       "paths": ["test/action-evaluation.js"],

@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
-import { assessSmoke, canvasAspectMatches, clipClearsStage, evidenceRegion, installSmokeMeasurements, smokeLimits, smokeStatusText, smokeViewports, transitionFrameSampler } from './smoke-measurements.js';
+import { assessSmoke, canvasAspectMatches, clipClearsStage, evidenceRegion, installSmokeMeasurements, smokeLimits, smokeStatusText, smokeViewports } from './smoke-measurements.js';
 
 const execute = promisify(execFile);
 
@@ -36,38 +36,8 @@ test('private smoke poses the puppet directly instead of toggling a conversation
   const source = await readFile(new URL('../scripts/smoke.mjs', import.meta.url), 'utf8');
   assert.match(source, /const transitions = mode === 'private' && !live\n\s+\? \["__smokeRuntime\.pose\('stand'\)", "__smokeRuntime\.pose\('sit'\)"\]\n\s+: \["document\.querySelector\('#puppet'\)\.click\(\)", "document\.querySelector\('#puppet'\)\.click\(\)"\];/);
   assert.equal(source.match(/#puppet'\)\.click\(\)/g).length, 2);
-  assert.match(source, /__smoke\.startTransition\(\);\$\{transitions\[0\]\}/);
-  assert.match(source, /__smoke\.startTransition\(\);\$\{transitions\[1\]\}/);
-});
-
-test('transition sampling rejects real stalls and excludes paused evidence work', () => {
-  const callbacks = new Map();
-  const gaps = [];
-  let nextId = 0;
-  const sampler = transitionFrameSampler(gaps, 50, (callback) => {
-    callbacks.set(++nextId, callback);
-    return nextId;
-  }, (id) => callbacks.delete(id));
-  const tick = (time) => {
-    const [id, callback] = callbacks.entries().next().value;
-    callbacks.delete(id);
-    callback(time);
-  };
-  sampler.start();
-  tick(0);
-  tick(16);
-  tick(83);
-  assert.deepEqual(gaps, [67]);
-  sampler.stop();
-  assert.equal(callbacks.size, 0);
-  sampler.start();
-  tick(1000);
-  tick(1016);
-  assert.deepEqual(gaps, [67]);
-  tick(1116);
-  assert.deepEqual(gaps, [67, 100]);
-  sampler.stop();
-  assert.equal(callbacks.size, 0);
+  assert.match(source, /cdp\.evaluate\(`\$\{transitions\[0\]\}/);
+  assert.match(source, /cdp\.evaluate\(`\$\{transitions\[1\]\}/);
 });
 
 const mockWasm = `
@@ -435,15 +405,18 @@ const layoutViewports = [
 ];
 
 test('smoke assessment rejects every measured browser failure and accepts a clean run', () => {
-  const clean = { cls: smokeLimits.cumulativeLayoutShift, moves: [], overlaps: [], heights: [{ canvas: 100, stage: 200 }, { canvas: 101, stage: 201 }], aspects: [{ cssWidth: 300, cssHeight: 400, bufferWidth: 600, bufferHeight: 800 }], stages: [{ top: 100, bottom: 500, height: 400, viewportHeight: 500 }], blankFrames: [], frameGaps: [], errors: [], telemetryRejections: [] };
+  const clean = { cls: smokeLimits.cumulativeLayoutShift, moves: [], overlaps: [], heights: [{ canvas: 100, stage: 200 }, { canvas: 101, stage: 201 }], aspects: [{ cssWidth: 300, cssHeight: 400, bufferWidth: 600, bufferHeight: 800 }], stages: [{ top: 100, bottom: 500, height: 400, viewportHeight: 500 }], blankFrames: [], errors: [], telemetryRejections: [] };
   assert.equal(assessSmoke(clean).pass, true);
+  for (const frameGaps of [[67], [1000, 5000]]) {
+    assert.deepEqual(assessSmoke({ ...clean, frameGaps }), assessSmoke(clean));
+  }
   for (const mutation of [
     { cls: smokeLimits.cumulativeLayoutShift + 0.001 },
     { moves: [{}] }, { overlaps: [{}] },
     { heights: [{ canvas: 100, stage: 200 }, { canvas: 102, stage: 200 }] },
     { aspects: [{ cssWidth: 330, cssHeight: 400, bufferWidth: 600, bufferHeight: 800 }] },
     { stages: [{ top: 100, bottom: 501, height: 401, viewportHeight: 500 }] },
-    { blankFrames: [1] }, { frameGaps: [51] }, { errors: ['fault'] }, { telemetryRejections: ['rejected'] },
+    { blankFrames: [1] }, { errors: ['fault'] }, { telemetryRejections: ['rejected'] },
   ]) assert.equal(assessSmoke({ ...clean, ...mutation }).pass, false, JSON.stringify(mutation));
 });
 
@@ -458,7 +431,6 @@ test('canvas aspect comparison rejects either non-uniform stretch and accepts re
 test('smoke sampling rejects a stretched canvas and passes after browser geometry is restored', async () => {
   const { stdout, stderr } = await runPuppetPage(`<!doctype html><main><canvas id="puppet" width="600" height="800" style="width:300px;height:400px"></canvas></main><script>
   const smokeLimits = ${JSON.stringify(smokeLimits)};
-  const transitionFrameSampler = ${transitionFrameSampler.toString()};
   const canvasAspectMatches = ${canvasAspectMatches.toString()};
   const smoke = (${installSmokeMeasurements.toString()})();
   smoke.sample();

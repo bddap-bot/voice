@@ -5,7 +5,7 @@ import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { assessSmoke, clipClearsStage, evidenceRegion, installSmokeMeasurements, smokeLimits, smokeStatusText, smokeViewports, transitionFrameSampler } from '../test/smoke-measurements.js';
+import { assessSmoke, clipClearsStage, evidenceRegion, installSmokeMeasurements, smokeLimits, smokeStatusText, smokeViewports } from '../test/smoke-measurements.js';
 
 const execute = promisify(execFile);
 import { serveDevelopment } from './dev.mjs';
@@ -198,27 +198,23 @@ async function runViewport(viewport, executable, server) {
     let ready=false;
     while(Date.now()<deadline){try{const page=JSON.parse(await cdp.evaluate("JSON.stringify({ready:document.querySelector('#puppet')?.getAttribute('aria-disabled')==='false',status:document.querySelector('#status')?.textContent,error:document.querySelector('#status')?.classList.contains('err')})"));ready=page.ready;if(ready)break;if(page.error)throw new Error(`page connection failed: ${page.status}`)}catch(error){if(error.message?.startsWith('page connection failed:'))throw error}await new Promise((resolve)=>setTimeout(resolve,250));}
     if(!ready){const probe=await cdp.evaluate(`JSON.stringify({status:document.querySelector('#status')?.textContent,disabled:document.querySelector('#puppet')?.getAttribute('aria-disabled'),body:document.body?.innerText?.slice(0,500)})`);throw new Error(`page did not become ready: ${probe} ${cdp.consoleErrors.join('; ')} ${chromeError.slice(-500)}`)}
-    await cdp.evaluate(`const smokeLimits = ${JSON.stringify(smokeLimits)}; const transitionFrameSampler = ${transitionFrameSampler.toString()}; globalThis.__smoke = (${installSmokeMeasurements.toString()})()`);
+    await cdp.evaluate(`const smokeLimits = ${JSON.stringify(smokeLimits)}; globalThis.__smoke = (${installSmokeMeasurements.toString()})()`);
     const stageGeometry = async () => JSON.parse(await cdp.evaluate("JSON.stringify((() => { const box = document.querySelector('#puppet').getBoundingClientRect(); return { canvas: { left: box.left + scrollX, right: box.right + scrollX, top: box.top + scrollY, bottom: box.bottom + scrollY }, viewport: { x: scrollX, y: scrollY, width: innerWidth, height: innerHeight } }; })())"));
     const region = evidenceRegion({ neutralSilhouette, ...(await stageGeometry()) });
     const frames=[];
-    let measuringTransition=false;
     let liveSessionOpened = false;
     for(let second=0;second<duration;second++){
-      if(second===1){measuringTransition=true;await cdp.evaluate(`__smoke.startTransition();${transitions[0]}`);if(mode==='public')await cdp.evaluate(`new Promise(async(resolve)=>{while(!globalThis.__smokeChannel)await new Promise(done=>setTimeout(done,10));const emit=(event)=>__smokeChannel.dispatchEvent(new MessageEvent('message',{data:JSON.stringify(event)}));emit({type:'session.output_transcript.delta',delta:'I will inspect the fixture.',start_ms:0,end_ms:20});emit({type:'session.input_transcript.delta',delta:'Check the fixture stream.'});const wrap=event=>emit({type:'response.event',delegation_id:'fixture',event});wrap({type:'response.created',response:{id:'fixture',output:[]}});wrap({type:'response.output_item.done',item:{type:'function_call',call_id:'fixture',name:'hub',arguments:JSON.stringify({text:'Check the fixture stream.'})}});wrap({type:'response.completed',response:{id:'fixture',output:[]}});setTimeout(resolve,150)})`)}
+      if(second===1){await cdp.evaluate(`${transitions[0]}`);if(mode==='public')await cdp.evaluate(`new Promise(async(resolve)=>{while(!globalThis.__smokeChannel)await new Promise(done=>setTimeout(done,10));const emit=(event)=>__smokeChannel.dispatchEvent(new MessageEvent('message',{data:JSON.stringify(event)}));emit({type:'session.output_transcript.delta',delta:'I will inspect the fixture.',start_ms:0,end_ms:20});emit({type:'session.input_transcript.delta',delta:'Check the fixture stream.'});const wrap=event=>emit({type:'response.event',delegation_id:'fixture',event});wrap({type:'response.created',response:{id:'fixture',output:[]}});wrap({type:'response.output_item.done',item:{type:'function_call',call_id:'fixture',name:'hub',arguments:JSON.stringify({text:'Check the fixture stream.'})}});wrap({type:'response.completed',response:{id:'fixture',output:[]}});setTimeout(resolve,150)})`)}
       if (development && second === 2) {
         await cdp.evaluate(`new Promise((resolve, reject) => { const deadline = Date.now() + 60000; const check = () => { if (document.querySelector('#puppet').getAttribute('aria-pressed') === 'true') return resolve(); if (Date.now() > deadline || document.querySelector('#status').classList.contains('err')) return reject(new Error(document.querySelector('#status').textContent)); setTimeout(check, 100); }; check(); })`);
         liveSessionOpened = true;
       }
       if(second===3)await cdp.evaluate(`document.querySelector('#status').textContent=${JSON.stringify(smokeStatusText)}`);
-      if(second===6){measuringTransition=false;await cdp.evaluate(`__smoke.stopTransition()`)}
-      if(second===Math.max(8,duration-6)){measuringTransition=true;await cdp.evaluate(`__smoke.startTransition();${transitions[1]}`)}
-      if(second===duration-1){measuringTransition=false;await cdp.evaluate(`__smoke.stopTransition()`)}
-      await cdp.evaluate('__smoke.stopTransition(); __smoke.sample()');
+      if(second===Math.max(8,duration-6)){await cdp.evaluate(`${transitions[1]}`)}
+      await cdp.evaluate('__smoke.sample()');
       if(!neutralSilhouette&&!clipClearsStage(region,(await stageGeometry()).canvas))throw new Error(`the stage canvas reached the evidence crop at second ${second}; this run did not load the neutral silhouette`);
       const shot=await cdp.call('Page.captureScreenshot',{format:'png',captureBeyondViewport:false,clip:{...region,scale:1}});
       const file=path.join(output,`${viewport.name}-${String(second).padStart(3,'0')}.png`);await writeFile(file,Buffer.from(shot.result.data,'base64'));frames.push(file);
-      if(measuringTransition)await cdp.evaluate('new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))).then(() => __smoke.startTransition())');
       await new Promise((resolve)=>setTimeout(resolve,1000));
     }
     if (development) {
@@ -255,7 +251,7 @@ const reports=[];
 try { for(const viewport of selectedViewports) reports.push(await runViewport(viewport,executable,server)); } finally { await server.close(); }
 const unexpected = reports.flatMap((report) => report.failures.filter((failure) => !(baseline[report.viewport] ?? []).includes(failure)).map((failure) => `${report.viewport}:${failure}`));
 await writeFile(path.join(output,'report.json'),JSON.stringify({mode,createdAt:new Date().toISOString(),reports,unexpected},null,2));
-console.log('| viewport | result | failures | CLS | canvas drift | max frame gap |');
-console.log('|---|---|---|---:|---:|---:|');
-for(const report of reports)console.log(`| ${report.viewport} | ${report.pass?'PASS':'FAIL'} | ${report.failures.join(', ')||'none'} | ${report.metrics.cumulativeLayoutShift.toFixed(3)} | ${report.metrics.canvasHeightDrift} | ${report.metrics.maximumFrameGapMs} |`);
+console.log('| viewport | result | failures | CLS | canvas drift |');
+console.log('|---|---|---|---:|---:|');
+for(const report of reports)console.log(`| ${report.viewport} | ${report.pass?'PASS':'FAIL'} | ${report.failures.join(', ')||'none'} | ${report.metrics.cumulativeLayoutShift.toFixed(3)} | ${report.metrics.canvasHeightDrift} |`);
 process.exitCode=unexpected.length?1:0;

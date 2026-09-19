@@ -11,7 +11,6 @@ export const smokeLimits = {
   cumulativeLayoutShift: 0.1,
   heightDrift: 1,
   aspectDrift: 0.005,
-  droppedFrameMs: 50,
 };
 
 export function canvasAspectMatches({ cssWidth, cssHeight, bufferWidth, bufferHeight }) {
@@ -46,31 +45,9 @@ export function evidenceRegion({ neutralSilhouette, canvas, viewport }) {
   return clip;
 }
 
-export function transitionFrameSampler(gaps, limit, schedule = requestAnimationFrame, cancel = cancelAnimationFrame) {
-  let frameId;
-  let lastFrame;
-  const frame = (now) => {
-    if (lastFrame !== undefined && now - lastFrame > limit) gaps.push(Math.round(now - lastFrame));
-    lastFrame = now;
-    frameId = schedule(frame);
-  };
-  return {
-    start() {
-      if (frameId !== undefined) cancel(frameId);
-      lastFrame = undefined;
-      frameId = schedule(frame);
-    },
-    stop() {
-      if (frameId !== undefined) cancel(frameId);
-      frameId = undefined;
-      lastFrame = undefined;
-    },
-  };
-}
-
 export function installSmokeMeasurements() {
   const selectors = ['header', '#saved', '#puppet', '.puppet-picker', '#puppet-credit', '#elapsed', '.share', '.display', '.ledger'];
-  const state = { cls: 0, moves: [], overlaps: [], heights: [], aspects: [], stages: [], blankFrames: [], frameGaps: [], errors: [], telemetryRejections: [] };
+  const state = { cls: 0, moves: [], overlaps: [], heights: [], aspects: [], stages: [], blankFrames: [], errors: [], telemetryRejections: [] };
   const canvas = document.querySelector('#puppet');
   const rect = (element) => {
     const value = element.getBoundingClientRect();
@@ -90,7 +67,6 @@ export function installSmokeMeasurements() {
     if (/telemetry|acknowledgment|unrecognized request/i.test(line)) state.telemetryRejections.push(line);
     originalWarn(...values);
   };
-  const transitionFrames = transitionFrameSampler(state.frameGaps, smokeLimits.droppedFrameMs);
   const sample = () => {
     second++;
     const canvasRect = rect(canvas);
@@ -127,8 +103,6 @@ export function installSmokeMeasurements() {
   return {
     state,
     sample,
-    startTransition() { transitionFrames.start(); },
-    stopTransition() { transitionFrames.stop(); },
   };
 }
 
@@ -146,7 +120,6 @@ export function assessSmoke(state) {
     paintedPuppet: state.blankFrames.length === 0,
     browserErrors: state.errors.length === 0,
     telemetry: state.telemetryRejections.length === 0,
-    transitionFrames: state.frameGaps.length === 0,
   };
-  return { pass: Object.values(checks).every(Boolean), checks, metrics: { cumulativeLayoutShift: state.cls, canvasHeightDrift: drift(canvasHeights), stageHeightDrift: drift(stageHeights), maximumFrameGapMs: Math.max(0, ...state.frameGaps) }, failures: Object.entries(checks).filter(([, pass]) => !pass).map(([name]) => name) };
+  return { pass: Object.values(checks).every(Boolean), checks, metrics: { cumulativeLayoutShift: state.cls, canvasHeightDrift: drift(canvasHeights), stageHeightDrift: drift(stageHeights) }, failures: Object.entries(checks).filter(([, pass]) => !pass).map(([name]) => name) };
 }

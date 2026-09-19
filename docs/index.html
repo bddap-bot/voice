@@ -253,6 +253,7 @@ function setMicrophoneMuted(muted) {
 }
 try {
   puppetRuntime = new PuppetRuntime($('puppet'), $('display'));
+  puppetRuntime.onAnimation = (state) => recordSession('animation', JSON.stringify(state));
   puppetRuntime.pause();
   puppetTools = new PuppetTools(puppetRuntime, () => puppetCatalog?.avatars ?? [], () => puppetActive, (id, valid) => showPuppet(id, valid));
 } catch (error) {
@@ -719,10 +720,14 @@ function onLiveEvent(message, source) {
   }
   if (event.type === 'session.input_transcript.delta') {
     playback?.interrupt();
+    recordSession('input_utterance', event.delta ?? '');
     trace.heard(event.delta ?? '', Date.now(), event.start_ms);
     conversation?.transcript?.add('user', event.delta ?? '');
   }
-  else if (event.type === 'input_audio_buffer.speech_started') listeningDriver.activity(true);
+  else if (event.type === 'input_audio_buffer.speech_started') {
+    recordSession('input_speech_started');
+    listeningDriver.activity(true);
+  }
   else if (event.type === 'input_audio_buffer.speech_stopped') listeningDriver.activity(false);
   else if (event.type === 'session.output_transcript.delta') {
     playback?.transcript(event);
@@ -743,7 +748,7 @@ function presentTranscript(event) {
     conversation?.transcript?.add('model', event.delta ?? '');
 }
 async function executeLiveTool(item, source, delegation) {
-  recordSession('tool_call', item.name);
+  recordSession('tool_call', item.name === 'pose' ? JSON.stringify({ name: item.name, arguments: item.arguments }) : item.name);
   if (item.name === 'hub') {
     (source === starting?.channel ? starting : conversation?.audioOwner)?.playback?.release(delegation);
     const args = JSON.parse(item.arguments);

@@ -182,7 +182,7 @@ export class PuppetRuntime {
       new THREE.NumberKeyframeTrack('.rotation[z]', [0, 2, 4, 6], [-0.012, 0.015, -0.008, -0.012]),
       new THREE.NumberKeyframeTrack('.rotation[y]', [0, 2.5, 4.5, 6], [0, 0.018, -0.015, 0]),
     ]);
-    this.mixer.clipAction(idle).play();
+    this.animationActions = new Set([this.mixer.clipAction(idle).play()]);
     this.clips = new Map();
     this.handovers = new Map();
     this.clipAction = null;
@@ -454,6 +454,7 @@ export class PuppetRuntime {
     const action = this.mixer.clipAction(clip, this.vrm.scene).reset();
     if (handover) action.time = handover.offset;
     action.fadeIn(duration).play();
+    (this.animationActions ??= new Set()).add(action);
     action.setLoop(name === fallback ? THREE.LoopRepeat : THREE.LoopOnce, name === fallback ? Infinity : 1);
     action.clampWhenFinished = name !== fallback;
     this.clipAction = action;
@@ -635,6 +636,24 @@ export class PuppetRuntime {
     }
     if (!this.audio) this.previousEnergy = 0;
   }
+  recordAnimation() {
+    if (!this.onAnimation) return;
+    const clips = [];
+    for (const action of this.animationActions ?? []) {
+      if (action.getRoot() !== this.idleRoot && action.getRoot() !== this.vrm?.scene) {
+        this.animationActions.delete(action);
+        continue;
+      }
+      const weight = action.enabled && action.isScheduled() ? action.getEffectiveWeight() : 0;
+      if (weight > 0) clips.push({ name: action.getClip().userData.action ?? action.getClip().name, weight: Number(weight.toFixed(4)) });
+    }
+    const state = JSON.stringify(clips);
+    if (state === this.animationState) return;
+    this.animationState = state;
+    const hips = this.vrm?.humanoid?.getRawBoneNode('hips');
+    const hipHeight = hips ? Number(hips.getWorldPosition(new THREE.Vector3()).y.toFixed(4)) : null;
+    this.onAnimation({ clips, hip_height: hipHeight });
+  }
   animate(now) {
     const delta = Math.min(this.clock.getDelta(), 0.05);
     this.updateBasePose(delta);
@@ -644,6 +663,7 @@ export class PuppetRuntime {
     this.updateListening();
     this.updateFace(now);
     this.vrm?.update(delta);
+    this.recordAnimation();
     if (this.clipAction) this.renderer.render(this.scene, this.camera);
     this.frame = requestAnimationFrame(this.animate);
   }

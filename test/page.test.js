@@ -1049,3 +1049,24 @@ window.addEventListener('test-ready', async () => {
   const encoded = /data-resume-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   assert.deepEqual(JSON.parse(encoded ?? 'null'), { offered: 'Session ended — tap to continue', active: 'true', context: [{ speaker: 'user', text: 'Remember the earlier question.' }] }, stderr);
 });
+
+test('pose arguments, animation deltas and input utterances reach session telemetry together', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  emitTool('pose_probe', 'pose', { name: 'sit' });
+  testPuppet.onAnimation({ clips: [{ name: 'sit', weight: 0.5 }], hip_height: 1.2 });
+  for (const event of [{ type: 'input_audio_buffer.speech_started' }, { type: 'session.input_transcript.delta', delta: 'Please stand.' }]) {
+    testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(event) }));
+  }
+  setTimeout(() => { document.body.dataset.poseTelemetry = JSON.stringify(telemetryBatches.flat().filter((event) => ['tool_call', 'animation', 'input_utterance', 'input_speech_started'].includes(event.name))); }, 600);
+});
+`);
+  const encoded = /data-pose-telemetry="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  const events = JSON.parse(encoded ?? 'null');
+  assert.ok(events, stderr);
+  assert.equal(events.length, 4);
+  assert.deepEqual(JSON.parse(events.find((event) => event.name === 'tool_call').detail), { name: 'pose', arguments: '{"name":"sit"}' });
+  assert.deepEqual(JSON.parse(events.find((event) => event.name === 'animation').detail), { clips: [{ name: 'sit', weight: 0.5 }], hip_height: 1.2 });
+  assert.equal(events.find((event) => event.name === 'input_utterance').detail, 'Please stand.');
+  assert.ok(events.every((event) => event.session_id === events[0].session_id && event.at > 0));
+});

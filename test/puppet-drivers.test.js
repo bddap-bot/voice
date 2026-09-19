@@ -113,3 +113,24 @@ test('input activity leans in, adds small head motion, then returns to idle afte
   assert.ok(frames[4].amount > 0 && frames[4].amount < 1);
   assert.deepEqual(frames.at(-1), { now: 2720, amount: 0, lean: 0, nod: 0, tilt: 0 });
 });
+
+for (const outcome of ['missing', 'null', 'reject', 'throw', 'available']) {
+  test('WebGPU probe explains CPU fallback once: ' + outcome, async (t) => {
+    let probes = 0;
+    const adapter = {};
+    const original = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    t.after(() => Object.defineProperty(globalThis, 'navigator', original));
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { gpu: outcome === 'missing' ? undefined : { requestAdapter() {
+      probes++;
+      if (outcome === 'throw') throw new Error('unavailable');
+      if (outcome === 'reject') return Promise.reject(new Error('unavailable'));
+      return Promise.resolve(outcome === 'available' ? adapter : null);
+    } } } });
+    const { webGpuAdapter } = await import('../docs/puppet-drivers.js?probe=' + outcome);
+    const info = t.mock.method(console, 'info', () => {});
+    assert.deepEqual(await Promise.all([webGpuAdapter(), webGpuAdapter()]), outcome === 'available' ? [adapter, adapter] : [null, null]);
+    assert.equal(probes, outcome === 'missing' ? 0 : 1);
+    assert.equal(info.mock.callCount(), outcome === 'available' ? 0 : 1);
+    if (outcome !== 'available') assert.match(info.mock.calls[0].arguments[0], /WebAssembly CPU fallback/);
+  });
+}

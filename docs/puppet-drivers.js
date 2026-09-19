@@ -63,7 +63,10 @@ export function keywordMood(text) {
 let webGpuAdapterPromise;
 
 export function webGpuAdapter() {
-  webGpuAdapterPromise ??= Promise.resolve(navigator.gpu?.requestAdapter()).catch(() => null);
+  webGpuAdapterPromise ??= Promise.resolve().then(() => navigator.gpu?.requestAdapter()).catch(() => null).then((adapter) => {
+    if (!adapter) console.info('WebGPU adapter unavailable; action embeddings use the WebAssembly CPU fallback.');
+    return adapter ?? null;
+  });
   return webGpuAdapterPromise;
 }
 

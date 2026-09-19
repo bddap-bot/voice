@@ -1,4 +1,4 @@
-const CACHE = 'voice-shell-v10';
+const CACHE = 'voice-shell-v11';
 const SHELL = ['.', 'index.html', 'live.js', 'config.js', 'puppet-client.js', 'puppet-drivers.js', 'puppet-tools.js', 'puppet.js', 'lib/render.js', 'manifest.webmanifest', 'icons/icon.svg'];
 const HASHED = /\/lib\/[^/]+-[A-Z0-9]{8}\.(js|css|woff2)$/;
 
@@ -20,7 +20,10 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
   const network = () => fetch(req).then((res) => {
-    if (res && res.ok) caches.open(CACHE).then((c) => c.put(req, res.clone()));
+    if (res && res.ok) {
+      const copy = res.clone();
+      e.waitUntil(caches.open(CACHE).then((c) => c.put(req, copy)));
+    }
     return res;
   });
   e.respondWith(HASHED.test(url.pathname) ? caches.match(req).then((hit) => hit || network()) : network().catch(() => caches.match(req)));

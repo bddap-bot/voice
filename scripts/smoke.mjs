@@ -112,15 +112,44 @@ async function connectCdp(port) {
     if (!page) await new Promise((resolve) => setTimeout(resolve, 100));
   }
   if (!page) throw new Error('Chromium DevTools page target did not appear within 30 seconds');
-  const socket = new WebSocket(page.webSocketDebuggerUrl);
+  const browser = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+  const socket = new WebSocket(browser.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject; });
   let id = 0;
+  let pageSession;
   const pending = new Map();
   const consoleErrors = [];
-  socket.onmessage = ({ data }) => { const message=JSON.parse(data);if(pending.has(message.id)){pending.get(message.id)(message);pending.delete(message.id)}else if(message.method==='Runtime.exceptionThrown')consoleErrors.push(message.params.exceptionDetails.exception?.description??message.params.exceptionDetails.text);else if(message.method==='Runtime.consoleAPICalled'&&message.params.type==='error')consoleErrors.push(message.params.args.map((value)=>value.value??value.description).join(' ')); };
-  const call = (method, params={}) => new Promise((resolve) => { const next=++id;pending.set(next,resolve);socket.send(JSON.stringify({id:next,method,params})); });
+  let workerSession;
+  socket.onmessage = ({ data }) => {
+    const message = JSON.parse(data);
+    if (pending.has(message.id)) {
+      const { resolve, reject } = pending.get(message.id);
+      pending.delete(message.id);
+      if (message.error) reject(new Error(message.error.message)); else resolve(message);
+    } else if (message.method === 'Target.attachedToTarget' && message.params.targetInfo.type === 'service_worker') {
+      workerSession = message.params.sessionId;
+    } else if (message.method === 'ServiceWorker.workerErrorReported') {
+      consoleErrors.push('service-worker: ' + message.params.errorMessage.errorMessage);
+    } else if (message.method === 'Runtime.exceptionThrown') {
+      consoleErrors.push(message.params.exceptionDetails.exception?.description ?? message.params.exceptionDetails.text);
+    } else if (message.method === 'Runtime.consoleAPICalled' && message.params.type === 'error') {
+      consoleErrors.push(message.params.args.map((value) => value.value ?? value.description).join(' '));
+    }
+  };
+  const call = (method, params = {}, sessionId = pageSession) => new Promise((resolve, reject) => {
+    const next = ++id;
+    pending.set(next, { resolve, reject });
+    socket.send(JSON.stringify({ id: next, method, params, sessionId }));
+  });
   const evaluate = async (expression) => { const message=await call('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(message.result.exceptionDetails)throw new Error(message.result.exceptionDetails.exception?.description??message.result.exceptionDetails.text);return message.result.result.value; };
-  return { call, evaluate, consoleErrors, close: () => socket.close() };
+  pageSession = (await call('Target.attachToTarget', { targetId: page.id, flatten: true })).result.sessionId;
+  const prepareWorker = async () => {
+    if (!workerSession) throw new Error('service worker was not observed');
+    // Delay cache lookup so response consumption wins the race if cloning moves back inside it.
+    const result = await call('Runtime.evaluate', { expression: `if (!self.__smokeCacheDelayed) { self.__smokeCacheDelayed = true; const open = caches.open.bind(caches); caches.open = async (...args) => { const cache = await open(...args); await new Promise(resolve => setTimeout(resolve, 100)); return cache; }; }` }, workerSession);
+    if (result.result.exceptionDetails) throw new Error('could not delay service-worker cache lookup: ' + JSON.stringify(result.result.exceptionDetails));
+  };
+  return { call, evaluate, consoleErrors, prepareWorker, close: () => socket.close() };
 }
 
 async function runViewport(viewport, executable, server) {
@@ -147,7 +176,24 @@ async function runViewport(viewport, executable, server) {
         }
       };
     ` });
-    await cdp.call('Page.enable');await cdp.call('Runtime.enable');await cdp.call('Page.addScriptToEvaluateOnNewDocument',{source:`localStorage.setItem('voice.token', ${JSON.stringify(server.token)})`});await cdp.call('Emulation.setDeviceMetricsOverride',{width:viewport.width,height:viewport.height,deviceScaleFactor:viewport.scale,mobile:viewport.mobile});await cdp.call('Page.navigate',{url:server.url});
+    await cdp.call('Page.enable');await cdp.call('Runtime.enable');await cdp.call('ServiceWorker.enable');await cdp.call('Target.setAutoAttach',{autoAttach:true,waitForDebuggerOnStart:false,flatten:true});await cdp.call('Page.addScriptToEvaluateOnNewDocument',{source:`localStorage.setItem('voice.token', ${JSON.stringify(server.token)})`});await cdp.call('Emulation.setDeviceMetricsOverride',{width:viewport.width,height:viewport.height,deviceScaleFactor:viewport.scale,mobile:viewport.mobile});await cdp.call('Page.navigate',{url:server.url});
+    if (!development) {
+      await cdp.evaluate(`new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('service worker did not take control')), 30000);
+        const controlled = () => { if (navigator.serviceWorker.controller) { clearTimeout(timeout); resolve(); } };
+        navigator.serviceWorker.addEventListener('controllerchange', controlled);
+        controlled();
+      })`);
+      await cdp.prepareWorker();
+      await cdp.evaluate('globalThis.__smokeBeforeReload = true');
+      await cdp.call('Page.reload');
+      const reloadDeadline = Date.now() + 30000;
+      while (true) {
+        try { if (await cdp.evaluate('!globalThis.__smokeBeforeReload && document.readyState === "complete"')) break; } catch {}
+        if (Date.now() > reloadDeadline) throw new Error('controlled page reload did not complete');
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
     const deadline=Date.now()+180000;
     let ready=false;
     while(Date.now()<deadline){try{const page=JSON.parse(await cdp.evaluate("JSON.stringify({ready:document.querySelector('#puppet')?.getAttribute('aria-disabled')==='false',status:document.querySelector('#status')?.textContent,error:document.querySelector('#status')?.classList.contains('err')})"));ready=page.ready;if(ready)break;if(page.error)throw new Error(`page connection failed: ${page.status}`)}catch(error){if(error.message?.startsWith('page connection failed:'))throw error}await new Promise((resolve)=>setTimeout(resolve,250));}

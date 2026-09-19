@@ -522,3 +522,38 @@ test('expired idle dwell cannot interrupt a clip gesture or retain its gesture m
   runtime.updatePose(2001);
   assert.equal(runtime.clipAction.getClip().name, 'idle', 'actual idle clips must still rotate');
 });
+
+test('interrupting a long seated fade removes every seated contribution by the new fade deadline', () => {
+  const scene = new THREE.Group();
+  scene.position.y = 1;
+  const clip = (name, height) => {
+    const value = new THREE.AnimationClip(name, 1, [new THREE.NumberKeyframeTrack('.position[y]', [0], [height])]);
+    value.userData.action = name;
+    return value;
+  };
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+    vrm: { scene }, mixer: new THREE.AnimationMixer(scene),
+    clips: new Map([['sit', clip('sit', 0.5)], ['sit-idle', clip('sit-idle', 0.5)], ['idle', clip('idle', 1)]]),
+    handovers: new Map([['sit:sit-idle', { duration: 2, offset: 0 }]]),
+  });
+  runtime.playClip('sit', 'sit');
+  runtime.mixer.update(0.3);
+  const seated = runtime.clipAction;
+  runtime.playClip('sit-idle', 'sit-idle');
+  runtime.mixer.update(0.1);
+  const seatedIdle = runtime.clipAction;
+  const before = [seated.getEffectiveWeight(), seatedIdle.getEffectiveWeight()];
+  runtime.pose('listen');
+  runtime.mixer.update(0.001);
+  const interruptedWeight = seatedIdle.getEffectiveWeight();
+  runtime.mixer.update(0.2);
+  assert.equal(seated.getEffectiveWeight(), 0, 'older seated action must finish fading at the new deadline');
+  assert.equal(seatedIdle.getEffectiveWeight(), 0);
+  assert.ok(interruptedWeight <= before[1], 'interrupting a fade must not increase an outgoing action weight');
+  assert.equal(runtime.poseName, 'listen');
+  assert.ok(Math.abs(scene.position.y - 1) < 1e-6, 'rendered height must contain no remaining seated contribution');
+  runtime.pose('sit');
+  runtime.mixer.update(0.2);
+  assert.equal(runtime.clipAction.getEffectiveWeight(), 1, 'reused actions must recover full weight');
+  assert.ok(Math.abs(scene.position.y - 0.5) < 1e-6);
+});

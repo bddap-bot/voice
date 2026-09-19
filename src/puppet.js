@@ -450,8 +450,11 @@ export class PuppetRuntime {
     const previous = this.clipAction;
     const handover = previous && this.handovers?.get(`${previous.getClip().userData.action}:${name}`);
     const duration = handover?.duration ?? 0.18;
-    previous?.fadeOut(duration);
-    const action = this.mixer.clipAction(clip, this.vrm.scene).reset();
+    for (const outgoingClip of this.clips.values()) {
+      const outgoing = this.mixer.existingAction(outgoingClip, this.vrm.scene);
+      if (outgoing?.isScheduled()) outgoing.setEffectiveWeight(outgoing.getEffectiveWeight()).fadeOut(duration);
+    }
+    const action = this.mixer.clipAction(clip, this.vrm.scene).reset().setEffectiveWeight(1);
     if (handover) action.time = handover.offset;
     action.fadeIn(duration).play();
     (this.animationActions ??= new Set()).add(action);

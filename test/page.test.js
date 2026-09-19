@@ -351,7 +351,7 @@ runtime.vrm = { update() {} };
 runtime.animate(0);
 runtime.pause();
 const beforePlayable = renders;
-runtime.clipAction = { isRunning: () => true };
+runtime.clipAction = { isRunning: () => true, getClip: () => null };
 runtime.animate(16);
 runtime.pause();
 document.body.dataset.visibilityTest = JSON.stringify({ beforePlayable, afterPlayable: renders });

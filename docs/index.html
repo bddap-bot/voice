@@ -108,7 +108,7 @@
     <canvas id="puppet" role="button" tabindex="0" aria-pressed="false" aria-label="start conversation" aria-disabled="true"></canvas>
     <label class="puppet-picker">appearance <select id="puppet-choice" aria-label="puppet appearance"></select></label>
     <div id="puppet-credit"></div>
-    <div id="elapsed" aria-live="polite">00:00 / 30:00</div>
+    <div id="elapsed" aria-live="polite">00:00</div>
     <button id="mic-mute" type="button" aria-pressed="false" disabled>Mute mic</button>
     <section class="share" aria-label="send text or image">
       <textarea id="share-text" maxlength="8192" placeholder="Paste text, a URL, or an image"></textarea>
@@ -382,11 +382,6 @@ async function listen(mine) {
           persistenceUploads.fail(key, result.retryable !== false);
           if (result.retryable === false) recordPageError(new Error(result.message));
         }
-      }
-      else if (verb === 'cap') {
-        const capped = JSON.parse(body);
-        if (isOfferFor(conversation, capped)) await stopConversation('billing cap reached — conversation stopped');
-        else if (isOfferFor(starting, capped)) cancelStarting('billing cap reached — conversation stopped');
       }
       else if (verb === 'error') {
         answerWaiter?.reject(new Error(body));
@@ -735,7 +730,7 @@ function onLiveEvent(message, source) {
   else if (event.type === 'session.usage.updated') usageSeconds = Number(event.usage?.seconds ?? usageSeconds);
   else if (event.type === 'session.closed') {
     usageSeconds = Number(event.usage?.seconds ?? usageSeconds);
-    if (source === conversation?.channel) stopConversation('', true);
+    if (source === conversation?.channel) stopConversation('Session ended — tap to continue', true);
     else cancelStarting();
   }
 }
@@ -814,7 +809,7 @@ function paintOff() {
   listeningDriver.reset();
   puppetRuntime?.waiting(false);
   puppetRuntime?.pose('sit');
-  $('elapsed').textContent = '00:00 / 30:00';
+  $('elapsed').textContent = '00:00';
   setMicrophoneMuted(false);
   syncPuppetUi();
 }
@@ -859,7 +854,6 @@ async function startConversation() {
       await loadPrivatePuppets();
     }
     if (attempt.cancelled) return;
-    if (!trace.entries.some((entry) => entry.shared && !entry.reply)) trace = new ConversationTrace(render);
 
     render(trace.entries);
     usageSeconds = 0;
@@ -880,6 +874,7 @@ async function startConversation() {
     }, (delegation) => attempt.playback.release(delegation));
     const started = waitData(attempt.channel, (event) => event.type === 'session.started', 30000, attempt);
     started.catch(() => {});
+    attempt.channel.addEventListener('close', () => { if (attempt.channel === conversation?.channel) stopConversation('Session ended — tap to continue', true); });
     attempt.channel.addEventListener('message', (event) => onLiveEvent(event, attempt.channel));
     attempt.pc.ontrack = async (event) => {
       try {
@@ -901,7 +896,7 @@ async function startConversation() {
     attempt.offerId = crypto.randomUUID();
     const answerPromise = waitForAnswer(attempt.offerId);
     attempt.offered = true;
-    await sendFrame(`offer\n${JSON.stringify({ id: attempt.offerId, sdp: attempt.pc.localDescription.sdp })}`);
+    await sendFrame(`offer\n${JSON.stringify({ id: attempt.offerId, sdp: attempt.pc.localDescription.sdp, context: trace.context(true) })}`);
     if (attempt.cancelled) {
       cancelOffer(attempt);
       return;
@@ -914,8 +909,7 @@ async function startConversation() {
     if (attempt.cancelled) return;
     conversation = { pc: attempt.pc, channel: attempt.channel, stream: attempt.stream, clock: null, id: attempt.offerId, audioOwner: attempt, transcript: new TranscriptBatcher(attempt.offerId, persistenceUploads, { onTurn: (side, at) => telemetry.add({ kind: 'transcript', session_id: attempt.offerId, name: side, at }) }) };
     startRecorders(attempt, attempt.offerId);
-    const capLabel = formatElapsed(answer.cap_seconds);
-    const clock = new SessionClock({ capSeconds: answer.cap_seconds, onTick: (seconds) => { $('elapsed').textContent = `${formatElapsed(seconds)} / ${capLabel}`; }, onCap: () => stopConversation(`${Math.round(answer.cap_seconds / 60)} minute cap reached — conversation stopped`) });
+    const clock = new SessionClock({ onTick: (seconds) => { $('elapsed').textContent = formatElapsed(seconds); } });
     conversation.clock = clock;
     clock.start();
     puppetRuntime?.pose('listen');

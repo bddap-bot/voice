@@ -139,7 +139,8 @@ export async function send_only(bytes) {
   }
   else if (frame.startsWith('offer\\n')) {
     const offer = JSON.parse(frame.slice(6));
-    deliver(enc.encode('answer\\n' + JSON.stringify({ offer_id: offer.id, sdp: 'answer', cap_seconds: 60 })));
+    globalThis.lastOffer = offer;
+    deliver(enc.encode('answer\\n' + JSON.stringify({ offer_id: offer.id, sdp: 'answer' })));
   }
   else if (frame.startsWith('share\\n')) {
     const metadata = JSON.parse(frame.slice(6, frame.indexOf('\\n', 6)));
@@ -1059,4 +1060,20 @@ window.addEventListener('test-ready', async () => {
 `);
   const encoded = /data-playback-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   assert.deepEqual(JSON.parse(encoded ?? 'null'), { early: 0, pending: 0, calls: [['mood', 'amused'], ['speak', 'Okay.']] }, stderr);
+});
+
+for (const close of ["testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.closed' }) }))", "testChannel.dispatchEvent(new Event('close'))"]) test('provider close offers a fresh session carrying history: ' + close, async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.input_transcript.delta', delta: 'Remember the earlier question.' }) }));
+  ${close};
+  await new Promise(resolve => setTimeout(resolve, 30));
+  const offered = document.querySelector('#status').textContent;
+  document.querySelector('#puppet').click();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  document.body.dataset.resumeTest = JSON.stringify({ offered, active: document.querySelector('#puppet').getAttribute('aria-pressed'), context: lastOffer.context });
+});
+`);
+  const encoded = /data-resume-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { offered: 'Session ended — tap to continue', active: 'true', context: [{ speaker: 'user', text: 'Remember the earlier question.' }] }, stderr);
 });

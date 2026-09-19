@@ -275,13 +275,11 @@ function boundedText(parts, maximum) {
 }
 
 export class SessionClock {
-  constructor({ capSeconds, now = () => Date.now(), every = (...args) => globalThis.setInterval(...args), cancel = (timer) => globalThis.clearInterval(timer), onTick, onCap }) {
-    this.capSeconds = capSeconds;
+  constructor({ now = () => Date.now(), every = (...args) => globalThis.setInterval(...args), cancel = (timer) => globalThis.clearInterval(timer), onTick }) {
     this.now = now;
     this.every = every;
     this.cancel = cancel;
     this.onTick = onTick;
-    this.onCap = onCap;
     this.started = null;
     this.timer = null;
   }
@@ -295,10 +293,6 @@ export class SessionClock {
     if (this.started === null) return;
     const elapsed = (this.now() - this.started) / 1000;
     this.onTick(elapsed);
-    if (elapsed >= this.capSeconds) {
-      this.stop();
-      this.onCap();
-    }
   }
   stop() {
     if (this.timer !== null) this.cancel(this.timer);
@@ -333,11 +327,15 @@ export class ConversationTrace {
     this.pendingTurns[this.pendingTurns.length - 1] += delta;
     this.onChange(this.entries);
   }
+  context(includePending = false) {
+    const context = this.entries.filter((item) => item.kind !== 'delegation' && (includePending || !this.pendingEntries.has(item))).slice(-20).map((item) => ({ speaker: item.kind === 'heard' ? 'user' : 'live', text: item.text }));
+    while (context.length && new TextEncoder().encode(JSON.stringify(context)).length > 8192) context.shift();
+    return context;
+  }
   delegated(id, now = Date.now()) {
     const pending = this.pendingTurns.map((text) => text.trim()).filter(Boolean);
     const sent = boundedText(pending, 8192);
-    const context = this.entries.filter((item) => item.kind !== 'delegation' && !this.pendingEntries.has(item)).slice(-20).map((item) => ({ speaker: item.kind === 'heard' ? 'user' : 'live', text: item.text }));
-    while (context.length && new TextEncoder().encode(JSON.stringify(context)).length > 8192) context.shift();
+    const context = this.context();
     const entry = { kind: 'delegation', id, sent, context, reply: '', timing: null, duration_ms: this.heardAt ? now - this.heardAt : 0 };
     this.entries.push(entry);
     this.pendingTurns = [];

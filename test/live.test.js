@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, SessionClock, TranscriptBatcher, audioFrame, errorEvent, formatElapsed, formatStartError, isOfferFor, shareFrame } from '../docs/live.js';
+import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, TranscriptBatcher, audioFrame, errorEvent, formatElapsed, formatStartError, isOfferFor, shareFrame } from '../docs/live.js';
 
 test('start errors include their name and first stack frame', () => {
   const error = new TypeError('Illegal invocation');
@@ -148,26 +148,7 @@ test('ending voice does not cancel a pending shared request', () => {
   trace.cancel();
   assert.equal(trace.entries[0].reply, '');
   assert.equal(trace.entries[2].reply, 'cancelled');
-});
-
-test('clock displays elapsed minutes and flips off at the configured cap', () => {
-  let now = 1000;
-  let tick;
-  let label;
-  let capped = 0;
-  const clock = new SessionClock({ capSeconds: 30, now: () => now, every: (fn) => { tick = fn; return 42; }, cancel: () => {}, onTick: (seconds) => { label = formatElapsed(seconds); }, onCap: () => { capped++; } });
-  clock.start();
-  assert.equal(label, '00:00');
-  now = 30999;
-  tick();
-  assert.equal(label, '00:29');
-  assert.equal(capped, 0);
-  now = 31000;
-  tick();
-  assert.equal(label, '00:30');
-  assert.equal(capped, 1);
-  tick();
-  assert.equal(capped, 1);
+  assert.deepEqual(trace.context(true), [{ speaker: 'user', text: 'stop voice' }]);
 });
 
 test('timeline preserves every heard and spoken fragment around delegation', () => {

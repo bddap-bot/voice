@@ -498,3 +498,27 @@ test('animation telemetry records changed clip weights and rendered world hip he
   runtime.recordAnimation();
   assert.deepEqual(events[2].clips, []);
 });
+
+test('expired idle dwell cannot interrupt a clip gesture or retain its gesture marker', () => {
+  const scene = new THREE.Group();
+  const clip = (name) => new THREE.AnimationClip(name, 1, [new THREE.NumberKeyframeTrack('.position[y]', [0], [1])]);
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+    vrm: { scene }, mixer: new THREE.AnimationMixer(scene),
+    clips: new Map(['idle', 'idle-2', 'nod'].map((name) => [name, clip(name)])),
+    poseName: 'stand', idleClip: 'idle', nextIdleAt: 0,
+  });
+  runtime.playClip('idle', 'idle');
+  runtime.mixer.update(0.2);
+  runtime.gesture('nod');
+  runtime.mixer.update(0.2);
+  runtime.updatePose(1000);
+  assert.equal(runtime.clipAction.getClip().name, 'nod', 'expired idle dwell must not replace a running nod');
+  assert.equal(runtime.clipGesture, 'nod');
+  runtime.mixer.update(1);
+  runtime.updatePose(2000);
+  assert.equal(runtime.clipGesture, null, 'completed nod must release its gesture marker');
+  assert.equal(runtime.clipAction.getClip().name, 'idle-2');
+  runtime.nextIdleAt = 2000;
+  runtime.updatePose(2001);
+  assert.equal(runtime.clipAction.getClip().name, 'idle', 'actual idle clips must still rotate');
+});

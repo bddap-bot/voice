@@ -503,7 +503,7 @@ export class PuppetRuntime {
     this.moodStarted = performance.now();
   }
   updatePose(now) {
-    if (this.clipAction?.isRunning() && this.clipFallback === this.idleClip && now >= this.nextIdleAt) {
+    if (this.clipAction?.isRunning() && this.clipAction.getClip() === this.clips.get(this.idleClip) && now >= this.nextIdleAt) {
       this.playIdle(now);
       return;
     }

@@ -455,6 +455,19 @@ function appendMarkdown(parent, markdown) {
       else appendFence(parent, line.slice(3).trim(), body.join('\n'));
       continue;
     }
+    if (line.startsWith('|') && /^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?$/.test(lines[index + 1] ?? '')) {
+      const table = document.createElement('table');
+      const head = document.createElement('thead');
+      const body = document.createElement('tbody');
+      while (index < lines.length && lines[index].startsWith('|')) {
+        const header = !head.childNodes.length;
+        const row = document.createElement('tr');
+        const source = lines[index].slice(1).trimEnd().replace(/\|$/, '') + '|';
+        for (const match of source.matchAll(/((?:`[^`]+`|[^|])*)\|/g)) { const cell = document.createElement(header ? 'th' : 'td'); appendInline(cell, match[1].trim()); row.append(cell); }
+        (header ? head : body).append(row); index += header ? 2 : 1;
+      }
+      table.append(head, body); parent.append(table); continue;
+    }
     if (/^[-*] /.test(line)) {
       const list = document.createElement('ul');
       while (index < lines.length && /^[-*] /.test(lines[index])) { const entry = document.createElement('li'); appendInline(entry, lines[index].slice(2)); list.append(entry); index++; }

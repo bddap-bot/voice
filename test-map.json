@@ -32,11 +32,12 @@
         "DESIGN.md"
       ],
       "tests": [
+        "node --test --test-name-pattern='display pipe tables' test/page.test.js",
         "npm test",
         "npm run build",
         "npm run smoke:ci"
       ],
-      "why": "browser assets, build inputs, smoke measurements, baseline, and gate configuration must pass the same browser smoke as CI"
+      "why": "browser assets, build inputs, smoke measurements, baseline, and gate configuration must pass the same browser smoke as CI; display coverage includes table rows, inline links, and pipes inside code"
     },
     {
       "paths": [

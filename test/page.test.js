@@ -1070,3 +1070,34 @@ window.addEventListener('test-ready', () => {
   assert.equal(events.find((event) => event.name === 'input_utterance').detail, 'Please stand.');
   assert.ok(events.every((event) => event.session_id === events[0].session_id && event.at > 0));
 });
+
+test('display pipe tables preserve rows, inline links and pipes inside code', async () => {
+  const markdown = '| Name | Value |\n| :--- | ---: |\n| First | one |\n| Second | two |\nAfter\n\n| Link | Code | Empty |\n| --- | :---: | --- |\n| [docs](https://example.test/docs) | `left|right` | |\n\n| ordinary | prose |\n| not a separator | text |';
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  const enc = new TextEncoder();
+  deliverRelay(enc.encode('display\\n' + JSON.stringify({ markdown: ${JSON.stringify(markdown)} }) + '\\n'));
+  setTimeout(() => {
+    const item = document.querySelector('.display-item');
+    document.body.dataset.tableTest = JSON.stringify({
+      tables: [...item.querySelectorAll('table')].map((table) => ({
+        head: [...table.querySelectorAll('thead tr')].map((row) => [...row.querySelectorAll('th')].map((cell) => cell.textContent)),
+        body: [...table.querySelectorAll('tbody tr')].map((row) => [...row.querySelectorAll('td')].map((cell) => cell.textContent)),
+      })),
+      link: [...item.querySelectorAll('td a')].map((link) => [link.textContent, link.href, link.rel]),
+      code: [...item.querySelectorAll('td code')].map((code) => code.textContent),
+      paragraphs: [...item.querySelectorAll('p')].map((paragraph) => paragraph.textContent),
+    });
+  }, 500);
+});`);
+  const encoded = /data-table-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), {
+    tables: [
+      { head: [['Name', 'Value']], body: [['First', 'one'], ['Second', 'two']] },
+      { head: [['Link', 'Code', 'Empty']], body: [['docs', 'left|right', '']] },
+    ],
+    link: [['docs', 'https://example.test/docs', 'noopener noreferrer']],
+    code: ['left|right'],
+    paragraphs: ['After', '| ordinary | prose |', '| not a separator | text |'],
+  }, stderr);
+});

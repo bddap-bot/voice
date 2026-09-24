@@ -861,7 +861,7 @@ window.addEventListener('test-ready', () => {
 test('completed puppet tool calls execute locally and are acknowledged to Live', async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
-  emitTool('call_1', 'mood', { name: 'amused' });
+  emitTool('call_1', 'perform', { steps: [{ mood: 'amused' }] });
   setTimeout(() => {
     document.body.dataset.toolTest = JSON.stringify({ calls: testPuppet.calls.filter(([name]) => name === 'mood'), events: sentLiveEvents.filter(({ type }) => type === 'response.item.create' || type === 'response.create').map(({ type }) => type) });
   }, 20);
@@ -881,7 +881,7 @@ window.addEventListener('test-ready', async () => {
   };
   event({ type: 'session.input_transcript.delta', delta: 'Nod, then check the weather.' });
   event({ type: 'session.delegation.created', delegation: { id: 'dlg', target: 'responses' } });
-  round('r1', { type: 'function_call', call_id: 'nod_1', name: 'gesture', arguments: JSON.stringify({ name: 'nod' }) });
+  round('r1', { type: 'function_call', call_id: 'nod_1', name: 'perform', arguments: JSON.stringify({ steps: [{ gesture: 'nod' }] }) });
   await pause();
   round('r2', { type: 'function_call', call_id: 'hub_1', name: 'hub', arguments: JSON.stringify({ text: 'check the weather' }) });
   await pause();
@@ -1067,7 +1067,7 @@ window.addEventListener('test-ready', async () => {
   const early = testPuppet.calls.filter(([name]) => name === 'speak').length;
   const nested = (event) => emit({ type: 'response.event', delegation_id: 'd', event });
   nested({ type: 'response.created', response: { id: 'r1' } });
-  nested({ type: 'response.output_item.done', item: { type: 'function_call', call_id: 'a', name: 'mood', arguments: '{"name":"amused"}' } });
+  nested({ type: 'response.output_item.done', item: { type: 'function_call', call_id: 'a', name: 'perform', arguments: '{"steps":[{"mood":"amused"}]}' } });
   nested({ type: 'response.completed', response: { id: 'r1', output: [] } });
   await new Promise(resolve => setTimeout(resolve, 10));
   const pending = testPuppet.calls.filter(([name]) => name === 'speak').length;
@@ -1096,11 +1096,11 @@ window.addEventListener('test-ready', async () => {
   assert.deepEqual(JSON.parse(encoded ?? 'null'), { offered: 'Session ended — tap to continue', active: 'true', context: [{ speaker: 'user', text: 'Remember the earlier question.' }] }, stderr);
 });
 
-test('pose requests reach the trace while animation deltas and input utterances reach session telemetry', async () => {
+test('perform requests reach the trace while animation deltas and input utterances reach session telemetry', async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.delegation.created', delegation: { id: 'pose_probe', target: 'responses' } }) }));
-  emitTool('pose_probe', 'pose', { name: 'sit' });
+  emitTool('pose_probe', 'perform', { steps: [{ pose: 'sit' }] });
   testPuppet.onAnimation({ clips: [{ name: 'sit', weight: 0.5 }], hip_height: 1.2 });
   for (const event of [{ type: 'input_audio_buffer.speech_started' }, { type: 'session.input_transcript.delta', delta: 'Please stand.' }]) {
     testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(event) }));
@@ -1112,7 +1112,7 @@ window.addEventListener('test-ready', () => {
   const { events, tools } = JSON.parse(encoded ?? 'null') ?? {};
   assert.ok(events, stderr);
   assert.equal(events.length, 3);
-  assert.deepEqual(tools.map((span) => Object.fromEntries(span.attributes.map(({ key, value }) => [key, value.stringValue]))), [{ 'tool.name': 'pose', 'tool.arguments': '{"name":"sit"}' }]);
+  assert.deepEqual(tools.map((span) => Object.fromEntries(span.attributes.map(({ key, value }) => [key, value.stringValue]))), [{ 'tool.name': 'perform', 'tool.arguments': '{"steps":[{"pose":"sit"}]}' }]);
   assert.deepEqual(JSON.parse(events.find((event) => event.name === 'animation').detail), { clips: [{ name: 'sit', weight: 0.5 }], hip_height: 1.2 });
   assert.equal(events.find((event) => event.name === 'input_utterance').detail, 'Please stand.');
   assert.ok(events.every((event) => event.session_id === events[0].session_id && event.at > 0));

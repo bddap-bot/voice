@@ -269,7 +269,7 @@ try {
   puppetRuntime = new PuppetRuntime($('puppet'), $('display'));
   puppetRuntime.onAnimation = (state) => recordSession('animation', JSON.stringify(state));
   puppetRuntime.pause();
-  puppetTools = new PuppetTools(puppetRuntime, () => puppetCatalog?.avatars ?? [], () => puppetActive, (id, valid) => showPuppet(id, valid));
+  puppetTools = new PuppetTools(puppetRuntime, () => puppetCatalog?.avatars ?? [], () => puppetActive, (id, valid) => showPuppet(id, valid), sleep);
 } catch (error) {
   console.warn('puppet:', error);
   syncPuppetUi();

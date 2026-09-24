@@ -664,9 +664,10 @@ function wakeable() {
   return listening && puppetReady && !conversation && !starting;
 }
 async function wakeModel() {
-  const model = await new Promise((resolve) => {
-    wakeModelWaiter = resolve;
-    sendFrame('wake-model').catch(() => resolve(null));
+  const model = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('the backend did not answer for its wake model')), 30000);
+    wakeModelWaiter = (value) => { clearTimeout(timer); resolve(value); };
+    sendFrame('wake-model').catch((error) => { clearTimeout(timer); reject(error); });
   });
   if (!model) throw new Error('the backend has no wake model');
   loadHead(model);

@@ -113,7 +113,7 @@ export async function send_only(bytes) {
     const id = JSON.parse(frame.slice(frame.indexOf('\\n') + 1)).id;
     deliver(enc.encode('puppet-selected\\n' + JSON.stringify({ id })));
   }
-  else if (frame === 'wake-model') deliver(enc.encode(globalThis.backendWakeModel === null ? 'wake-model-none' : 'wake-model\\n' + JSON.stringify(globalThis.backendWakeModel ?? testWakeModel)));
+  else if (frame === 'wake-model' && globalThis.backendWakeModel !== 'unanswered') deliver(enc.encode(globalThis.backendWakeModel === null ? 'wake-model-none' : 'wake-model\\n' + JSON.stringify(globalThis.backendWakeModel ?? testWakeModel)));
   else if (frame.startsWith('offer\\n')) {
     const offer = JSON.parse(frame.slice(6));
     globalThis.lastOffer = offer;
@@ -1200,16 +1200,20 @@ for (const [name, served, error] of [
   ['without a backend model', null, 'the backend has no wake model'],
   ['with a backend model for another phrase', { ...demoModel, phrase: 'another phrase' }, 'the backend wake model listens for another phrase: another phrase'],
   ['with a backend model missing its weights', { phrase: WAKE_PHRASE, threshold: 0.9 }, 'invalid wake model'],
-]) test(`${name} the spotter stays off, says so, and a tap still opens a session`, async () => {
+  ['when the backend never answers for its model', 'unanswered', 'the backend did not answer for its wake model'],
+]) test(`${name} the spotter stays off, says so without retrying, and a tap still opens a session`, async () => {
   const result = await runWakePage(`
     const errors = () => telemetryBatches.flat().filter((event) => event.kind === 'error').map((event) => event.message);
     await sleepNow();
     await until(() => errors().length);
+    const requests = count('wake-model');
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const retried = count('wake-model') - requests;
     document.querySelector('#puppet').click();
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
-    return { spotter: Boolean(globalThis.testSpotter), errors: [...new Set(errors())] };
-  `, { setup: `globalThis.backendWakeModel = ${JSON.stringify(served)};` });
-  assert.deepEqual(result, { spotter: false, errors: [error] });
+    return { spotter: Boolean(globalThis.testSpotter), errors: [...new Set(errors())], retried };
+  `, { setup: `globalThis.backendWakeModel = ${JSON.stringify(served)};`, budget: 40000 });
+  assert.deepEqual(result, { spotter: false, errors: [error], retried: 0 });
 });
 
 test('the sleep tool ends the session once speech goes quiet and the puppet falls asleep listening again', async () => {

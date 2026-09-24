@@ -591,8 +591,8 @@ async function train({ phrase, corpus, acavMegabytes, out }) {
   if ((corpus || acavMegabytes) && inside(root, out)) throw new Error('a model trained on recordings or on the non-commercial ACAV100M features stays private; write it outside the repository');
   const rng = random(['train', phrase]);
   const [spokenClips, recorded, devClean, testClean] = await Promise.all([synthetic(phrase), corpus ? real(corpus, phrase) : [], librispeech('dev-clean'), librispeech('test-clean')]);
-  const babble = { label: devClean[1].label, audio: [await devClean[1].audio()] };
-  const heldBabble = { label: testClean[0].label, audio: [await testClean[0].audio()] };
+  const background = async (chapter) => ({ label: chapter.label, audio: [await chapter.audio()] });
+  const [babble, validationBabble, heldBabble] = await Promise.all([devClean[1], devClean[0], testClean[0]].map(background));
   const streams = { train: [], trainNegative: [], validation: [], validationNegative: [], eval: {}, evalNegative: {} };
   const add = (group, name, stream) => { (streams[group][name] ??= []).push(stream); };
   for (const item of spokenClips) {
@@ -606,7 +606,7 @@ async function train({ phrase, corpus, acavMegabytes, out }) {
     } else if (item.split === 'train') streams.trainNegative.push(clipStream([...key, 'clean'], item.clip, [], random(key)));
     else if (item.split === 'validation' && positive) {
       streams.validation.push(clipStream([...key, 'clean'], item.clip, spans, random(key)));
-      streams.validation.push(clipStream([...key, 'validation noise'], item.clip, spans, random([...key, 'validation noise']), babble));
+      streams.validation.push(clipStream([...key, 'validation noise'], item.clip, spans, random([...key, 'validation noise']), validationBabble));
     } else if (item.split === 'validation') streams.validationNegative.push(clipStream([...key, 'clean'], item.clip, [], random(key)));
     else if (positive) {
       add('eval', heldOutVoice, clipStream([...key, 'clean'], item.clip, spans, random(key), null, item.speed));

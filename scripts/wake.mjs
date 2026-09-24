@@ -32,10 +32,13 @@ const LIBRISPEECH = {
   'dev-clean': '76f87d090650617fca0cac8f88b9416e0ebf80350acb97b343a85fa903728ab3',
   'test-clean': '39fde525e59672dc6d1551919b1478f724438a95aa55f874b576be21967e6c23',
 };
+const FEATURES = 'https://huggingface.co/datasets/davidscripka/openwakeword_features/resolve/985bf1b47e7f19c07741af82bfe32d5a9dc56096';
+const VALIDATION_FEATURES = 'a56a8a0f8e0efb91900acc6de4c0cdf4c564842e8475a7d49b36c039e17a690f';
 const VOICES = [...Object.keys(PIPER).filter((name) => name !== 'en_US-libritts_r-medium'), 'espeak-en-us', 'flite-rms', 'flite-slt'];
 const HELD_OUT = new Set(['en_US-ryan-high', 'en_US-amy-medium', 'en_GB-alan-medium', 'en_GB-cori-high', 'flite-slt']);
+const VALIDATION = new Set(['en_US-kristin-medium', 'en_GB-northern_english_male-medium']);
 const SPEEDS = [0.85, 1, 1.2];
-const TRAIN_SPEEDS = [0.9, 1, 1.1];
+const TRAIN_SPEEDS = [0.8, 0.95, 1.1, 1.3];
 const SPEAKERS = 904;
 export const HARVARD = [
   'The birch canoe slid on the smooth planks.', 'Glue the sheet to the dark blue background.', "It's easy to tell the depth of a well.",
@@ -59,6 +62,8 @@ const PRE = Math.round(2.2 * RATE);
 const POST = Math.round(0.8 * RATE);
 const SESSION_GAP_MS = 20 * 60 * 1000;
 const HIDDEN = 32;
+const BLOCK_SECONDS = 600;
+const TARGET_FALSE_ACCEPTS = 0.25;
 
 function hash(value) {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 32);
@@ -166,6 +171,40 @@ export async function synthesize(voice, speed, texts, speaker = null) {
   return clips;
 }
 
+const HALF = Float32Array.from({ length: 65536 }, (_, bits) => {
+  const sign = bits & 0x8000 ? -1 : 1;
+  const exponent = (bits >> 10) & 0x1f;
+  const fraction = bits & 0x3ff;
+  if (exponent === 31) return fraction ? NaN : sign * Infinity;
+  return exponent ? sign * 2 ** (exponent - 15) * (1 + fraction / 1024) : sign * 2 ** -14 * (fraction / 1024);
+});
+
+async function npy(file) {
+  const bytes = await readFile(file);
+  const version = bytes[6];
+  const length = version === 1 ? bytes.readUInt16LE(8) : bytes.readUInt32LE(8);
+  const start = (version === 1 ? 10 : 12) + length;
+  const header = bytes.toString('latin1', version === 1 ? 10 : 12, start);
+  const type = /'descr': '([^']+)'/.exec(header)[1];
+  const shape = /'shape': \(([^)]*)\)/.exec(header)[1].split(',').filter((part) => part.trim()).map(Number);
+  const data = bytes.buffer.slice(bytes.byteOffset + start, bytes.byteOffset + bytes.length);
+  const values = type === '<f4' ? new Float32Array(data, 0, Math.floor(data.byteLength / 4)) : new Uint16Array(data, 0, Math.floor(data.byteLength / 2));
+  const width = shape.slice(1).reduce((product, size) => product * size, 1);
+  return values.subarray(0, Math.floor(values.length / width) * width);
+}
+
+async function acav(megabytes) {
+  const file = path.join(cache, `acav-${megabytes}mb.npy`);
+  if (!existsSync(file)) {
+    const response = await fetch(`${FEATURES}/openwakeword_features_ACAV100M_2000_hrs_16bit.npy`, { headers: { range: `bytes=0-${megabytes * 1024 * 1024 - 1}` } });
+    if (response.status !== 206) throw new Error(`ACAV100M features answered ${response.status}`);
+    await mkdir(cache, { recursive: true });
+    await writeFile(`${file}.part`, Buffer.from(await response.arrayBuffer()));
+    await rename(`${file}.part`, file);
+  }
+  return npy(file);
+}
+
 async function librispeech(set) {
   const archive = await download(`https://www.openslr.org/resources/12/${set}.tar.gz`, LIBRISPEECH[set], path.join(cache, 'librispeech', `${set}.tar.gz`));
   const directory = path.join(cache, 'librispeech', set);
@@ -178,7 +217,7 @@ async function librispeech(set) {
   for (const speaker of (await readdir(speakers)).sort()) {
     for (const chapter of (await readdir(path.join(speakers, speaker))).sort()) {
       const folder = path.join(speakers, speaker, chapter);
-      chapters.push({ key: ['librispeech', set, speaker, chapter], audio: async () => {
+      chapters.push({ key: ['librispeech', set, speaker, chapter], label: `${set} ${speaker}-${chapter}`, audio: async () => {
         const files = (await readdir(folder)).filter((name) => name.endsWith('.flac')).sort();
         const list = path.join(folder, 'concat.txt');
         await writeFile(list, files.map((name) => `file '${path.join(folder, name)}'`).join('\n'));
@@ -315,6 +354,7 @@ async function streamed(audio) {
 }
 
 async function embedded(stream) {
+  if (stream.embeddings) return stream;
   const file = path.join(cache, 'features', `${hash(['from the first embedding', ...stream.key])}.f32`);
   if (existsSync(file)) {
     const bytes = await readFile(file);
@@ -373,40 +413,52 @@ function wakes(stream, streamScores, threshold) {
 function recall(streams, threshold) {
   let detected = 0;
   let total = 0;
+  const missed = [];
   for (const stream of streams) {
     const times = wakes(stream, stream.scores, threshold);
     for (const span of stream.spans) {
       total++;
       if (times.some((at) => at >= span.start / RATE && at <= span.end / RATE + 1)) detected++;
+      else missed.push(stream.label);
     }
   }
-  return { detected, total, rate: total ? detected / total : null };
+  return { detected, total, rate: total ? detected / total : null, missed };
 }
 
 function falseAccepts(streams, threshold) {
-  const events = streams.reduce((sum, stream) => sum + wakes(stream, stream.scores, threshold).length, 0);
+  const accepted = streams.map((stream) => [stream.label, wakes(stream, stream.scores, threshold).length]).filter(([, count]) => count);
+  const events = accepted.reduce((sum, [, count]) => sum + count, 0);
   const hours = streams.reduce((sum, stream) => sum + duration(stream), 0) / 3600;
-  return { events, hours: Number(hours.toFixed(3)), perHour: hours ? Number((events / hours).toFixed(3)) : null };
+  return { events, hours: Number(hours.toFixed(3)), perHour: hours ? Number((events / hours).toFixed(3)) : null, accepted: accepted.map(([label]) => label) };
 }
 
 function encode(values) {
   return Buffer.from(Float32Array.from(values).buffer).toString('base64');
 }
 
-function fit(positives, negatives, rng, steps = 4000) {
+function fit(positives, negatives, rng, windows, steps = 4000) {
   const inputs = WINDOW * WIDTH;
   const index = [];
   negatives.forEach((stream, which) => { for (let at = WINDOW - 1; at < stream.embeddings.length / WIDTH; at++) index.push(which, at); });
   const pairs = Int32Array.from(index);
-  const negativeAt = (pick, out) => windowAt(negatives[pairs[pick * 2]].embeddings, pairs[pick * 2 + 1], out);
-  const count = pairs.length / 2;
+  const streamed = pairs.length / 2;
+  const count = streamed + windows.length / inputs;
+  const negativeAt = (pick, out) => {
+    if (pick < streamed) return windowAt(negatives[pairs[pick * 2]].embeddings, pairs[pick * 2 + 1], out);
+    const base = (pick - streamed) * inputs;
+    for (let i = 0; i < inputs; i++) out[i] = HALF[windows[base + i]];
+    return out;
+  };
   const mean = new Float64Array(inputs);
   const square = new Float64Array(inputs);
-  const sample = [...positives, ...Array.from({ length: Math.min(20000, count) }, () => negativeAt(Math.floor(rng() * count), new Float32Array(inputs)))];
-  for (const window of sample) for (let i = 0; i < inputs; i++) { mean[i] += window[i]; square[i] += window[i] * window[i]; }
+  const probe = new Float32Array(inputs);
+  const samples = positives.length + Math.min(20000, count);
+  const accumulate = (window) => { for (let i = 0; i < inputs; i++) { mean[i] += window[i]; square[i] += window[i] * window[i]; } };
+  positives.forEach(accumulate);
+  for (let drawn = positives.length; drawn < samples; drawn++) accumulate(negativeAt(Math.floor(rng() * count), probe));
   const head = {
-    mean: Float32Array.from(mean, (sum) => sum / sample.length),
-    scale: Float32Array.from(square, (sum, i) => 1 / (Math.sqrt(Math.max(1e-6, sum / sample.length - (mean[i] / sample.length) ** 2)) + 1e-3)),
+    mean: Float32Array.from(mean, (sum) => sum / samples),
+    scale: Float32Array.from(square, (sum, i) => 1 / (Math.sqrt(Math.max(1e-6, sum / samples - (mean[i] / samples) ** 2)) + 1e-3)),
     w1: Float32Array.from({ length: HIDDEN * inputs }, () => gaussian(rng) * Math.sqrt(2 / inputs)),
     b1: new Float32Array(HIDDEN),
     w2: Float32Array.from({ length: HIDDEN }, () => gaussian(rng) * Math.sqrt(1 / HIDDEN)),
@@ -486,7 +538,7 @@ function variants(phrase) {
 }
 
 function clipStream(key, clip, spans, rng, augment = null, speed = null) {
-  return { key, speed, spans: spans.map((span) => ({ start: span.start + PRE, end: span.end + PRE })), audio: async () => placed(augment ? augmented(clip, rng, augment) : clip, rng) };
+  return { key, speed, label: key.filter((part) => part !== null && part !== 'synthetic').join(' '), spans: spans.map((span) => ({ start: span.start + PRE, end: span.end + PRE })), audio: async () => placed(augment ? augmented(clip, rng, augment) : clip, rng) };
 }
 
 async function spoken(voice, speed, texts, speaker = null) {
@@ -495,14 +547,15 @@ async function spoken(voice, speed, texts, speaker = null) {
 
 async function synthetic(phrase) {
   const negatives = [...NEAR_MISS, ...variants(phrase), ...HARVARD];
-  const trainVoices = VOICES.filter((voice) => !HELD_OUT.has(voice));
+  const trainVoices = VOICES.filter((voice) => !HELD_OUT.has(voice) && !VALIDATION.has(voice));
   const heldVoices = VOICES.filter((voice) => HELD_OUT.has(voice));
   const speakers = (keep) => Array.from({ length: SPEAKERS }, (_, speaker) => speaker).filter(keep);
   const jobs = [
     ...trainVoices.flatMap((voice) => TRAIN_SPEEDS.map((speed) => ['train', voice, speed, [phrase], null])),
     ...trainVoices.map((voice) => ['train', voice, 1, negatives, null]),
     ...heldVoices.flatMap((voice) => SPEEDS.map((speed) => ['eval', voice, speed, [phrase, ...negatives], null])),
-    ...speakers((speaker) => speaker % 10 >= 2 && speaker % 3 === 0).map((speaker, index) => ['train', 'en_US-libritts_r-medium', TRAIN_SPEEDS[index % 3], index % 12 ? [phrase] : [phrase, ...negatives], speaker]),
+    ...[...VALIDATION].flatMap((voice) => SPEEDS.map((speed) => ['validation', voice, speed, speed === 1 ? [phrase, ...negatives] : [phrase], null])),
+    ...speakers((speaker) => speaker % 10 >= 2 && speaker % 6 === 0).map((speaker, index) => ['train', 'en_US-libritts_r-medium', TRAIN_SPEEDS[index % TRAIN_SPEEDS.length], index % 6 ? [phrase] : [phrase, ...negatives], speaker]),
     ...speakers((speaker) => speaker % 10 === 1).map((speaker) => ['validation', 'en_US-libritts_r-medium', 1, [phrase], speaker]),
     ...speakers((speaker) => speaker % 10 === 0).map((speaker, index) => ['eval', 'en_US-libritts_r-medium', SPEEDS[index % 3], [phrase], speaker]),
   ];
@@ -519,7 +572,6 @@ async function real(corpus, phrase) {
   const manifest = JSON.parse(await readFile(path.join(corpus, 'manifest.json'), 'utf8'));
   const label = (text) => text?.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
   const clips = manifest.clips.filter((item) => item.phrase === null || label(item.phrase) === label(phrase));
-  if (!clips.some((item) => item.phrase !== null)) throw new Error(`the corpus has no recordings of "${phrase}"`);
   return Promise.all(clips.map(async (item) => ({ ...item, clip: await cached(['real', item.file, (await stat(path.join(corpus, item.file))).mtimeMs], () => decode(['-i', path.join(corpus, item.file)])) })));
 }
 
@@ -528,12 +580,12 @@ function inside(directory, candidate) {
   return !relative.startsWith('..') && !path.isAbsolute(relative);
 }
 
-async function train({ phrase, corpus, out }) {
-  if (corpus && inside(root, out)) throw new Error('a model trained on recordings is private; write it outside the repository');
+async function train({ phrase, corpus, acavMegabytes, out }) {
+  if ((corpus || acavMegabytes) && inside(root, out)) throw new Error('a model trained on recordings or on the non-commercial ACAV100M features stays private; write it outside the repository');
   const rng = random(['train', phrase]);
   const [spokenClips, recorded, devClean, testClean] = await Promise.all([synthetic(phrase), corpus ? real(corpus, phrase) : [], librispeech('dev-clean'), librispeech('test-clean')]);
-  const babble = await Promise.all(devClean.slice(0, 3).map((chapter) => chapter.audio()));
-  const heldBabble = await Promise.all(testClean.slice(0, 3).map((chapter) => chapter.audio()));
+  const babble = [await devClean[0].audio()];
+  const heldBabble = [await testClean[0].audio()];
   const streams = { train: [], trainNegative: [], validation: [], validationNegative: [], eval: {}, evalNegative: {} };
   const add = (group, name, stream) => { (streams[group][name] ??= []).push(stream); };
   for (const item of spokenClips) {
@@ -543,46 +595,60 @@ async function train({ phrase, corpus, out }) {
     const heldOutVoice = item.speaker === null ? 'held-out voices' : 'held-out speakers';
     if (item.split === 'train' && positive) {
       streams.train.push(clipStream([...key, 'clean'], item.clip, spans, random(key)));
-      streams.train.push(clipStream([...key, 'augmented'], item.clip, spans, random([...key, 'augmented']), babble));
-      if (item.speaker === null) streams.train.push(clipStream([...key, 'augmented', 2], item.clip, spans, random([...key, 'augmented', 2]), babble));
+      for (let copy = 1; copy <= (item.speaker === null ? 5 : 1); copy++) streams.train.push(clipStream([...key, 'augmented', copy], item.clip, spans, random([...key, 'augmented', copy]), babble));
     } else if (item.split === 'train') streams.trainNegative.push(clipStream([...key, 'clean'], item.clip, [], random(key)));
-    else if (item.split === 'validation') streams.validation.push(clipStream([...key, 'clean'], item.clip, spans, random(key)));
+    else if (item.split === 'validation' && positive) {
+      streams.validation.push(clipStream([...key, 'clean'], item.clip, spans, random(key)));
+      streams.validation.push(clipStream([...key, 'validation noise'], item.clip, spans, random([...key, 'validation noise']), babble));
+    } else if (item.split === 'validation') streams.validationNegative.push(clipStream([...key, 'clean'], item.clip, [], random(key)));
     else if (positive) {
       add('eval', heldOutVoice, clipStream([...key, 'clean'], item.clip, spans, random(key), null, item.speed));
       add('eval', `${heldOutVoice} in noise and rooms`, clipStream([...key, 'held-out noise'], item.clip, spans, random([...key, 'held-out noise']), heldBabble, item.speed));
     }
-    else add('evalNegative', 'near-miss and Harvard sentences, held-out voices', clipStream([...key, 'clean'], item.clip, [], random(key)));
+    else add('evalNegative', variants(phrase).includes(item.text) ? 'variants of the phrase, held-out voices' : 'Harvard and near-miss sentences, held-out voices', clipStream([...key, 'clean'], item.clip, [], random(key)));
   }
-  for (const [index, color] of ['white', 'pink', 'brown', 'white', 'pink', 'brown'].entries()) {
-    const key = ['noise', color, index];
-    streams.trainNegative.push({ key, audio: async () => noise(30 * RATE, [3e-4, 3e-3, 3e-2][index % 3], random(key), color) });
+  for (const [index, level] of [0, 1e-5, 3e-4, 3e-3, 3e-2, 1e-1].entries()) {
+    for (const color of ['white', 'pink', 'brown']) {
+      const key = ['noise', color, level];
+      streams.trainNegative.push({ key, label: key.join(' '), audio: async () => noise(30 * RATE, level, random([...key, index]), color) });
+    }
   }
   devClean.forEach((chapter, index) => (index % 5 ? streams.trainNegative : streams.validationNegative).push(chapter));
   streams.evalNegative['LibriSpeech test-clean'] = testClean;
+  const realAudio = await npy(await download(`${FEATURES}/validation_set_features.npy`, VALIDATION_FEATURES, path.join(cache, 'validation_set_features.npy')));
+  const block = BLOCK_SECONDS * RATE / CHUNK;
+  for (let start = 0, index = 0; start * WIDTH < realAudio.length; start += block, index++) {
+    const stream = { key: ['validation set', start], label: `validation set from ${(start * CHUNK / RATE / 60).toFixed(0)} min`, first: 0, embeddings: realAudio.subarray(start * WIDTH, Math.min(realAudio.length, (start + block) * WIDTH)) };
+    if (index % 2) add('evalNegative', 'openWakeWord false-positive validation set, odd ten-minute blocks: dinner parties, conversation, reverberated music', stream);
+    else streams.validationNegative.push(stream);
+  }
   for (const item of recorded) {
     const spans = item.phrase === null ? [] : speechSpans(item.clip, 0.9);
     const key = ['real', item.file];
     if (item.split === 'train' && item.phrase !== null) {
       streams.train.push(clipStream([...key, 'clean'], item.clip, spans, random(key)));
       for (const copy of [1, 2]) streams.train.push(clipStream([...key, 'augmented', copy], item.clip, spans, random([...key, copy]), babble));
-    } else if (item.split === 'train') streams.trainNegative.push({ key, audio: async () => item.clip });
+    } else if (item.split === 'train') streams.trainNegative.push({ key, label: item.file, audio: async () => item.clip });
     else if (item.phrase !== null) add('eval', 'recorded session', clipStream([...key, 'clean'], item.clip, spans, random(key)));
-    else add('evalNegative', 'recorded ordinary speech', { key, audio: async () => item.clip });
+    else add('evalNegative', 'recorded ordinary speech', { key, label: item.file, audio: async () => item.clip });
   }
   const extract = async (list) => {
-    const out = await pool(list, 8, (stream) => embedded({ ...stream, key: ['features', ...stream.key] }));
+    const out = await pool(list, 3, (stream) => embedded({ ...stream, key: ['features', ...stream.key] }));
     console.log(`features for ${out.length} streams`);
     return out;
   };
   const positives = (await extract(streams.train)).flatMap(positiveWindows);
-  const negatives = (await extract(streams.trainNegative)).map((stream) => stream.embeddings);
-  console.log(`training on ${positives.length} positive windows and ${negatives.reduce((sum, embeddings) => sum + Math.max(0, embeddings.length / WIDTH - WINDOW + 1), 0)} negative windows`);
-  const head = fit(positives, negatives, rng);
+  const negatives = await extract(streams.trainNegative);
+  console.log(`training on ${positives.length} positive windows and ${negatives.reduce((sum, stream) => sum + windowCount(stream), 0)} negative windows`);
+  const head = fit(positives, negatives, rng, acavMegabytes ? await acav(acavMegabytes) : new Uint16Array(0));
   const scored = async (list) => (await extract(list)).map((stream) => ({ ...stream, scores: scores(head, stream) }));
   const validation = await scored(streams.validation);
   const validationNegative = await scored(streams.validationNegative);
-  const candidates = [0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.97, 0.99].map((threshold) => ({ threshold, recall: recall(validation, threshold).rate, ...falseAccepts(validationNegative, threshold) }));
-  const threshold = (candidates.find((row) => row.perHour <= 1) ?? candidates.at(-1)).threshold;
+  const candidates = [0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.97, 0.99, 0.995, 0.998, 0.999].map((threshold) => {
+    const { events, hours, perHour } = falseAccepts(validationNegative, threshold);
+    return { threshold, recall: recall(validation, threshold).rate, events, hours, perHour };
+  });
+  const threshold = (candidates.find((row) => row.perHour <= TARGET_FALSE_ACCEPTS) ?? candidates.at(-1)).threshold;
   const metrics = { threshold, validation: candidates, recall: {}, falseAccepts: {} };
   for (const [name, list] of Object.entries(streams.eval)) {
     const evaluated = await scored(list);
@@ -611,6 +677,7 @@ export async function ingest(directory, { corpus, phrase, ordinary }) {
   const manifestFile = path.join(corpus, 'manifest.json');
   const manifest = existsSync(manifestFile) ? JSON.parse(await readFile(manifestFile, 'utf8')) : { clips: [] };
   const kind = ordinary ? 'ordinary' : hash(phrase).slice(0, 12);
+  const held = sessions.length - Math.max(1, Math.round(sessions.length / 4));
   for (const [index, session] of sessions.entries()) {
     const id = new Date(session[0].time).toISOString().replace(/[:.]/g, '-');
     await mkdir(path.join(corpus, kind, id), { recursive: true });
@@ -618,17 +685,17 @@ export async function ingest(directory, { corpus, phrase, ordinary }) {
       const relative = path.join(kind, id, file.name);
       await copyFile(path.join(directory, file.name), path.join(corpus, relative));
       manifest.clips = manifest.clips.filter((item) => item.file !== relative);
-      manifest.clips.push({ file: relative, phrase: ordinary ? null : phrase, session: id, split: index === sessions.length - 1 ? 'eval' : 'train' });
+      manifest.clips.push({ file: relative, phrase: ordinary ? null : phrase, session: id, split: index >= held ? 'eval' : 'train' });
     }
   }
   await writeFile(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`);
-  console.log(sessions.map((session, index) => `${index === sessions.length - 1 ? 'eval' : 'train'} session of ${session.length} clips`).join('\n'));
+  console.log(sessions.map((session, index) => `${index >= held ? 'eval' : 'train'} session of ${session.length} clips`).join('\n'));
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const [command, ...args] = process.argv.slice(2);
   const option = (name) => { const at = args.indexOf(name); return at >= 0 ? args[at + 1] : undefined; };
-  if (command === 'train') await train({ phrase: option('--phrase') ?? WAKE_PHRASE, corpus: option('--corpus'), out: path.resolve(option('--out') ?? path.join(root, 'docs/wake/demo.json')) });
+  if (command === 'train') await train({ phrase: option('--phrase') ?? WAKE_PHRASE, corpus: option('--corpus'), acavMegabytes: Number(option('--acav') ?? 0), out: path.resolve(option('--out') ?? path.join(root, 'docs/wake/demo.json')) });
   else if (command === 'ingest') await ingest(args[0], { corpus: option('--corpus'), phrase: option('--phrase'), ordinary: args.includes('--ordinary') });
-  else throw new Error('usage: node scripts/wake.mjs train [--phrase <text>] [--corpus <dir> --out <file>] | ingest <clips> --corpus <dir> (--phrase <text> | --ordinary)');
+  else throw new Error('usage: node scripts/wake.mjs train [--phrase <text>] [--corpus <dir>] [--acav <megabytes>] [--out <file>] | ingest <clips> --corpus <dir> (--phrase <text> | --ordinary)');
 }

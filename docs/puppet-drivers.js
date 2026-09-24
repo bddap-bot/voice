@@ -1,5 +1,3 @@
-import { transformers } from './transformers.js';
-
 const LABELS = {
   none: {
     neutral: ['the available colors are red, green, and blue', 'the choices are small, medium, and large', 'the expressions include happy, sad, angry, and surprised', 'the list includes alpha, beta, gamma, and delta', 'first is setup, second is execution, and third is review'],
@@ -73,7 +71,8 @@ export function webGpuAdapter() {
 }
 
 export async function browserEmbedder() {
-  const { pipeline } = await transformers();
+  const { env, pipeline } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.3');
+  env.allowLocalModels = false;
   const adapter = await webGpuAdapter();
   const extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { dtype: 'q8', device: adapter ? 'webgpu' : 'wasm' });
   return async (texts) => (await extractor(texts, { pooling: 'mean', normalize: true })).tolist();

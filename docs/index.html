@@ -129,8 +129,8 @@ import { PuppetTools } from './puppet-tools.js';
 import { ResponsesTools } from './responses-tools.js';
 import { LivePlayback } from './live-playback.js';
 import { PuppetRuntime } from './puppet.js';
-import { INACTIVITY_MS, NAME, WAKE_PHRASE } from './identity.js';
-import { MISS_SCORE, WAKE_SCORE, startWakeSpotter, wakeScore } from './wake.js';
+import { INACTIVITY_MS, NAME } from './identity.js';
+import { startWakeSpotter } from './wake.js';
 import { disposeRenderer, renderChart, renderMath, renderMermaid } from './lib/render.js';
 
 import config, { configuredToken } from './config.js';
@@ -178,6 +178,7 @@ let microphoneMuted = false;
 let microphone;
 let microphoneStream;
 let spotter;
+let wakeModelWaiter;
 let inactivity;
 const startSpotter = globalThis.__voiceStartSpotter ?? startWakeSpotter;
 const shareWaiters = new Map();
@@ -365,6 +366,8 @@ async function listen(mine) {
         const failure = JSON.parse(body);
         if (isOfferFor(answerWaiter, failure)) answerWaiter.reject(new Error(failure.message));
       }
+      else if (verb === 'wake-model') wakeModelWaiter?.(JSON.parse(body));
+      else if (verb === 'wake-model-none') wakeModelWaiter?.(null);
       else if (verb === 'hub') await receiveHub(JSON.parse(body));
       else if (verb === 'hub-error') await receiveHubError(JSON.parse(body));
       else if (verb === 'share-ok') receiveShare(JSON.parse(body));
@@ -653,9 +656,19 @@ function acquireMicrophone() {
 function wakeable() {
   return puppetReady && !conversation && !starting;
 }
+async function wakeModel() {
+  const answer = new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(undefined), 10000);
+    wakeModelWaiter = (model) => { clearTimeout(timer); resolve(model); };
+  });
+  sendFrame('wake-model').catch(() => wakeModelWaiter(undefined));
+  const model = await answer;
+  recordSession('wake-model', model ? 'private' : model === null ? 'demo' : 'demo, backend did not answer');
+  return model ?? (await fetch('wake/demo.json')).json();
+}
 function listenForWake() {
   if (spotter) return;
-  spotter = acquireMicrophone().then((stream) => startSpotter(stream, heard, wakeable));
+  spotter = Promise.all([acquireMicrophone(), wakeModel()]).then(([stream, model]) => startSpotter(stream, heard, model));
   spotter.catch((error) => { spotter = undefined; recordPageError(error); });
 }
 function closeSpotter() {
@@ -669,18 +682,17 @@ function stopListening() {
   microphoneStream = undefined;
   setMicrophoneMuted(false);
 }
-function heard({ text, error }) {
+function heard({ wake, miss, error }) {
   if (error) {
     recordPageError(new Error(error));
     closeSpotter();
     return;
   }
-  if (typeof text !== 'string' || !wakeable()) return;
-  const match = wakeScore(text, WAKE_PHRASE);
-  if (match.score >= WAKE_SCORE) {
-    recordSession('wake', JSON.stringify(match));
+  if (!wakeable()) return;
+  if (wake) {
+    recordSession('wake', wake.toFixed(3));
     toggleConversation();
-  } else if (match.score >= MISS_SCORE) recordSession('wake-miss', JSON.stringify(match));
+  } else if (miss) recordSession('wake-miss', miss.toFixed(3));
 }
 function stayAwake() {
   clearTimeout(inactivity);

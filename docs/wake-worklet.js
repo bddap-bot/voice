@@ -1,12 +1,19 @@
-import { SpeechSegmenter } from './wake.js';
+import { CHUNK } from './wake.js';
 
 class WakeCapture extends AudioWorkletProcessor {
   constructor() {
     super();
-    this.segmenter = new SpeechSegmenter(sampleRate);
+    this.chunk = new Float32Array(CHUNK);
+    this.filled = 0;
   }
   process([input]) {
-    for (const segment of this.segmenter.push(input[0] ?? [])) this.port.postMessage(segment, [segment.buffer]);
+    for (const sample of input[0] ?? []) {
+      this.chunk[this.filled++] = sample;
+      if (this.filled < CHUNK) continue;
+      this.port.postMessage(this.chunk, [this.chunk.buffer]);
+      this.chunk = new Float32Array(CHUNK);
+      this.filled = 0;
+    }
     return true;
   }
 }

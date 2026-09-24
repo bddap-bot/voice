@@ -1,28 +1,26 @@
-import { transformers } from './transformers.js';
-import { WAKE_MODEL } from './wake.js';
+import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.wasm.min.mjs';
+import { WakeDecision, headScore, loadHead, wakeFeatures } from './wake.js';
 
-const recognizer = transformers().then(({ pipeline }) => pipeline('automatic-speech-recognition', WAKE_MODEL.id, { dtype: WAKE_MODEL.dtype, device: 'wasm' }));
-let next = null;
-let running = false;
+ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
+let detect;
+let queue = Promise.resolve();
+const fail = (error) => postMessage({ error: String(error?.stack ?? error) });
 
-recognizer.then(() => postMessage({ ready: true }), (error) => postMessage({ error: String(error?.stack ?? error) }));
+async function start(model) {
+  const features = (await wakeFeatures(ort, (name) => ort.InferenceSession.create(new URL(`./wake/${name}.onnx`, import.meta.url).href)))();
+  const head = loadHead(model);
+  const decision = new WakeDecision(head);
+  detect = async (chunk) => {
+    const window = await features.push(chunk);
+    return window && decision.decide(headScore(head, window));
+  };
+  postMessage({ ready: true });
+}
 
 onmessage = ({ data }) => {
-  next = data;
-  if (!running) transcribe();
+  if (data.model) return void start(data.model).catch(fail);
+  queue = queue.then(async () => {
+    const event = detect && await detect(data);
+    if (event) postMessage(event);
+  }).catch(fail);
 };
-
-async function transcribe() {
-  running = true;
-  try {
-    const recognize = await recognizer;
-    while (next) {
-      const audio = next;
-      next = null;
-      postMessage({ text: (await recognize(audio)).text });
-    }
-  } catch (error) {
-    postMessage({ error: String(error?.stack ?? error) });
-  }
-  running = false;
-}

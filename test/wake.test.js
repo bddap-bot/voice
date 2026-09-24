@@ -1,72 +1,115 @@
 import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { MISS_SCORE, SpeechSegmenter, WAKE_SCORE, wakeScore } from '../docs/wake.js';
+import { WAKE_PHRASE } from '../docs/identity.js';
+import { CHUNK, RATE, WIDTH, WINDOW, WakeDecision, WakeFeatures, headScore, loadHead, wakeFeatures } from '../docs/wake.js';
+import { ingest, speechSpans } from '../scripts/wake.mjs';
 
-const phrase = 'Hey Corvus, wake up.';
-const rate = 16000;
-
-function tone(seconds, amplitude = 0.2) {
-  return Float32Array.from({ length: Math.round(seconds * rate) }, (_, index) => amplitude * Math.sin(index / 5));
+function chunk(value) {
+  return new Float32Array(CHUNK).fill(value);
 }
 
-function silence(seconds) {
-  return new Float32Array(Math.round(seconds * rate));
-}
+test('streaming features pass int16-scaled audio with context and slide one embedding per chunk', async () => {
+  const seen = [];
+  const features = new WakeFeatures(
+    async (audio) => {
+      seen.push([audio.length, audio[0], audio.at(-1)]);
+      return new Float32Array(8 * 32).fill(audio.at(-1) * 10);
+    },
+    async (frames) => new Float32Array(WIDTH).fill(frames.at(-1)),
+  );
+  const windows = [];
+  for (let index = 0; index < 30; index++) windows.push(await features.push(chunk((index + 1) / 1000)));
+  assert.deepEqual(seen[1], [480 + CHUNK, Math.fround(Math.fround(1 / 1000) * 32767), Math.fround(Math.fround(2 / 1000) * 32767)]);
+  const first = windows.findIndex(Boolean);
+  assert.equal(first, 9 + WINDOW - 1);
+  const window = windows[29];
+  assert.equal(window.length, WINDOW * WIDTH);
+  const last = (index) => (index + 1) / 1000 * 32767 * 10 / 10 + 2;
+  assert.ok(Math.abs(window[WINDOW * WIDTH - 1] - last(29)) < 1e-3);
+  assert.ok(Math.abs(window[0] - last(29 - WINDOW + 1)) < 1e-3);
+});
 
-function segments(...parts) {
-  const segmenter = new SpeechSegmenter(rate);
-  return parts.flatMap((part) => segmenter.push(part));
-}
+test('a head scores the standardized window through one hidden layer', () => {
+  const encoded = (values) => Buffer.from(Float32Array.from(values).buffer).toString('base64');
+  const inputs = WINDOW * WIDTH;
+  const head = loadHead({
+    mean: encoded(new Array(inputs).fill(1)),
+    scale: encoded(new Array(inputs).fill(2)),
+    w1: encoded([...new Array(inputs).fill(0.001), ...new Array(inputs).fill(-0.001)]),
+    b1: encoded([0.5, 0.25]),
+    w2: encoded([2, 3]),
+    b2: -1,
+  });
+  const window = new Float32Array(inputs).fill(1.5);
+  const hidden = [0.5 + inputs * 0.001, Math.max(0, 0.25 - inputs * 0.001)];
+  assert.ok(Math.abs(headScore(head, window) - 1 / (1 + Math.exp(-(-1 + 2 * hidden[0] + 3 * hidden[1])))) < 1e-5);
+});
 
-test('the phrase wakes even when the name is misheard or the phrase sits inside other speech', () => {
-  for (const heard of [' Hey Corvus, wake up.', ' Hey, Coravus, wake up!', ' Hey Caravus, wake up!', 'Hey chorus, wake up', ' Okay so, hey Corvus, wake up please.']) {
-    assert.ok(wakeScore(heard, phrase).score >= WAKE_SCORE, heard);
+test('crossing the threshold wakes once and then rests for two seconds', () => {
+  const decision = new WakeDecision({ threshold: 0.9, miss: 0.45 });
+  const events = [0.1, 0.95, 0.99, ...new Array(24).fill(0.99), 0.98].map((score) => decision.decide(score));
+  assert.deepEqual(events.filter(Boolean), [{ wake: 0.95 }, { wake: 0.98 }]);
+  assert.equal(events.indexOf(events.find((event) => event?.wake === 0.98)), 27);
+});
+
+test('an episode that peaks between the miss level and the threshold is one logged miss', () => {
+  const decision = new WakeDecision({ threshold: 0.9, miss: 0.45 });
+  const events = [0.2, 0.5, 0.8, 0.6, 0.3, 0.1].map((score) => decision.decide(score)).filter(Boolean);
+  assert.deepEqual(events, [{ miss: 0.8 }]);
+});
+
+test('repetitions separated by pauses become one span each and a pause inside a repetition does not split it', () => {
+  const tone = (seconds) => Float32Array.from({ length: Math.round(seconds * RATE) }, (_, index) => 0.3 * Math.sin(index / 7));
+  const quiet = (seconds) => new Float32Array(Math.round(seconds * RATE));
+  const audio = Float32Array.from([...quiet(0.5), ...tone(0.6), ...quiet(0.3), ...tone(0.5), ...quiet(1.5), ...tone(1), ...quiet(1.5), ...tone(0.8), ...quiet(0.5)]);
+  const spans = speechSpans(audio, 0.9);
+  assert.equal(spans.length, 3);
+  assert.ok(Math.abs(spans[0].start / RATE - 0.5) < 0.03 && Math.abs(spans[0].end / RATE - 1.9) < 0.03);
+});
+
+test('ingestion splits clips into sessions by time and holds the latest session out for evaluation', async () => {
+  const scratch = await mkdtemp(path.join(os.tmpdir(), 'wake-ingest-'));
+  try {
+    const clips = path.join(scratch, 'clips');
+    const corpus = path.join(scratch, 'corpus');
+    await mkdir(clips);
+    const start = Date.parse('2030-01-01T00:00:00Z');
+    for (const [name, minutes] of [['a.ogg', 0], ['b.ogg', 2], ['c.ogg', 90], ['d.ogg', 200], ['e.ogg', 203]]) {
+      await writeFile(path.join(clips, name), name);
+      await utimes(path.join(clips, name), new Date(start + minutes * 60000), new Date(start + minutes * 60000));
+    }
+    await ingest(clips, { corpus, phrase: WAKE_PHRASE, ordinary: false });
+    const manifest = JSON.parse(await readFile(path.join(corpus, 'manifest.json'), 'utf8'));
+    assert.deepEqual(manifest.clips.map(({ file, split }) => [path.basename(file), split]), [['a.ogg', 'train'], ['b.ogg', 'train'], ['c.ogg', 'train'], ['d.ogg', 'eval'], ['e.ogg', 'eval']]);
+    assert.equal(new Set(manifest.clips.map(({ session }) => session)).size, 3);
+    assert.ok(manifest.clips.every(({ phrase }) => phrase === WAKE_PHRASE));
+    await assert.rejects(ingest(clips, { corpus: path.join(process.cwd(), 'corpus'), phrase: WAKE_PHRASE, ordinary: false }), /outside the repository/);
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
   }
-  assert.deepEqual(wakeScore(' Okay so, hey Corvus, wake up please.', phrase), { score: 1, heard: 'hey corvus wake up' });
 });
 
-test('ordinary speech, the bare name and a bare wake up stay below a logged miss', () => {
-  for (const heard of [' I think we should get pizza tonight.', ' Corvus is a genus of birds.', ' It is time to wake up, everyone.', ' Wake up.', ' Hey Corvus.', ' Thanks for watching!', ' [BLANK_AUDIO]', '']) {
-    assert.ok(wakeScore(heard, phrase).score < MISS_SCORE, heard);
+test('batched features equal the streaming features the browser computes, window for window', async () => {
+  const ort = (await import('onnxruntime-node')).default;
+  const create = await wakeFeatures(ort, (name) => ort.InferenceSession.create(fileURLToPath(new URL(`../docs/wake/${name}.onnx`, import.meta.url))));
+  let seed = 7;
+  const noise = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648 - 0.5; };
+  const audio = Float32Array.from({ length: CHUNK * 60 + 300 }, (_, index) => 0.02 * noise() + (index > 20000 && index < 50000 ? 0.3 * Math.sin(index / 9) * Math.sin(index / 2000) : 0));
+  const stream = create();
+  const streamed = [];
+  let first = -1;
+  for (let chunk = 0; chunk < 60; chunk++) {
+    await stream.push(audio.subarray(chunk * CHUNK, (chunk + 1) * CHUNK));
+    if (!stream.count) continue;
+    if (first < 0) first = chunk;
+    streamed.push(...stream.embeddings.subarray((WINDOW - 1) * WIDTH));
   }
-});
-
-test('a near miss scores between a logged miss and a wake and names the words that resembled the phrase', () => {
-  for (const heard of [' Hey carameless, wake up!', ' Hey Google, wake up.']) {
-    const { score } = wakeScore(heard, phrase);
-    assert.ok(score >= MISS_SCORE && score < WAKE_SCORE, `${heard} ${score}`);
-  }
-  assert.equal(wakeScore(' So then, hey Google, wake up, he said.', phrase).heard, 'hey google wake up');
-});
-
-test('silence yields no speech segments', () => {
-  assert.deepEqual(segments(silence(5)), []);
-});
-
-test('an utterance becomes one segment with its lead-in and trailing pause', () => {
-  const found = segments(silence(1), tone(1.2), silence(2));
-  assert.equal(found.length, 1);
-  assert.ok(Math.abs(found[0].length / rate - 2.2) < 0.05, `${found[0].length / rate}`);
-  assert.equal(found[0][0], 0);
-  assert.ok(Math.max(...found[0].subarray(0.3 * rate, 1.5 * rate).map(Math.abs)) > 0.19);
-});
-
-test('a click too short to be speech yields nothing', () => {
-  assert.deepEqual(segments(silence(1), tone(0.1), silence(2)), []);
-});
-
-test('long speech is cut into bounded segments that overlap across each cut', () => {
-  const found = segments(silence(1), tone(20), silence(2));
-  assert.ok(found.length >= 3);
-  for (const segment of found) assert.ok(segment.length <= 8 * rate);
-  for (let index = 1; index < found.length; index++) {
-    assert.deepEqual(found[index].subarray(0, 2 * rate), found[index - 1].subarray(-2 * rate));
-  }
-});
-
-test('steady background noise stops producing segments while louder speech still does', () => {
-  const segmenter = new SpeechSegmenter(rate);
-  assert.ok(segmenter.push(Float32Array.from([...silence(1), ...tone(40, 0.02)])).length > 0);
-  assert.deepEqual(segmenter.push(tone(20, 0.02)), []);
-  assert.equal(segmenter.push(Float32Array.from([...tone(1.2, 0.3), ...tone(2, 0.02)])).length, 1);
+  const batched = await create.all(audio);
+  assert.equal(batched.first, first);
+  assert.equal(batched.embeddings.length, streamed.length);
+  assert.ok(streamed.every((value, index) => Math.abs(value - batched.embeddings[index]) < 1e-4));
 });

@@ -172,8 +172,9 @@ async function runViewport(viewport, executable, server) {
   const args=['--headless=new','--no-sandbox','--disable-background-timer-throttling','--disable-renderer-backgrounding','--hide-scrollbars','--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream','--autoplay-policy=no-user-gesture-required',`--window-size=${viewport.width},${viewport.height}`,`--user-data-dir=${path.join(scratch,'profile')}`,`--remote-debugging-port=${devPort}`,'--remote-debugging-address=127.0.0.1',...(viewport.mobile?['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36']:[]),'about:blank'];
   const chrome=spawn(executable,args,{stdio:['ignore','ignore','pipe']});
   let chromeError='';chrome.stderr.on('data',(chunk)=>{chromeError+=chunk});
-  const cdp=await connectCdp(devPort);
+  let cdp;
   try {
+    cdp=await connectCdp(devPort);
     if (development) await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `
       globalThis.__smokeLiveChannels = [];
       globalThis.__smokeSpeech = ${JSON.stringify(speech)};
@@ -281,7 +282,7 @@ async function runViewport(viewport, executable, server) {
     await execute('ffmpeg',['-y','-framerate','2','-i',path.join(output,`${viewport.name}-%03d.png`),'-vf','scale=iw/2:ih/2:flags=lanczos','-t','8',path.join(output,`${viewport.name}.gif`)],{timeout:120000,maxBuffer:1024*1024*10});
     return report;
   } finally {
-    cdp.close();
+    cdp?.close();
     if (chrome.exitCode === null) {
       const exited = new Promise((resolve) => chrome.once('exit', resolve));
       chrome.kill('SIGKILL');

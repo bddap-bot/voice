@@ -300,7 +300,7 @@ export class PuppetRuntime {
     this.clips.set(initialClip.action, preparedClip);
     this.prepareHandovers();
     this.idleRoot.add(vrm.scene);
-    this.playIdle();
+    this.playClip(initialClip.action, initialClip.action);
     return true;
   }
   async loadClips(entries) {
@@ -310,7 +310,7 @@ export class PuppetRuntime {
       this.clips.set(entry.action, clip);
     }
     this.prepareHandovers();
-    this.pose(this.poseName);
+    if (this.poseName === 'sit') this.playClip('sit', 'sit-idle');
   }
   prepareHandovers() {
     this.handovers.clear();
@@ -397,12 +397,11 @@ export class PuppetRuntime {
     if (this.gazeMode === 'panel') this.gazeDestination.copy(this.panelPoint);
   }
   pose(name) {
-    const resolved = name === 'listen' ? 'idle' : name;
-    if (!['sit', 'stand', 'idle'].includes(resolved)) throw new Error(`unknown pose ${name}`);
+    if (!['sit', 'stand', 'listen'].includes(name)) throw new Error(`unknown pose ${name}`);
+    const seated = name === 'sit';
+    const transition = seated !== (this.poseName === 'sit');
     this.poseName = name;
-    const transition = resolved === 'sit' ? 'sit' : resolved === 'stand' ? 'stand' : 'idle';
-    const fallback = resolved === 'sit' ? 'sit-idle' : 'idle';
-    this.playClip(transition, fallback);
+    if (transition) this.playClip(seated ? 'sit' : 'stand', seated ? 'sit-idle' : 'idle');
   }
   gesture(name, target) {
     const resolved = name === 'point' && target === 'panel' ? 'point_at' : name;

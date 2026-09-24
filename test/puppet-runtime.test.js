@@ -533,8 +533,8 @@ test('interrupting a long seated fade removes every seated contribution by the n
   };
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
     vrm: { scene }, mixer: new THREE.AnimationMixer(scene),
-    clips: new Map([['sit', clip('sit', 0.5)], ['sit-idle', clip('sit-idle', 0.5)], ['idle', clip('idle', 1)]]),
-    handovers: new Map([['sit:sit-idle', { duration: 2, offset: 0 }]]),
+    clips: new Map([['sit', clip('sit', 0.5)], ['sit-idle', clip('sit-idle', 0.5)], ['stand', clip('stand', 1)]]),
+    handovers: new Map([['sit:sit-idle', { duration: 2, offset: 0 }]]), poseName: 'sit',
   });
   runtime.playClip('sit', 'sit');
   runtime.mixer.update(0.3);
@@ -556,6 +556,41 @@ test('interrupting a long seated fade removes every seated contribution by the n
   runtime.mixer.update(0.2);
   assert.equal(runtime.clipAction.getEffectiveWeight(), 1, 'reused actions must recover full weight');
   assert.ok(Math.abs(scene.position.y - 0.5) < 1e-6);
+});
+
+test('a posture already held never replays or restarts a clip, so the hips hold their idle', async () => {
+  const model = new THREE.Group();
+  const hips = new THREE.Bone();
+  hips.position.y = 1.6;
+  model.add(hips);
+  const clip = (name, times, heights) => {
+    const value = new THREE.AnimationClip(name, times.at(-1), [new THREE.VectorKeyframeTrack(`${hips.uuid}.position`, times, heights.flatMap((height) => [0, height, 0]))]);
+    value.userData.action = name;
+    return [name, value];
+  };
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+    vrm: { scene: model }, mixer: new THREE.AnimationMixer(model), handovers: new Map(), poseName: 'sit',
+    clips: new Map([clip('idle', [0, 1], [1.4, 1.4]), clip('sit-idle', [0, 1], [0.75, 0.75]), clip('sit', [0, 0.5, 0.8], [1.4, 0.75, 0.75]), clip('stand', [0, 0.5, 0.8], [0.75, 1.4, 1.4])]),
+  });
+  const hipHeights = (seconds) => Array.from({ length: seconds * 60 }, (_, frame) => {
+    runtime.mixer.update(1 / 60);
+    runtime.updatePose(frame * 1000 / 60);
+    return hips.position.y;
+  });
+  runtime.playClip('idle', 'idle');
+  await runtime.loadClips([]);
+  assert.equal(runtime.clipAction.getClip().name, 'sit', 'a seated puppet sits down from the standing idle it loads in');
+  hipHeights(3);
+  runtime.pose('stand');
+  hipHeights(3);
+  for (const [request, repeat] of [['stand', () => runtime.pose('stand')], ['listen', () => runtime.pose('listen')], ['clip reload', () => runtime.loadClips([])]]) {
+    repeat();
+    assert.ok(hipHeights(2).every((height) => Math.abs(height - 1.4) < 0.01), `${request} while standing must hold the standing idle`);
+  }
+  runtime.pose('sit');
+  hipHeights(3);
+  runtime.pose('sit');
+  assert.ok(hipHeights(2).every((height) => Math.abs(height - 0.75) < 0.01), 'sit while seated must hold the seated idle');
 });
 
 test('asleep holds the eyes shut under a sleepy droop and waking reopens them and clears the droop', () => {

@@ -283,11 +283,7 @@ async function runViewport(viewport, executable, server) {
     return report;
   } finally {
     cdp?.close();
-    if (chrome.exitCode === null) {
-      const exited = new Promise((resolve) => chrome.once('exit', resolve));
-      chrome.kill('SIGKILL');
-      await exited;
-    }
+    if (chrome.kill('SIGKILL')) await new Promise((resolve) => chrome.once('exit', resolve));
     for (let attempt = 0; attempt < 5; attempt++) {
       try { await rm(scratch,{recursive:true,force:true,maxRetries:3,retryDelay:100}); break; }
       catch (error) { if (attempt === 4) throw error; await new Promise((resolve) => setTimeout(resolve, 250)); }

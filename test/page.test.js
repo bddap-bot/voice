@@ -1274,6 +1274,20 @@ test('a relay lost before the wake model arrives leaves the spotter off and says
   assert.deepEqual(result, { spotter: false, errors: ['relay closed'] });
 });
 
+test('a reconnect that fails asks for no wake model on a connection nobody reads', async () => {
+  const result = await runWakePage(`
+    await sleepNow();
+    loseRelay(new Error('relay closed'));
+    await until(() => telemetryBatches.flat().some((event) => event.kind === 'error'));
+    const requests = count('wake-model');
+    deliverRelay(new TextEncoder().encode(JSON.stringify({ ok: false })));
+    document.querySelector('#puppet').click();
+    await until(() => document.querySelector('#status').textContent.startsWith('conversation could not start'));
+    return { requests: count('wake-model') - requests };
+  `, { setup: "globalThis.backendWakeModel = 'unanswered';" });
+  assert.deepEqual(result, { requests: 0 });
+});
+
 test('the sleep tool ends the session once speech goes quiet and the puppet falls asleep listening again', async () => {
   const result = await runWakePage(`
     const { LivePlayback } = await import('/live-playback.js');

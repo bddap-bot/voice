@@ -679,7 +679,7 @@ async function wakeModel() {
   return model;
 }
 function listenForWake() {
-  if (spotter || !listening) return;
+  if (spotter || !listening || !connected) return;
   const current = spotter = Promise.all([acquireMicrophone(), wakeModel()]).then(([stream, model]) => startSpotter(stream, heard, model));
   current.catch((error) => {
     if (spotter !== current) return;

@@ -1,4 +1,4 @@
-export const WAKE_MODEL = { id: 'onnx-community/whisper-tiny.en', dtype: 'q8' };
+export const WAKE_MODEL = { id: 'onnx-community/whisper-base.en', dtype: 'q8' };
 export const WAKE_SCORE = 0.8;
 export const MISS_SCORE = 0.6;
 

@@ -9,6 +9,8 @@ import { assessSmoke, clipClearsStage, evidenceRegion, installSmokeMeasurements,
 
 const execute = promisify(execFile);
 import { serveDevelopment } from './dev.mjs';
+import { WAKE_PHRASE } from '../docs/identity.js';
+import { farewell, ordinarySpeech, synthesize } from '../test/speech.js';
 
 const development = process.argv.includes('--dev');
 const mode = (development || process.argv.includes('--private')) ? 'private' : 'public';
@@ -19,7 +21,10 @@ if (development && deployed) throw new Error('--dev and --deployed are exclusive
 const neutralSilhouette = mode === 'public';
 const transitions = mode === 'private' && !live
   ? ["__smokeRuntime.pose('stand')", "__smokeRuntime.pose('sit')"]
+  : live ? ['__smokeSay(__smokeSpeech.wake)', '__smokeSay(__smokeSpeech.farewell)']
   : ["document.querySelector('#puppet').click()", "document.querySelector('#puppet').click()"];
+const spoken = async (text) => (await synthesize(text)).toString('base64');
+const speech = live ? { wake: await spoken(WAKE_PHRASE), farewell: await spoken(farewell), ordinary: await Promise.all(ordinarySpeech.map(spoken)) } : null;
 const outputFlag = process.argv.indexOf('--output');
 const output = path.resolve(outputFlag >= 0 ? process.argv[outputFlag + 1] : 'smoke-artifacts');
 const durationFlag = process.argv.indexOf('--duration');
@@ -156,13 +161,29 @@ async function connectCdp(port) {
 async function runViewport(viewport, executable, server) {
   const scratch = await mkdtemp(path.join(root, '.smoke-'));
   const devPort = await new Promise((resolve) => { const listener=net.createServer().listen(0,'127.0.0.1',()=>{const value=listener.address().port;listener.close(()=>resolve(value))}); });
-  const args=['--headless=new','--no-sandbox','--disable-background-timer-throttling','--disable-renderer-backgrounding','--hide-scrollbars','--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream',`--window-size=${viewport.width},${viewport.height}`,`--user-data-dir=${path.join(scratch,'profile')}`,`--remote-debugging-port=${devPort}`,'--remote-debugging-address=127.0.0.1',...(viewport.mobile?['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36']:[]),'about:blank'];
+  const args=['--headless=new','--no-sandbox','--disable-background-timer-throttling','--disable-renderer-backgrounding','--hide-scrollbars','--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream','--autoplay-policy=no-user-gesture-required',`--window-size=${viewport.width},${viewport.height}`,`--user-data-dir=${path.join(scratch,'profile')}`,`--remote-debugging-port=${devPort}`,'--remote-debugging-address=127.0.0.1',...(viewport.mobile?['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36']:[]),'about:blank'];
   const chrome=spawn(executable,args,{stdio:['ignore','ignore','pipe']});
   let chromeError='';chrome.stderr.on('data',(chunk)=>{chromeError+=chunk});
   const cdp=await connectCdp(devPort);
   try {
     if (development) await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `
       globalThis.__smokeLiveChannels = [];
+      globalThis.__smokeSpeech = ${JSON.stringify(speech)};
+      globalThis.__smokeHeard = [];
+      const microphone = new AudioContext();
+      const destination = microphone.createMediaStreamDestination();
+      navigator.mediaDevices.getUserMedia = async () => destination.stream;
+      globalThis.__smokeSay = async (encoded) => {
+        const source = microphone.createBufferSource();
+        source.buffer = await microphone.decodeAudioData(Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0)).buffer);
+        source.connect(destination);
+        source.start();
+        await new Promise((resolve) => { source.onended = resolve; });
+      };
+      const SpotterWorker = Worker;
+      globalThis.Worker = class extends SpotterWorker {
+        constructor(...args) { super(...args); this.addEventListener('message', ({ data }) => __smokeHeard.push({ ...data, at: Date.now() })); }
+      };
       import(location.origin + "/puppet.js").then(({ PuppetRuntime }) => {
         const load = PuppetRuntime.prototype.load;
         PuppetRuntime.prototype.load = function(...args) { globalThis.__smokeRuntime = this; return load.apply(this, args); };
@@ -171,8 +192,14 @@ async function runViewport(viewport, executable, server) {
       globalThis.RTCPeerConnection = class extends Peer {
         createDataChannel(...args) {
           const channel = super.createDataChannel(...args);
-          const events = []; globalThis.__smokeLiveChannels.push({ channel, events });
-          channel.addEventListener('message', ({ data }) => { const event = JSON.parse(data); if (['session.started', 'session.closed'].includes(event.type)) events.push(event.type); });
+          const record = { channel, events: [], spoken: '', calls: [] }; globalThis.__smokeLiveChannels.push(record);
+          channel.addEventListener('message', ({ data }) => {
+            const event = JSON.parse(data);
+            if (['session.started', 'session.closed'].includes(event.type)) record.events.push(event.type);
+            globalThis.__smokeDebug ??= []; if (!['session.output_audio.delta'].includes(event.type)) __smokeDebug.push(event.type + (event.delta ? ':' + event.delta : '') + (event.error ? ':' + JSON.stringify(event.error) : ''));
+            if (event.type === 'session.output_transcript.delta') record.spoken += event.delta;
+            if (event.event?.type === 'response.output_item.done' && event.event.item?.type === 'function_call') record.calls.push(event.event.item.name);
+          });
           return channel;
         }
       };
@@ -202,13 +229,20 @@ async function runViewport(viewport, executable, server) {
     await cdp.evaluate(`const smokeLimits = ${JSON.stringify(smokeLimits)}; globalThis.__smoke = (${installSmokeMeasurements.toString()})()`);
     const stageGeometry = async () => JSON.parse(await cdp.evaluate("JSON.stringify((() => { const box = document.querySelector('#puppet').getBoundingClientRect(); return { canvas: { left: box.left + scrollX, right: box.right + scrollX, top: box.top + scrollY, bottom: box.bottom + scrollY }, viewport: { x: scrollX, y: scrollY, width: innerWidth, height: innerHeight } }; })())"));
     const region = evidenceRegion({ neutralSilhouette, ...(await stageGeometry()) });
+    if (live) {
+      await cdp.evaluate(`new Promise((resolve, reject) => { const deadline = Date.now() + 300000; const check = () => { const failure = __smokeHeard.find((message) => message.error); if (failure || Date.now() > deadline) return reject(new Error(failure?.error ?? 'wake spotter did not load')); if (__smokeHeard.some((message) => message.ready)) return resolve(); setTimeout(check, 250); }; check(); })`);
+      for (const index of speech.ordinary.keys()) await cdp.evaluate(`__smokeSay(__smokeSpeech.ordinary[${index}]).then(() => new Promise((resolve) => setTimeout(resolve, 2000)))`);
+      await cdp.evaluate(`new Promise((resolve, reject) => { const deadline = Date.now() + 120000; const check = () => { const texts = __smokeHeard.filter((message) => typeof message.text === 'string'); if (texts.length && Date.now() - texts.at(-1).at > 10000) return resolve(); if (Date.now() > deadline) return reject(new Error('the wake spotter did not settle on the ordinary speech')); setTimeout(check, 250); }; check(); })`);
+      if (await cdp.evaluate('__smokeLiveChannels.length')) throw new Error('ordinary speech opened a Live session: ' + await cdp.evaluate('JSON.stringify(__smokeHeard)'));
+    }
     const frames=[];
     let liveSessionOpened = false;
     for(let second=0;second<duration;second++){
       if(second===1){await cdp.evaluate(`${transitions[0]}`);if(mode==='public')await cdp.evaluate(`new Promise(async(resolve)=>{while(!globalThis.__smokeChannel)await new Promise(done=>setTimeout(done,10));const emit=(event)=>__smokeChannel.dispatchEvent(new MessageEvent('message',{data:JSON.stringify(event)}));emit({type:'session.output_transcript.delta',delta:'I will inspect the fixture.',start_ms:0,end_ms:20});emit({type:'session.input_transcript.delta',delta:'Check the fixture stream.'});const wrap=event=>emit({type:'response.event',delegation_id:'fixture',event});wrap({type:'response.created',response:{id:'fixture',output:[]}});wrap({type:'response.output_item.done',item:{type:'function_call',call_id:'fixture',name:'hub',arguments:JSON.stringify({text:'Check the fixture stream.'})}});wrap({type:'response.completed',response:{id:'fixture',output:[]}});setTimeout(resolve,150)})`)}
       if (development && second === 2) {
-        await cdp.evaluate(`new Promise((resolve, reject) => { const deadline = Date.now() + 60000; const check = () => { if (document.querySelector('#puppet').getAttribute('aria-pressed') === 'true') return resolve(); if (Date.now() > deadline || document.querySelector('#status').classList.contains('err')) return reject(new Error(document.querySelector('#status').textContent)); setTimeout(check, 100); }; check(); })`);
+        await cdp.evaluate(`new Promise((resolve, reject) => { const deadline = Date.now() + 60000; const check = () => { if (document.querySelector('#puppet').getAttribute('aria-pressed') === 'true') return resolve(); if (Date.now() > deadline || document.querySelector('#status').classList.contains('err')) return reject(new Error(document.querySelector('#status').textContent + ' heard ' + JSON.stringify((globalThis.__smokeHeard ?? []).map(({ text, error, ready, at }) => [text ?? error ?? ready, at])))); setTimeout(check, 100); }; check(); })`);
         liveSessionOpened = true;
+        await cdp.evaluate(`new Promise((resolve, reject) => { const deadline = Date.now() + 30000; const check = () => { if (__smokeLiveChannels.at(-1).spoken.trim()) return resolve(); if (Date.now() > deadline) return reject(new Error('the woken session did not greet: ' + JSON.stringify(__smokeDebug) + JSON.stringify(__smokeHeard.map(({ text, at }) => [text, at])))); setTimeout(check, 100); }; check(); })`);
       }
       if(second===3)await cdp.evaluate(`document.querySelector('#status').textContent=${JSON.stringify(smokeStatusText)}`);
       if(second===Math.max(8,duration-6)){await cdp.evaluate(`${transitions[1]}`)}
@@ -220,10 +254,11 @@ async function runViewport(viewport, executable, server) {
     }
     if (development) {
       if (!liveSessionOpened) throw new Error('development smoke did not open a Live session');
-      await cdp.evaluate(`new Promise((resolve, reject) => { const deadline = Date.now() + 30000; const check = () => { if (document.querySelector('#mic-mute').disabled && document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && document.querySelector('#puppet').getAttribute('aria-disabled') === 'false') return resolve(); if (Date.now() > deadline) return reject(new Error('Live session did not close')); setTimeout(check, 100); }; check(); })`);
-      const channels = await cdp.evaluate('__smokeLiveChannels.map(({ channel, events }) => ({ events, state: channel.readyState }))');
-      if (!channels.some(({ events, state }) => events.includes('session.started') && state === 'closed')) throw new Error('Live did not start and close its channel: ' + JSON.stringify(channels));
-      const sessions = { channels, endpoint: JSON.parse(Buffer.from(server.token, 'base64url')).endpoint_id, liveSessionOpened, liveSessionClosed: true };
+      await cdp.evaluate(`new Promise((resolve, reject) => { const deadline = Date.now() + 60000; const check = () => { if (document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && document.querySelector('#puppet').getAttribute('aria-disabled') === 'false') return resolve(); if (Date.now() > deadline) return reject(new Error('Live session did not close after the farewell')); setTimeout(check, 100); }; check(); })`);
+      const channels = await cdp.evaluate('__smokeLiveChannels.map(({ channel, events, spoken, calls }) => ({ events, spoken, calls, state: channel.readyState }))');
+      if (channels.length !== 1 || !channels[0].events.includes('session.started') || channels[0].state !== 'closed' || !channels[0].calls.includes('sleep')) throw new Error('the wake phrase did not open one session that the farewell closed through the sleep tool: ' + JSON.stringify(channels));
+      const heard = await cdp.evaluate('__smokeHeard.filter((message) => typeof message.text === "string").map((message) => message.text)');
+      const sessions = { channels, heard, endpoint: JSON.parse(Buffer.from(server.token, 'base64url')).endpoint_id, liveSessionOpened, liveSessionClosed: true };
       await writeFile(path.join(output, `${viewport.name}-connection.json`), JSON.stringify(sessions, null, 2));
     }
     const state=JSON.parse(await cdp.evaluate('JSON.stringify(__smoke.state)'));

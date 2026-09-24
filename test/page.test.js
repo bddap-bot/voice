@@ -36,7 +36,7 @@ test('connection errors identify transport, authentication transport, and token 
 
 test('private smoke poses the puppet directly instead of toggling a conversation on the deployed pair', async () => {
   const source = await readFile(new URL('../scripts/smoke.mjs', import.meta.url), 'utf8');
-  assert.match(source, /const transitions = mode === 'private' && !live\n\s+\? \["__smokeRuntime\.pose\('stand'\)", "__smokeRuntime\.pose\('sit'\)"\]\n\s+: \["document\.querySelector\('#puppet'\)\.click\(\)", "document\.querySelector\('#puppet'\)\.click\(\)"\];/);
+  assert.match(source, /const transitions = mode === 'private' && !live\n\s+\? \["__smokeRuntime\.pose\('stand'\)", "__smokeRuntime\.pose\('sit'\)"\]\n\s+: live \? \['__smokeSay\(__smokeSpeech\.wake\)', '__smokeSay\(__smokeSpeech\.farewell\)'\]\n\s+: \["document\.querySelector\('#puppet'\)\.click\(\)", "document\.querySelector\('#puppet'\)\.click\(\)"\];/);
   assert.equal(source.match(/#puppet'\)\.click\(\)/g).length, 2);
   assert.match(source, /cdp\.evaluate\(`\$\{transitions\[0\]\}/);
   assert.match(source, /cdp\.evaluate\(`\$\{transitions\[1\]\}/);

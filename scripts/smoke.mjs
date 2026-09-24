@@ -27,7 +27,7 @@ async function developmentSpeech() {
   const { HELD_OUT, HELD_OUT_SENTENCES, synthesize } = await import('./wake.mjs');
   const [voice] = HELD_OUT;
   const spoken = async (texts) => (await synthesize(voice, 1, texts)).map((clip) => Buffer.from(clip.buffer, clip.byteOffset, clip.byteLength).toString('base64'));
-  return { wake: (await spoken([WAKE_PHRASE]))[0], farewell: (await spoken([`Thank you, ${NAME}. Goodbye.`]))[0], ordinary: await spoken(HELD_OUT_SENTENCES.slice(0, 8)) };
+  return { wake: (await spoken([WAKE_PHRASE]))[0], farewell: (await spoken([`Goodbye, ${NAME}. Go back to sleep.`]))[0], ordinary: await spoken(HELD_OUT_SENTENCES.slice(0, 8)) };
 }
 const speech = live ? await developmentSpeech() : null;
 const outputFlag = process.argv.indexOf('--output');

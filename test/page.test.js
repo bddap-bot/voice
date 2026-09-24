@@ -6,6 +6,8 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
+import { INACTIVITY_MS, NAME, WAKE_PHRASE } from '../docs/identity.js';
+import { WIDTH, WINDOW } from '../docs/wake.js';
 import { assessSmoke, canvasAspectMatches, clipClearsStage, evidenceRegion, installSmokeMeasurements, smokeLimits, smokeStatusText, smokeViewports } from './smoke-measurements.js';
 
 const execute = promisify(execFile);
@@ -34,13 +36,16 @@ test('connection errors identify transport, authentication transport, and token 
 
 test('private smoke poses the puppet directly instead of toggling a conversation on the deployed pair', async () => {
   const source = await readFile(new URL('../scripts/smoke.mjs', import.meta.url), 'utf8');
-  assert.match(source, /const transitions = mode === 'private' && !live\n\s+\? \["__smokeRuntime\.pose\('stand'\)", "__smokeRuntime\.pose\('sit'\)"\]\n\s+: \["document\.querySelector\('#puppet'\)\.click\(\)", "document\.querySelector\('#puppet'\)\.click\(\)"\];/);
+  assert.match(source, /const transitions = mode === 'private' && !live\n\s+\? \["__smokeRuntime\.pose\('stand'\)", "__smokeRuntime\.pose\('sit'\)"\]\n\s+: live \? \['__smokeSay\(__smokeSpeech\.wake\)', '__smokeSay\(__smokeSpeech\.farewell\)'\]\n\s+: \["document\.querySelector\('#puppet'\)\.click\(\)", "document\.querySelector\('#puppet'\)\.click\(\)"\];/);
   assert.equal(source.match(/#puppet'\)\.click\(\)/g).length, 2);
   assert.match(source, /cdp\.evaluate\(`\$\{transitions\[0\]\}/);
   assert.match(source, /cdp\.evaluate\(`\$\{transitions\[1\]\}/);
 });
 
+const zeros = (length) => Buffer.from(new Float32Array(length).buffer).toString('base64');
+const testWakeModel = { phrase: WAKE_PHRASE, threshold: 0.5, b2: 0, mean: zeros(WINDOW * WIDTH), scale: zeros(WINDOW * WIDTH), w1: zeros(WINDOW * WIDTH), b1: zeros(1), w2: zeros(1) };
 const mockWasm = `
+const testWakeModel = ${JSON.stringify(testWakeModel)};
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 const queued = [enc.encode(JSON.stringify({ ok: true }))];
@@ -60,6 +65,7 @@ export async function init() {}
 export async function connect() {}
 export async function send_only(bytes) {
   const frame = dec.decode(bytes);
+  (globalThis.sentVerbs ??= []).push(frame.split('\\n', 1)[0]);
   if (frame.startsWith('telemetry\\n')) {
     const batch = JSON.parse(frame.slice(frame.indexOf('\\n') + 1));
     globalThis.telemetryBatches.push(batch.events);
@@ -107,6 +113,7 @@ export async function send_only(bytes) {
     const id = JSON.parse(frame.slice(frame.indexOf('\\n') + 1)).id;
     deliver(enc.encode('puppet-selected\\n' + JSON.stringify({ id })));
   }
+  else if (frame === 'wake-model' && globalThis.backendWakeModel !== 'unanswered') deliver(enc.encode(globalThis.backendWakeModel === null ? 'wake-model-none' : 'wake-model\\n' + JSON.stringify(globalThis.backendWakeModel ?? testWakeModel)));
   else if (frame.startsWith('offer\\n')) {
     const offer = JSON.parse(frame.slice(6));
     globalThis.lastOffer = offer;
@@ -134,6 +141,7 @@ export class PuppetRuntime {
   look(...args) { this.calls.push(['look', ...args]); }
   mood(...args) { this.calls.push(['mood', ...args]); }
   waiting(...args) { this.calls.push(['waiting', ...args]); }
+  asleep(...args) { this.calls.push(['asleep', ...args]); }
   listening(...args) { this.calls.push(['listening', ...args]); }
   speak(...args) { this.calls.push(['speak', ...args]); }
   start() {}
@@ -190,11 +198,15 @@ class FakePeerConnection {
   createDataChannel() { this.channel = new FakeChannel(); globalThis.testChannel = this.channel; return this.channel; }
   async createOffer() { return { type: 'offer', sdp: 'offer' }; }
   async setLocalDescription(description) { this.localDescription = description; }
-  async setRemoteDescription() { queueMicrotask(() => this.channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.started' }) }))); }
+  async setRemoteDescription() { queueMicrotask(() => this.channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.started', session: { delegation: { type: 'responses', responses: { tools: [{ type: 'function', name: 'hub' }] } } } }) }))); }
   addTrack() {}
   close() {}
 }
 globalThis.RTCPeerConnection = FakePeerConnection;
+globalThis.__voiceStartSpotter = async (stream, heard, model) => {
+  globalThis.testSpotter = { stream, heard, model, closed: 0 };
+  return { close() { testSpotter.closed++; } };
+};
 globalThis.sentLiveEvents = [];
 window.addEventListener('load', () => {
   const poll = globalThis.setInterval.bind(globalThis);
@@ -675,7 +687,7 @@ window.addEventListener('test-ready', () => {
   const result = JSON.parse(encoded ?? 'null');
   assert.ok(result, stderr);
   const states = result.states;
-  const removed = ['ready', 'opening microphone', 'live', 'conversation off', 'session ended', 'listening', 'waiting for the hub'];
+  const removed = ['ready', 'opening microphone', 'live', 'conversation off', 'session ended', 'listening', 'waiting for the hub', 'asleep', 'awake', 'sleep', 'woken'];
   for (const [state, text] of Object.entries(states)) {
     for (const value of removed) assert.equal(text.toLowerCase().includes(value.toLowerCase()), false, `${viewport.name} ${state} exposes ${value}: ${text}`);
   }
@@ -1100,4 +1112,160 @@ window.addEventListener('test-ready', () => {
     code: ['left|right'],
     paragraphs: ['After', '| ordinary | prose |', '| not a separator | text |'],
   }, stderr);
+});
+
+const untilAsleep = `
+const until = async (check) => { while (!check()) await new Promise((resolve) => setTimeout(resolve, 10)); };
+const count = (verb) => sentVerbs.filter((item) => item === verb).length;
+const sessionEvents = (name) => telemetryBatches.flat().filter((event) => event.kind === 'session' && event.name === name);
+const sleepNow = async () => {
+  document.querySelector('#puppet').click();
+  await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false');
+  testPuppet.calls.length = 0;
+  sentLiveEvents.length = 0;
+};
+`;
+
+async function runWakePage(script, { setup = '', ...options } = {}) {
+  const { stdout, stderr } = await runPage(`${setup}${untilAsleep}
+window.addEventListener('test-ready', async () => {
+  try { document.body.dataset.wakeTest = JSON.stringify(await (async () => { ${script} })()); }
+  catch (error) { document.body.dataset.wakeTest = JSON.stringify({ error: String(error?.stack ?? error) }); }
+});
+`, options);
+  const result = JSON.parse(/data-wake-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"') ?? 'null');
+  assert.ok(result && !result.error, `${result?.error}\n${stderr}`);
+  return result;
+}
+
+test('while asleep, anything short of a wake opens no session, asks the hub nothing and speaks nothing', async () => {
+  const result = await runWakePage(`
+    await sleepNow();
+    const offers = count('offer');
+    for (const miss of [0.2, 0.4, 0.6]) testSpotter.heard({ miss });
+    testSpotter.heard({ ready: true });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return { offers: count('offer') - offers, delegates: count('delegate'), pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), wakes: sessionEvents('wake').length, spoken: testPuppet.calls.filter(([name]) => name === 'speak').length, live: sentLiveEvents.length };
+  `);
+  assert.deepEqual(result, { offers: 0, delegates: 0, pressed: 'false', wakes: 0, spoken: 0, live: 0 });
+});
+
+test('the wake phrase wakes the puppet into one session that learns only its name, its way back to sleep, and that it was woken', async () => {
+  const result = await runWakePage(`
+    await sleepNow();
+    const offers = count('offer');
+    testSpotter.heard({ wake: 0.93 });
+    testSpotter.heard({ wake: 0.95 });
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+    testSpotter.heard({ wake: 0.97 });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return {
+      offers: count('offer') - offers,
+      wakes: sessionEvents('wake').map((event) => event.detail),
+      puppet: testPuppet.calls.filter(([name]) => name === 'asleep' || name === 'pose'),
+      live: sentLiveEvents.map((event) => event.type === 'session.update' ? { type: event.type, tools: event.session.delegation.responses.tools.map((tool) => tool.name) } : { type: event.type, delegation_id: event.delegation_id, content: event.content }),
+    };
+  `);
+  assert.equal(result.offers, 1);
+  assert.deepEqual(result.wakes, ['0.930']);
+  assert.deepEqual(result.puppet, [['asleep', false], ['pose', 'stand'], ['pose', 'listen']]);
+  assert.deepEqual(result.live, [
+    { type: 'session.update', tools: ['hub', 'sleep'] },
+    { type: 'session.instructions.append', delegation_id: null, content: `Your name is ${NAME}. The Responses backend can end this session, which puts you back to sleep.` },
+    { type: 'session.commentary.append', delegation_id: null, content: 'Context: You were just woken.' },
+  ]);
+});
+
+test('a misheard wake phrase is a logged miss that leaves it asleep', async () => {
+  const result = await runWakePage(`
+    await sleepNow();
+    const offers = count('offer');
+    testSpotter.heard({ miss: 0.61 });
+    await until(() => sessionEvents('wake-miss').length);
+    return { offers: count('offer') - offers, pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), misses: sessionEvents('wake-miss').map((event) => event.detail) };
+  `);
+  assert.deepEqual(result, { offers: 0, pressed: 'false', misses: ['0.610'] });
+});
+
+const demoModel = JSON.parse(await readFile(new URL('../scripts/wake-demo.json', import.meta.url), 'utf8'));
+test('the spotter listens with the model the backend serves', async () => {
+  const result = await runWakePage(`
+    await until(() => globalThis.testSpotter);
+    return { threshold: testSpotter.model.threshold, errors: telemetryBatches.flat().filter((event) => event.kind === 'error').map((event) => event.message) };
+  `, { setup: `globalThis.backendWakeModel = ${JSON.stringify({ ...demoModel, threshold: 0.9 })};` });
+  assert.deepEqual(result, { threshold: 0.9, errors: [] });
+});
+
+for (const [name, served, error] of [
+  ['without a backend model', null, 'the backend has no wake model'],
+  ['with a backend model for another phrase', { ...demoModel, phrase: 'another phrase' }, 'the backend wake model listens for another phrase: another phrase'],
+  ['with a backend model missing its weights', { phrase: WAKE_PHRASE, threshold: 0.9 }, 'invalid wake model'],
+  ['when the backend never answers for its model', 'unanswered', 'the backend did not answer for its wake model'],
+]) test(`${name} the spotter stays off, says so without retrying, and a tap still opens a session`, async () => {
+  const result = await runWakePage(`
+    const errors = () => telemetryBatches.flat().filter((event) => event.kind === 'error').map((event) => event.message);
+    await sleepNow();
+    await until(() => errors().length);
+    const requests = count('wake-model');
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const retried = count('wake-model') - requests;
+    document.querySelector('#puppet').click();
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+    return { spotter: Boolean(globalThis.testSpotter), errors: [...new Set(errors())], retried };
+  `, { setup: `globalThis.backendWakeModel = ${JSON.stringify(served)};`, budget: 40000 });
+  assert.deepEqual(result, { spotter: false, errors: [error], retried: 0 });
+});
+
+test('the sleep tool ends the session once speech goes quiet and the puppet falls asleep listening again', async () => {
+  const result = await runWakePage(`
+    const { LivePlayback } = await import('/live-playback.js');
+    let quiet;
+    LivePlayback.prototype.quiet = () => new Promise((resolve) => { quiet = resolve; });
+    emitTool('farewell', 'sleep', {});
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const speaking = document.querySelector('#puppet').getAttribute('aria-pressed');
+    quiet?.();
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && sessionEvents('close').length);
+    return {
+      speaking,
+      sleeps: sessionEvents('sleep').map((event) => event.detail),
+      puppet: testPuppet.calls.filter(([name]) => name === 'asleep').at(-1),
+      microphone: { enabled: testMicrophoneTrack.enabled, button: document.querySelector('#mic-mute').disabled },
+      rewoken: await (async () => { testSpotter.heard({ wake: 0.9 }); await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true'); return true; })(),
+    };
+  `);
+  assert.deepEqual(result, { speaking: 'true', sleeps: ['farewell'], puppet: ['asleep', true], microphone: { enabled: true, button: false }, rewoken: true });
+});
+
+for (const pending of [false, true]) test(`inactivity sleeps only after the generous window${pending ? ', never while a hub request is pending' : ''}`, async () => {
+  const result = await runWakePage(`
+    ${pending ? "emitTool('slow', 'hub', { text: 'Take your time.' });" : ''}
+    await new Promise((resolve) => setTimeout(resolve, ${INACTIVITY_MS - 60000}));
+    const before = document.querySelector('#puppet').getAttribute('aria-pressed');
+    await new Promise((resolve) => setTimeout(resolve, 65000));
+    const after = document.querySelector('#puppet').getAttribute('aria-pressed');
+    ${pending ? `deliverRelay(new TextEncoder().encode('hub\\n' + JSON.stringify({ id: 'slow', reply: 'Done.', timing_ms: 1, stamp: 'slow' })));
+    await new Promise((resolve) => setTimeout(resolve, ${INACTIVITY_MS + 5000}));` : ''}
+    return { before, after, released: document.querySelector('#puppet').getAttribute('aria-pressed'), sleeps: sessionEvents('sleep').map((event) => event.detail) };
+  `, { budget: 2 * INACTIVITY_MS + 30000 });
+  assert.deepEqual(result, pending ? { before: 'true', after: 'true', released: 'false', sleeps: ['inactivity'] } : { before: 'true', after: 'false', released: 'false', sleeps: ['inactivity'] });
+});
+
+test('muting the microphone persists while asleep and into the next session', async () => {
+  const result = await runWakePage(`
+    const state = () => ({ enabled: testMicrophoneTrack.enabled, pressed: document.querySelector('#mic-mute').getAttribute('aria-pressed'), disabled: document.querySelector('#mic-mute').disabled, live: document.querySelector('#puppet').getAttribute('aria-pressed') });
+    document.querySelector('#mic-mute').click();
+    await sleepNow();
+    const asleep = state();
+    document.querySelector('#puppet').click();
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+    const awake = state();
+    document.querySelector('#mic-mute').click();
+    return { asleep, awake, unmuted: state() };
+  `);
+  assert.deepEqual(result, {
+    asleep: { enabled: false, pressed: 'true', disabled: false, live: 'false' },
+    awake: { enabled: false, pressed: 'true', disabled: false, live: 'true' },
+    unmuted: { enabled: true, pressed: 'false', disabled: false, live: 'true' },
+  });
 });

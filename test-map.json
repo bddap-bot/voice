@@ -24,6 +24,8 @@
         "scripts/build.mjs",
         "scripts/dev.mjs",
         "scripts/smoke.mjs",
+        "scripts/wake.mjs",
+        "scripts/wake-demo.json",
         "test/**",
         "package.json",
         "package-lock.json",

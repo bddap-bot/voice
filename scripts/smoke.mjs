@@ -9,6 +9,8 @@ import { assessSmoke, clipClearsStage, evidenceRegion, installSmokeMeasurements,
 
 const execute = promisify(execFile);
 import { serveDevelopment } from './dev.mjs';
+import { NAME, WAKE_PHRASE } from '../docs/identity.js';
+import { RATE } from '../docs/wake.js';
 
 const development = process.argv.includes('--dev');
 const mode = (development || process.argv.includes('--private')) ? 'private' : 'public';
@@ -19,7 +21,15 @@ if (development && deployed) throw new Error('--dev and --deployed are exclusive
 const neutralSilhouette = mode === 'public';
 const transitions = mode === 'private' && !live
   ? ["__smokeRuntime.pose('stand')", "__smokeRuntime.pose('sit')"]
+  : live ? ['__smokeSay(__smokeSpeech.wake)', '__smokeSay(__smokeSpeech.farewell)']
   : ["document.querySelector('#puppet').click()", "document.querySelector('#puppet').click()"];
+async function developmentSpeech() {
+  const { HELD_OUT, HELD_OUT_SENTENCES, synthesize } = await import('./wake.mjs');
+  const [voice] = HELD_OUT;
+  const spoken = async (texts) => (await synthesize(voice, 1, texts)).map((clip) => Buffer.from(clip.buffer, clip.byteOffset, clip.byteLength).toString('base64'));
+  return { wake: (await spoken([WAKE_PHRASE]))[0], farewell: (await spoken([`Goodbye, ${NAME}. Go back to sleep.`]))[0], ordinary: await spoken(HELD_OUT_SENTENCES.slice(0, 8)) };
+}
+const speech = live ? await developmentSpeech() : null;
 const outputFlag = process.argv.indexOf('--output');
 const output = path.resolve(outputFlag >= 0 ? process.argv[outputFlag + 1] : 'smoke-artifacts');
 const durationFlag = process.argv.indexOf('--duration');
@@ -52,6 +62,7 @@ export async function send_only(bytes) {
   else if (value.startsWith('puppet\\n')) { const zipped = new Uint8Array(await new Response(new Blob([new Uint8Array([1])]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer()); const id='neutral'; push(enc.encode('puppet-start\\n'+JSON.stringify({id,size:zipped.length,originalSize:1,contentHash:'neutral',encoding:'gzip'}))); const prefix=enc.encode('puppet-chunk\\n'+id+'\\n'); const chunk=new Uint8Array(prefix.length+zipped.length); chunk.set(prefix); chunk.set(zipped,prefix.length); push(chunk); push(enc.encode('puppet-end\\n'+id)); }
   else if (value.startsWith('track\\n')) { const request=JSON.parse(value.slice(value.indexOf('\\n')+1)); const zipped=new Uint8Array(await new Response(new Blob([new Uint8Array([1])]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer()); push(enc.encode('track-start\\n'+JSON.stringify({id:request.id,size:zipped.length,originalSize:1,contentHash:request.modelHash+'-'+request.clipHash,encoding:'gzip'}))); const prefix=enc.encode('track-chunk\\n'+request.id+'\\n'); const chunk=new Uint8Array(prefix.length+zipped.length); chunk.set(prefix); chunk.set(zipped,prefix.length); push(chunk); push(enc.encode('track-end\\n'+request.id)); }
   else if (value.startsWith('puppet-select\\n')) { const request=JSON.parse(value.slice(value.indexOf('\\n')+1)); push(enc.encode('puppet-selected\\n'+JSON.stringify({id:request.id}))); }
+  else if (value === 'wake-model') push(enc.encode('wake-model-none'));
   else if (value.startsWith('offer\\n')) { const offer=JSON.parse(value.slice(6)); push(enc.encode('answer\\n'+JSON.stringify({offer_id:offer.id,sdp:'answer'}))); }
   else if (value.startsWith('delegate\\n')) { const request=JSON.parse(value.slice(value.indexOf('\\n')+1)); push(enc.encode('hub\\n'+JSON.stringify({id:request.id,reply:'The fixture is complete.',timing_ms:42,stamp:'fixture'}))); }
   else if (value.startsWith('telemetry\\n')) { const batch=JSON.parse(value.slice(value.indexOf('\\n')+1)); push(enc.encode('telemetry-ack\\n'+JSON.stringify({batch_id:batch.batch_id}))); }
@@ -63,14 +74,15 @@ export class PuppetRuntime {
   async load(bytes, clip, valid, beforeCommit) { await beforeCommit(); this.draw(false); return valid(); }
   async loadClips() {} start() {} pause() {} clear() {} dispose() {} async attachAudio() {} async detachAudio() {}
   draw(standing) { const c=this.canvas, width=Math.max(1,c.clientWidth), height=Math.max(1,c.clientHeight); if(c.width!==width)c.width=width;if(c.height!==height)c.height=height;const x=c.getContext('2d'); x.clearRect(0,0,c.width,c.height); x.fillStyle='#b9bdc7'; const cx=c.width/2, head=c.height*.2; x.beginPath(); x.arc(cx,head,c.height*.055,0,Math.PI*2); x.fill(); x.lineWidth=Math.max(8,c.width*.025); x.strokeStyle='#b9bdc7'; x.beginPath(); x.moveTo(cx,head+c.height*.06); x.lineTo(cx,standing?c.height*.58:c.height*.52); x.moveTo(cx,head+c.height*.15); x.lineTo(cx-c.width*.1,c.height*.42); x.moveTo(cx,head+c.height*.15); x.lineTo(cx+c.width*.1,c.height*.42); x.moveTo(cx,standing?c.height*.58:c.height*.52); x.lineTo(cx-c.width*.07,standing?c.height*.82:c.height*.65); x.moveTo(cx,standing?c.height*.58:c.height*.52); x.lineTo(cx+c.width*.07,standing?c.height*.82:c.height*.65); x.stroke(); }
-  pose(name) { this.poseName=name; this.draw(name!=='sit'); } gesture() { return true; } look() {} mood() {} waiting() {} listening() {} speak() {}
+  pose(name) { this.poseName=name; this.draw(name!=='sit'); } gesture() { return true; } look() {} mood() {} waiting() {} listening() {} speak() {} asleep() {}
 }`;
 
 const browserMocks = `
 Object.defineProperty(navigator,'mediaDevices',{value:{getUserMedia:async()=>({getTracks:()=>[{stop(){}}]})}});
 class Recorder extends EventTarget { static isTypeSupported(){return true} start(){this.state='recording'} stop(){this.state='inactive';this.dispatchEvent(new Event('stop'))} } globalThis.MediaRecorder=Recorder;
 class Channel extends EventTarget { constructor(){super();this.readyState='open'} send(value){const e=JSON.parse(value);if(e.type==='session.close')queueMicrotask(()=>this.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'session.closed',usage:{seconds:0}})})))} close(){this.readyState='closed'} }
-class Peer { constructor(){this.iceGatheringState='complete';this.localDescription={sdp:'offer'}} createDataChannel(){this.channel=new Channel();globalThis.__smokeChannel=this.channel;return this.channel}async createOffer(){return {type:'offer',sdp:'offer'}}async setLocalDescription(v){this.localDescription=v}async setRemoteDescription(){queueMicrotask(()=>this.channel.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'session.started'})})))}addTrack(){}close(){} } globalThis.RTCPeerConnection=Peer;
+class Peer { constructor(){this.iceGatheringState='complete';this.localDescription={sdp:'offer'}} createDataChannel(){this.channel=new Channel();globalThis.__smokeChannel=this.channel;return this.channel}async createOffer(){return {type:'offer',sdp:'offer'}}async setLocalDescription(v){this.localDescription=v}async setRemoteDescription(){queueMicrotask(()=>this.channel.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'session.started',session:{delegation:{type:'responses',responses:{tools:[]}}}})})))}addTrack(){}close(){} } globalThis.RTCPeerConnection=Peer;
+globalThis.__voiceStartSpotter=async()=>({close(){}});
 globalThis.__voiceLoadEmbedder=async()=>async(texts)=>texts.map(()=>[1]);
 const cache=new Map();Object.defineProperty(globalThis,'caches',{value:{open:async()=>({match:async(r)=>cache.get(r.url)?.clone(),put:async(r,v)=>cache.set(r.url,v.clone())})}});
 `;
@@ -155,13 +167,35 @@ async function connectCdp(port) {
 async function runViewport(viewport, executable, server) {
   const scratch = await mkdtemp(path.join(root, '.smoke-'));
   const devPort = await new Promise((resolve) => { const listener=net.createServer().listen(0,'127.0.0.1',()=>{const value=listener.address().port;listener.close(()=>resolve(value))}); });
-  const args=['--headless=new','--no-sandbox','--disable-background-timer-throttling','--disable-renderer-backgrounding','--hide-scrollbars','--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream',`--window-size=${viewport.width},${viewport.height}`,`--user-data-dir=${path.join(scratch,'profile')}`,`--remote-debugging-port=${devPort}`,'--remote-debugging-address=127.0.0.1',...(viewport.mobile?['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36']:[]),'about:blank'];
+  const args=['--headless=new','--no-sandbox','--disable-background-timer-throttling','--disable-renderer-backgrounding','--hide-scrollbars','--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream','--autoplay-policy=no-user-gesture-required',`--window-size=${viewport.width},${viewport.height}`,`--user-data-dir=${path.join(scratch,'profile')}`,`--remote-debugging-port=${devPort}`,'--remote-debugging-address=127.0.0.1',...(viewport.mobile?['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36']:[]),'about:blank'];
   const chrome=spawn(executable,args,{stdio:['ignore','ignore','pipe']});
   let chromeError='';chrome.stderr.on('data',(chunk)=>{chromeError+=chunk});
   const cdp=await connectCdp(devPort);
   try {
     if (development) await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `
       globalThis.__smokeLiveChannels = [];
+      globalThis.__smokeSpeech = ${JSON.stringify(speech)};
+      globalThis.__smokeHeard = [];
+      const microphone = new AudioContext();
+      const destination = microphone.createMediaStreamDestination();
+      const floor = microphone.createConstantSource();
+      floor.offset.value = 0;
+      floor.connect(destination);
+      floor.start();
+      navigator.mediaDevices.getUserMedia = async () => destination.stream;
+      globalThis.__smokeSay = async (encoded) => {
+        const samples = new Float32Array(Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0)).buffer);
+        const source = microphone.createBufferSource();
+        source.buffer = microphone.createBuffer(1, samples.length, ${RATE});
+        source.buffer.copyToChannel(samples, 0);
+        source.connect(destination);
+        source.start();
+        await new Promise((resolve) => { source.onended = resolve; });
+      };
+      const SpotterWorker = Worker;
+      globalThis.Worker = class extends SpotterWorker {
+        constructor(...args) { super(...args); this.addEventListener('message', ({ data }) => __smokeHeard.push({ ...data, at: Date.now() })); }
+      };
       import(location.origin + "/puppet.js").then(({ PuppetRuntime }) => {
         const load = PuppetRuntime.prototype.load;
         PuppetRuntime.prototype.load = function(...args) { globalThis.__smokeRuntime = this; return load.apply(this, args); };
@@ -170,8 +204,13 @@ async function runViewport(viewport, executable, server) {
       globalThis.RTCPeerConnection = class extends Peer {
         createDataChannel(...args) {
           const channel = super.createDataChannel(...args);
-          const events = []; globalThis.__smokeLiveChannels.push({ channel, events });
-          channel.addEventListener('message', ({ data }) => { const event = JSON.parse(data); if (['session.started', 'session.closed'].includes(event.type)) events.push(event.type); });
+          const record = { channel, events: [], spoken: '', calls: [] }; globalThis.__smokeLiveChannels.push(record);
+          channel.addEventListener('message', ({ data }) => {
+            const event = JSON.parse(data);
+            if (['session.started', 'session.closed'].includes(event.type)) record.events.push(event.type);
+            if (event.type === 'session.output_transcript.delta') record.spoken += event.delta;
+            if (event.event?.type === 'response.output_item.done' && event.event.item?.type === 'function_call') record.calls.push(event.event.item.name);
+          });
           return channel;
         }
       };
@@ -201,13 +240,20 @@ async function runViewport(viewport, executable, server) {
     await cdp.evaluate(`const smokeLimits = ${JSON.stringify(smokeLimits)}; globalThis.__smoke = (${installSmokeMeasurements.toString()})()`);
     const stageGeometry = async () => JSON.parse(await cdp.evaluate("JSON.stringify((() => { const box = document.querySelector('#puppet').getBoundingClientRect(); return { canvas: { left: box.left + scrollX, right: box.right + scrollX, top: box.top + scrollY, bottom: box.bottom + scrollY }, viewport: { x: scrollX, y: scrollY, width: innerWidth, height: innerHeight } }; })())"));
     const region = evidenceRegion({ neutralSilhouette, ...(await stageGeometry()) });
+    if (live) {
+      await cdp.evaluate(`new Promise((resolve, reject) => { const deadline = Date.now() + 300000; const check = () => { const failure = __smokeHeard.find((message) => message.error); if (failure || Date.now() > deadline) return reject(new Error(failure?.error ?? 'wake spotter did not load')); if (__smokeHeard.some((message) => message.ready)) return resolve(); setTimeout(check, 250); }; check(); })`);
+      for (const index of speech.ordinary.keys()) await cdp.evaluate(`__smokeSay(__smokeSpeech.ordinary[${index}]).then(() => new Promise((resolve) => setTimeout(resolve, 1000)))`);
+      await cdp.evaluate('new Promise((resolve) => setTimeout(resolve, 3000))');
+      if (await cdp.evaluate('__smokeLiveChannels.length')) throw new Error('ordinary speech opened a Live session: ' + await cdp.evaluate('JSON.stringify(__smokeHeard)'));
+    }
     const frames=[];
     let liveSessionOpened = false;
     for(let second=0;second<duration;second++){
       if(second===1){await cdp.evaluate(`${transitions[0]}`);if(mode==='public')await cdp.evaluate(`new Promise(async(resolve)=>{while(!globalThis.__smokeChannel)await new Promise(done=>setTimeout(done,10));const emit=(event)=>__smokeChannel.dispatchEvent(new MessageEvent('message',{data:JSON.stringify(event)}));emit({type:'session.output_transcript.delta',delta:'I will inspect the fixture.',start_ms:0,end_ms:20});emit({type:'session.input_transcript.delta',delta:'Check the fixture stream.'});const wrap=event=>emit({type:'response.event',delegation_id:'fixture',event});wrap({type:'response.created',response:{id:'fixture',output:[]}});wrap({type:'response.output_item.done',item:{type:'function_call',call_id:'fixture',name:'hub',arguments:JSON.stringify({text:'Check the fixture stream.'})}});wrap({type:'response.completed',response:{id:'fixture',output:[]}});setTimeout(resolve,150)})`)}
       if (development && second === 2) {
-        await cdp.evaluate(`new Promise((resolve, reject) => { const deadline = Date.now() + 60000; const check = () => { if (document.querySelector('#puppet').getAttribute('aria-pressed') === 'true') return resolve(); if (Date.now() > deadline || document.querySelector('#status').classList.contains('err')) return reject(new Error(document.querySelector('#status').textContent)); setTimeout(check, 100); }; check(); })`);
+        await cdp.evaluate(`new Promise((resolve, reject) => { const deadline = Date.now() + 60000; const check = () => { if (document.querySelector('#puppet').getAttribute('aria-pressed') === 'true') return resolve(); if (Date.now() > deadline || document.querySelector('#status').classList.contains('err')) return reject(new Error(document.querySelector('#status').textContent + ' heard ' + JSON.stringify(globalThis.__smokeHeard ?? []))); setTimeout(check, 100); }; check(); })`);
         liveSessionOpened = true;
+        await cdp.evaluate(`new Promise((resolve, reject) => { const deadline = Date.now() + 30000; const check = () => { if (__smokeLiveChannels.at(-1).spoken.trim()) return resolve(); if (Date.now() > deadline) return reject(new Error('the woken session did not greet: ' + JSON.stringify(__smokeLiveChannels.map(({ events, spoken, calls }) => ({ events, spoken, calls }))))); setTimeout(check, 100); }; check(); })`);
       }
       if(second===3)await cdp.evaluate(`document.querySelector('#status').textContent=${JSON.stringify(smokeStatusText)}`);
       if(second===Math.max(8,duration-6)){await cdp.evaluate(`${transitions[1]}`)}
@@ -219,10 +265,11 @@ async function runViewport(viewport, executable, server) {
     }
     if (development) {
       if (!liveSessionOpened) throw new Error('development smoke did not open a Live session');
-      await cdp.evaluate(`new Promise((resolve, reject) => { const deadline = Date.now() + 30000; const check = () => { if (document.querySelector('#mic-mute').disabled && document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && document.querySelector('#puppet').getAttribute('aria-disabled') === 'false') return resolve(); if (Date.now() > deadline) return reject(new Error('Live session did not close')); setTimeout(check, 100); }; check(); })`);
-      const channels = await cdp.evaluate('__smokeLiveChannels.map(({ channel, events }) => ({ events, state: channel.readyState }))');
-      if (!channels.some(({ events, state }) => events.includes('session.started') && state === 'closed')) throw new Error('Live did not start and close its channel: ' + JSON.stringify(channels));
-      const sessions = { channels, endpoint: JSON.parse(Buffer.from(server.token, 'base64url')).endpoint_id, liveSessionOpened, liveSessionClosed: true };
+      await cdp.evaluate(`new Promise((resolve, reject) => { const deadline = Date.now() + 60000; const check = () => { if (document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && document.querySelector('#puppet').getAttribute('aria-disabled') === 'false') return resolve(); if (Date.now() > deadline) return reject(new Error('Live session did not close after the farewell')); setTimeout(check, 100); }; check(); })`);
+      const channels = await cdp.evaluate('__smokeLiveChannels.map(({ channel, events, spoken, calls }) => ({ events, spoken, calls, state: channel.readyState }))');
+      if (channels.length !== 1 || !channels[0].events.includes('session.started') || channels[0].state !== 'closed' || !channels[0].calls.includes('sleep')) throw new Error('the wake phrase did not open one session that the farewell closed through the sleep tool: ' + JSON.stringify(channels));
+      const heard = await cdp.evaluate('__smokeHeard');
+      const sessions = { channels, heard, endpoint: JSON.parse(Buffer.from(server.token, 'base64url')).endpoint_id, liveSessionOpened, liveSessionClosed: true };
       await writeFile(path.join(output, `${viewport.name}-connection.json`), JSON.stringify(sessions, null, 2));
     }
     const state=JSON.parse(await cdp.evaluate('JSON.stringify(__smoke.state)'));

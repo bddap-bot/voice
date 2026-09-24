@@ -211,7 +211,8 @@ export class PuppetRuntime {
     this.speechUntil = 0;
     this.mouthValues = Object.fromEntries(VISEMES.map((name) => [name, 0]));
     this.moodValues = Object.fromEntries(MOOD_EXPRESSIONS.map((name) => [name, 0]));
-    this.moodName = null;
+    this.moodName = 'sleepy';
+    this.sleeping = true;
     this.moodFrom = {};
     this.moodBones = {};
     this.moodStarted = performance.now();
@@ -498,8 +499,12 @@ export class PuppetRuntime {
       this.gazeDestination.copy(this.panelPoint ?? new THREE.Vector3(2.8, 1.35, 2.4));
     } else this.gazeDestination.fromArray(GAZE_POINTS[mode]);
   }
+  asleep(value) {
+    this.sleeping = value;
+    this.mood(value ? 'sleepy' : null);
+  }
   mood(name) {
-    if (!MOOD_TABLE[name]) throw new Error(`unknown mood ${name}`);
+    if (name !== null && !MOOD_TABLE[name]) throw new Error(`unknown mood ${name}`);
     if (this.moodName === name) return;
     this.moodName = name;
     this.moodFrom = copyOffsets(this.moodBones);
@@ -572,9 +577,8 @@ export class PuppetRuntime {
       this.moodValues[name] = THREE.MathUtils.lerp(this.moodValues[name], mood?.expressions[name] ?? 0, 0.12);
       manager.setValue(name, this.moodValues[name]);
     }
-    if (!mood) return;
     const amount = THREE.MathUtils.smoothstep((now - this.moodStarted) / 320, 0, 1);
-    this.moodBones = blendOffsets(this.moodFrom, mood.bones, amount);
+    this.moodBones = blendOffsets(this.moodFrom, mood?.bones ?? {}, amount);
     for (const [name, values] of Object.entries(this.moodBones)) {
       const bone = this.bones.get(name)?.node;
       if (!bone) continue;
@@ -585,14 +589,12 @@ export class PuppetRuntime {
   updateFace(now) {
     const manager = this.vrm?.expressionManager;
     if (manager) {
-      if (now >= this.nextBlink && !this.blinkStart) this.blinkStart = now;
-      if (this.blinkStart) {
-        const phase = (now - this.blinkStart) / 180;
-        manager.setValue('blink', Math.sin(Math.min(1, phase) * Math.PI));
-        if (phase >= 1) {
-          this.blinkStart = 0;
-          this.nextBlink = now + 2200 + Math.random() * 4200;
-        }
+      if (!this.sleeping && now >= this.nextBlink && !this.blinkStart) this.blinkStart = now;
+      const phase = this.blinkStart ? (now - this.blinkStart) / 180 : 0;
+      manager.setValue('blink', this.sleeping ? 1 : Math.sin(Math.min(1, phase) * Math.PI));
+      if (phase >= 1) {
+        this.blinkStart = 0;
+        this.nextBlink = now + 2200 + Math.random() * 4200;
       }
       this.updateMood(now, manager);
       this.updateMouth(manager, now);

@@ -450,13 +450,12 @@ export class PuppetRuntime {
     const previous = this.clipAction;
     const handover = previous && this.handovers?.get(`${previous.getClip().userData.action}:${name}`);
     const duration = handover?.duration ?? 0.18;
-    for (const outgoingClip of this.clips.values()) {
-      const outgoing = this.mixer.existingAction(outgoingClip, this.vrm.scene);
-      if (outgoing?.isScheduled()) outgoing.setEffectiveWeight(outgoing.getEffectiveWeight()).fadeOut(duration);
-    }
+    const scheduled = [...this.clips.values()].map((loaded) => this.mixer.existingAction(loaded, this.vrm.scene)).filter((existing) => existing?.isScheduled());
+    for (const outgoing of scheduled) outgoing.setEffectiveWeight(outgoing.getEffectiveWeight()).fadeOut(duration);
     const action = this.mixer.clipAction(clip, this.vrm.scene).reset().setEffectiveWeight(1);
     if (handover) action.time = handover.offset;
-    action.fadeIn(duration).play();
+    if (scheduled.some((outgoing) => outgoing !== action && outgoing.getEffectiveWeight() > 0)) action.fadeIn(duration);
+    action.play();
     (this.animationActions ??= new Set()).add(action);
     action.setLoop(name === fallback ? THREE.LoopRepeat : THREE.LoopOnce, name === fallback ? Infinity : 1);
     action.clampWhenFinished = name !== fallback;

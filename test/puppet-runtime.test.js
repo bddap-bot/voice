@@ -467,36 +467,46 @@ test('ready-to-play tracks decode without FBX parsing', async () => {
   assert.equal(clip.userData.poseTracks[0].valueSize, 4);
 });
 
-test('animation telemetry records changed clip weights and rendered world hip height only', () => {
-  const scene = new THREE.Group();
-  const hips = new THREE.Bone();
-  scene.position.y = 2;
-  scene.add(hips);
+test('every loaded puppet shows its first clip at full weight on its first frame, and telemetry records only changed weights and hip height', () => {
   const events = [];
-  const clip = new THREE.AnimationClip('idle', 1, [new THREE.NumberKeyframeTrack(`${hips.uuid}.position[y]`, [0], [1])]);
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
-    vrm: { scene, humanoid: { getRawBoneNode: () => hips } },
-    mixer: new THREE.AnimationMixer(scene), clips: new Map([['idle', clip]]),
+    mixer: new THREE.AnimationMixer(new THREE.Group()),
+    handovers: new Map([['idle:sit', { offset: 0, duration: 0.36 }]]),
     onAnimation: (state) => events.push(state),
   });
-  runtime.playClip('idle', 'idle');
-  runtime.mixer.update(0.09);
-  runtime.recordAnimation();
-  assert.equal(events.length, 1);
-  assert.equal(events[0].clips[0].name, 'idle');
-  assert.ok(Math.abs(events[0].clips[0].weight - 0.5) < 0.001);
-  assert.ok(Math.abs(events[0].hip_height - 2.5) < 0.001);
-  runtime.mixer.update(0.2);
-  runtime.recordAnimation();
-  assert.deepEqual(events[1], { clips: [{ name: 'idle', weight: 1 }], hip_height: 3 });
+  const showPuppet = (height) => {
+    const scene = new THREE.Group();
+    const hips = new THREE.Bone();
+    scene.position.y = height;
+    scene.add(hips);
+    const clip = (name, y) => {
+      const value = new THREE.AnimationClip(name, 1, [new THREE.NumberKeyframeTrack(`${hips.uuid}.position[y]`, [0], [y])]);
+      value.userData.action = name;
+      return [name, value];
+    };
+    Object.assign(runtime, { vrm: { scene, humanoid: { getRawBoneNode: () => hips } }, clips: new Map([clip('idle', 1), clip('sit', 0)]) });
+    runtime.playClip('idle', 'idle');
+    runtime.mixer.update(1 / 60);
+    runtime.recordAnimation();
+  };
+  showPuppet(2);
+  assert.deepEqual(events[0], { clips: [{ name: 'idle', weight: 1 }], hip_height: 3 });
   for (let frame = 0; frame < 60; frame++) {
     runtime.mixer.update(1 / 60);
     runtime.recordAnimation();
   }
-  assert.equal(events.length, 2);
-  runtime.clipAction.stop();
+  assert.equal(events.length, 1);
+  runtime.playClip('sit', 'sit');
+  runtime.mixer.update(0.18);
   runtime.recordAnimation();
-  assert.deepEqual(events[2].clips, []);
+  assert.deepEqual(events[1], { clips: [{ name: 'idle', weight: 0.5 }, { name: 'sit', weight: 0.5 }], hip_height: 2.5 });
+  runtime.mixer.update(0.2);
+  runtime.playClip('sit', 'sit');
+  runtime.mixer.update(1 / 60);
+  runtime.recordAnimation();
+  assert.deepEqual(events[2], { clips: [{ name: 'sit', weight: 1 }], hip_height: 2 }, 'replaying the only visible clip must not blend in the rest pose');
+  showPuppet(4);
+  assert.deepEqual(events[3], { clips: [{ name: 'idle', weight: 1 }], hip_height: 5 });
 });
 
 test('expired idle dwell cannot interrupt a clip gesture or retain its gesture marker', () => {

@@ -4,6 +4,7 @@ export class LivePlayback {
     this.onError = onError;
     this.holds = new Set();
     this.transcripts = [];
+    this.quietWaiters = [];
     this.closed = false;
   }
   async attach(stream) {
@@ -11,8 +12,10 @@ export class LivePlayback {
     await context.audioWorklet.addModule(new URL('./playback-worklet.js', import.meta.url));
     if (this.closed) return null;
     this.node = new AudioWorkletNode(context, 'live-playback', { outputChannelCount: [1], channelCount: 1, channelCountMode: 'explicit' });
-    this.node.port.onmessage = ({ data }) => { if (data.error) this.onError(new Error(data.error)); };
-    // Chromium needs a playing media element to decode remote WebRTC audio for Web Audio.
+    this.node.port.onmessage = ({ data }) => {
+      if (data.error) this.onError(new Error(data.error));
+      if (data.quiet) for (const resolve of this.quietWaiters.splice(0)) resolve();
+    };
     this.sink = new Audio();
     this.sink.muted = true;
     this.sink.srcObject = stream;
@@ -43,6 +46,13 @@ export class LivePlayback {
   interrupt() {
     this.transcripts.length = 0;
     this.node?.port.postMessage({ type: 'clear' });
+  }
+  quiet(ms = 2000) {
+    if (!this.node) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.quietWaiters.push(resolve);
+      this.node.port.postMessage({ type: 'quiet', ms });
+    });
   }
   async close() {
     this.closed = true;

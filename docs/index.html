@@ -129,6 +129,8 @@ import { PuppetTools } from './puppet-tools.js';
 import { ResponsesTools } from './responses-tools.js';
 import { LivePlayback } from './live-playback.js';
 import { PuppetRuntime } from './puppet.js';
+import { INACTIVITY_MS, NAME, WAKE_PHRASE } from './identity.js';
+import { MISS_SCORE, WAKE_SCORE, startWakeSpotter, wakeScore } from './wake.js';
 import { disposeRenderer, renderChart, renderMath, renderMermaid } from './lib/render.js';
 
 import config, { configuredToken } from './config.js';
@@ -173,6 +175,11 @@ let puppetTools;
 let selectedImage;
 let sharing = false;
 let microphoneMuted = false;
+let microphone;
+let microphoneStream;
+let spotter;
+let inactivity;
+const startSpotter = globalThis.__voiceStartSpotter ?? startWakeSpotter;
 const shareWaiters = new Map();
 function applyTranscriptAction(action, timing) {
   if (action.kind === 'none') return;
@@ -235,6 +242,8 @@ function savedState(saved) {
   setTokenPanel(!saved);
   if (saved && !document.hidden) puppetRuntime?.start();
   else puppetRuntime?.pause();
+  if (saved) listenForWake();
+  else stopListening();
 }
 function syncPuppetUi() {
   const active = Boolean(conversation);
@@ -244,10 +253,9 @@ function syncPuppetUi() {
   $('puppet').setAttribute('aria-label', active || starting ? 'stop conversation' : 'start conversation');
 }
 function setMicrophoneMuted(muted) {
-  const stream = conversation?.stream ?? starting?.stream;
-  microphoneMuted = Boolean(muted && stream);
-  for (const track of stream?.getAudioTracks?.() ?? stream?.getTracks?.() ?? []) track.enabled = !microphoneMuted;
-  $('mic-mute').disabled = !stream;
+  microphoneMuted = Boolean(muted && microphoneStream);
+  for (const track of microphoneStream?.getAudioTracks?.() ?? microphoneStream?.getTracks?.() ?? []) track.enabled = !microphoneMuted;
+  $('mic-mute').disabled = !microphoneStream;
   $('mic-mute').textContent = microphoneMuted ? 'Unmute mic' : 'Mute mic';
   $('mic-mute').setAttribute('aria-pressed', String(microphoneMuted));
 }
@@ -631,15 +639,63 @@ function waitIce(pc, attempt) {
     pc.addEventListener('icegatheringstatechange', onChange);
   });
 }
+function acquireMicrophone() {
+  microphone ??= navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+    microphoneStream = stream;
+    setMicrophoneMuted(microphoneMuted);
+    return stream;
+  }, (error) => {
+    microphone = undefined;
+    throw error;
+  });
+  return microphone;
+}
+function wakeable() {
+  return puppetReady && !conversation && !starting;
+}
+function listenForWake() {
+  if (spotter) return;
+  spotter = acquireMicrophone().then((stream) => startSpotter(stream, heard, wakeable));
+  spotter.catch((error) => { spotter = undefined; recordPageError(error); });
+}
+function closeSpotter() {
+  spotter?.then((running) => running.close()).catch(() => {});
+  spotter = undefined;
+}
+function stopListening() {
+  closeSpotter();
+  for (const track of microphoneStream?.getTracks?.() ?? []) track.stop();
+  microphone = undefined;
+  microphoneStream = undefined;
+  setMicrophoneMuted(false);
+}
+function heard({ text, error }) {
+  if (error) {
+    recordPageError(new Error(error));
+    closeSpotter();
+    return;
+  }
+  if (typeof text !== 'string' || !wakeable()) return;
+  const match = wakeScore(text, WAKE_PHRASE);
+  if (match.score >= WAKE_SCORE) {
+    recordSession('wake', JSON.stringify(match));
+    toggleConversation();
+  } else if (match.score >= MISS_SCORE) recordSession('wake-miss', JSON.stringify(match));
+}
+function stayAwake() {
+  clearTimeout(inactivity);
+  if (!conversation) return;
+  inactivity = setTimeout(() => {
+    if (hubWaiting.size) return stayAwake();
+    recordSession('sleep', 'inactivity');
+    stopConversation();
+  }, INACTIVITY_MS);
+}
 function openMicrophone(attempt) {
   let rejectCancellation;
   const cancelled = new Promise((_, reject) => { rejectCancellation = reject; });
   attempt.cancelMic = () => rejectCancellation(new Error('conversation start cancelled'));
-  const pending = navigator.mediaDevices.getUserMedia({ audio: true });
-  pending.then((stream) => {
-    if (attempt.cancelled) for (const track of stream.getTracks()) track.stop();
-  }).catch(() => {});
-  return Promise.race([pending, cancelled]).finally(() => { attempt.cancelMic = null; });
+  return Promise.race([acquireMicrophone(), cancelled]).finally(() => { attempt.cancelMic = null; });
 }
 function recordAudio(stream, side, id) {
   if (!globalThis.MediaRecorder?.isTypeSupported?.('audio/webm;codecs=opus')) {
@@ -734,6 +790,7 @@ function onLiveEvent(message, source) {
   if (event.type === 'session.input_transcript.delta') {
     playback?.interrupt();
     recordSession('input_utterance', event.delta ?? '');
+    stayAwake();
     trace.heard(event.delta ?? '', Date.now(), event.start_ms);
     conversation?.transcript?.add('user', event.delta ?? '');
   }
@@ -753,12 +810,19 @@ function onLiveEvent(message, source) {
   }
 }
 function presentTranscript(event) {
+    stayAwake();
     trace.spoke(event.delta ?? '', event.start_ms, event.end_ms);
     const audioNow = $('speaker').currentTime * 1000;
     const playAt = performance.now() + Math.max(0, (event.start_ms ?? audioNow) - audioNow);
     puppetRuntime?.speak(event.delta ?? '', playAt);
     actionDriver.push(event.delta ?? '', playAt);
     conversation?.transcript?.add('model', event.delta ?? '');
+}
+const SLEEP_TOOL = { type: 'function', name: 'sleep', description: 'End this conversation and go back to sleep.', parameters: { type: 'object', properties: {}, additionalProperties: false } };
+function awaken(channel, session) {
+  channel.send(JSON.stringify({ type: 'session.update', event_id: 'sleep', session: { delegation: { type: 'responses', responses: { tools: [...session.delegation.responses.tools, SLEEP_TOOL] } } } }));
+  channel.send(JSON.stringify({ type: 'session.instructions.append', event_id: 'identity', delegation_id: null, content: `Your name is ${NAME}. The Responses backend can end this session, which puts you back to sleep.` }));
+  channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: 'wake', delegation_id: null, content: 'Context: You were just woken.' }));
 }
 async function executeLiveTool(item, source, delegation) {
   recordSession('tool_call', item.name === 'pose' ? JSON.stringify({ name: item.name, arguments: item.arguments }) : item.name);
@@ -783,6 +847,12 @@ async function executeLiveTool(item, source, delegation) {
         resolve({ ok: false, error: 'hub request failed' });
       });
     });
+  }
+  if (item.name === 'sleep') {
+    const current = conversation;
+    recordSession('sleep', 'farewell');
+    current?.audioOwner.playback.quiet().then(() => { if (conversation === current) stopConversation(); });
+    return { ok: true };
   }
   if (!puppetTools) throw new Error('puppet renderer unavailable');
   return puppetTools.execute(item.name, item.arguments, () => source === conversation?.channel || source === starting?.channel);
@@ -825,10 +895,11 @@ function paintOff() {
   hubWaiting.clear();
   actionDriver.reset();
   listeningDriver.reset();
+  clearTimeout(inactivity);
   puppetRuntime?.waiting(false);
   puppetRuntime?.pose('sit');
+  puppetRuntime?.asleep(true);
   $('elapsed').textContent = '00:00';
-  setMicrophoneMuted(false);
   syncPuppetUi();
 }
 function cancelOffer(attempt) {
@@ -843,7 +914,6 @@ function cancelStarting(reason = '') {
   attempt.cancelled = true;
   attempt.playback?.close();
   attempt.cancelMic?.();
-  for (const track of attempt.stream?.getTracks() ?? []) track.stop();
   attempt.cancelData?.();
   attempt.channel?.close();
   attempt.pc?.close();
@@ -862,6 +932,7 @@ async function startConversation() {
     stopConversation('Live playback failed');
   });
   starting = attempt;
+  puppetRuntime?.asleep(false);
   puppetRuntime?.pose('stand');
   syncPuppetUi();
   try {
@@ -877,11 +948,7 @@ async function startConversation() {
     usageSeconds = 0;
     setStatus();
     attempt.stream = await openMicrophone(attempt);
-    if (attempt.cancelled) {
-      for (const track of attempt.stream.getTracks()) track.stop();
-      return;
-    }
-    setMicrophoneMuted(false);
+    if (attempt.cancelled) return;
     attempt.pc = new RTCPeerConnection();
     attempt.channel = attempt.pc.createDataChannel('oai-events');
     responseTools = new ResponsesTools((item, delegation) => executeLiveTool(item, attempt.channel, delegation), (event) => attempt.channel.send(JSON.stringify(event)), () => attempt.channel.readyState === 'open' && (attempt.channel === conversation?.channel || attempt.channel === starting?.channel), async (id) => {
@@ -923,14 +990,16 @@ async function startConversation() {
     answerWaiter = null;
     if (attempt.cancelled) return;
     await attempt.pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
-    await started;
+    const { session } = await started;
     if (attempt.cancelled) return;
-    conversation = { pc: attempt.pc, channel: attempt.channel, stream: attempt.stream, clock: null, id: attempt.offerId, audioOwner: attempt, transcript: new TranscriptBatcher(attempt.offerId, persistenceUploads, { onTurn: (side, at) => telemetry.add({ kind: 'transcript', session_id: attempt.offerId, name: side, at }) }) };
+    awaken(attempt.channel, session);
+    conversation = { pc: attempt.pc, channel: attempt.channel, clock: null, id: attempt.offerId, audioOwner: attempt, transcript: new TranscriptBatcher(attempt.offerId, persistenceUploads, { onTurn: (side, at) => telemetry.add({ kind: 'transcript', session_id: attempt.offerId, name: side, at }) }) };
     startRecorders(attempt, attempt.offerId);
     const clock = new SessionClock({ onTick: (seconds) => { $('elapsed').textContent = formatElapsed(seconds); } });
     conversation.clock = clock;
     clock.start();
     puppetRuntime?.pose('listen');
+    stayAwake();
     syncPuppetUi();
     setStatus();
     recordSession('open', '', attempt.offerId);
@@ -942,7 +1011,6 @@ async function startConversation() {
     if (conversation?.pc !== attempt.pc) {
       cancelOffer(attempt);
       await stopRecorders(attempt);
-      for (const track of attempt.stream?.getTracks() ?? []) track.stop();
       attempt.channel?.close();
       attempt.pc?.close();
       await puppetRuntime?.detachAudio(attempt);
@@ -964,7 +1032,6 @@ async function finishStop(reason, remoteClosed) {
   recordSession('close', reason, current.id);
   await stopRecorders(current.audioOwner);
   current.clock?.stop();
-  for (const track of current.stream.getTracks()) track.stop();
   for (const id of hubWaiting) recordSession('delegation_end', `${id}: cancelled`, current.id);
   trace.cancel();
   paintOff();
@@ -977,7 +1044,6 @@ async function finishStop(reason, remoteClosed) {
   }
   current.transcript.flush();
   conversation = null;
-  setMicrophoneMuted(false);
   syncPuppetUi();
   current.channel.close();
   current.pc.close();

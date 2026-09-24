@@ -557,3 +557,33 @@ test('interrupting a long seated fade removes every seated contribution by the n
   assert.equal(runtime.clipAction.getEffectiveWeight(), 1, 'reused actions must recover full weight');
   assert.ok(Math.abs(scene.position.y - 0.5) < 1e-6);
 });
+
+test('asleep holds the eyes shut under a sleepy droop and waking reopens them and clears the droop', () => {
+  const head = new THREE.Object3D();
+  const values = {};
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+    moodName: null, moodFrom: {}, moodBones: {}, moodStarted: 0, sleeping: false, nextBlink: Infinity, blinkStart: 0,
+    moodValues: Object.fromEntries(['happy', 'angry', 'sad', 'relaxed', 'surprised'].map((name) => [name, 0])),
+    mouthValues: { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 }, audio: null,
+    bones: new Map([['head', { node: head }]]), gestureRotation: new THREE.Quaternion(),
+    vrm: { expressionManager: { setValue: (name, value) => { values[name] = value; } } },
+  });
+  runtime.asleep(true);
+  runtime.moodStarted = 0;
+  for (const now of [1000, 9000]) {
+    head.quaternion.identity();
+    runtime.nextBlink = now - 1;
+    runtime.updateFace(now);
+    assert.equal(values.blink, 1);
+  }
+  assert.equal(runtime.moodName, 'sleepy');
+  assert.ok(head.quaternion.angleTo(new THREE.Quaternion()) > 0.1);
+  runtime.asleep(false);
+  runtime.nextBlink = Infinity;
+  runtime.moodStarted = 0;
+  head.quaternion.identity();
+  runtime.updateFace(1000);
+  assert.equal(values.blink, 0);
+  assert.equal(runtime.moodName, null);
+  assert.ok(head.quaternion.angleTo(new THREE.Quaternion()) < 1e-6);
+});

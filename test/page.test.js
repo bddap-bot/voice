@@ -66,6 +66,8 @@ export async function connect() {}
 export async function send_only(bytes) {
   const frame = dec.decode(bytes);
   (globalThis.sentVerbs ??= []).push(frame.split('\\n', 1)[0]);
+  if (frame.startsWith('spans\\n')) (globalThis.spanBatches ??= []).push(JSON.parse(frame.slice(6)).spans);
+  if (frame.startsWith('delegate\\n')) (globalThis.delegateFrames ??= []).push(JSON.parse(frame.slice(9)));
   if (frame.startsWith('telemetry\\n')) {
     const batch = JSON.parse(frame.slice(frame.indexOf('\\n') + 1));
     globalThis.telemetryBatches.push(batch.events);
@@ -869,6 +871,38 @@ window.addEventListener('test-ready', () => {
   assert.deepEqual(JSON.parse(encoded ?? 'null'), { calls: [['mood', 'amused']], events: ['response.item.create', 'response.create'] }, stderr);
 });
 
+test('a delegated turn reaches the relay as one trace whose hub call carries the traceparent', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  const pause = () => new Promise((resolve) => setTimeout(resolve, 30));
+  const event = (value) => testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(value) }));
+  const round = (id, item) => {
+    for (const nested of [{ type: 'response.created', response: { id, output: [] } }, { type: 'response.output_item.done', item }, { type: 'response.completed', response: { id, output: [] } }]) event({ type: 'response.event', delegation_id: 'dlg', event: nested });
+  };
+  event({ type: 'session.input_transcript.delta', delta: 'Nod, then check the weather.' });
+  event({ type: 'session.delegation.created', delegation: { id: 'dlg', target: 'responses' } });
+  round('r1', { type: 'function_call', call_id: 'nod_1', name: 'gesture', arguments: JSON.stringify({ name: 'nod' }) });
+  await pause();
+  round('r2', { type: 'function_call', call_id: 'hub_1', name: 'hub', arguments: JSON.stringify({ text: 'check the weather' }) });
+  await pause();
+  deliverRelay(new TextEncoder().encode('hub\\n' + JSON.stringify({ id: 'hub_1', reply: 'Sunny.', timing_ms: 5, stamp: 'stamp_1' })));
+  await pause();
+  round('r3', { type: 'message', content: [] });
+  await pause();
+  event({ type: 'session.output_transcript.delta', delta: 'Sunny.' });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  document.body.dataset.stageTest = JSON.stringify({ batches: globalThis.spanBatches ?? [], delegates: globalThis.delegateFrames ?? [] });
+});
+`);
+  const encoded = /data-stage-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  const { batches, delegates } = JSON.parse(encoded ?? 'null') ?? {};
+  const spans = batches?.flat() ?? [];
+  assert.deepEqual(spans.map((span) => span.name).sort(), ['await-speech', 'decide', 'hear', 'respond', 'respond', 'respond', 'resume', 'resume', 'tool', 'tool', 'turn'], stderr);
+  assert.ok(spans.every((span) => span.traceId === spans[0].traceId && span.status === undefined));
+  const hub = spans.find((span) => span.name === 'tool' && span.attributes.some(({ key, value }) => key === 'tool.name' && value.stringValue === 'hub'));
+  assert.deepEqual(delegates.map(({ id, traceparent }) => [id, traceparent]), [['hub_1', `00-${hub.traceId}-${hub.spanId}-01`]]);
+});
+
 test('output transcript drives mood and delegation drives the waiting pose', async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
@@ -1062,22 +1096,23 @@ window.addEventListener('test-ready', async () => {
   assert.deepEqual(JSON.parse(encoded ?? 'null'), { offered: 'Session ended — tap to continue', active: 'true', context: [{ speaker: 'user', text: 'Remember the earlier question.' }] }, stderr);
 });
 
-test('pose arguments, animation deltas and input utterances reach session telemetry together', async () => {
+test('pose requests reach the trace while animation deltas and input utterances reach session telemetry', async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
+  testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.delegation.created', delegation: { id: 'pose_probe', target: 'responses' } }) }));
   emitTool('pose_probe', 'pose', { name: 'sit' });
   testPuppet.onAnimation({ clips: [{ name: 'sit', weight: 0.5 }], hip_height: 1.2 });
   for (const event of [{ type: 'input_audio_buffer.speech_started' }, { type: 'session.input_transcript.delta', delta: 'Please stand.' }]) {
     testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(event) }));
   }
-  setTimeout(() => { document.body.dataset.poseTelemetry = JSON.stringify(telemetryBatches.flat().filter((event) => ['tool_call', 'animation', 'input_utterance', 'input_speech_started'].includes(event.name))); }, 600);
+  setTimeout(() => { document.body.dataset.poseTelemetry = JSON.stringify({ events: telemetryBatches.flat().filter((event) => ['tool_call', 'animation', 'input_utterance', 'input_speech_started'].includes(event.name)), tools: (globalThis.spanBatches ?? []).flat().filter((span) => span.name === 'tool') }); }, 600);
 });
 `);
   const encoded = /data-pose-telemetry="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  const events = JSON.parse(encoded ?? 'null');
+  const { events, tools } = JSON.parse(encoded ?? 'null') ?? {};
   assert.ok(events, stderr);
-  assert.equal(events.length, 4);
-  assert.deepEqual(JSON.parse(events.find((event) => event.name === 'tool_call').detail), { name: 'pose', arguments: '{"name":"sit"}' });
+  assert.equal(events.length, 3);
+  assert.deepEqual(tools.map((span) => Object.fromEntries(span.attributes.map(({ key, value }) => [key, value.stringValue]))), [{ 'tool.name': 'pose', 'tool.arguments': '{"name":"sit"}' }]);
   assert.deepEqual(JSON.parse(events.find((event) => event.name === 'animation').detail), { clips: [{ name: 'sit', weight: 0.5 }], hip_height: 1.2 });
   assert.equal(events.find((event) => event.name === 'input_utterance').detail, 'Please stand.');
   assert.ok(events.every((event) => event.session_id === events[0].session_id && event.at > 0));

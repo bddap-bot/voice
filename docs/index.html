@@ -127,6 +127,7 @@ import { PuppetChannel } from './puppet-client.js';
 import { ListeningReactionDriver, TranscriptActionDriver, webGpuAdapter } from './puppet-drivers.js';
 import { PuppetTools } from './puppet-tools.js';
 import { ResponsesTools } from './responses-tools.js';
+import { StageTrace } from './stage-trace.js';
 import { LivePlayback } from './live-playback.js';
 import { PuppetRuntime } from './puppet.js';
 import { INACTIVITY_MS, NAME, WAKE_PHRASE } from './identity.js';
@@ -198,6 +199,8 @@ const actionDriver = new TranscriptActionDriver(applyTranscriptAction);
 const listeningDriver = new ListeningReactionDriver((motion) => puppetRuntime?.listening(motion));
 const hubWaiting = new Set();
 let responseTools;
+let stageTrace;
+const traces = new EventBatcher((spans) => sendFrame(`spans\n${JSON.stringify({ spans })}`));
 const hubCalls = new Map();
 const telemetryWaiters = new Map();
 const puppetChannel = new PuppetChannel(sendFrame, caches, () => token?.endpoint_id ?? '', config.transferTimeout);
@@ -805,16 +808,19 @@ function onLiveEvent(message, source) {
   }
   const playback = (source === starting?.channel ? starting : conversation?.audioOwner)?.playback;
   if (event.type === 'session.delegation.created' && event.delegation?.target === 'responses') {
+    stageTrace?.delegationCreated(event.delegation.id);
     playback?.hold(event.delegation.id);
     return;
   }
   if (event.type === 'response.event') {
+    stageTrace?.responseEvent(event);
     Promise.resolve(responseTools?.handle(event)).catch(recordPageError);
     return;
   }
   if (event.type === 'session.input_transcript.delta') {
     playback?.interrupt();
     recordSession('input_utterance', event.delta ?? '');
+    stageTrace?.inputTranscript();
     stayAwake();
     trace.heard(event.delta ?? '', Date.now(), event.start_ms);
     conversation?.transcript?.add('user', event.delta ?? '');
@@ -838,7 +844,9 @@ function presentTranscript(event) {
     stayAwake();
     trace.spoke(event.delta ?? '', event.start_ms, event.end_ms);
     const audioNow = $('speaker').currentTime * 1000;
-    const playAt = performance.now() + Math.max(0, (event.start_ms ?? audioNow) - audioNow);
+    const delay = Math.max(0, (event.start_ms ?? audioNow) - audioNow);
+    stageTrace?.outputTranscript(delay);
+    const playAt = performance.now() + delay;
     puppetRuntime?.speak(event.delta ?? '', playAt);
     actionDriver.push(event.delta ?? '', playAt);
     conversation?.transcript?.add('model', event.delta ?? '');
@@ -849,8 +857,7 @@ function awaken(channel, session) {
   channel.send(JSON.stringify({ type: 'session.instructions.append', event_id: 'identity', delegation_id: null, content: `Your name is ${NAME}. The Responses backend can end this session, which puts you back to sleep.` }));
   channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: 'wake', delegation_id: null, content: `Context: ${NAME} was just woken.` }));
 }
-async function executeLiveTool(item, source, delegation) {
-  recordSession('tool_call', item.name === 'pose' ? JSON.stringify({ name: item.name, arguments: item.arguments }) : item.name);
+async function executeLiveTool(item, source, delegation, traceparent) {
   if (item.name === 'hub') {
     (source === starting?.channel ? starting : conversation?.audioOwner)?.playback?.release(delegation);
     const args = JSON.parse(item.arguments);
@@ -860,12 +867,11 @@ async function executeLiveTool(item, source, delegation) {
     turn.sent = args.text;
     render(trace.entries);
     hubWaiting.add(id);
-    recordSession('delegation_start', id);
     puppetRuntime?.waiting(true);
     syncPuppetUi();
     return new Promise((resolve) => {
       hubCalls.set(id, { resolve, source, stamp: null });
-      sendFrame(`delegate\n${JSON.stringify({ id, text: args.text, context: turn.context, duration_ms: turn.duration_ms })}`).catch((error) => {
+      sendFrame(`delegate\n${JSON.stringify({ id, text: args.text, context: turn.context, duration_ms: turn.duration_ms, traceparent })}`).catch((error) => {
         hubCalls.delete(id);
         finishHubWait(id);
         trace.failed(id, error.message);
@@ -894,7 +900,6 @@ async function receiveHub(result) {
   }
   finishHubWait(result.id);
   if (!conversation?.channel || !trace.hub(result.id, result.reply, result.timing_ms)) return;
-  recordSession('delegation_end', `${result.id}: ok`);
   const pending = hubCalls.get(result.id);
   if (pending) {
     pending.stamp = result.stamp;
@@ -908,7 +913,6 @@ async function receiveHub(result) {
 async function receiveHubError(result) {
   finishHubWait(result.id);
   if (!conversation?.channel || !trace.failed(result.id, result.message)) return;
-  recordSession('delegation_end', `${result.id}: failed`);
   const pending = hubCalls.get(result.id);
   hubCalls.delete(result.id);
   pending?.resolve({ ok: false, error: result.message });
@@ -977,12 +981,16 @@ async function startConversation() {
     if (attempt.cancelled) return;
     attempt.pc = new RTCPeerConnection();
     attempt.channel = attempt.pc.createDataChannel('oai-events');
-    responseTools = new ResponsesTools((item, delegation) => executeLiveTool(item, attempt.channel, delegation), (event) => attempt.channel.send(JSON.stringify(event)), () => attempt.channel.readyState === 'open' && (attempt.channel === conversation?.channel || attempt.channel === starting?.channel), async (id) => {
+    const stages = stageTrace = new StageTrace((span) => traces.add(span));
+    responseTools = new ResponsesTools((item, delegation) => stages.tool(delegation, item, (traceparent) => executeLiveTool(item, attempt.channel, delegation, traceparent)), (event) => attempt.channel.send(JSON.stringify(event)), () => attempt.channel.readyState === 'open' && (attempt.channel === conversation?.channel || attempt.channel === starting?.channel), async (id) => {
       const pending = hubCalls.get(id);
       if (!pending?.stamp || pending.source !== attempt.channel) return;
       await sendFrame(`hub-ack\n${JSON.stringify({ id, stamp: pending.stamp })}`);
       hubCalls.delete(id);
-    }, (delegation) => attempt.playback.release(delegation));
+    }, (delegation) => {
+      stages.delegationSettled(delegation);
+      attempt.playback.release(delegation);
+    });
     const started = waitData(attempt.channel, (event) => event.type === 'session.started', 30000, attempt);
     started.catch(() => {});
     attempt.channel.addEventListener('close', () => { if (attempt.channel === conversation?.channel) stopConversation('Session ended — tap to continue', true); });
@@ -1058,7 +1066,8 @@ async function finishStop(reason, remoteClosed) {
   recordSession('close', reason, current.id);
   await stopRecorders(current.audioOwner);
   current.clock?.stop();
-  for (const id of hubWaiting) recordSession('delegation_end', `${id}: cancelled`, current.id);
+  stageTrace?.sessionEnded();
+  stageTrace = null;
   trace.cancel();
   paintOff();
   sendFrame('cancel').catch(() => {});

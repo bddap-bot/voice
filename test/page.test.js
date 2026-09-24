@@ -55,11 +55,12 @@ globalThis.transferOrder = [];
 globalThis.telemetryBatches = [];
 globalThis.fleetLines = [];
 function deliver(value) {
-  const resolve = waiting.shift();
-  if (resolve) resolve(value);
+  const receiver = waiting.shift();
+  if (receiver) receiver.resolve(value);
   else queued.push(value);
 }
 globalThis.deliverRelay = deliver;
+globalThis.loseRelay = (error) => { for (const receiver of waiting.splice(0)) receiver.reject(error); };
 export default async function initWasm() {}
 export async function init() {}
 export async function connect() {}
@@ -115,6 +116,7 @@ export async function send_only(bytes) {
     const id = JSON.parse(frame.slice(frame.indexOf('\\n') + 1)).id;
     deliver(enc.encode('puppet-selected\\n' + JSON.stringify({ id })));
   }
+  else if (frame === 'wake-model' && globalThis.backendWakeModel === 'unreadable') deliver(enc.encode('error\\nwake model unreadable'));
   else if (frame === 'wake-model' && globalThis.backendWakeModel !== 'unanswered') deliver(enc.encode(globalThis.backendWakeModel === null ? 'wake-model-none' : 'wake-model\\n' + JSON.stringify(globalThis.backendWakeModel ?? testWakeModel)));
   else if (frame.startsWith('offer\\n')) {
     const offer = JSON.parse(frame.slice(6));
@@ -129,7 +131,7 @@ export async function send_only(bytes) {
 }
 export async function recv() {
   if (queued.length) return queued.shift();
-  return new Promise((resolve) => waiting.push(resolve));
+  return new Promise((resolve, reject) => waiting.push({ resolve, reject }));
 }
 `;
 
@@ -1235,7 +1237,7 @@ for (const [name, served, error] of [
   ['without a backend model', null, 'the backend has no wake model'],
   ['with a backend model for another phrase', { ...demoModel, phrase: 'another phrase' }, 'the backend wake model listens for another phrase: another phrase'],
   ['with a backend model missing its weights', { phrase: WAKE_PHRASE, threshold: 0.9 }, 'invalid wake model'],
-  ['when the backend never answers for its model', 'unanswered', 'the backend did not answer for its wake model'],
+  ['when the backend cannot read its model', 'unreadable', 'wake model unreadable'],
 ]) test(`${name} the spotter stays off, says so without retrying, and a tap still opens a session`, async () => {
   const result = await runWakePage(`
     const errors = () => telemetryBatches.flat().filter((event) => event.kind === 'error').map((event) => event.message);
@@ -1247,8 +1249,29 @@ for (const [name, served, error] of [
     document.querySelector('#puppet').click();
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
     return { spotter: Boolean(globalThis.testSpotter), errors: [...new Set(errors())], retried };
-  `, { setup: `globalThis.backendWakeModel = ${JSON.stringify(served)};`, budget: 40000 });
+  `, { setup: `globalThis.backendWakeModel = ${JSON.stringify(served)};` });
   assert.deepEqual(result, { spotter: false, errors: [error], retried: 0 });
+});
+
+test('a wake model that arrives after a long wait still starts the spotter', async () => {
+  const result = await runWakePage(`
+    await sleepNow();
+    await new Promise((resolve) => setTimeout(resolve, 60000));
+    deliverRelay(new TextEncoder().encode('wake-model\\n' + ${JSON.stringify(JSON.stringify(testWakeModel))}));
+    await until(() => globalThis.testSpotter);
+    return { errors: telemetryBatches.flat().filter((event) => event.kind === 'error').map((event) => event.message) };
+  `, { setup: "globalThis.backendWakeModel = 'unanswered';", budget: 70000 });
+  assert.deepEqual(result, { errors: [] });
+});
+
+test('a relay lost before the wake model arrives leaves the spotter off and says why', async () => {
+  const result = await runWakePage(`
+    await sleepNow();
+    loseRelay(new Error('relay closed'));
+    await until(() => telemetryBatches.flat().some((event) => event.kind === 'error'));
+    return { spotter: Boolean(globalThis.testSpotter), errors: telemetryBatches.flat().filter((event) => event.kind === 'error').map((event) => event.message) };
+  `, { setup: "globalThis.backendWakeModel = 'unanswered';" });
+  assert.deepEqual(result, { spotter: false, errors: ['relay closed'] });
 });
 
 test('the sleep tool ends the session once speech goes quiet and the puppet falls asleep listening again', async () => {

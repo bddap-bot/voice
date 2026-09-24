@@ -371,8 +371,8 @@ async function listen(mine) {
         const failure = JSON.parse(body);
         if (isOfferFor(answerWaiter, failure)) answerWaiter.reject(new Error(failure.message));
       }
-      else if (verb === 'wake-model') wakeModelWaiter?.(JSON.parse(body));
-      else if (verb === 'wake-model-none') wakeModelWaiter?.(null);
+      else if (verb === 'wake-model') wakeModelWaiter?.resolve(JSON.parse(body));
+      else if (verb === 'wake-model-none') wakeModelWaiter?.resolve(null);
       else if (verb === 'hub') await receiveHub(JSON.parse(body));
       else if (verb === 'hub-error') await receiveHubError(JSON.parse(body));
       else if (verb === 'share-ok') receiveShare(JSON.parse(body));
@@ -403,6 +403,7 @@ async function listen(mine) {
       else if (verb === 'error') {
         answerWaiter?.reject(new Error(body));
         answerWaiter = null;
+        wakeModelWaiter?.reject(new Error(body));
         setStatus(body, 'err');
       }
     }
@@ -411,6 +412,7 @@ async function listen(mine) {
     failShares(error);
     answerWaiter?.reject(error);
     answerWaiter = null;
+    wakeModelWaiter?.reject(error);
     puppetChannel.fail(error);
     connected = false;
     if (conversation) await stopConversation('connection lost');
@@ -668,9 +670,8 @@ function wakeable() {
 }
 async function wakeModel() {
   const model = await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('the backend did not answer for its wake model')), 30000);
-    wakeModelWaiter = (value) => { clearTimeout(timer); resolve(value); };
-    sendFrame('wake-model').catch((error) => { clearTimeout(timer); reject(error); });
+    wakeModelWaiter = { resolve, reject };
+    sendFrame('wake-model').catch(reject);
   });
   if (!model) throw new Error('the backend has no wake model');
   loadHead(model);

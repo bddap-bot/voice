@@ -163,7 +163,7 @@ async function connectCdp(port) {
     const result = await call('Runtime.evaluate', { expression: `if (!self.__smokeCacheDelayed) { self.__smokeCacheDelayed = true; const open = caches.open.bind(caches); caches.open = async (...args) => { const cache = await open(...args); await new Promise(resolve => setTimeout(resolve, 100)); return cache; }; }` }, workerSession);
     if (result.result.exceptionDetails) throw new Error('could not delay service-worker cache lookup: ' + JSON.stringify(result.result.exceptionDetails));
   };
-  return { call, evaluate, consoleErrors, prepareWorker, close: () => socket.close() };
+  return { call, evaluate, consoleErrors, prepareWorker };
 }
 
 async function runViewport(viewport, executable, server) {
@@ -171,10 +171,10 @@ async function runViewport(viewport, executable, server) {
   const devPort = await new Promise((resolve) => { const listener=net.createServer().listen(0,'127.0.0.1',()=>{const value=listener.address().port;listener.close(()=>resolve(value))}); });
   const args=['--headless=new','--no-sandbox','--disable-background-timer-throttling','--disable-renderer-backgrounding','--hide-scrollbars','--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream','--autoplay-policy=no-user-gesture-required',`--window-size=${viewport.width},${viewport.height}`,`--user-data-dir=${path.join(scratch,'profile')}`,`--remote-debugging-port=${devPort}`,'--remote-debugging-address=127.0.0.1',...(viewport.mobile?['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36']:[]),'about:blank'];
   const chrome=spawn(executable,args,{stdio:['ignore','ignore','pipe']});
-  let chromeError='';chrome.stderr.on('data',(chunk)=>{chromeError+=chunk});
-  let cdp;
-  try {
-    cdp=await connectCdp(devPort);
+  let chromeError='';chrome.stderr.on('data',(chunk)=>{chromeError=(chromeError+chunk).slice(-500)});
+  const exited=new Promise((resolve)=>chrome.on('error',resolve).on('close',(code,signal)=>resolve(new Error(`Chromium exited with ${signal??`code ${code}`}: ${chromeError}`))));
+  const run = async () => {
+    const cdp=await connectCdp(devPort);
     if (development) await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `
       globalThis.__smokeLiveChannels = [];
       globalThis.__smokeSpeech = ${JSON.stringify(speech)};
@@ -239,7 +239,7 @@ async function runViewport(viewport, executable, server) {
     const deadline=Date.now()+180000;
     let ready=false;
     while(Date.now()<deadline){try{const page=JSON.parse(await cdp.evaluate("JSON.stringify({ready:document.querySelector('#puppet')?.getAttribute('aria-disabled')==='false',status:document.querySelector('#status')?.textContent,error:document.querySelector('#status')?.classList.contains('err')})"));ready=page.ready;if(ready)break;if(page.error)throw new Error(`page connection failed: ${page.status}`)}catch(error){if(error.message?.startsWith('page connection failed:'))throw error}await new Promise((resolve)=>setTimeout(resolve,250));}
-    if(!ready){const probe=await cdp.evaluate(`JSON.stringify({status:document.querySelector('#status')?.textContent,disabled:document.querySelector('#puppet')?.getAttribute('aria-disabled'),body:document.body?.innerText?.slice(0,500)})`);throw new Error(`page did not become ready: ${probe} ${cdp.consoleErrors.join('; ')} ${chromeError.slice(-500)}`)}
+    if(!ready){const probe=await cdp.evaluate(`JSON.stringify({status:document.querySelector('#status')?.textContent,disabled:document.querySelector('#puppet')?.getAttribute('aria-disabled'),body:document.body?.innerText?.slice(0,500)})`);throw new Error(`page did not become ready: ${probe} ${cdp.consoleErrors.join('; ')} ${chromeError}`)}
     await cdp.evaluate(`const smokeLimits = ${JSON.stringify(smokeLimits)}; globalThis.__smoke = (${installSmokeMeasurements.toString()})()`);
     const stageGeometry = async () => JSON.parse(await cdp.evaluate("JSON.stringify((() => { const box = document.querySelector('#puppet').getBoundingClientRect(); return { canvas: { left: box.left + scrollX, right: box.right + scrollX, top: box.top + scrollY, bottom: box.bottom + scrollY }, viewport: { x: scrollX, y: scrollY, width: innerWidth, height: innerHeight } }; })())"));
     const region = evidenceRegion({ neutralSilhouette, ...(await stageGeometry()) });
@@ -281,9 +281,12 @@ async function runViewport(viewport, executable, server) {
     await writeFile(path.join(output,`${viewport.name}.json`),JSON.stringify(report,null,2));
     await execute('ffmpeg',['-y','-framerate','2','-i',path.join(output,`${viewport.name}-%03d.png`),'-vf','scale=iw/2:ih/2:flags=lanczos','-t','8',path.join(output,`${viewport.name}.gif`)],{timeout:120000,maxBuffer:1024*1024*10});
     return report;
+  };
+  try {
+    return await Promise.race([exited.then((error) => { throw error; }), run()]);
   } finally {
-    cdp?.close();
-    if (chrome.kill('SIGKILL')) await new Promise((resolve) => chrome.once('exit', resolve));
+    chrome.kill('SIGKILL');
+    await exited;
     for (let attempt = 0; attempt < 5; attempt++) {
       try { await rm(scratch,{recursive:true,force:true,maxRetries:3,retryDelay:100}); break; }
       catch (error) { if (attempt === 4) throw error; await new Promise((resolve) => setTimeout(resolve, 250)); }

@@ -118,12 +118,14 @@ async function makeServer() {
 }
 
 async function connectCdp(port) {
+  const seconds = 120;
+  const deadline = Date.now() + seconds * 1000;
   let page;
-  for (let index = 0; !page && index < 300; index++) {
+  while (!page && Date.now() < deadline) {
     try { page = (await (await fetch(`http://127.0.0.1:${port}/json`)).json()).find((target) => target.type === 'page'); } catch {}
     if (!page) await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  if (!page) throw new Error('Chromium DevTools page target did not appear within 30 seconds');
+  if (!page) throw new Error(`Chromium DevTools page target did not appear within ${seconds} seconds`);
   const browser = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
   const socket = new WebSocket(browser.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject; });

@@ -621,6 +621,7 @@ async function dial() {
   connected = true;
   everConnected = true;
   listener = listen(generation);
+  listenForWake();
   if (reconnecting) recordSession('reconnect');
 }
 function waitForAnswer(id) {

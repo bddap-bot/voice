@@ -580,6 +580,10 @@ test('asleep holds the eyes shut under a sleepy droop and waking reopens them an
   assert.ok(head.quaternion.angleTo(new THREE.Quaternion()) > 0.1);
   runtime.asleep(false);
   runtime.nextBlink = Infinity;
+  runtime.moodStarted = 840;
+  head.quaternion.identity();
+  runtime.updateFace(1000);
+  assert.ok(head.quaternion.angleTo(new THREE.Quaternion()) > 0.01);
   runtime.moodStarted = 0;
   head.quaternion.identity();
   runtime.updateFace(1000);

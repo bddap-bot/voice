@@ -77,12 +77,19 @@ export async function wakeFeatures(ort, load) {
 }
 
 function floats(encoded) {
-  const bytes = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
-  return new Float32Array(bytes.buffer);
+  try {
+    return new Float32Array(Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0)).buffer);
+  } catch {
+    return new Float32Array();
+  }
 }
 
 export function loadHead(json) {
-  return { ...json, mean: floats(json.mean), scale: floats(json.scale), w1: floats(json.w1), b1: floats(json.b1), w2: floats(json.w2) };
+  const head = { ...json, mean: floats(json.mean), scale: floats(json.scale), w1: floats(json.w1), b1: floats(json.b1), w2: floats(json.w2) };
+  const inputs = WINDOW * WIDTH;
+  const sized = head.mean.length === inputs && head.scale.length === inputs && head.b1.length > 0 && head.w1.length === head.b1.length * inputs && head.w2.length === head.b1.length;
+  if (!sized || !Number.isFinite(head.b2) || !(head.threshold > 0 && head.threshold < 1)) throw new Error('invalid wake model');
+  return head;
 }
 
 export function headScore(head, window) {
@@ -97,9 +104,9 @@ export function headScore(head, window) {
 }
 
 export class WakeDecision {
-  constructor({ threshold, miss }) {
+  constructor({ threshold }) {
     this.threshold = threshold;
-    this.miss = miss;
+    this.miss = threshold / 2;
     this.rest = 0;
     this.peak = 0;
   }
@@ -135,7 +142,7 @@ export async function startWakeSpotter(stream, heard, model) {
   capture.port.onmessage = ({ data }) => worker.postMessage(data, [data.buffer]);
   worker.onmessage = ({ data }) => heard(data);
   worker.onerror = (event) => heard({ error: event.message || 'wake worker failed' });
-  if (context.state === 'suspended') for (const type of ['pointerdown', 'keydown']) addEventListener(type, () => context.resume(), { once: true });
+  if (context.state === 'suspended') for (const type of ['pointerdown', 'keydown']) addEventListener(type, () => { if (context.state === 'suspended') context.resume(); }, { once: true });
   return {
     close() {
       source.disconnect();

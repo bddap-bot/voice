@@ -6,7 +6,8 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
-import { INACTIVITY_MS, NAME } from '../docs/identity.js';
+import { INACTIVITY_MS, NAME, WAKE_PHRASE } from '../docs/identity.js';
+import { WIDTH, WINDOW } from '../docs/wake.js';
 import { assessSmoke, canvasAspectMatches, clipClearsStage, evidenceRegion, installSmokeMeasurements, smokeLimits, smokeStatusText, smokeViewports } from './smoke-measurements.js';
 
 const execute = promisify(execFile);
@@ -41,7 +42,10 @@ test('private smoke poses the puppet directly instead of toggling a conversation
   assert.match(source, /cdp\.evaluate\(`\$\{transitions\[1\]\}/);
 });
 
+const zeros = (length) => Buffer.from(new Float32Array(length).buffer).toString('base64');
+const testWakeModel = { phrase: WAKE_PHRASE, threshold: 0.5, b2: 0, mean: zeros(WINDOW * WIDTH), scale: zeros(WINDOW * WIDTH), w1: zeros(WINDOW * WIDTH), b1: zeros(1), w2: zeros(1) };
 const mockWasm = `
+const testWakeModel = ${JSON.stringify(testWakeModel)};
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 const queued = [enc.encode(JSON.stringify({ ok: true }))];
@@ -109,7 +113,7 @@ export async function send_only(bytes) {
     const id = JSON.parse(frame.slice(frame.indexOf('\\n') + 1)).id;
     deliver(enc.encode('puppet-selected\\n' + JSON.stringify({ id })));
   }
-  else if (frame === 'wake-model') deliver(enc.encode(globalThis.privateWakeModel ? 'wake-model\\n' + JSON.stringify(globalThis.privateWakeModel) : 'wake-model-none'));
+  else if (frame === 'wake-model') deliver(enc.encode(globalThis.backendWakeModel === null ? 'wake-model-none' : 'wake-model\\n' + JSON.stringify(globalThis.backendWakeModel ?? testWakeModel)));
   else if (frame.startsWith('offer\\n')) {
     const offer = JSON.parse(frame.slice(6));
     globalThis.lastOffer = offer;
@@ -736,7 +740,7 @@ window.addEventListener('test-ready', () => {
   assert.equal(event.webgpu_adapter, null);
 });
 
-test('the wake model choice, session open and session close arrive as batched telemetry events', async () => {
+test('session open and close arrive as two batched telemetry events', async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   document.querySelector('#puppet').click();
@@ -744,7 +748,7 @@ window.addEventListener('test-ready', () => {
 });
 `);
   const encoded = /data-telemetry-session-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), ['wake-model', 'open', 'close'], stderr);
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), ['open', 'close'], stderr);
 });
 
 test('the page loads a clip, moves a humanoid bone, and preloads inactive puppets', async () => {
@@ -1151,6 +1155,7 @@ test('the wake phrase wakes the puppet into one session that learns only its nam
     await sleepNow();
     const offers = count('offer');
     testSpotter.heard({ wake: 0.93 });
+    testSpotter.heard({ wake: 0.95 });
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
     testSpotter.heard({ wake: 0.97 });
     await new Promise((resolve) => setTimeout(resolve, 300));
@@ -1182,27 +1187,50 @@ test('a misheard wake phrase is a logged miss that leaves it asleep', async () =
   assert.deepEqual(result, { offers: 0, pressed: 'false', misses: ['0.610'] });
 });
 
-for (const privateModel of [null, { phrase: 'a private phrase', threshold: 0.9 }]) test(`the spotter runs the ${privateModel ? 'private model the backend serves' : 'public demo model when the backend has none'} and logs which`, async () => {
-  const demo = JSON.parse(await readFile(new URL('../docs/wake/demo.json', import.meta.url), 'utf8'));
+const demoModel = JSON.parse(await readFile(new URL('../scripts/wake-demo.json', import.meta.url), 'utf8'));
+test('the spotter listens with the model the backend serves', async () => {
   const result = await runWakePage(`
-    await until(() => globalThis.testSpotter && sessionEvents('wake-model').length);
-    return { phrase: testSpotter.model.phrase, source: sessionEvents('wake-model').map((event) => event.detail) };
-  `, { setup: `globalThis.privateWakeModel = ${JSON.stringify(privateModel)};` });
-  assert.deepEqual(result, privateModel ? { phrase: 'a private phrase', source: ['private'] } : { phrase: demo.phrase, source: ['demo'] });
+    await until(() => globalThis.testSpotter);
+    return { threshold: testSpotter.model.threshold, errors: telemetryBatches.flat().filter((event) => event.kind === 'error').map((event) => event.message) };
+  `, { setup: `globalThis.backendWakeModel = ${JSON.stringify({ ...demoModel, threshold: 0.9 })};` });
+  assert.deepEqual(result, { threshold: 0.9, errors: [] });
+});
+
+for (const [name, served, error] of [
+  ['without a backend model', null, 'the backend has no wake model'],
+  ['with a backend model for another phrase', { ...demoModel, phrase: 'another phrase' }, 'the backend wake model listens for another phrase: another phrase'],
+  ['with a backend model missing its weights', { phrase: WAKE_PHRASE, threshold: 0.9 }, 'invalid wake model'],
+]) test(`${name} the spotter stays off, says so, and a tap still opens a session`, async () => {
+  const result = await runWakePage(`
+    const errors = () => telemetryBatches.flat().filter((event) => event.kind === 'error').map((event) => event.message);
+    await sleepNow();
+    await until(() => errors().length);
+    document.querySelector('#puppet').click();
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+    return { spotter: Boolean(globalThis.testSpotter), errors: [...new Set(errors())] };
+  `, { setup: `globalThis.backendWakeModel = ${JSON.stringify(served)};` });
+  assert.deepEqual(result, { spotter: false, errors: [error] });
 });
 
 test('the sleep tool ends the session once speech goes quiet and the puppet falls asleep listening again', async () => {
   const result = await runWakePage(`
+    const { LivePlayback } = await import('/live-playback.js');
+    let quiet;
+    LivePlayback.prototype.quiet = () => new Promise((resolve) => { quiet = resolve; });
     emitTool('farewell', 'sleep', {});
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const speaking = document.querySelector('#puppet').getAttribute('aria-pressed');
+    quiet?.();
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && sessionEvents('close').length);
     return {
+      speaking,
       sleeps: sessionEvents('sleep').map((event) => event.detail),
       puppet: testPuppet.calls.filter(([name]) => name === 'asleep').at(-1),
       microphone: { enabled: testMicrophoneTrack.enabled, button: document.querySelector('#mic-mute').disabled },
       rewoken: await (async () => { testSpotter.heard({ wake: 0.9 }); await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true'); return true; })(),
     };
   `);
-  assert.deepEqual(result, { sleeps: ['farewell'], puppet: ['asleep', true], microphone: { enabled: true, button: false }, rewoken: true });
+  assert.deepEqual(result, { speaking: 'true', sleeps: ['farewell'], puppet: ['asleep', true], microphone: { enabled: true, button: false }, rewoken: true });
 });
 
 for (const pending of [false, true]) test(`inactivity sleeps only after the generous window${pending ? ', never while a hub request is pending' : ''}`, async () => {
@@ -1211,9 +1239,12 @@ for (const pending of [false, true]) test(`inactivity sleeps only after the gene
     await new Promise((resolve) => setTimeout(resolve, ${INACTIVITY_MS - 60000}));
     const before = document.querySelector('#puppet').getAttribute('aria-pressed');
     await new Promise((resolve) => setTimeout(resolve, 65000));
-    return { before, after: document.querySelector('#puppet').getAttribute('aria-pressed'), sleeps: sessionEvents('sleep').map((event) => event.detail) };
-  `, { budget: INACTIVITY_MS + 30000 });
-  assert.deepEqual(result, pending ? { before: 'true', after: 'true', sleeps: [] } : { before: 'true', after: 'false', sleeps: ['inactivity'] });
+    const after = document.querySelector('#puppet').getAttribute('aria-pressed');
+    ${pending ? `deliverRelay(new TextEncoder().encode('hub\\n' + JSON.stringify({ id: 'slow', reply: 'Done.', timing_ms: 1, stamp: 'slow' })));
+    await new Promise((resolve) => setTimeout(resolve, ${INACTIVITY_MS + 5000}));` : ''}
+    return { before, after, released: document.querySelector('#puppet').getAttribute('aria-pressed'), sleeps: sessionEvents('sleep').map((event) => event.detail) };
+  `, { budget: 2 * INACTIVITY_MS + 30000 });
+  assert.deepEqual(result, pending ? { before: 'true', after: 'true', released: 'false', sleeps: ['inactivity'] } : { before: 'true', after: 'false', released: 'false', sleeps: ['inactivity'] });
 });
 
 test('muting the microphone persists while asleep and into the next session', async () => {

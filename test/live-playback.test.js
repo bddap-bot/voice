@@ -69,6 +69,11 @@ test('long holds discard queued silence and catch up after buffered words', () =
 test('quiet waits for release, for held speech to play out, and for a run of silence', async () => {
   const buffer = new PlaybackBuffer(64);
   const output = new Float32Array(4);
+  const idle = new PlaybackBuffer(64);
+  idle.held = true;
+  idle.process([0, 0, 0, 0], output);
+  idle.process([0, 0, 0, 0], output);
+  assert.equal(idle.quiet(4), false);
   buffer.held = true;
   buffer.process([0.5, 0.5, 0.5, 0.5], output);
   buffer.process([0, 0, 0, 0], output);

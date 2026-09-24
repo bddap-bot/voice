@@ -129,8 +129,8 @@ import { PuppetTools } from './puppet-tools.js';
 import { ResponsesTools } from './responses-tools.js';
 import { LivePlayback } from './live-playback.js';
 import { PuppetRuntime } from './puppet.js';
-import { INACTIVITY_MS, NAME } from './identity.js';
-import { startWakeSpotter } from './wake.js';
+import { INACTIVITY_MS, NAME, WAKE_PHRASE } from './identity.js';
+import { loadHead, startWakeSpotter } from './wake.js';
 import { disposeRenderer, renderChart, renderMath, renderMermaid } from './lib/render.js';
 
 import config, { configuredToken } from './config.js';
@@ -177,6 +177,7 @@ let sharing = false;
 let microphoneMuted = false;
 let microphone;
 let microphoneStream;
+let listening = false;
 let spotter;
 let wakeModelWaiter;
 let inactivity;
@@ -243,6 +244,7 @@ function savedState(saved) {
   setTokenPanel(!saved);
   if (saved && !document.hidden) puppetRuntime?.start();
   else puppetRuntime?.pause();
+  listening = saved;
   if (saved) listenForWake();
   else stopListening();
 }
@@ -643,39 +645,49 @@ function waitIce(pc, attempt) {
   });
 }
 function acquireMicrophone() {
-  microphone ??= navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+  if (microphone) return microphone;
+  const opening = microphone = navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+    if (microphone !== opening) {
+      for (const track of stream.getTracks()) track.stop();
+      throw new Error('microphone released while opening');
+    }
     microphoneStream = stream;
     setMicrophoneMuted(microphoneMuted);
     return stream;
   }, (error) => {
-    microphone = undefined;
+    if (microphone === opening) microphone = undefined;
     throw error;
   });
-  return microphone;
+  return opening;
 }
 function wakeable() {
-  return puppetReady && !conversation && !starting;
+  return listening && puppetReady && !conversation && !starting;
 }
 async function wakeModel() {
-  const answer = new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(undefined), 10000);
-    wakeModelWaiter = (model) => { clearTimeout(timer); resolve(model); };
+  const model = await new Promise((resolve) => {
+    wakeModelWaiter = resolve;
+    sendFrame('wake-model').catch(() => resolve(null));
   });
-  sendFrame('wake-model').catch(() => wakeModelWaiter(undefined));
-  const model = await answer;
-  recordSession('wake-model', model ? 'private' : model === null ? 'demo' : 'demo, backend did not answer');
-  return model ?? (await fetch('wake/demo.json')).json();
+  if (!model) throw new Error('the backend has no wake model');
+  loadHead(model);
+  if (model.phrase !== WAKE_PHRASE) throw new Error(`the backend wake model listens for another phrase: ${model.phrase}`);
+  return model;
 }
 function listenForWake() {
-  if (spotter) return;
-  spotter = Promise.all([acquireMicrophone(), wakeModel()]).then(([stream, model]) => startSpotter(stream, heard, model));
-  spotter.catch((error) => { spotter = undefined; recordPageError(error); });
+  if (spotter || !listening) return;
+  const current = spotter = Promise.all([acquireMicrophone(), wakeModel()]).then(([stream, model]) => startSpotter(stream, heard, model));
+  current.catch((error) => {
+    if (spotter !== current) return;
+    spotter = undefined;
+    recordPageError(error);
+  });
 }
 function closeSpotter() {
   spotter?.then((running) => running.close()).catch(() => {});
   spotter = undefined;
 }
 function stopListening() {
+  listening = false;
   closeSpotter();
   for (const track of microphoneStream?.getTracks?.() ?? []) track.stop();
   microphone = undefined;
@@ -696,7 +708,7 @@ function heard({ wake, miss, error }) {
 }
 function stayAwake() {
   clearTimeout(inactivity);
-  if (!conversation) return;
+  if (!conversation || stopping) return;
   inactivity = setTimeout(() => {
     if (hubWaiting.size) return stayAwake();
     recordSession('sleep', 'inactivity');
@@ -832,7 +844,7 @@ function presentTranscript(event) {
 }
 const SLEEP_TOOL = { type: 'function', name: 'sleep', description: 'End this conversation and go back to sleep.', parameters: { type: 'object', properties: {}, additionalProperties: false } };
 function awaken(channel, session) {
-  channel.send(JSON.stringify({ type: 'session.update', event_id: 'sleep', session: { delegation: { type: 'responses', responses: { tools: [...session.delegation.responses.tools, SLEEP_TOOL] } } } }));
+  channel.send(JSON.stringify({ type: 'session.update', event_id: 'tools', session: { delegation: { type: 'responses', responses: { tools: [...session.delegation.responses.tools, SLEEP_TOOL] } } } }));
   channel.send(JSON.stringify({ type: 'session.instructions.append', event_id: 'identity', delegation_id: null, content: `Your name is ${NAME}. The Responses backend can end this session, which puts you back to sleep.` }));
   channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: 'wake', delegation_id: null, content: 'Context: You were just woken.' }));
 }
@@ -913,6 +925,7 @@ function paintOff() {
   puppetRuntime?.asleep(true);
   $('elapsed').textContent = '00:00';
   syncPuppetUi();
+  listenForWake();
 }
 function cancelOffer(attempt) {
   if (!attempt?.offered || attempt.cancelSent) return;
@@ -1181,8 +1194,8 @@ $('puppet-choice').addEventListener('change', () => showPuppet($('puppet-choice'
 $('connect').addEventListener('click', () => start($('token').value).catch((error) => setStatus(error.message, 'err')));
 $('token-toggle').addEventListener('click', () => setTokenPanel($('token-toggle').getAttribute('aria-expanded') !== 'true'));
 $('mic-mute').addEventListener('click', () => setMicrophoneMuted(!microphoneMuted));
-$('reenter').addEventListener('click', async () => { await stopConversation(); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); savedState(false); $('token').focus(); });
-$('forget').addEventListener('click', async () => { await stopConversation(); localStorage.removeItem(KEY); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); await sendFrame('bye').catch(() => {}); generation++; connected = false; resetPuppetConnection(new Error('connection replaced'), true); await puppetChannel.clearCache().catch(() => {}); savedState(false); setStatus('token forgotten'); });
+$('reenter').addEventListener('click', async () => { listening = false; await stopConversation(); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); savedState(false); $('token').focus(); });
+$('forget').addEventListener('click', async () => { listening = false; await stopConversation(); localStorage.removeItem(KEY); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); await sendFrame('bye').catch(() => {}); generation++; connected = false; resetPuppetConnection(new Error('connection replaced'), true); await puppetChannel.clearCache().catch(() => {}); savedState(false); setStatus('token forgotten'); });
 document.addEventListener('visibilitychange', () => { if (document.hidden) puppetRuntime?.pause(); else if (!$('conversation').classList.contains('hidden')) puppetRuntime?.start(); });
 window.addEventListener('beforeunload', () => puppetRuntime?.dispose());
 const saved = configuredToken(config, localStorage.getItem(KEY));

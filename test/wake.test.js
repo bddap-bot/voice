@@ -43,6 +43,7 @@ test('a head scores the standardized window through one hidden layer', () => {
     b1: encoded([0.5, 0.25]),
     w2: encoded([2, 3]),
     b2: -1,
+    threshold: 0.5,
   });
   const window = new Float32Array(inputs).fill(1.5);
   const hidden = [0.5 + inputs * 0.001, Math.max(0, 0.25 - inputs * 0.001)];
@@ -50,16 +51,23 @@ test('a head scores the standardized window through one hidden layer', () => {
 });
 
 test('crossing the threshold wakes once and then rests for two seconds', () => {
-  const decision = new WakeDecision({ threshold: 0.9, miss: 0.45 });
+  const decision = new WakeDecision({ threshold: 0.9 });
   const events = [0.1, 0.95, 0.99, ...new Array(24).fill(0.99), 0.98].map((score) => decision.decide(score));
   assert.deepEqual(events.filter(Boolean), [{ wake: 0.95 }, { wake: 0.98 }]);
   assert.equal(events.indexOf(events.find((event) => event?.wake === 0.98)), 27);
 });
 
 test('an episode that peaks between the miss level and the threshold is one logged miss', () => {
-  const decision = new WakeDecision({ threshold: 0.9, miss: 0.45 });
+  const decision = new WakeDecision({ threshold: 0.9 });
   const events = [0.2, 0.5, 0.8, 0.6, 0.3, 0.1].map((score) => decision.decide(score)).filter(Boolean);
   assert.deepEqual(events, [{ miss: 0.8 }]);
+});
+
+test('the threshold and the miss level are inclusive and a wake ends its episode without a miss', () => {
+  assert.deepEqual(new WakeDecision({ threshold: 0.9 }).decide(0.9), { wake: 0.9 });
+  const decision = new WakeDecision({ threshold: 0.9 });
+  const events = [0.45, 0.1, 0.6, 0.95, ...new Array(26).fill(0.1)].map((score) => decision.decide(score)).filter(Boolean);
+  assert.deepEqual(events, [{ miss: 0.45 }, { wake: 0.95 }]);
 });
 
 test('repetitions separated by pauses become one span each and a pause inside a repetition does not split it', () => {
@@ -68,6 +76,7 @@ test('repetitions separated by pauses become one span each and a pause inside a 
   const audio = Float32Array.from([...quiet(0.5), ...tone(0.6), ...quiet(0.3), ...tone(0.5), ...quiet(1.5), ...tone(1), ...quiet(1.5), ...tone(0.8), ...quiet(0.5)]);
   const spans = speechSpans(audio, 0.9);
   assert.equal(spans.length, 3);
+  assert.equal(speechSpans(audio, 0.2).length, 4);
   assert.ok(Math.abs(spans[0].start / RATE - 0.5) < 0.03 && Math.abs(spans[0].end / RATE - 1.9) < 0.03);
 });
 
@@ -112,4 +121,28 @@ test('batched features equal the streaming features the browser computes, window
   assert.equal(batched.first, first);
   assert.equal(batched.embeddings.length, streamed.length);
   assert.ok(streamed.every((value, index) => Math.abs(value - batched.embeddings[index]) < 1e-4));
+});
+
+test('the demo model listens for the configured phrase, carries its measurements, and stays asleep in silence and noise', async () => {
+  const model = JSON.parse(await readFile(new URL('../scripts/wake-demo.json', import.meta.url), 'utf8'));
+  assert.equal(model.phrase, WAKE_PHRASE);
+  const head = loadHead(model);
+  assert.ok(Object.keys(model.metrics.recall).length && Object.keys(model.metrics.falseAccepts).length);
+  const ort = (await import('onnxruntime-node')).default;
+  const create = await wakeFeatures(ort, (name) => ort.InferenceSession.create(fileURLToPath(new URL(`../docs/wake/${name}.onnx`, import.meta.url))));
+  let seed = 3;
+  const noise = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648 - 0.5; };
+  for (const audio of [new Float32Array(CHUNK * 80), Float32Array.from({ length: CHUNK * 80 }, () => 0.01 * noise()), Float32Array.from({ length: CHUNK * 80 }, () => 0.3 * noise())]) {
+    const { embeddings } = await create.all(audio);
+    const decision = new WakeDecision(head);
+    for (let index = WINDOW - 1; index < embeddings.length / WIDTH; index++) assert.equal(decision.decide(headScore(head, embeddings.slice((index - WINDOW + 1) * WIDTH, (index + 1) * WIDTH)))?.wake, undefined);
+  }
+});
+
+test('a model with missing or mismatched weights is refused', () => {
+  const encoded = (length) => Buffer.from(new Float32Array(length).buffer).toString('base64');
+  const inputs = WINDOW * WIDTH;
+  const valid = { phrase: WAKE_PHRASE, threshold: 0.9, b2: 0, mean: encoded(inputs), scale: encoded(inputs), w1: encoded(inputs * 2), b1: encoded(2), w2: encoded(2) };
+  assert.doesNotThrow(() => loadHead(valid));
+  for (const broken of [{ ...valid, w1: encoded(inputs) }, { ...valid, w2: encoded(3) }, { ...valid, threshold: 1 }, { ...valid, b2: undefined }, { ...valid, mean: encoded(10) }, { ...valid, scale: undefined }, { ...valid, b1: 'not base64!' }]) assert.throws(() => loadHead(broken), /invalid wake model/);
 });

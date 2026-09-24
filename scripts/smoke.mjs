@@ -10,6 +10,7 @@ import { assessSmoke, clipClearsStage, evidenceRegion, installSmokeMeasurements,
 const execute = promisify(execFile);
 import { serveDevelopment } from './dev.mjs';
 import { NAME, WAKE_PHRASE } from '../docs/identity.js';
+import { RATE } from '../docs/wake.js';
 
 const development = process.argv.includes('--dev');
 const mode = (development || process.argv.includes('--private')) ? 'private' : 'public';
@@ -23,9 +24,10 @@ const transitions = mode === 'private' && !live
   : live ? ['__smokeSay(__smokeSpeech.wake)', '__smokeSay(__smokeSpeech.farewell)']
   : ["document.querySelector('#puppet').click()", "document.querySelector('#puppet').click()"];
 async function developmentSpeech() {
-  const { HARVARD, synthesize } = await import('./wake.mjs');
-  const spoken = async (texts) => (await synthesize('en_US-amy-medium', 1, texts)).map((clip) => Buffer.from(clip.buffer, clip.byteOffset, clip.byteLength).toString('base64'));
-  return { wake: (await spoken([WAKE_PHRASE]))[0], farewell: (await spoken([`Thank you, ${NAME}. Goodbye.`]))[0], ordinary: await spoken(HARVARD.slice(0, 8)) };
+  const { HELD_OUT, HELD_OUT_SENTENCES, synthesize } = await import('./wake.mjs');
+  const [voice] = HELD_OUT;
+  const spoken = async (texts) => (await synthesize(voice, 1, texts)).map((clip) => Buffer.from(clip.buffer, clip.byteOffset, clip.byteLength).toString('base64'));
+  return { wake: (await spoken([WAKE_PHRASE]))[0], farewell: (await spoken([`Thank you, ${NAME}. Goodbye.`]))[0], ordinary: await spoken(HELD_OUT_SENTENCES.slice(0, 8)) };
 }
 const speech = live ? await developmentSpeech() : null;
 const outputFlag = process.argv.indexOf('--output');
@@ -184,7 +186,7 @@ async function runViewport(viewport, executable, server) {
       globalThis.__smokeSay = async (encoded) => {
         const samples = new Float32Array(Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0)).buffer);
         const source = microphone.createBufferSource();
-        source.buffer = microphone.createBuffer(1, samples.length, 16000);
+        source.buffer = microphone.createBuffer(1, samples.length, ${RATE});
         source.buffer.copyToChannel(samples, 0);
         source.connect(destination);
         source.start();

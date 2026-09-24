@@ -1172,7 +1172,7 @@ test('the wake phrase wakes the puppet into one session that learns only its nam
   assert.deepEqual(result.live, [
     { type: 'session.update', tools: ['hub', 'sleep'] },
     { type: 'session.instructions.append', delegation_id: null, content: `Your name is ${NAME}. The Responses backend can end this session, which puts you back to sleep.` },
-    { type: 'session.commentary.append', delegation_id: null, content: 'Context: You were just woken.' },
+    { type: 'session.commentary.append', delegation_id: null, content: `Context: ${NAME} was just woken.` },
   ]);
 });
 

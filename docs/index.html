@@ -847,7 +847,7 @@ const SLEEP_TOOL = { type: 'function', name: 'sleep', description: 'End this con
 function awaken(channel, session) {
   channel.send(JSON.stringify({ type: 'session.update', event_id: 'tools', session: { delegation: { type: 'responses', responses: { tools: [...session.delegation.responses.tools, SLEEP_TOOL] } } } }));
   channel.send(JSON.stringify({ type: 'session.instructions.append', event_id: 'identity', delegation_id: null, content: `Your name is ${NAME}. The Responses backend can end this session, which puts you back to sleep.` }));
-  channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: 'wake', delegation_id: null, content: 'Context: You were just woken.' }));
+  channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: 'wake', delegation_id: null, content: `Context: ${NAME} was just woken.` }));
 }
 async function executeLiveTool(item, source, delegation) {
   recordSession('tool_call', item.name === 'pose' ? JSON.stringify({ name: item.name, arguments: item.arguments }) : item.name);

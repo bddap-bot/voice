@@ -17,6 +17,7 @@ const LABELS = {
     'look-around': ['let me look around the room', 'I am checking what is around us', 'let me survey our surroundings'],
   },
   mood: {
+    neutral: ['I feel neutral', 'I have no particular emotion', 'my expression is neutral'],
     apologetic: ['I am sorry', 'please forgive my mistake', 'that was my fault'],
     surprised: ['that is completely unexpected', 'what an astonishing result', 'I cannot believe it'],
     amused: ['that is hilarious', 'what a funny joke', 'this makes me laugh'],

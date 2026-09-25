@@ -106,6 +106,7 @@ export async function animationClip(bytes, format, vrm) {
 }
 
 export const MOOD_TABLE = {
+  neutral: { expressions: {}, bones: {} },
   curious: { expressions: { surprised: 0.22 }, bones: { head: [-0.03, 0.12, 0.08], leftShoulder: [0, 0, 0.05] } },
   amused: { expressions: { happy: 0.68, relaxed: 0.12 }, bones: { head: [0.02, -0.08, -0.07], rightShoulder: [0, 0, -0.06] } },
   puzzled: { expressions: { sad: 0.2, surprised: 0.12 }, bones: { head: [0.04, 0.14, 0.1], leftShoulder: [0, 0, 0.08] } },
@@ -210,7 +211,6 @@ export class PuppetRuntime {
     this.speech = [];
     this.speechUntil = 0;
     this.mouthValues = Object.fromEntries(VISEMES.map((name) => [name, 0]));
-    this.moodValues = Object.fromEntries(MOOD_EXPRESSIONS.map((name) => [name, 0]));
     this.moodName = 'sleepy';
     this.sleeping = true;
     this.moodFrom = {};
@@ -287,13 +287,11 @@ export class PuppetRuntime {
       const rest = node.quaternion.clone();
       this.bones.set(bone, { node, rest, base: rest.clone(), from: rest.clone(), target: rest.clone() });
     }
-    for (const name of MOOD_EXPRESSIONS) {
-      const expression = vrm.expressionManager?.getExpression(name);
-      if (expression) {
-        expression.overrideMouth = 'none';
-        expression.overrideBlink = 'none';
-        expression.overrideLookAt = 'none';
-      }
+    for (const expression of vrm.expressionManager?.expressions ?? []) {
+      if (!MOOD_EXPRESSIONS.includes(expression.expressionName.toLowerCase())) continue;
+      expression.overrideMouth = 'none';
+      expression.overrideBlink = 'none';
+      expression.overrideLookAt = 'none';
     }
     this.clips.clear();
     preparedClip.userData.action = initialClip.action;
@@ -571,9 +569,9 @@ export class PuppetRuntime {
   }
   updateMood(now, manager) {
     const mood = MOOD_TABLE[this.moodName];
-    for (const name of MOOD_EXPRESSIONS) {
-      this.moodValues[name] = THREE.MathUtils.lerp(this.moodValues[name], mood?.expressions[name] ?? 0, 0.12);
-      manager.setValue(name, this.moodValues[name]);
+    for (const expression of manager.expressions) {
+      const name = expression.expressionName.toLowerCase();
+      if (MOOD_EXPRESSIONS.includes(name)) expression.weight = THREE.MathUtils.lerp(expression.weight, mood?.expressions[name] ?? 0, 0.12);
     }
     const amount = THREE.MathUtils.smoothstep((now - this.moodStarted) / 320, 0, 1);
     this.moodBones = blendOffsets(this.moodFrom, mood?.bones ?? {}, amount);

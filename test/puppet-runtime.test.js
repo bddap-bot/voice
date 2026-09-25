@@ -44,11 +44,12 @@ test('live amplitude opens the mouth between transcript vowels', () => {
   assert.deepEqual(Object.keys(values).filter((name) => name !== 'aa' && values[name]), []);
 });
 
-test('every mood has bounded expressions and a head or shoulder pose', () => {
-  assert.deepEqual(Object.keys(MOOD_TABLE), ['curious', 'amused', 'puzzled', 'thinking', 'pleased', 'sad', 'angry', 'apologetic', 'alert', 'sleepy', 'relaxed', 'surprised', 'skeptical']);
-  for (const mood of Object.values(MOOD_TABLE)) {
+test('moods have bounded expressions and poses, with empty neutral targets', () => {
+  assert.deepEqual(Object.keys(MOOD_TABLE), ['neutral', 'curious', 'amused', 'puzzled', 'thinking', 'pleased', 'sad', 'angry', 'apologetic', 'alert', 'sleepy', 'relaxed', 'surprised', 'skeptical']);
+  assert.deepEqual(MOOD_TABLE.neutral, { expressions: {}, bones: {} });
+  for (const [name, mood] of Object.entries(MOOD_TABLE)) {
     assert.ok(Object.values(mood.expressions).every((value) => value >= 0 && value <= 1));
-    assert.ok(['head', 'leftShoulder', 'rightShoulder'].some((bone) => bone in mood.bones));
+    if (name !== 'neutral') assert.ok(['head', 'leftShoulder', 'rightShoulder'].some((bone) => bone in mood.bones));
   }
 });
 
@@ -167,10 +168,9 @@ test('procedural mood rotation composes on a running clip pose', () => {
   bone.quaternion.copy(clipRotation);
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
     moodName: 'thinking', moodFrom: {}, moodBones: {}, moodStarted: 0,
-    moodValues: Object.fromEntries(['happy', 'angry', 'sad', 'relaxed', 'surprised'].map((name) => [name, 0])),
     bones: new Map([['head', { node: bone }]]), gestureRotation: new THREE.Quaternion(),
   });
-  runtime.updateMood(1000, { setValue() {} });
+  runtime.updateMood(1000, { expressions: [] });
   assert.ok(bone.quaternion.angleTo(clipRotation) > 0.01);
   assert.ok(bone.quaternion.angleTo(new THREE.Quaternion().setFromEuler(new THREE.Euler(...MOOD_TABLE.thinking.bones.head))) > 0.01);
 });
@@ -608,10 +608,9 @@ test('asleep holds the eyes shut under a sleepy droop and waking reopens them an
   const values = {};
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
     moodName: null, moodFrom: {}, moodBones: {}, moodStarted: 0, sleeping: false, nextBlink: Infinity, blinkStart: 0,
-    moodValues: Object.fromEntries(['happy', 'angry', 'sad', 'relaxed', 'surprised'].map((name) => [name, 0])),
     mouthValues: { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 }, audio: null,
     bones: new Map([['head', { node: head }]]), gestureRotation: new THREE.Quaternion(),
-    vrm: { expressionManager: { setValue: (name, value) => { values[name] = value; } } },
+    vrm: { expressionManager: { expressions: [], setValue: (name, value) => { values[name] = value; } } },
   });
   runtime.asleep(true);
   runtime.moodStarted = 0;
@@ -635,4 +634,40 @@ test('asleep holds the eyes shut under a sleepy droop and waking reopens them an
   assert.equal(values.blink, 0);
   assert.equal(runtime.moodName, null);
   assert.ok(head.quaternion.angleTo(new THREE.Quaternion()) < 1e-6);
+});
+
+for (const name of ['surprised', 'Surprised', 'SURPRISED']) test(`mood actions reach ${name} and neutral clears weights and pose`, async () => {
+  const { VRMExpression, VRMExpressionManager, VRMExpressionMorphTargetBind } = await import('@pixiv/three-vrm');
+  const manager = new VRMExpressionManager();
+  const mesh = new THREE.Mesh();
+  mesh.morphTargetInfluences = [0, 0];
+  for (const [index, expressionName] of [name, 'angry'].entries()) {
+    const expression = new VRMExpression(expressionName);
+    expression.addBind(new VRMExpressionMorphTargetBind({ primitives: [mesh], index, weight: 1 }));
+    manager.registerExpression(expression);
+  }
+  const head = new THREE.Object3D();
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+    moodName: null, moodFrom: {}, moodBones: {}, moodStarted: 0,
+    bones: new Map([['head', { node: head }]]), gestureRotation: new THREE.Quaternion(),
+  });
+  const settle = () => {
+    for (let i = 0; i < 120; i++) {
+      head.quaternion.identity();
+      runtime.updateMood(performance.now() + 1000, manager);
+      manager.update();
+    }
+  };
+  runtime.mood('surprised');
+  settle();
+  assert.ok(mesh.morphTargetInfluences[0] > 0.89, `${name} must move the face`);
+  runtime.mood('angry');
+  settle();
+  assert.ok(mesh.morphTargetInfluences[1] > 0.77);
+  assert.ok(head.quaternion.angleTo(new THREE.Quaternion()) > 0.01);
+  runtime.mood('neutral');
+  settle();
+  assert.ok(mesh.morphTargetInfluences.every(value => value < 1e-6));
+  assert.ok(head.quaternion.angleTo(new THREE.Quaternion()) < 1e-6);
+  assert.throws(() => runtime.mood('unknown'), /unknown mood/);
 });

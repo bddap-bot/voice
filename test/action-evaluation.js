@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { EmbeddingActionClassifier, LABELS, keywordMood } from '../docs/puppet-drivers.js';
 
 export const evaluation = [
+  ['mood','neutral',"I'm neutral."], ['mood','neutral','I am feeling neither happy nor sad.'], ['mood','neutral','My face has a neutral expression.'],
   ['none','neutral','The available expressions are neutral, happy, sad, angry, surprised, blink, and mouth open.'], ['none','neutral','The choices are small, medium, and large.'], ['none','neutral','The colors are red, green, and blue.'],
   ['gesture','nod','I concur with that conclusion.'], ['gesture','nod','You have my approval.'], ['gesture','nod','That answer checks out.'], ['gesture','nod','Proceed with the plan.'],
   ['gesture','shrug','Your guess is as good as mine.'], ['gesture','shrug','Either option works for me.'], ['gesture','shrug','I have no idea.'],
@@ -47,7 +48,7 @@ export async function evaluate(loadEmbedder) {
     if (hit) row.hits++;
   }
   for (const row of rows.values()) assert.ok(row.hits, `unreachable action token: ${row.token}`);
-  for (const [sentence, token] of [['Yes.', 'gesture:nod'], ['No idea.', 'gesture:shrug'], ['Hmm.', 'mood:thinking'], ['Happy.', 'mood:pleased'], ['Sad.', 'mood:sad'], ['Angry.', 'mood:angry'], ['Relaxed.', 'mood:relaxed'], ['Surprised.', 'mood:surprised'], ['Pointing at the panel.', 'gesture:point']]) {
+  for (const [sentence, token] of [['Yes.', 'gesture:nod'], ['No idea.', 'gesture:shrug'], ['Hmm.', 'mood:thinking'], ['Happy.', 'mood:pleased'], ['Sad.', 'mood:sad'], ['Angry.', 'mood:angry'], ['Relaxed.', 'mood:relaxed'], ['Surprised.', 'mood:surprised'], ["I'm neutral.", 'mood:neutral'], ['I feel neutral.', 'mood:neutral'], ['My expression is neutral.', 'mood:neutral'], ['Pointing at the panel.', 'gesture:point']]) {
     const result = await classifier.classify(sentence);
     assert.equal(`${result.kind}:${result.name}`, token, `short sentence ${sentence}`);
   }

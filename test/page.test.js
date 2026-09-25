@@ -1116,20 +1116,19 @@ window.addEventListener('test-ready', async () => {
   assert.deepEqual(JSON.parse(encoded ?? 'null'), { early: 0, pending: 0, calls: [['mood', 'amused'], ['speak', 'Okay.']] }, stderr);
 });
 
-for (const close of ["testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.closed' }) }))", "testChannel.dispatchEvent(new Event('close'))"]) test('provider close offers a fresh session carrying history: ' + close, async () => {
+for (const close of ["testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.closed' }) }))", "testChannel.dispatchEvent(new Event('close'))"]) test('provider close offers a fresh session: ' + close, async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {
-  testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.input_transcript.delta', delta: 'Remember the earlier question.' }) }));
   ${close};
   await new Promise(resolve => setTimeout(resolve, 30));
   const offered = document.querySelector('#status').textContent;
   document.querySelector('#puppet').click();
   await new Promise(resolve => setTimeout(resolve, 50));
-  document.body.dataset.resumeTest = JSON.stringify({ offered, active: document.querySelector('#puppet').getAttribute('aria-pressed'), context: lastOffer.context });
+  document.body.dataset.closeTest = JSON.stringify({ offered, active: document.querySelector('#puppet').getAttribute('aria-pressed') });
 });
 `);
-  const encoded = /data-resume-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { offered: 'Session ended — tap to continue', active: 'true', context: [{ speaker: 'user', text: 'Remember the earlier question.' }] }, stderr);
+  const encoded = /data-close-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { offered: 'Session ended — tap to continue', active: 'true' }, stderr);
 });
 
 test('perform requests reach the trace while animation deltas and input utterances reach session telemetry', async () => {
@@ -1223,7 +1222,12 @@ test('while asleep, anything short of a wake opens no session, asks the hub noth
 
 test('the wake phrase wakes the puppet into one session that learns only its name, its way back to sleep, and that it was woken', async () => {
   const result = await runWakePage(`
-    await sleepNow();
+    testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.output_transcript.delta', delta: 'The beacon is green.' }) }));
+    testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.input_transcript.delta', delta: 'Go back to sleep.' }) }));
+    emitTool('farewell', 'sleep', {});
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false');
+    testPuppet.calls.length = 0;
+    sentLiveEvents.length = 0;
     const offers = count('offer');
     testSpotter.heard({ wake: 0.93 });
     testSpotter.heard({ wake: 0.95 });
@@ -1232,12 +1236,14 @@ test('the wake phrase wakes the puppet into one session that learns only its nam
     await new Promise((resolve) => setTimeout(resolve, 300));
     return {
       offers: count('offer') - offers,
+      offer: Object.keys(lastOffer),
       wakes: sessionEvents('wake').map((event) => event.detail),
       puppet: testPuppet.calls.filter(([name]) => name === 'asleep' || name === 'pose'),
       live: sentLiveEvents.map((event) => event.type === 'session.update' ? { type: event.type, tools: event.session.delegation.responses.tools.map((tool) => tool.name) } : { type: event.type, delegation_id: event.delegation_id, content: event.content }),
     };
   `);
   assert.equal(result.offers, 1);
+  assert.deepEqual(result.offer, ['id', 'sdp']);
   assert.deepEqual(result.wakes, ['0.930']);
   assert.deepEqual(result.puppet, [['asleep', false], ['pose', 'stand'], ['pose', 'listen']]);
   assert.deepEqual(result.live, [

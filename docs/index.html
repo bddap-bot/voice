@@ -987,7 +987,7 @@ async function startConversation() {
     attempt.offerId = crypto.randomUUID();
     const answerPromise = waitForAnswer(attempt.offerId);
     attempt.offered = true;
-    await sendFrame(`offer\n${JSON.stringify({ id: attempt.offerId, sdp: attempt.pc.localDescription.sdp, context: trace.context(true) })}`);
+    await sendFrame(`offer\n${JSON.stringify({ id: attempt.offerId, sdp: attempt.pc.localDescription.sdp })}`);
     if (attempt.cancelled) {
       cancelOffer(attempt);
       return;

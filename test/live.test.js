@@ -148,7 +148,6 @@ test('ending voice does not cancel a pending shared request', () => {
   trace.cancel();
   assert.equal(trace.entries[0].reply, '');
   assert.equal(trace.entries[2].reply, 'cancelled');
-  assert.deepEqual(trace.context(true), [{ speaker: 'user', text: 'stop voice' }]);
 });
 
 test('timeline preserves every heard and spoken fragment around delegation', () => {

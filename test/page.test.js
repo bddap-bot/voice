@@ -1471,3 +1471,36 @@ test('the spotter stops throughout a conversation and restarts when it ends', as
   `);
   assert.deepEqual(result, { mid: { closed: 1, replaced: false, running: false }, unmuted: { closed: 1, replaced: false, running: false }, restarted: true });
 });
+
+test('a running spotter survives relay loss and the wake phrase reconnects', async () => {
+  const result = await runWakePage(`
+    await sleepNow();
+    await until(() => globalThis.testSpotter && !testSpotter.closed);
+    const before = testSpotter;
+    loseRelay(new Error('relay closed'));
+    await until(() => document.querySelector('#status').textContent.includes('connection lost'));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const afterLoss = { closed: before.closed, replaced: testSpotter !== before, running: !testSpotter.closed };
+    const offers = count('offer');
+    before.heard({ wake: 0.95 });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    deliverRelay(new TextEncoder().encode(JSON.stringify({ ok: true })));
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    return { afterLoss, pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), offers: count('offer') - offers };
+  `, { budget: 15000 });
+  assert.deepEqual(result.afterLoss, { closed: 0, replaced: false, running: true });
+  assert.equal(result.pressed, 'true');
+  assert.equal(result.offers, 1);
+});
+
+for (const control of ['reenter', 'forget']) test(control + ' stops the spotter before waiting for uploads', async () => {
+  const result = await runWakePage(`
+    await sleepNow();
+    await until(() => !testSpotter.closed);
+    const asleep = testSpotter;
+    document.querySelector('#${control}').click();
+    await Promise.resolve();
+    return { closed: asleep.closed, replaced: testSpotter !== asleep };
+  `);
+  assert.deepEqual(result, { closed: 1, replaced: false });
+});

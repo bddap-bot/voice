@@ -413,7 +413,6 @@ async function listen(mine) {
     wakeModelWaiter?.reject(error);
     puppetChannel.fail(error);
     connected = false;
-    syncSpotter();
     if (conversation) await stopConversation('connection lost');
     else setStatus('connection lost', 'err');
   }
@@ -657,7 +656,7 @@ function acquireMicrophone() {
   return opening;
 }
 function wakeable() {
-  return listening && connected && puppetReady && !microphoneMuted && !conversation && !starting;
+  return listening && puppetReady && !microphoneMuted && !conversation && !starting;
 }
 async function wakeModel() {
   const model = await new Promise((resolve, reject) => {
@@ -671,7 +670,7 @@ async function wakeModel() {
 }
 function syncSpotter() {
   if (!wakeable()) return closeSpotter();
-  if (spotter) return;
+  if (spotter || !connected) return;
   const current = spotter = Promise.all([acquireMicrophone(), wakeModel()]).then(([stream, model]) => startSpotter(stream, heard, model));
   current.catch((error) => {
     if (spotter === current) spotter = undefined;
@@ -1178,8 +1177,8 @@ $('puppet-choice').addEventListener('change', () => showPuppet($('puppet-choice'
 $('connect').addEventListener('click', () => start($('token').value).catch((error) => setStatus(error.message, 'err')));
 $('token-toggle').addEventListener('click', () => setTokenPanel($('token-toggle').getAttribute('aria-expanded') !== 'true'));
 $('mic-mute').addEventListener('click', () => setMicrophoneMuted(!microphoneMuted));
-$('reenter').addEventListener('click', async () => { listening = false; await stopConversation(); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); savedState(false); $('token').focus(); });
-$('forget').addEventListener('click', async () => { listening = false; await stopConversation(); localStorage.removeItem(KEY); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); await sendFrame('bye').catch(() => {}); generation++; connected = false; resetPuppetConnection(new Error('connection replaced'), true); await puppetChannel.clearCache().catch(() => {}); savedState(false); setStatus('token forgotten'); });
+$('reenter').addEventListener('click', async () => { listening = false; syncSpotter(); await stopConversation(); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); savedState(false); $('token').focus(); });
+$('forget').addEventListener('click', async () => { listening = false; syncSpotter(); await stopConversation(); localStorage.removeItem(KEY); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); await sendFrame('bye').catch(() => {}); generation++; connected = false; resetPuppetConnection(new Error('connection replaced'), true); await puppetChannel.clearCache().catch(() => {}); savedState(false); setStatus('token forgotten'); });
 document.addEventListener('visibilitychange', () => { if (document.hidden) puppetRuntime?.pause(); else if (!$('conversation').classList.contains('hidden')) puppetRuntime?.start(); });
 window.addEventListener('beforeunload', () => puppetRuntime?.dispose());
 const saved = configuredToken(config, localStorage.getItem(KEY));

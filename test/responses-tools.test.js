@@ -67,28 +67,26 @@ test('interleaved delegations retain their response and call association', async
   assert.deepEqual(sent.filter((event) => event.item).map((event) => event.item.call_id), ['b', 'a']);
 });
 
-test('failed submission retains delivery state and only acknowledges after continuation', async () => {
-  const sent = [], acknowledged = [];
+test('failed submission retains delivery state so a repeated completion sends only what is missing', async () => {
+  const sent = [];
   let fail = true;
   const loop = new ResponsesTools(() => ({ ok: true }), (event) => {
     if (fail && event.type === 'response.create') throw Error('send failed');
     sent.push(event);
-  }, () => true, (id) => acknowledged.push(id));
+  });
   loop.handle(envelope(created()));
   loop.handle(envelope(call('a', 'hub')));
   await assert.rejects(loop.handle(envelope(completed())), /send failed/);
-  assert.deepEqual(acknowledged, []);
   assert.equal(sent.length, 1);
   fail = false;
-  await loop.flush();
-  assert.deepEqual(acknowledged, ['a']);
+  await loop.handle(envelope(completed()));
   assert.deepEqual(sent.map((event) => event.type), ['response.item.create', 'response.create']);
 });
 
-test('closing a pending hub call prevents continuation even while the channel stays valid', async () => {
-  const sent = [], acknowledged = [];
+test('closing a pending call prevents continuation even while the channel stays valid', async () => {
+  const sent = [];
   let resolve;
-  const loop = new ResponsesTools(() => new Promise((done) => { resolve = done; }), (event) => sent.push(event), () => true, (id) => acknowledged.push(id));
+  const loop = new ResponsesTools(() => new Promise((done) => { resolve = done; }), (event) => sent.push(event), () => true);
   loop.handle(envelope(created()));
   loop.handle(envelope(call('a', 'hub')));
   const completion = loop.handle(envelope(completed()));
@@ -96,5 +94,4 @@ test('closing a pending hub call prevents continuation even while the channel st
   resolve({ ok: false, error: 'session ended' });
   await completion;
   assert.deepEqual(sent, []);
-  assert.deepEqual(acknowledged, []);
 });

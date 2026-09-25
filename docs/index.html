@@ -200,7 +200,6 @@ const hubWaiting = new Set();
 let responseTools;
 let stageTrace;
 const traces = new EventBatcher((spans) => sendFrame(`spans\n${JSON.stringify({ spans })}`));
-const hubCalls = new Map();
 const telemetryWaiters = new Map();
 const puppetChannel = new PuppetChannel(sendFrame, caches, () => token?.endpoint_id ?? '', config.transferTimeout);
 const telemetry = new EventBatcher(sendTelemetry);
@@ -374,10 +373,9 @@ async function listen(mine) {
       }
       else if (verb === 'wake-model') wakeModelWaiter?.resolve(JSON.parse(body));
       else if (verb === 'wake-model-none') wakeModelWaiter?.resolve(null);
-      else if (verb === 'hub') await receiveHub(JSON.parse(body));
-      else if (verb === 'hub-error') await receiveHubError(JSON.parse(body));
+      else if (verb === 'hub' || verb === 'share-reply') await receiveHub(JSON.parse(body));
+      else if (verb === 'hub-error') receiveHubError(JSON.parse(body));
       else if (verb === 'share-ok') receiveShare(JSON.parse(body));
-      else if (verb === 'share-reply') receiveShareReply(JSON.parse(body));
       else if (verb === 'share-error') receiveShareError(JSON.parse(body));
       else if (verb === 'transcript-ack') {
         const result = JSON.parse(body);
@@ -547,13 +545,6 @@ function receiveShareError(result) {
     waiter.reject(new Error(result.message));
   } else setStatus(result.message, 'err');
 }
-function receiveShareReply(result) {
-  trace.hub(result.id, result.reply, result.timing_ms);
-  if (conversation?.channel?.readyState === 'open') {
-    conversation.channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: `share_reply_${result.stamp}`, delegation_id: null, content: result.reply }));
-  }
-  sendFrame(`hub-ack\n${JSON.stringify({ id: result.id, stamp: result.stamp })}`).catch(() => {});
-}
 function chooseImage(file) {
   if (sharing) throw new Error('send in progress');
   if (!file) {
@@ -589,9 +580,7 @@ async function submitShare() {
     $('share-file').value = '';
     sharing = false;
     chooseImage();
-    if (conversation?.channel?.readyState === 'open') {
-      conversation.channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: `share_${result.stamp}`, delegation_id: null, content: result.summary }));
-    }
+    tell(`share_${result.stamp}`, result.summary);
     setStatus('sent', 'ok');
   } finally {
     sharing = false;
@@ -872,15 +861,14 @@ async function executeLiveTool(item, source, delegation, traceparent) {
     hubWaiting.add(id);
     puppetRuntime?.waiting(true);
     syncPuppetUi();
-    return new Promise((resolve) => {
-      hubCalls.set(id, { resolve, source, stamp: null });
-      sendFrame(`delegate\n${JSON.stringify({ id, text: args.text, context: turn.context, duration_ms: turn.duration_ms, traceparent })}`).catch((error) => {
-        hubCalls.delete(id);
-        finishHubWait(id);
-        trace.failed(id, error.message);
-        resolve({ ok: false, error: 'hub request failed' });
-      });
-    });
+    try {
+      await sendFrame(`delegate\n${JSON.stringify({ id, text: args.text, context: turn.context, duration_ms: turn.duration_ms, traceparent })}`);
+    } catch (error) {
+      finishHubWait(id);
+      trace.failed(id, error.message);
+      return { ok: false, error: 'hub request failed' };
+    }
+    return { ok: true, status: 'The hub answers later in this conversation.' };
   }
   if (item.name === 'sleep') {
     const current = conversation;
@@ -896,34 +884,23 @@ function finishHubWait(id) {
   if (!hubWaiting.size) puppetRuntime?.waiting(false);
   syncPuppetUi();
 }
+function tell(event_id, content) {
+  if (conversation?.channel?.readyState === 'open') conversation.channel.send(JSON.stringify({ type: 'session.commentary.append', event_id, delegation_id: null, content }));
+}
 async function receiveHub(result) {
-  if (result.reply === '' && !hubCalls.has(result.id)) {
-    await sendFrame(`hub-ack\n${JSON.stringify({ id: result.id, stamp: result.stamp })}`);
-    return;
+  if (result.reply) {
+    finishHubWait(result.id);
+    trace.hub(result.id, result.reply, result.timing_ms);
+    tell(`hub_${result.stamp}`, result.reply);
   }
-  finishHubWait(result.id);
-  if (!conversation?.channel || !trace.hub(result.id, result.reply, result.timing_ms)) return;
-  const pending = hubCalls.get(result.id);
-  if (pending) {
-    pending.stamp = result.stamp;
-    pending.resolve({ ok: true, reply: result.reply });
-    responseTools.flush().catch(recordPageError);
-    return;
-  }
-  conversation.channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: `hub_${result.stamp}`, delegation_id: null, content: result.reply }));
   await sendFrame(`hub-ack\n${JSON.stringify({ id: result.id, stamp: result.stamp })}`);
 }
-async function receiveHubError(result) {
+function receiveHubError(result) {
   finishHubWait(result.id);
-  if (!conversation?.channel || !trace.failed(result.id, result.message)) return;
-  const pending = hubCalls.get(result.id);
-  hubCalls.delete(result.id);
-  pending?.resolve({ ok: false, error: result.message });
+  if (trace.failed(result.id, result.message)) tell(`hub_error_${result.id}`, `The hub request failed: ${result.message}.`);
 }
 function paintOff() {
   responseTools?.close();
-  for (const { resolve } of hubCalls.values()) resolve({ ok: false, error: 'session ended' });
-  hubCalls.clear();
   hubWaiting.clear();
   actionDriver.reset();
   listeningDriver.reset();
@@ -985,12 +962,7 @@ async function startConversation() {
     attempt.pc = new RTCPeerConnection();
     attempt.channel = attempt.pc.createDataChannel('oai-events');
     const stages = stageTrace = new StageTrace((span) => traces.add(span));
-    responseTools = new ResponsesTools((item, delegation) => stages.tool(delegation, item, (traceparent) => executeLiveTool(item, attempt.channel, delegation, traceparent)), (event) => attempt.channel.send(JSON.stringify(event)), () => attempt.channel.readyState === 'open' && (attempt.channel === conversation?.channel || attempt.channel === starting?.channel), async (id) => {
-      const pending = hubCalls.get(id);
-      if (!pending?.stamp || pending.source !== attempt.channel) return;
-      await sendFrame(`hub-ack\n${JSON.stringify({ id, stamp: pending.stamp })}`);
-      hubCalls.delete(id);
-    }, (delegation) => {
+    responseTools = new ResponsesTools((item, delegation) => stages.tool(delegation, item, (traceparent) => executeLiveTool(item, attempt.channel, delegation, traceparent)), (event) => attempt.channel.send(JSON.stringify(event)), () => attempt.channel.readyState === 'open' && (attempt.channel === conversation?.channel || attempt.channel === starting?.channel), (delegation) => {
       stages.delegationSettled(delegation);
       attempt.playback.release(delegation);
     });

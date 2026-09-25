@@ -1,9 +1,8 @@
 export class ResponsesTools {
-  constructor(execute, send, valid = () => true, submitted = () => {}, settled = () => {}) {
+  constructor(execute, send, valid = () => true, settled = () => {}) {
     this.execute = execute;
     this.send = send;
     this.valid = valid;
-    this.submitted = submitted;
     this.settled = settled;
     this.responses = new Map();
     this.delegations = new Map();
@@ -17,7 +16,7 @@ export class ResponsesTools {
     const event = envelope.event;
     if (event?.type === 'response.created') {
       this.delegations.set(envelope.delegation_id, event.response.id);
-      if (!this.responses.has(event.response.id)) this.responses.set(event.response.id, { calls: [], terminal: false, sent: 0, continued: false, delegation: envelope.delegation_id });
+      if (!this.responses.has(event.response.id)) this.responses.set(event.response.id, { calls: [], sent: 0, continued: false, delegation: envelope.delegation_id });
       return;
     }
     const id = event?.response_id ?? event?.response?.id ?? this.delegations.get(envelope.delegation_id);
@@ -32,12 +31,8 @@ export class ResponsesTools {
       const result = Promise.resolve(execution).catch(() => ({ ok: false, error: 'tool execution failed' }));
       response.calls.push({ item, result });
     }
-    if (event.type === 'response.completed') {
-      response.terminal = true;
-      return this.complete(response);
-    }
+    if (event.type === 'response.completed') return this.complete(response);
   }
-  flush() { return Promise.all([...this.responses.values()].filter((response) => response.terminal).map((response) => this.complete(response))); }
   complete(response) {
     if (response.pending) return response.pending;
     response.pending = this.submit(response).finally(() => { response.pending = null; });
@@ -55,6 +50,5 @@ export class ResponsesTools {
       this.send({ type: 'response.create' });
       response.continued = true;
     }
-    for (const output of outputs) await this.submitted(output.call_id);
   }
 }

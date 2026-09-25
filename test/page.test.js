@@ -12,12 +12,6 @@ import { assessSmoke, canvasAspectMatches, clipClearsStage, evidenceRegion, inst
 
 const execute = promisify(execFile);
 
-test('display-only hub messages are acknowledged without prompting Live', async () => {
-  const source = await readFile(new URL('../docs/index.html', import.meta.url), 'utf8');
-  const handler = source.slice(source.indexOf('async function receiveHub(result)'), source.indexOf('async function receiveHubError(result)'));
-  assert.match(handler, /if \(result\.reply === '' && !hubCalls\.has\(result\.id\)\) \{\s*await sendFrame\(`hub-ack[^;]+;\s*return;\s*\}/);
-  assert.ok(handler.indexOf("result.reply === ''") < handler.indexOf('session.commentary.append'));
-});
 
 test('private smoke uses the same authenticated relay transport as the page', async () => {
   const source = await readFile(new URL('../scripts/smoke.mjs', import.meta.url), 'utf8');
@@ -73,6 +67,7 @@ export async function connect() { lost = false; }
 export async function send_only(bytes) {
   const frame = dec.decode(bytes);
   (globalThis.sentVerbs ??= []).push(frame.split('\\n', 1)[0]);
+  if (frame.startsWith('hub-ack\\n')) (globalThis.hubAcks ??= []).push(JSON.parse(frame.slice(8)).stamp);
   if (frame.startsWith('spans\\n')) (globalThis.spanBatches ??= []).push(JSON.parse(frame.slice(6)).spans);
   if (frame.startsWith('delegate\\n')) (globalThis.delegateFrames ??= []).push(JSON.parse(frame.slice(9)));
   if (frame.startsWith('telemetry\\n')) {
@@ -909,6 +904,38 @@ window.addEventListener('test-ready', async () => {
   assert.ok(spans.every((span) => span.traceId === spans[0].traceId && span.status === undefined));
   const hub = spans.find((span) => span.name === 'tool' && span.attributes.some(({ key, value }) => key === 'tool.name' && value.stringValue === 'hub'));
   assert.deepEqual(delegates.map(({ id, traceparent }) => [id, traceparent]), [['hub_1', `00-${hub.traceId}-${hub.spanId}-01`]]);
+});
+
+test('a hub call returns at once and the hub reply reaches Live later as commentary, while a display-only push says nothing', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  const pause = () => new Promise((resolve) => setTimeout(resolve, 30));
+  const relay = (verb, value) => deliverRelay(new TextEncoder().encode(verb + '\\n' + JSON.stringify(value)));
+  const told = () => sentLiveEvents.filter(({ type, event_id }) => type === 'session.commentary.append' && event_id.startsWith('hub_')).map(({ delegation_id, content }) => [delegation_id, content]);
+  emitTool('slow', 'hub', { text: 'How many jobs are queued?' });
+  await pause();
+  const returned = sentLiveEvents.filter(({ type }) => type === 'response.item.create' || type === 'response.create').map(({ type, item }) => item ? [item.call_id, JSON.parse(item.output).ok] : type);
+  relay('hub', { id: 'slow', reply: '', timing_ms: 5, stamp: 'push_1' });
+  await pause();
+  const pushed = { told: told(), waiting: testPuppet.calls.filter(([name]) => name === 'waiting').map(([, value]) => value) };
+  relay('hub', { id: 'slow', reply: 'Four jobs are queued.', timing_ms: 180000, stamp: 'reply_1' });
+  await pause();
+  emitTool('lost', 'hub', { text: 'Is the printer busy?' });
+  await pause();
+  relay('hub-error', { id: 'lost', message: 'delegation queue is full' });
+  await pause();
+  document.body.dataset.asyncHubTest = JSON.stringify({ returned, pushed, told: told(), acks: globalThis.hubAcks ?? [], waiting: testPuppet.calls.filter(([name]) => name === 'waiting').map(([, value]) => value), log: document.querySelector('#log').innerText });
+});
+`);
+  const encoded = /data-async-hub-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  const result = JSON.parse(encoded ?? 'null');
+  assert.ok(result, stderr);
+  assert.deepEqual(result.returned, [['slow', true], 'response.create']);
+  assert.deepEqual(result.pushed, { told: [], waiting: [true] });
+  assert.deepEqual(result.told, [[null, 'Four jobs are queued.'], [null, 'The hub request failed: delegation queue is full.']]);
+  assert.deepEqual(result.acks, ['push_1', 'reply_1']);
+  assert.deepEqual(result.waiting, [true, false, true, false]);
+  assert.match(result.log, /sent to hub: How many jobs are queued\?[\s\S]*hub reply: Four jobs are queued\./);
 });
 
 test('output transcript drives mood and delegation drives the waiting pose', async () => {

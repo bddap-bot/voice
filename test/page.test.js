@@ -561,7 +561,6 @@ for (const viewport of layoutViewports) test(`stage UI stays outside the puppet 
   const { stdout, stderr } = await runPuppetPage(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">${style}</head><body>${chrome}${main}<script type="module">
   import { PuppetRuntime } from '/puppet.js';
   const stageHeight = Math.round(visualViewport?.height ?? innerHeight);
-  document.documentElement.style.setProperty('--visual-viewport-height', stageHeight + 'px');
   document.querySelector('main').style.setProperty('--stage-height', stageHeight + 'px');
   const runtime = new PuppetRuntime(document.querySelector('#puppet'));
   runtime.pause();

@@ -143,7 +143,6 @@ const dec = new TextDecoder();
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function syncVisualViewport() {
   const height = Math.round(window.visualViewport?.height ?? window.innerHeight);
-  document.documentElement.style.setProperty('--visual-viewport-height', `${height}px`);
   $('conversation').style.setProperty('--stage-height', `${height}px`);
 }
 syncVisualViewport();

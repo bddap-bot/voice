@@ -71,12 +71,25 @@ export function webGpuAdapter() {
   return webGpuAdapterPromise;
 }
 
+export function independentEmbedder(extractor) {
+  return async (texts) => {
+    const vectors = [];
+    // q8 inference can depend on batch padding and quantization ranges.
+    // Keep each inference independent of the other texts and label count.
+    for (const text of texts) {
+      const [vector] = (await extractor([text], { pooling: 'mean', normalize: true })).tolist();
+      vectors.push(vector);
+    }
+    return vectors;
+  };
+}
+
 export async function browserEmbedder() {
   const { env, pipeline } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.3');
   env.allowLocalModels = false;
   const adapter = await webGpuAdapter();
   const extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { dtype: 'q8', device: adapter ? 'webgpu' : 'wasm' });
-  return async (texts) => (await extractor(texts, { pooling: 'mean', normalize: true })).tolist();
+  return independentEmbedder(extractor);
 }
 
 export class EmbeddingActionClassifier {

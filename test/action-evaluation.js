@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { EmbeddingActionClassifier, LABELS, keywordMood } from '../docs/puppet-drivers.js';
+import { EmbeddingActionClassifier, LABELS, independentEmbedder, keywordMood } from '../docs/puppet-drivers.js';
 
 export const evaluation = [
   ['mood','neutral',"I'm neutral."], ['mood','neutral','I am feeling neither happy nor sad.'], ['mood','neutral','My face has a neutral expression.'],
@@ -62,7 +62,26 @@ export async function evaluate(loadEmbedder) {
 if (process.argv[1] === new URL(import.meta.url).pathname) {
   const { pipeline } = await import('@huggingface/transformers');
   const extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { dtype: 'q8' });
-  const result = await evaluate(async () => async (texts) => (await extractor(texts, { pooling: 'mean', normalize: true })).tolist());
+  const embed = independentEmbedder(extractor);
+  const texts = ['Yes.', 'It makes no difference to me.', evaluation[3][2]];
+  const alone = await Promise.all(texts.map(async (text) => (await embed([text]))[0]));
+  for (const batch of [
+    texts,
+    [...texts].reverse(),
+    ['A much longer unrelated sentence about comparing several possible approaches to a complicated problem.', ...texts, 'Hi.'],
+    [...Object.values(LABELS).flatMap((labels) => Object.values(labels).flat()), ...texts],
+  ]) {
+    const vectors = await embed(batch);
+    for (const [i, text] of texts.entries()) {
+      assert.deepEqual(vectors[batch.indexOf(text)], alone[i], `batch-independent embedding: ${text}`);
+    }
+  }
+  console.log('Batch independence: identical vectors alone, reordered, with unrelated texts, and with all labels.');
+  const result = await evaluate(async () => embed);
+  for (const sentence of [evaluation[3][2], 'It makes no difference to me.']) {
+    const row = result.rows.flatMap(({ examples }) => examples).find((row) => row.sentence === sentence);
+    console.log(JSON.stringify({ sentence, classified: row.classified }));
+  }
   console.table(result.rows.map(({ token, hitRate }) => ({ token, hitRate })));
   console.log(JSON.stringify({ total: result.total, before: result.before, after: result.after }));
 }

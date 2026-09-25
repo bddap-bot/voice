@@ -19,6 +19,19 @@
     },
     {
       "paths": [
+        "docs/puppet-drivers.js"
+      ],
+      "tests": [
+        "node test/action-evaluation.js",
+        "node --test --test-name-pattern='display pipe tables' test/page.test.js",
+        "npm test",
+        "npm run build",
+        "npm run smoke:ci"
+      ],
+      "why": "Classifier changes must pass real-model embedding invariance and action evaluation as well as browser coverage."
+    },
+    {
+      "paths": [
         "docs/**",
         "src/**",
         "scripts/build.mjs",

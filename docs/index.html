@@ -706,7 +706,6 @@ function stayAwake() {
   clearTimeout(inactivity);
   if (!conversation || stopping) return;
   inactivity = setTimeout(() => {
-    if (hubWaiting.size) return stayAwake();
     recordSession('sleep', 'inactivity');
     stopConversation();
   }, INACTIVITY_MS);
@@ -896,8 +895,10 @@ async function receiveHub(result) {
   await sendFrame(`hub-ack\n${JSON.stringify({ id: result.id, stamp: result.stamp })}`);
 }
 function receiveHubError(result) {
+  if (!hubWaiting.has(result.id)) return;
   finishHubWait(result.id);
-  if (trace.failed(result.id, result.message)) tell(`hub_error_${result.id}`, `The hub request failed: ${result.message}.`);
+  trace.failed(result.id, result.message);
+  tell(`hub_error_${result.id}`, `The hub request failed: ${result.message}.`);
 }
 function paintOff() {
   responseTools?.close();

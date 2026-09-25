@@ -920,6 +920,7 @@ window.addEventListener('test-ready', async () => {
   const pushed = { told: told(), waiting: testPuppet.calls.filter(([name]) => name === 'waiting').map(([, value]) => value) };
   relay('hub', { id: 'slow', reply: 'Four jobs are queued.', timing_ms: 180000, stamp: 'reply_1' });
   await pause();
+  relay('hub-error', { id: 'slow', message: 'invalid hub reply' });
   emitTool('lost', 'hub', { text: 'Is the printer busy?' });
   await pause();
   relay('hub-error', { id: 'lost', message: 'delegation queue is full' });
@@ -1360,18 +1361,15 @@ test('the sleep tool ends the session once speech goes quiet and the puppet fall
   assert.deepEqual(result, { speaking: 'true', sleeps: ['farewell'], puppet: ['asleep', true], microphone: { enabled: true, button: false }, rewoken: true });
 });
 
-for (const pending of [false, true]) test(`inactivity sleeps only after the generous window${pending ? ', never while a hub request is pending' : ''}`, async () => {
+for (const pending of [false, true]) test(`inactivity sleeps after the generous window${pending ? ', even while a hub request is pending' : ''}`, async () => {
   const result = await runWakePage(`
     ${pending ? "emitTool('slow', 'hub', { text: 'Take your time.' });" : ''}
     await new Promise((resolve) => setTimeout(resolve, ${INACTIVITY_MS - 60000}));
     const before = document.querySelector('#puppet').getAttribute('aria-pressed');
     await new Promise((resolve) => setTimeout(resolve, 65000));
-    const after = document.querySelector('#puppet').getAttribute('aria-pressed');
-    ${pending ? `deliverRelay(new TextEncoder().encode('hub\\n' + JSON.stringify({ id: 'slow', reply: 'Done.', timing_ms: 1, stamp: 'slow' })));
-    await new Promise((resolve) => setTimeout(resolve, ${INACTIVITY_MS + 5000}));` : ''}
-    return { before, after, released: document.querySelector('#puppet').getAttribute('aria-pressed'), sleeps: sessionEvents('sleep').map((event) => event.detail) };
-  `, { budget: 2 * INACTIVITY_MS + 30000 });
-  assert.deepEqual(result, pending ? { before: 'true', after: 'true', released: 'false', sleeps: ['inactivity'] } : { before: 'true', after: 'false', released: 'false', sleeps: ['inactivity'] });
+    return { before, after: document.querySelector('#puppet').getAttribute('aria-pressed'), sleeps: sessionEvents('sleep').map((event) => event.detail) };
+  `, { budget: INACTIVITY_MS + 30000 });
+  assert.deepEqual(result, { before: 'true', after: 'false', sleeps: ['inactivity'] });
 });
 
 test('muting the microphone persists while asleep and into the next session', async () => {

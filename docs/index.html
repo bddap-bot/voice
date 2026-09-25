@@ -420,7 +420,7 @@ async function listen(mine) {
 }
 function appendUrl(parent, url) {
   const link = document.createElement('a');
-  link.href = url; link.textContent = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+  link.href = url; link.textContent = url; link.rel = 'noopener noreferrer';
   parent.append(link);
 }
 function appendMath(parent, source, display) {
@@ -440,7 +440,7 @@ function appendInline(parent, text) {
     if (!match[2] && !match[4] && !match[5] && !match[6]) { appendUrl(parent, match[0]); continue; }
     const node = match[2] ? document.createElement('a') : match[4] ? document.createElement('strong') : match[5] ? document.createElement('em') : document.createElement('code');
     node.textContent = match[2] || match[4] || match[5] || match[6];
-    if (match[2]) { node.href = match[3]; node.target = '_blank'; node.rel = 'noopener noreferrer'; }
+    if (match[2]) { node.href = match[3]; node.rel = 'noopener noreferrer'; }
     parent.append(node);
   }
   parent.append(document.createTextNode(text.slice(offset)));
@@ -508,7 +508,7 @@ function receiveDisplay(raw) {
   if (typeof payload.markdown === 'string') appendMarkdown(item, payload.markdown);
   if (typeof payload.link === 'string' && /^https?:\/\//i.test(payload.link)) {
     const link = document.createElement('a');
-    link.href = payload.link; link.textContent = payload.link; link.target = '_blank'; link.rel = 'noopener noreferrer';
+    link.href = payload.link; link.textContent = payload.link; link.rel = 'noopener noreferrer';
     item.append(link);
   }
   if (['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(payload.image?.mime) && boundary + 1 < raw.length && raw.length - boundary - 1 <= 8 * 1024 * 1024) {
@@ -938,7 +938,7 @@ async function startConversation() {
     if (attempt.cancelled || (starting !== attempt && conversation?.audioOwner !== attempt)) return;
     recordPageError(error);
     stopConversation('Live playback failed');
-  });
+  }, $('speaker'));
   starting = attempt;
   puppetRuntime?.asleep(false);
   puppetRuntime?.pose('stand');

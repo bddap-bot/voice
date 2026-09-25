@@ -1063,13 +1063,25 @@ window.addEventListener('test-ready', () => {
   deliverRelay(enc.encode('display\\n' + JSON.stringify({ markdown: 'Spent $9 on the pizza and $3 more, see https://example.test/receipt?id=1). Ended.' }) + '\\n'));
   setTimeout(() => {
     const item = document.querySelector('.display-item');
-    document.body.dataset.linkTest = JSON.stringify({ text: item.textContent, links: [...item.querySelectorAll('a')].map((a) => [a.href, a.rel]), math: item.querySelectorAll('.math').length });
+    document.body.dataset.linkTest = JSON.stringify({ text: item.textContent, links: [...item.querySelectorAll('a')].map((a) => [a.href, a.rel, a.target]), math: item.querySelectorAll('.math').length });
   }, 500);
 });
 `);
   const encoded = /data-link-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { text: 'Spent $9 on the pizza and $3 more, see https://example.test/receipt?id=1). Ended.', links: [['https://example.test/receipt?id=1', 'noopener noreferrer']], math: 0 }, stderr);
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { text: 'Spent $9 on the pizza and $3 more, see https://example.test/receipt?id=1). Ended.', links: [['https://example.test/receipt?id=1', 'noopener noreferrer', '']], math: 0 }, stderr);
   assert.ok(await libBytes(requests) < 8192, requests.join(' '));
+});
+
+test('panel links use the default browsing target', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  deliverRelay(new TextEncoder().encode('display\\n' + JSON.stringify({ markdown: '[linked](https://example.test/linked) https://example.test/bare', link: 'https://example.test/panel' }) + '\\n'));
+  setTimeout(() => { document.body.dataset.targets = JSON.stringify([...document.querySelectorAll('.display-item a')].map(a => [a.href, a.target])); }, 500);
+});`);
+  const encoded = /data-targets="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), [
+    ['https://example.test/linked', ''], ['https://example.test/bare', ''], ['https://example.test/panel', ''],
+  ], stderr);
 });
 
 test('adopted renderer output loses scripts, handlers, remote references and unsafe links in both SVG and HTML', async () => {
@@ -1079,7 +1091,7 @@ window.addEventListener('test-ready', async () => {
   const svg = document.createElement('div');
   adopt(svg, '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" onload="alert(1)"><script>alert(2)<\\/script><style>.a{fill:red}</style><a href="javascript:alert(3)"><text onclick="x()">t</text></a><a href="https://ok.test/"><text>k</text></a><use xlink:href="https://evil.test/x.svg#y"/><use href="#local"/><image href="https://evil.test/a.png"/><foreignObject><div onmouseover="y()">f</div></foreignObject></svg>', 'image/svg+xml');
   const html = document.createElement('div');
-  adopt(html, '<span class="katex"><img src="x" onerror="alert(4)"><a href="https://ok.test/">k</a><a href="data:text/html,x">d</a><iframe srcdoc="x"></iframe></span>', 'text/html');
+  adopt(html, '<span class="katex"><img src="x" onerror="alert(4)"><a href="https://ok.test/" target="_blank">k</a><a href="data:text/html,x">d</a><iframe srcdoc="x"></iframe></span>', 'text/html');
   let unparseable = false;
   try { adopt(document.createElement('div'), '<svg', 'image/svg+xml'); } catch { unparseable = true; }
   document.body.dataset.adoptTest = JSON.stringify({ svg: svg.innerHTML, html: html.innerHTML, unparseable });
@@ -1090,8 +1102,8 @@ window.addEventListener('test-ready', async () => {
   assert.ok(result, stderr);
   assert.equal(result.unparseable, true);
   for (const forbidden of ['script', 'onload', 'onclick', 'onmouseover', 'onerror', 'javascript:', 'evil.test', '<image', '<iframe', 'srcdoc', 'data:']) assert.equal(result.svg.includes(forbidden) || result.html.includes(forbidden), false, forbidden + ': ' + result.svg + result.html);
-  for (const kept of ['<style>.a{fill:red}</style>', 'href="https://ok.test/" target="_blank" rel="noopener noreferrer"', 'href="#local"', '<foreignObject><div>f</div></foreignObject>']) assert.ok(result.svg.includes(kept), kept + ': ' + result.svg);
-  assert.ok(result.html.includes('href="https://ok.test/" target="_blank" rel="noopener noreferrer"') && result.html.includes('<img>'), result.html);
+  for (const kept of ['<style>.a{fill:red}</style>', 'href="https://ok.test/" rel="noopener noreferrer"', 'href="#local"', '<foreignObject><div>f</div></foreignObject>']) assert.ok(result.svg.includes(kept), kept + ': ' + result.svg);
+  assert.ok(result.html.includes('href="https://ok.test/" rel="noopener noreferrer"') && result.html.includes('<img>'), result.html);
 });
 
 test('Responses delegation holds early speech until the final backend response', async () => {
@@ -1166,7 +1178,7 @@ window.addEventListener('test-ready', () => {
         head: [...table.querySelectorAll('thead tr')].map((row) => [...row.querySelectorAll('th')].map((cell) => cell.textContent)),
         body: [...table.querySelectorAll('tbody tr')].map((row) => [...row.querySelectorAll('td')].map((cell) => cell.textContent)),
       })),
-      link: [...item.querySelectorAll('td a')].map((link) => [link.textContent, link.href, link.rel]),
+      link: [...item.querySelectorAll('td a')].map((link) => [link.textContent, link.href, link.rel, link.target]),
       code: [...item.querySelectorAll('td code')].map((code) => code.textContent),
       paragraphs: [...item.querySelectorAll('p')].map((paragraph) => paragraph.textContent),
     });
@@ -1178,7 +1190,7 @@ window.addEventListener('test-ready', () => {
       { head: [['Name', 'Value']], body: [['First', 'one'], ['Second', 'two']] },
       { head: [['Link', 'Code', 'Empty']], body: [['docs', 'left|right', '']] },
     ],
-    link: [['docs', 'https://example.test/docs', 'noopener noreferrer']],
+    link: [['docs', 'https://example.test/docs', 'noopener noreferrer', '']],
     code: ['left|right'],
     paragraphs: ['After', '| ordinary | prose |', '| not a separator | text |'],
   }, stderr);

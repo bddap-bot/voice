@@ -13,7 +13,7 @@ function sanitize(root) {
       if (key.startsWith('on') || key === 'srcdoc' || key === 'formaction') node.removeAttribute(attribute.name);
       else if ((key === 'href' || key === 'xlink:href' || key === 'src') && !SAFE_HREF.test(attribute.value.trim())) node.removeAttribute(attribute.name);
     }
-    if (name === 'a') { node.setAttribute('target', '_blank'); node.setAttribute('rel', 'noopener noreferrer'); }
+    if (name === 'a') { node.removeAttribute('target'); node.setAttribute('rel', 'noopener noreferrer'); }
   }
   return root;
 }

@@ -244,10 +244,11 @@ function savedState(saved) {
   if (saved && !document.hidden) puppetRuntime?.start();
   else puppetRuntime?.pause();
   listening = saved;
-  if (saved) listenForWake();
+  if (saved) syncSpotter();
   else stopListening();
 }
 function syncPuppetUi() {
+  syncSpotter();
   const active = Boolean(conversation);
   const disabled = !puppetReady && !active && !starting;
   $('puppet').setAttribute('aria-disabled', String(disabled));
@@ -260,8 +261,7 @@ function setMicrophoneMuted(muted) {
   $('mic-mute').disabled = !microphoneStream;
   $('mic-mute').textContent = microphoneMuted ? 'Unmute mic' : 'Mute mic';
   $('mic-mute').setAttribute('aria-pressed', String(microphoneMuted));
-  if (microphoneMuted) closeSpotter();
-  else listenForWake();
+  syncSpotter();
 }
 try {
   puppetRuntime = new PuppetRuntime($('puppet'), $('display'));
@@ -412,6 +412,7 @@ async function listen(mine) {
     wakeModelWaiter?.reject(error);
     puppetChannel.fail(error);
     connected = false;
+    syncSpotter();
     if (conversation) await stopConversation('connection lost');
     else setStatus('connection lost', 'err');
   }
@@ -609,7 +610,7 @@ async function dial() {
   connected = true;
   everConnected = true;
   listener = listen(generation);
-  listenForWake();
+  syncSpotter();
   if (reconnecting) recordSession('reconnect');
 }
 function waitForAnswer(id) {
@@ -655,7 +656,7 @@ function acquireMicrophone() {
   return opening;
 }
 function wakeable() {
-  return listening && puppetReady && !conversation && !starting;
+  return listening && connected && puppetReady && !microphoneMuted && !conversation && !starting;
 }
 async function wakeModel() {
   const model = await new Promise((resolve, reject) => {
@@ -667,12 +668,12 @@ async function wakeModel() {
   if (model.phrase !== WAKE_PHRASE) throw new Error(`the backend wake model listens for another phrase: ${model.phrase}`);
   return model;
 }
-function listenForWake() {
-  if (spotter || microphoneMuted || !listening || !connected) return;
+function syncSpotter() {
+  if (!wakeable()) return closeSpotter();
+  if (spotter) return;
   const current = spotter = Promise.all([acquireMicrophone(), wakeModel()]).then(([stream, model]) => startSpotter(stream, heard, model));
   current.catch((error) => {
-    if (spotter !== current) return;
-    spotter = undefined;
+    if (spotter === current) spotter = undefined;
     recordPageError(error);
   });
 }
@@ -682,7 +683,7 @@ function closeSpotter() {
 }
 function stopListening() {
   listening = false;
-  closeSpotter();
+  syncSpotter();
   for (const track of microphoneStream?.getTracks?.() ?? []) track.stop();
   microphone = undefined;
   microphoneStream = undefined;
@@ -907,7 +908,6 @@ function paintOff() {
   puppetRuntime?.asleep(true);
   $('elapsed').textContent = '00:00';
   syncPuppetUi();
-  listenForWake();
 }
 function cancelOffer(attempt) {
   if (!attempt?.offered || attempt.cancelSent) return;

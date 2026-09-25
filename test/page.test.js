@@ -1435,3 +1435,23 @@ test('a reconnect while the microphone is muted starts no wake spotter until unm
   `);
   assert.deepEqual(result, { spotter: false });
 });
+
+test('the spotter stops throughout a conversation and restarts when it ends', async () => {
+  const result = await runWakePage(`
+    await sleepNow();
+    await until(() => !testSpotter.closed);
+    const asleep = testSpotter;
+    document.querySelector('#puppet').click();
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const mid = { closed: asleep.closed, replaced: testSpotter !== asleep, running: !testSpotter.closed };
+    document.querySelector('#mic-mute').click();
+    document.querySelector('#mic-mute').click();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const unmuted = { closed: asleep.closed, replaced: testSpotter !== asleep, running: !testSpotter.closed };
+    await sleepNow();
+    await until(() => !testSpotter.closed);
+    return { mid, unmuted, restarted: testSpotter !== asleep };
+  `);
+  assert.deepEqual(result, { mid: { closed: 1, replaced: false, running: false }, unmuted: { closed: 1, replaced: false, running: false }, restarted: true });
+});

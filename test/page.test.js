@@ -1220,7 +1220,7 @@ test('while asleep, anything short of a wake opens no session, asks the hub noth
   assert.deepEqual(result, { offers: 0, delegates: 0, pressed: 'false', wakes: 0, spoken: 0, live: 0 });
 });
 
-test('the wake phrase wakes the puppet into one session that learns only its name, its way back to sleep, and that it was woken', async () => {
+test('the wake phrase carries earlier turns and a completed-sleep marker into one new session', async () => {
   const result = await runWakePage(`
     testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.output_transcript.delta', delta: 'The beacon is green.' }) }));
     testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.input_transcript.delta', delta: 'Go back to sleep.' }) }));
@@ -1237,13 +1237,17 @@ test('the wake phrase wakes the puppet into one session that learns only its nam
     return {
       offers: count('offer') - offers,
       offer: Object.keys(lastOffer),
+      context: lastOffer.context,
+      marker: lastOffer.wake,
       wakes: sessionEvents('wake').map((event) => event.detail),
       puppet: testPuppet.calls.filter(([name]) => name === 'asleep' || name === 'pose'),
       live: sentLiveEvents.map((event) => event.type === 'session.update' ? { type: event.type, tools: event.session.delegation.responses.tools.map((tool) => tool.name) } : { type: event.type, delegation_id: event.delegation_id, content: event.content }),
     };
   `);
   assert.equal(result.offers, 1);
-  assert.deepEqual(result.offer, ['id', 'sdp']);
+  assert.deepEqual(result.offer, ['id', 'sdp', 'context', 'wake']);
+  assert.deepEqual(result.context, [{ speaker: 'live', text: 'The beacon is green.' }, { speaker: 'user', text: 'Go back to sleep.' }]);
+  assert.match(result.marker, /^The previous conversation ended and you went to sleep about \d+ seconds ago\. You have just been woken for a new conversation\. Any earlier goodbye or request to sleep was already completed\./);
   assert.deepEqual(result.wakes, ['0.930']);
   assert.deepEqual(result.puppet, [['asleep', false], ['pose', 'stand'], ['pose', 'listen']]);
   assert.deepEqual(result.live, [

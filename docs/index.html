@@ -154,6 +154,7 @@ let listener;
 let sendQueue = Promise.resolve();
 let answerWaiter;
 let conversation;
+let sleptAt = null;
 let usageSeconds = 0;
 let connected = false;
 let everConnected = false;
@@ -987,7 +988,7 @@ async function startConversation() {
     attempt.offerId = crypto.randomUUID();
     const answerPromise = waitForAnswer(attempt.offerId);
     attempt.offered = true;
-    await sendFrame(`offer\n${JSON.stringify({ id: attempt.offerId, sdp: attempt.pc.localDescription.sdp })}`);
+    await sendFrame(`offer\n${JSON.stringify({ id: attempt.offerId, sdp: attempt.pc.localDescription.sdp, ...(sleptAt === null ? {} : { context: trace.context(), wake: `The previous conversation ended and you went to sleep about ${Math.max(0, Math.round((Date.now() - sleptAt) / 1000))} seconds ago. You have just been woken for a new conversation. Any earlier goodbye or request to sleep was already completed. Keep the earlier conversation as memory; greet briefly and listen for a new request.` }) })}`);
     if (attempt.cancelled) {
       cancelOffer(attempt);
       return;
@@ -1051,6 +1052,7 @@ async function finishStop(reason, remoteClosed) {
   }
   current.transcript.flush();
   conversation = null;
+  sleptAt = Date.now();
   syncPuppetUi();
   current.channel.close();
   current.pc.close();

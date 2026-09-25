@@ -263,6 +263,8 @@ function setMicrophoneMuted(muted) {
   $('mic-mute').disabled = !microphoneStream;
   $('mic-mute').textContent = microphoneMuted ? 'Unmute mic' : 'Mute mic';
   $('mic-mute').setAttribute('aria-pressed', String(microphoneMuted));
+  if (microphoneMuted) closeSpotter();
+  else listenForWake();
 }
 try {
   puppetRuntime = new PuppetRuntime($('puppet'), $('display'));
@@ -679,7 +681,7 @@ async function wakeModel() {
   return model;
 }
 function listenForWake() {
-  if (spotter || !listening || !connected) return;
+  if (spotter || microphoneMuted || !listening || !connected) return;
   const current = spotter = Promise.all([acquireMicrophone(), wakeModel()]).then(([stream, model]) => startSpotter(stream, heard, model));
   current.catch((error) => {
     if (spotter !== current) return;

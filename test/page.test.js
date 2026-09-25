@@ -1365,3 +1365,42 @@ test('muting the microphone persists while asleep and into the next session', as
     unmuted: { enabled: true, pressed: 'false', disabled: false, live: 'true' },
   });
 });
+
+test('a muted microphone runs no wake spotter, not even after a session ends, and unmuting starts one that hears the phrase', async () => {
+  const result = await runWakePage(`
+    await sleepNow();
+    const listening = testSpotter;
+    const before = listening.closed;
+    document.querySelector('#mic-mute').click();
+    document.querySelector('#puppet').click();
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+    await sleepNow();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const muted = { closed: listening.closed, replaced: testSpotter !== listening };
+    document.querySelector('#mic-mute').click();
+    await until(() => !testSpotter.closed);
+    testSpotter.heard({ wake: 0.9 });
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true' && sessionEvents('wake').length);
+    return { before, muted, wakes: sessionEvents('wake').map((event) => event.detail) };
+  `);
+  assert.deepEqual(result, { before: 0, muted: { closed: 1, replaced: false }, wakes: ['0.900'] });
+});
+
+test('a reconnect while the microphone is muted starts no wake spotter until unmute', async () => {
+  const result = await runWakePage(`
+    await sleepNow();
+    document.querySelector('#mic-mute').click();
+    loseRelay(new Error('relay closed'));
+    await until(() => document.querySelector('#status').textContent.includes('connection lost'));
+    document.querySelector('#puppet').click();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    document.querySelector('#puppet').click();
+    deliverRelay(new TextEncoder().encode(JSON.stringify({ ok: true })));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const spotter = !testSpotter.closed;
+    document.querySelector('#mic-mute').click();
+    await until(() => !testSpotter.closed);
+    return { spotter };
+  `);
+  assert.deepEqual(result, { spotter: false });
+});

@@ -373,7 +373,7 @@ async function listen(mine) {
       }
       else if (verb === 'wake-model') wakeModelWaiter?.resolve(JSON.parse(body));
       else if (verb === 'wake-model-none') wakeModelWaiter?.resolve(null);
-      else if (verb === 'hub' || verb === 'share-reply') await receiveHub(JSON.parse(body));
+      else if (verb === 'hub') await receiveHub(JSON.parse(body));
       else if (verb === 'hub-error') receiveHubError(JSON.parse(body));
       else if (verb === 'share-ok') receiveShare(JSON.parse(body));
       else if (verb === 'share-error') receiveShareError(JSON.parse(body));

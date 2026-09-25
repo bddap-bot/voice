@@ -818,19 +818,19 @@ window.addEventListener('test-ready', () => {
   assert.deepEqual(JSON.parse(encoded ?? 'null'), { count: 2, first: 'Newest', link: 'https://example.test/result', image: true, pointed: true, arrived: true, settled: true }, stderr);
 });
 
-test('the delegation log keeps the last of ten appended entries visible', async () => {
+for (const size of ['720,1280', '1440,900']) test(`the delegation log keeps its newest entry in view at ${size}`, async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   ${appendEntries}
   const log = document.querySelector('#log');
-  const last = log.lastElementChild;
-  const lastBox = last.getBoundingClientRect();
-  const logBox = log.getBoundingClientRect();
-  document.body.dataset.followTest = String(lastBox.bottom <= logBox.bottom + 1 && lastBox.bottom >= logBox.top - 1);
+  log.dispatchEvent(new Event('scroll'));
+  append('session.input_transcript.delta', 'newest');
+  document.body.dataset.followTest = JSON.stringify({ overflow: log.scrollHeight - log.clientHeight, below: log.scrollHeight - log.scrollTop - log.clientHeight });
 });
-`);
-  const observed = /data-follow-test="([^"]*)"/.exec(stdout)?.[1] ?? 'follow test did not run';
-  assert.equal(observed, 'true', `${observed}\n${stderr}`);
+`, { size });
+  const encoded = /data-follow-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  const result = JSON.parse(encoded ?? 'null');
+  assert.ok(result?.overflow > 1 && result.below <= 1, `${size}: ${encoded}\n${stderr}`);
 });
 
 test('the delegation log renders every trace kind and delegation field', async () => {

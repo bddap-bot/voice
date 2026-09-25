@@ -67,22 +67,6 @@ test('interleaved delegations retain their response and call association', async
   assert.deepEqual(sent.filter((event) => event.item).map((event) => event.item.call_id), ['b', 'a']);
 });
 
-test('failed submission retains delivery state so a repeated completion sends only what is missing', async () => {
-  const sent = [];
-  let fail = true;
-  const loop = new ResponsesTools(() => ({ ok: true }), (event) => {
-    if (fail && event.type === 'response.create') throw Error('send failed');
-    sent.push(event);
-  });
-  loop.handle(envelope(created()));
-  loop.handle(envelope(call('a', 'hub')));
-  await assert.rejects(loop.handle(envelope(completed())), /send failed/);
-  assert.equal(sent.length, 1);
-  fail = false;
-  await loop.handle(envelope(completed()));
-  assert.deepEqual(sent.map((event) => event.type), ['response.item.create', 'response.create']);
-});
-
 test('closing a pending call prevents continuation even while the channel stays valid', async () => {
   const sent = [];
   let resolve;

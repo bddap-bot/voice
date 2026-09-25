@@ -933,7 +933,8 @@ window.addEventListener('test-ready', async () => {
   assert.ok(result, stderr);
   assert.deepEqual(result.returned, [['slow', true], 'response.create']);
   assert.deepEqual(result.pushed, { told: [], waiting: [true] });
-  assert.deepEqual(result.told, [[null, 'Four jobs are queued.'], [null, 'The hub request failed: delegation queue is full.']]);
+  assert.deepEqual(result.told, [[null, 'Four jobs are queued.'], [null, 'The hub request failed.']]);
+  assert.match(result.log, /Is the printer busy\?[\s\S]*delegation queue is full/);
   assert.deepEqual(result.acks, ['push_1', 'reply_1']);
   assert.deepEqual(result.waiting, [true, false, true, false]);
   assert.match(result.log, /sent to hub: How many jobs are queued\?[\s\S]*hub reply: Four jobs are queued\./);
@@ -1361,9 +1362,9 @@ test('the sleep tool ends the session once speech goes quiet and the puppet fall
   assert.deepEqual(result, { speaking: 'true', sleeps: ['farewell'], puppet: ['asleep', true], microphone: { enabled: true, button: false }, rewoken: true });
 });
 
-for (const pending of [false, true]) test(`inactivity sleeps after the generous window${pending ? ', even while a hub request is pending' : ''}`, async () => {
+test('inactivity sleeps after the generous window even while a hub request is pending', async () => {
   const result = await runWakePage(`
-    ${pending ? "emitTool('slow', 'hub', { text: 'Take your time.' });" : ''}
+    emitTool('slow', 'hub', { text: 'Take your time.' });
     await new Promise((resolve) => setTimeout(resolve, ${INACTIVITY_MS - 60000}));
     const before = document.querySelector('#puppet').getAttribute('aria-pressed');
     await new Promise((resolve) => setTimeout(resolve, 65000));

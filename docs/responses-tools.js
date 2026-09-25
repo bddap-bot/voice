@@ -16,7 +16,7 @@ export class ResponsesTools {
     const event = envelope.event;
     if (event?.type === 'response.created') {
       this.delegations.set(envelope.delegation_id, event.response.id);
-      if (!this.responses.has(event.response.id)) this.responses.set(event.response.id, { calls: [], sent: 0, continued: false, delegation: envelope.delegation_id });
+      if (!this.responses.has(event.response.id)) this.responses.set(event.response.id, { calls: [], delegation: envelope.delegation_id });
       return;
     }
     const id = event?.response_id ?? event?.response?.id ?? this.delegations.get(envelope.delegation_id);
@@ -33,22 +33,13 @@ export class ResponsesTools {
     }
     if (event.type === 'response.completed') return this.complete(response);
   }
-  complete(response) {
-    if (response.pending) return response.pending;
-    response.pending = this.submit(response).finally(() => { response.pending = null; });
-    return response.pending;
-  }
-  async submit(response) {
+  async complete(response) {
+    if (response.done) return;
+    response.done = true;
     const outputs = await Promise.all(response.calls.map(async ({ item, result }) => ({ call_id: item.call_id, output: JSON.stringify(await result) })));
     if (!this.active()) return;
     if (!outputs.length) { this.settled(response.delegation); return; }
-    while (response.sent < outputs.length) {
-      this.send({ type: 'response.item.create', item: { type: 'function_call_output', ...outputs[response.sent] } });
-      response.sent++;
-    }
-    if (!response.continued) {
-      this.send({ type: 'response.create' });
-      response.continued = true;
-    }
+    for (const output of outputs) this.send({ type: 'response.item.create', item: { type: 'function_call_output', ...output } });
+    this.send({ type: 'response.create' });
   }
 }

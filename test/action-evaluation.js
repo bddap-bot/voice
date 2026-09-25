@@ -34,6 +34,10 @@ export const evaluation = [
 
 export async function evaluate(loadEmbedder) {
   const classifier = new EmbeddingActionClassifier(loadEmbedder);
+  for (const [sentence, token] of [['Yes.', 'gesture:nod'], ['No idea.', 'gesture:shrug'], ['Hmm.', 'mood:thinking'], ['Happy.', 'mood:pleased'], ['Sad.', 'mood:sad'], ['Angry.', 'mood:angry'], ['Relaxed.', 'mood:relaxed'], ['Surprised.', 'mood:surprised'], ["I'm neutral.", 'mood:neutral'], ['I feel neutral.', 'mood:neutral'], ['My expression is neutral.', 'mood:neutral'], ['Pointing at the panel.', 'gesture:point']]) {
+    const result = await classifier.classify(sentence);
+    assert.equal(`${result.kind}:${result.name}`, token, `short sentence ${sentence}`);
+  }
   let before = 0;
   let after = 0;
   const rows = new Map(Object.entries(LABELS).flatMap(([kind, names]) => Object.keys(names).map((name) => [`${kind}:${name}`, { token: `${kind}:${name}`, examples: [], hits: 0 }])));
@@ -48,10 +52,6 @@ export async function evaluate(loadEmbedder) {
     if (hit) row.hits++;
   }
   for (const row of rows.values()) assert.ok(row.hits, `unreachable action token: ${row.token}`);
-  for (const [sentence, token] of [['Yes.', 'gesture:nod'], ['No idea.', 'gesture:shrug'], ['Hmm.', 'mood:thinking'], ['Happy.', 'mood:pleased'], ['Sad.', 'mood:sad'], ['Angry.', 'mood:angry'], ['Relaxed.', 'mood:relaxed'], ['Surprised.', 'mood:surprised'], ["I'm neutral.", 'mood:neutral'], ['I feel neutral.', 'mood:neutral'], ['My expression is neutral.', 'mood:neutral'], ['Pointing at the panel.', 'gesture:point']]) {
-    const result = await classifier.classify(sentence);
-    assert.equal(`${result.kind}:${result.name}`, token, `short sentence ${sentence}`);
-  }
   for (const sentence of ['The available expressions are neutral, happy, sad, angry, surprised, blink, and mouth open.', 'The list includes alpha, beta, gamma, and delta.', 'First is setup, second is execution, and third is review.']) {
     const result = await classifier.classify(sentence);
     assert.notEqual(`${result.kind}:${result.name}`, 'gesture:point', `enumeration sentence ${sentence}`);

@@ -45,7 +45,6 @@
         "package.json",
         "package-lock.json",
         ".github/workflows/smoke.yml",
-        "test-map.json",
         "DESIGN.md"
       ],
       "tests": [

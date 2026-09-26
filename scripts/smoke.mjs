@@ -1,6 +1,6 @@
-import { execFile, spawn } from 'node:child_process';
-import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { constants } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chromiumExecutable, launchChromium } from './chromium.mjs';
 import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
@@ -41,14 +41,6 @@ const baseline = baselineFlag >= 0 ? JSON.parse(await readFile(process.argv[base
 const root = path.resolve(new URL('..', import.meta.url).pathname);
 const wasmRoot = process.env.VOICE_WASM_DIR ? path.resolve(process.env.VOICE_WASM_DIR) : null;
 await mkdir(output, { recursive: true });
-
-async function chromiumExecutable() {
-  if (process.env.CHROMIUM_BIN) return process.env.CHROMIUM_BIN;
-  const candidates = ['chromium', 'chromium-browser', 'google-chrome'];
-  try { candidates.push(...(await readdir('/nix/store')).filter((name) => name.includes('-chromium-')).map((name) => `/nix/store/${name}/bin/chromium`)); } catch {}
-  for (const candidate of candidates) for (const location of candidate.includes('/') ? [candidate] : (process.env.PATH ?? '').split(':').map((directory) => path.join(directory, candidate))) try { await access(location, constants.X_OK); return location; } catch {}
-  throw new Error('headless Chromium is required; set CHROMIUM_BIN');
-}
 
 const mockWasm = `
 const enc = new TextEncoder(); const dec = new TextDecoder(); const queue = [enc.encode('{"ok":true}')]; const waiting = [];
@@ -167,12 +159,9 @@ async function connectCdp(port) {
 }
 
 async function runViewport(viewport, executable, server) {
-  const scratch = await mkdtemp(path.join(root, '.smoke-'));
   const devPort = await new Promise((resolve) => { const listener=net.createServer().listen(0,'127.0.0.1',()=>{const value=listener.address().port;listener.close(()=>resolve(value))}); });
-  const args=['--headless=new','--no-sandbox','--disable-background-timer-throttling','--disable-renderer-backgrounding','--hide-scrollbars','--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream','--autoplay-policy=no-user-gesture-required',`--window-size=${viewport.width},${viewport.height}`,`--user-data-dir=${path.join(scratch,'profile')}`,`--remote-debugging-port=${devPort}`,'--remote-debugging-address=127.0.0.1',...(viewport.mobile?['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36']:[]),'about:blank'];
-  const chrome=spawn(executable,args,{stdio:['ignore','ignore','pipe']});
-  let chromeError='';chrome.stderr.on('data',(chunk)=>{chromeError=(chromeError+chunk).slice(-500)});
-  const exited=new Promise((resolve)=>chrome.on('error',resolve).on('close',(code,signal)=>resolve(new Error(`Chromium exited with ${signal??`code ${code}`}: ${chromeError}`))));
+  const args=['--headless=new','--no-sandbox','--disable-background-timer-throttling','--disable-renderer-backgrounding','--hide-scrollbars','--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream','--autoplay-policy=no-user-gesture-required',`--window-size=${viewport.width},${viewport.height}`,`--remote-debugging-port=${devPort}`,'--remote-debugging-address=127.0.0.1',...(viewport.mobile?['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36']:[]),'about:blank'];
+  const chrome = await launchChromium({ executable, args, prefix: '.smoke-' });
   const run = async () => {
     const cdp=await connectCdp(devPort);
     if (development) await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `
@@ -239,7 +228,7 @@ async function runViewport(viewport, executable, server) {
     const deadline=Date.now()+180000;
     let ready=false;
     while(Date.now()<deadline){try{const page=JSON.parse(await cdp.evaluate("JSON.stringify({ready:document.querySelector('#puppet')?.getAttribute('aria-disabled')==='false',status:document.querySelector('#status')?.textContent,error:document.querySelector('#status')?.classList.contains('err')})"));ready=page.ready;if(ready)break;if(page.error)throw new Error(`page connection failed: ${page.status}`)}catch(error){if(error.message?.startsWith('page connection failed:'))throw error}await new Promise((resolve)=>setTimeout(resolve,250));}
-    if(!ready){const probe=await cdp.evaluate(`JSON.stringify({status:document.querySelector('#status')?.textContent,disabled:document.querySelector('#puppet')?.getAttribute('aria-disabled'),body:document.body?.innerText?.slice(0,500)})`);throw new Error(`page did not become ready: ${probe} ${cdp.consoleErrors.join('; ')} ${chromeError}`)}
+    if(!ready){const probe=await cdp.evaluate(`JSON.stringify({status:document.querySelector('#status')?.textContent,disabled:document.querySelector('#puppet')?.getAttribute('aria-disabled'),body:document.body?.innerText?.slice(0,500)})`);throw new Error(`page did not become ready: ${probe} ${cdp.consoleErrors.join('; ')} ${chrome.stderr}`)}
     await cdp.evaluate(`const smokeLimits = ${JSON.stringify(smokeLimits)}; globalThis.__smoke = (${installSmokeMeasurements.toString()})()`);
     const stageGeometry = async () => JSON.parse(await cdp.evaluate("JSON.stringify((() => { const box = document.querySelector('#puppet').getBoundingClientRect(); return { canvas: { left: box.left + scrollX, right: box.right + scrollX, top: box.top + scrollY, bottom: box.bottom + scrollY }, viewport: { x: scrollX, y: scrollY, width: innerWidth, height: innerHeight } }; })())"));
     const region = evidenceRegion({ neutralSilhouette, ...(await stageGeometry()) });
@@ -283,14 +272,9 @@ async function runViewport(viewport, executable, server) {
     return report;
   };
   try {
-    return await Promise.race([exited.then((error) => { throw error; }), run()]);
+    return await Promise.race([chrome.exited.then((error) => { throw error; }), run()]);
   } finally {
-    chrome.kill('SIGKILL');
-    await exited;
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try { await rm(scratch,{recursive:true,force:true,maxRetries:3,retryDelay:100}); break; }
-      catch (error) { if (attempt === 4) throw error; await new Promise((resolve) => setTimeout(resolve, 250)); }
-    }
+    await chrome.close();
   }
 }
 

@@ -1504,3 +1504,97 @@ for (const control of ['reenter', 'forget']) test(control + ' stops the spotter 
   `);
   assert.deepEqual(result, { closed: 1, replaced: false });
 });
+
+test('relay loss during a conversation restarts the listener and its wake reconnects', async () => {
+  const result = await runWakePage(`
+    await sleepNow();
+    await until(() => globalThis.testSpotter && !testSpotter.closed);
+    const asleep = testSpotter;
+    document.querySelector('#puppet').click();
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const mid = { closed: asleep.closed, replaced: testSpotter !== asleep, running: !testSpotter.closed };
+    loseRelay(new Error('relay closed'));
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false');
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const live = testSpotter;
+    const afterLoss = { closed: live.closed, replaced: live !== asleep, running: !live.closed, status: document.querySelector('#status').textContent };
+    const offers = count('offer');
+    if (!live.closed) {
+      live.heard({ wake: 0.95 });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      deliverRelay(new TextEncoder().encode(JSON.stringify({ ok: true })));
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+    }
+    return { mid, afterLoss, pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), offers: count('offer') - offers };
+  `, { budget: 15000 });
+  assert.deepEqual(result.mid, { closed: 1, replaced: false, running: false });
+  assert.equal(result.afterLoss.running, true);
+  assert.equal(result.afterLoss.replaced, true);
+  assert.equal(result.pressed, 'true');
+  assert.equal(result.offers, 1);
+});
+
+test('a failed wake reconnect restarts the listener for another wake', async () => {
+  const result = await runWakePage(`
+    await sleepNow();
+    await until(() => globalThis.testSpotter && !testSpotter.closed);
+    const asleep = testSpotter;
+    loseRelay(new Error('relay closed'));
+    await until(() => document.querySelector('#status').textContent.includes('connection lost'));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const afterLoss = { closed: asleep.closed, replaced: testSpotter !== asleep, running: !testSpotter.closed };
+    asleep.heard({ wake: 0.95 });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    loseRelay(new Error('relay still down'));
+    await until(() => document.querySelector('#status').textContent.includes('could not start'));
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const live = testSpotter;
+    const afterFailedReconnect = { closed: live.closed, replaced: live !== asleep, running: !live.closed, status: document.querySelector('#status').textContent };
+    const offers = count('offer');
+    if (!live.closed) {
+      live.heard({ wake: 0.95 });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      deliverRelay(new TextEncoder().encode(JSON.stringify({ ok: true })));
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+    }
+    return { afterLoss, afterFailedReconnect, pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), offers: count('offer') - offers };
+  `, { budget: 20000 });
+  assert.deepEqual(result.afterLoss, { closed: 0, replaced: false, running: true });
+  assert.equal(result.afterFailedReconnect.running, true);
+  assert.equal(result.afterFailedReconnect.replaced, true);
+  assert.equal(result.pressed, 'true');
+  assert.equal(result.offers, 1);
+});
+
+for (const loseRefresh of [false, true]) test('a cached model remains wakeable during ' + (loseRefresh ? 'failed' : 'pending') + ' reconnect refresh', async () => {
+  const result = await runWakePage(`
+    await sleepNow();
+    await until(() => globalThis.testSpotter && !testSpotter.closed);
+    const model = testSpotter.model;
+    loseRelay(new Error('relay closed'));
+    await until(() => document.querySelector('#status').textContent.includes('connection lost'));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    globalThis.backendWakeModel = 'unanswered';
+    testSpotter.heard({ wake: 0.95 });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const requests = count('wake-model');
+    deliverRelay(new TextEncoder().encode(JSON.stringify({ ok: true })));
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    if (${loseRefresh}) loseRelay(new Error('refresh lost'));
+    else await sleepNow();
+    await until(() => !testSpotter.closed);
+    const cached = testSpotter.model === model;
+    const refreshed = count('wake-model') - requests;
+    if (!${loseRefresh}) {
+      deliverRelay(new TextEncoder().encode('wake-model\\n' + JSON.stringify({ ...model, threshold: 0.9 })));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      document.querySelector('#mic-mute').click();
+      document.querySelector('#mic-mute').click();
+      await until(() => !testSpotter.closed && testSpotter.model.threshold === 0.9);
+    }
+    return { cached, refreshed, running: !testSpotter.closed, threshold: testSpotter.model.threshold };
+  `, { budget: 15000 });
+  assert.deepEqual(result, { cached: true, refreshed: 1, running: true, threshold: loseRefresh ? 0.5 : 0.9 });
+});

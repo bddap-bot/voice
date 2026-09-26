@@ -90,3 +90,12 @@ test('quiet waits for release, for held speech to play out, and for a run of sil
   assert.equal(buffer.quiet(4), false);
   await new LivePlayback(assert.fail, assert.fail).quiet();
 });
+
+test('closing playback releases quiet waiters so delayed replies can be discarded', async () => {
+  const playback = new LivePlayback(() => {}, assert.fail);
+  playback.node = { port: { postMessage() {} }, disconnect() {} };
+  const quiet = playback.quiet();
+  await playback.close();
+  await quiet;
+  assert.equal(playback.quietWaiters.length, 0);
+});

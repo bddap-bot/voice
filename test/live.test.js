@@ -271,3 +271,26 @@ test('delegation context preserves transcript text exactly', () => {
   const entry = trace.delegated('d1');
   assert.deepEqual(entry.context, [{ speaker: 'user', text: 'what about [this]' }, { speaker: 'live', text: 'Yes [nod], the [thumbs up] build is green [shru' }]);
 });
+
+test('sleep memory quotes completed turns without replaying assistant messages', () => {
+  const trace = new ConversationTrace();
+  trace.entries = [{ kind: 'heard', text: 'Remember the blue lantern.' }, { kind: 'said', text: 'The lantern is blue.' }];
+  const context = trace.sleepContext();
+  assert.equal(context.length, 1);
+  assert.equal(context[0].speaker, 'user');
+  assert.match(context[0].text, /for memory only/);
+  assert.deepEqual(JSON.parse(context[0].text.slice(context[0].text.indexOf('\n') + 1)), trace.context());
+  assert.equal(trace.entries.length, 2);
+});
+
+test('sleep memory stays within the wire limit after quoting and retains newest turns', () => {
+  const trace = new ConversationTrace();
+  assert.deepEqual(trace.sleepContext(), []);
+  trace.entries = Array.from({ length: 20 }, (_, i) => ({ kind: i % 2 ? 'said' : 'heard', text: `${i}:` + '"\\雪'.repeat(110) }));
+  const context = trace.sleepContext();
+  assert.ok(new TextEncoder().encode(JSON.stringify(context)).length <= 8192);
+  const turns = JSON.parse(context[0].text.slice(context[0].text.indexOf('\n') + 1));
+  assert.ok(turns.length > 0 && turns.length < 20);
+  assert.equal(turns.at(-1).text, trace.entries.at(-1).text);
+  assert.equal(trace.entries.length, 20);
+});

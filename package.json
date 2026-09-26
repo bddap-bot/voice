@@ -6,7 +6,8 @@
     "smoke": "node scripts/smoke.mjs",
     "test": "node --test test/*.test.js",
     "smoke:ci": "npm run smoke -- --output smoke-artifacts --baseline test/smoke-baseline.json",
-    "dev": "node scripts/dev.mjs"
+    "dev": "node scripts/dev.mjs",
+    "smoke:wake-replies": "node scripts/wake-reply-smoke.mjs"
   },
   "dependencies": {
     "@pixiv/three-vrm": "3.5.5",

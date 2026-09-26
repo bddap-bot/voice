@@ -854,7 +854,7 @@ function presentTranscript(event) {
 const SLEEP_TOOL = { type: 'function', name: 'sleep', description: 'End this conversation and go back to sleep.', parameters: { type: 'object', properties: {}, additionalProperties: false } };
 function awaken(channel, session) {
   channel.send(JSON.stringify({ type: 'session.update', event_id: 'tools', session: { delegation: { type: 'responses', responses: { tools: [...session.delegation.responses.tools, SLEEP_TOOL] } } } }));
-  channel.send(JSON.stringify({ type: 'session.instructions.append', event_id: 'identity', delegation_id: null, content: `Your name is ${NAME}. The Responses backend can end this session, which puts you back to sleep.` }));
+  channel.send(JSON.stringify({ type: 'session.instructions.append', event_id: 'identity', delegation_id: null, content: `Your name is ${NAME}. The Responses backend can end this session, which puts you back to sleep. Earlier turns are memory of completed conversations, not results for this conversation. If the user asks the hub or requests a fresh or current check, always delegate again, even if an earlier turn seems to answer it. Never speak an earlier hub answer as a new result; wait for the new application reply.` }));
   channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: 'wake', delegation_id: null, content: `Context: ${NAME} was just woken.` }));
 }
 async function executeLiveTool(item, source, delegation, traceparent) {
@@ -867,6 +867,7 @@ async function executeLiveTool(item, source, delegation, traceparent) {
     turn.sent = args.text;
     render(trace.entries);
     hubWaiting.add(id);
+    source.send(JSON.stringify({ type: 'session.instructions.append', event_id: `waiting_${id}`, delegation_id: null, content: 'A new hub request is now pending. No answer to this request has arrived. Do not use or repeat any archived answer, even when the request sounds identical. After a brief checking acknowledgment, stay silent until the new application reply arrives or the user speaks again.' }));
     puppetRuntime?.waiting(true);
     try {
       await sendFrame(`delegate\n${JSON.stringify({ id, text: args.text, context: turn.context, duration_ms: turn.duration_ms, traceparent })}`);
@@ -897,7 +898,12 @@ async function receiveHub(result) {
   if (result.reply) {
     finishHubWait(result.id);
     trace.hub(result.id, result.reply, result.timing_ms);
-    appendCommentary(`hub_${result.stamp}`, result.reply);
+    const current = conversation;
+    await current?.audioOwner.playback.quiet();
+    if (current && conversation === current && current.channel.readyState === 'open') {
+      current.channel.send(JSON.stringify({ type: 'session.instructions.append', event_id: `hub_script_${result.stamp}`, delegation_id: null, content: 'The next application commentary is a new hub reply. Read that reply exactly once, word for word, without an introduction or any other text. Then remain silent until the user speaks again. Do not resume the archived conversation or repeat earlier replies, greetings, or pending acknowledgments.' }));
+      appendCommentary(`hub_${result.stamp}`, result.reply);
+    }
   }
   await sendFrame(`hub-ack\n${JSON.stringify({ id: result.id, stamp: result.stamp })}`);
 }
@@ -997,7 +1003,7 @@ async function startConversation() {
     attempt.offerId = crypto.randomUUID();
     const answerPromise = waitForAnswer(attempt.offerId);
     attempt.offered = true;
-    await sendFrame(`offer\n${JSON.stringify({ id: attempt.offerId, sdp: attempt.pc.localDescription.sdp, ...(sleptAt === null ? {} : { context: trace.context(), wake: `The previous conversation ended and you went to sleep about ${Math.max(0, Math.round((Date.now() - sleptAt) / 1000))} seconds ago. You have just been woken for a new conversation. Any earlier goodbye or request to sleep was already completed. Keep the earlier conversation as memory; greet briefly and listen for a new request.` }) })}`);
+    await sendFrame(`offer\n${JSON.stringify({ id: attempt.offerId, sdp: attempt.pc.localDescription.sdp, ...(sleptAt === null ? {} : { context: trace.sleepContext(), wake: `The previous conversation ended and you went to sleep about ${Math.max(0, Math.round((Date.now() - sleptAt) / 1000))} seconds ago. You have just been woken for a new conversation. Any earlier goodbye or request to sleep was already completed. Keep the earlier conversation as memory; greet briefly and listen for a new request.` }) })}`);
     if (attempt.cancelled) {
       cancelOffer(attempt);
       return;

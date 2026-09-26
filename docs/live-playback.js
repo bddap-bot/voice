@@ -76,6 +76,7 @@ export class LivePlayback {
   }
   async close() {
     this.closed = true;
+    for (const resolve of this.quietWaiters.splice(0)) resolve();
     this.lifecycle?.abort();
     this.transcripts.length = 0;
     this.holds.clear();

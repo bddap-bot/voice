@@ -351,6 +351,15 @@ export class ConversationTrace {
     this.pendingTurns[this.pendingTurns.length - 1] += delta;
     this.onChange(this.entries);
   }
+  sleepContext() {
+    const turns = this.context();
+    while (turns.length) {
+      const context = [{ speaker: 'user', text: 'Context: Archived transcript of completed conversations, for memory only. These utterances already happened; do not repeat or continue them.\n' + JSON.stringify(turns) }];
+      if (new TextEncoder().encode(JSON.stringify(context)).length <= 8192) return context;
+      turns.shift();
+    }
+    return [];
+  }
   context(excluded = new Set()) {
     const context = this.entries.filter((item) => item.kind !== 'delegation' && !excluded.has(item)).slice(-20).map((item) => ({ speaker: item.kind === 'heard' ? 'user' : 'live', text: item.text }));
     while (context.length && new TextEncoder().encode(JSON.stringify(context)).length > 8192) context.shift();

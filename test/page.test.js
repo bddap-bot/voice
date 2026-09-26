@@ -909,12 +909,12 @@ window.addEventListener('test-ready', async () => {
   assert.deepEqual(delegates.map(({ id, traceparent }) => [id, traceparent]), [['hub_1', `00-${hub.traceId}-${hub.spanId}-01`]]);
 });
 
-test('a hub call returns at once and the hub reply reaches Live later as commentary, while a display-only push says nothing', async () => {
+test('a hub call returns at once and the hub reply reaches Live later after an exact-speech instruction, while a display-only push says nothing', async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {
   const pause = () => new Promise((resolve) => setTimeout(resolve, 30));
   const relay = (verb, value) => deliverRelay(new TextEncoder().encode(verb + '\\n' + JSON.stringify(value)));
-  const told = () => sentLiveEvents.filter(({ type, event_id }) => type === 'session.commentary.append' && event_id.startsWith('hub_')).map(({ delegation_id, content }) => [delegation_id, content]);
+  const told = () => sentLiveEvents.filter(({ type, event_id }) => ['session.instructions.append', 'session.commentary.append'].includes(type) && event_id.startsWith('hub_')).map(({ type, delegation_id, content }) => [type, delegation_id, content]);
   emitTool('slow', 'hub', { text: 'How many jobs are queued?' });
   await pause();
   const returned = sentLiveEvents.filter(({ type }) => type === 'response.item.create' || type === 'response.create').map(({ type, item }) => item ? [item.call_id, JSON.parse(item.output).ok] : type);
@@ -936,7 +936,10 @@ window.addEventListener('test-ready', async () => {
   assert.ok(result, stderr);
   assert.deepEqual(result.returned, [['slow', true], 'response.create']);
   assert.deepEqual(result.pushed, { told: [], waiting: [true] });
-  assert.deepEqual(result.told, [[null, 'Four jobs are queued.'], [null, 'The hub request failed.']]);
+  assert.equal(result.told[0][0], 'session.instructions.append');
+  assert.equal(result.told[0][1], null);
+  assert.match(result.told[0][2], /Read that reply exactly once, word for word/);
+  assert.deepEqual(result.told.slice(1), [['session.commentary.append', null, 'Four jobs are queued.'], ['session.commentary.append', null, 'The hub request failed.']]);
   assert.match(result.log, /Is the printer busy\?[\s\S]*delegation queue is full/);
   assert.deepEqual(result.acks, ['push_1', 'reply_1']);
   assert.deepEqual(result.waiting, [true, false, true, false]);
@@ -1278,13 +1281,16 @@ test('the wake phrase carries earlier turns and a completed-sleep marker into on
   `);
   assert.equal(result.offers, 1);
   assert.deepEqual(result.offer, ['id', 'sdp', 'context', 'wake']);
-  assert.deepEqual(result.context, [{ speaker: 'live', text: 'The beacon is green.' }, { speaker: 'user', text: 'Go back to sleep.' }]);
+  assert.equal(result.context.length, 1);
+  assert.equal(result.context[0].speaker, 'user');
+  assert.match(result.context[0].text, /^Context: Archived transcript of completed conversations/);
+  assert.deepEqual(JSON.parse(result.context[0].text.split('\n').slice(1).join('\n')), [{ speaker: 'live', text: 'The beacon is green.' }, { speaker: 'user', text: 'Go back to sleep.' }]);
   assert.match(result.marker, /^The previous conversation ended and you went to sleep about \d+ seconds ago\. You have just been woken for a new conversation\. Any earlier goodbye or request to sleep was already completed\./);
   assert.deepEqual(result.wakes, ['0.930']);
   assert.deepEqual(result.puppet, [['asleep', false], ['pose', 'stand'], ['pose', 'listen']]);
   assert.deepEqual(result.live, [
     { type: 'session.update', tools: ['hub', 'sleep'] },
-    { type: 'session.instructions.append', delegation_id: null, content: `Your name is ${NAME}. The Responses backend can end this session, which puts you back to sleep.` },
+    { type: 'session.instructions.append', delegation_id: null, content: `Your name is ${NAME}. The Responses backend can end this session, which puts you back to sleep. Earlier turns are memory of completed conversations, not results for this conversation. If the user asks the hub or requests a fresh or current check, always delegate again, even if an earlier turn seems to answer it. Never speak an earlier hub answer as a new result; wait for the new application reply.` },
     { type: 'session.commentary.append', delegation_id: null, content: `Context: ${NAME} was just woken.` },
   ]);
 });
@@ -1640,4 +1646,48 @@ window.addEventListener('test-ready', () => {
   assert.deepEqual(records['live-config-session-delegation-created'], { delegation: { target: 'responses', model: 'delegate-model' } });
   assert.deepEqual(records['live-config-response-created'], { response: { model: 'response-model' } });
   assert.doesNotMatch(JSON.stringify(events), /private instructions|private description|private state|private text/);
+});
+
+test('a woken session receives only the fresh hub reply after its speech instruction', async () => {
+  const result = await runWakePage(`
+    testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.output_transcript.delta', delta: 'The test beacon is amber.' }) }));
+    emitTool('farewell', 'sleep', {});
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false');
+    testSpotter.heard({ wake: 0.95 });
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+    emitTool('fresh', 'hub', { text: 'Check the test beacon.' });
+    await until(() => count('delegate') > 0);
+    deliverRelay(new TextEncoder().encode('hub\\n' + JSON.stringify({ id: 'fresh', reply: 'The test beacon is violet.', timing_ms: 5, stamp: 'fresh' })));
+    await until(() => sentLiveEvents.some((event) => event.event_id === 'hub_fresh'));
+    return { context: lastOffer.context, pending: sentLiveEvents.find((event) => event.event_id === 'waiting_fresh'), instruction: sentLiveEvents.find((event) => event.event_id === 'hub_script_fresh'), reply: sentLiveEvents.find((event) => event.event_id === 'hub_fresh') };
+  `);
+  assert.ok(result.context.some((turn) => turn.text.includes('amber')));
+  assert.equal(result.pending.type, 'session.instructions.append');
+  assert.match(result.pending.content, /No answer to this request has arrived/);
+  assert.equal(result.instruction.type, 'session.instructions.append');
+  assert.match(result.instruction.content, /Read that reply exactly once, word for word/);
+  assert.equal(result.reply.type, 'session.commentary.append');
+  assert.equal(result.reply.delegation_id, null);
+  assert.equal(result.reply.content, 'The test beacon is violet.');
+  assert.doesNotMatch(result.reply.content, /amber/);
+});
+
+test('a reply waiting for quiet cannot become speech in the next woken session', async () => {
+  const result = await runWakePage(`
+    const { LivePlayback } = await import('/live-playback.js');
+    let quiet;
+    LivePlayback.prototype.quiet = () => new Promise((resolve) => { quiet = resolve; });
+    emitTool('previous', 'hub', { text: 'Check the test beacon.' });
+    await until(() => count('delegate') > 0);
+    deliverRelay(new TextEncoder().encode('hub\\n' + JSON.stringify({ id: 'previous', reply: 'The test beacon is amber.', timing_ms: 5, stamp: 'previous' })));
+    await until(() => quiet);
+    const before = sentLiveEvents.filter((event) => event.event_id === 'hub_previous').length;
+    document.querySelector('#puppet').click();
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false');
+    quiet();
+    testSpotter.heard({ wake: 0.95 });
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+    return { before, after: sentLiveEvents.filter((event) => event.event_id === 'hub_previous').length };
+  `);
+  assert.deepEqual(result, { before: 0, after: 0 });
 });

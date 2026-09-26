@@ -1,0 +1,1303 @@
+{
+  "replies": [
+    "The test beacon is amber.",
+    "The test beacon is violet.",
+    "The test beacon is silver.",
+    "The test beacon is crimson.",
+    "The test beacon is golden.",
+    "The test beacon is indigo.",
+    "The test beacon is turquoise.",
+    "The test beacon is copper.",
+    "The test beacon is magenta.",
+    "The test beacon is ivory.",
+    "The test beacon is emerald."
+  ],
+  "capture": {
+    "frames": [
+      {
+        "at": 5796,
+        "dir": "out",
+        "verb": "offer",
+        "text": "offer\n{}"
+      },
+      {
+        "at": 28261,
+        "dir": "in",
+        "verb": "hub",
+        "text": "hub\n{\"reply\":\"The test beacon is amber.\",\"stamp\":\"reply-0\"}"
+      },
+      {
+        "at": 64412,
+        "dir": "out",
+        "verb": "offer",
+        "text": "offer\n{\"context\":[{\"speaker\":\"user\",\"text\":\"Context: Archived transcript of completed conversations, for memory only. These utterances already happened; do not repeat or continue them.\\n[{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Hi.\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\" Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Okay.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is amber.\\\"}]\"}],\"wake\":\"The previous conversation ended and you went to sleep about 17 seconds ago. You have just been woken for a new conversation. Any earlier goodbye or request to sleep was already completed. Keep the earlier conversation as memory; greet briefly and listen for a new request.\"}"
+      },
+      {
+        "at": 90805,
+        "dir": "in",
+        "verb": "hub",
+        "text": "hub\n{\"reply\":\"The test beacon is violet.\",\"stamp\":\"reply-1\"}"
+      },
+      {
+        "at": 139038,
+        "dir": "out",
+        "verb": "offer",
+        "text": "offer\n{\"context\":[{\"speaker\":\"user\",\"text\":\"Context: Archived transcript of completed conversations, for memory only. These utterances already happened; do not repeat or continue them.\\n[{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Hi.\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\" Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Okay.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is amber.Hey. I'm here. What's up?\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\"Ask the hub for the current test beacon status.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is violet.\\\"}]\"}],\"wake\":\"The previous conversation ended and you went to sleep about 28 seconds ago. You have just been woken for a new conversation. Any earlier goodbye or request to sleep was already completed. Keep the earlier conversation as memory; greet briefly and listen for a new request.\"}"
+      },
+      {
+        "at": 163326,
+        "dir": "in",
+        "verb": "hub",
+        "text": "hub\n{\"reply\":\"The test beacon is silver.\",\"stamp\":\"reply-2\"}"
+      },
+      {
+        "at": 200507,
+        "dir": "out",
+        "verb": "offer",
+        "text": "offer\n{\"context\":[{\"speaker\":\"user\",\"text\":\"Context: Archived transcript of completed conversations, for memory only. These utterances already happened; do not repeat or continue them.\\n[{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Hi.\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\" Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Okay.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is amber.Hey. I'm here. What's up?\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\"Ask the hub for the current test beacon status.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is violet.Hi again. How can I help this time?\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\" Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking that.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is silver.\\\"}]\"}],\"wake\":\"The previous conversation ended and you went to sleep about 17 seconds ago. You have just been woken for a new conversation. Any earlier goodbye or request to sleep was already completed. Keep the earlier conversation as memory; greet briefly and listen for a new request.\"}"
+      },
+      {
+        "at": 221697,
+        "dir": "in",
+        "verb": "hub",
+        "text": "hub\n{\"reply\":\"The test beacon is crimson.\",\"stamp\":\"reply-3\"}"
+      },
+      {
+        "at": 248153,
+        "dir": "out",
+        "verb": "offer",
+        "text": "offer\n{\"context\":[{\"speaker\":\"user\",\"text\":\"Context: Archived transcript of completed conversations, for memory only. These utterances already happened; do not repeat or continue them.\\n[{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Hi.\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\" Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Okay.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is amber.Hey. I'm here. What's up?\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\"Ask the hub for the current test beacon status.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is violet.Hi again. How can I help this time?\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\" Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking that.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is silver.Hey, I'm here. What's up?\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\" Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is crimson.\\\"}]\"}],\"wake\":\"The previous conversation ended and you went to sleep about 7 seconds ago. You have just been woken for a new conversation. Any earlier goodbye or request to sleep was already completed. Keep the earlier conversation as memory; greet briefly and listen for a new request.\"}"
+      },
+      {
+        "at": 266019,
+        "dir": "in",
+        "verb": "hub",
+        "text": "hub\n{\"reply\":\"The test beacon is golden.\",\"stamp\":\"reply-4\"}"
+      },
+      {
+        "at": 291849,
+        "dir": "out",
+        "verb": "offer",
+        "text": "offer\n{\"context\":[{\"speaker\":\"user\",\"text\":\"Context: Archived transcript of completed conversations, for memory only. These utterances already happened; do not repeat or continue them.\\n[{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\" Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Okay.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is amber.Hey. I'm here. What's up?\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\"Ask the hub for the current test beacon status.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is violet.Hi again. How can I help this time?\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\" Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking that.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is silver.Hey, I'm here. What's up?\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\" Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is crimson.Hey there! Ready when you are.\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\"Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking that.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking that, I'll be right back.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is golden.\\\"}]\"}],\"wake\":\"The previous conversation ended and you went to sleep about 6 seconds ago. You have just been woken for a new conversation. Any earlier goodbye or request to sleep was already completed. Keep the earlier conversation as memory; greet briefly and listen for a new request.\"}"
+      },
+      {
+        "at": 309700,
+        "dir": "in",
+        "verb": "hub",
+        "text": "hub\n{\"reply\":\"The test beacon is indigo.\",\"stamp\":\"reply-5\"}"
+      },
+      {
+        "at": 335759,
+        "dir": "out",
+        "verb": "offer",
+        "text": "offer\n{\"context\":[{\"speaker\":\"user\",\"text\":\"Context: Archived transcript of completed conversations, for memory only. These utterances already happened; do not repeat or continue them.\\n[{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\"Ask the hub for the current test beacon status.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is violet.Hi again. How can I help this time?\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\" Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking that.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is silver.Hey, I'm here. What's up?\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\" Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is crimson.Hey there! Ready when you are.\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\"Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking that.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking that, I'll be right back.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is golden.Hey! What's on your mind?\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\" Ask the hub for the current test beacon status.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Okay,\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" checking.Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is indigo.\\\"}]\"}],\"wake\":\"The previous conversation ended and you went to sleep about 6 seconds ago. You have just been woken for a new conversation. Any earlier goodbye or request to sleep was already completed. Keep the earlier conversation as memory; greet briefly and listen for a new request.\"}"
+      },
+      {
+        "at": 352812,
+        "dir": "in",
+        "verb": "hub",
+        "text": "hub\n{\"reply\":\"The test beacon is turquoise.\",\"stamp\":\"reply-6\"}"
+      },
+      {
+        "at": 378065,
+        "dir": "out",
+        "verb": "offer",
+        "text": "offer\n{\"context\":[{\"speaker\":\"user\",\"text\":\"Context: Archived transcript of completed conversations, for memory only. These utterances already happened; do not repeat or continue them.\\n[{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\" Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking that.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is silver.Hey, I'm here. What's up?\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\" Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is crimson.Hey there! Ready when you are.\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\"Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking that.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking that, I'll be right back.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is golden.Hey! What's on your mind?\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\" Ask the hub for the current test beacon status.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Okay,\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" checking.Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is indigo.Hey, what's up? I'm all ears.\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\"Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Sure. Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking the current test beacon status.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is turquoise.\\\"}]\"}],\"wake\":\"The previous conversation ended and you went to sleep about 5 seconds ago. You have just been woken for a new conversation. Any earlier goodbye or request to sleep was already completed. Keep the earlier conversation as memory; greet briefly and listen for a new request.\"}"
+      },
+      {
+        "at": 395033,
+        "dir": "in",
+        "verb": "hub",
+        "text": "hub\n{\"reply\":\"The test beacon is copper.\",\"stamp\":\"reply-7\"}"
+      },
+      {
+        "at": 419506,
+        "dir": "out",
+        "verb": "offer",
+        "text": "offer\n{\"context\":[{\"speaker\":\"user\",\"text\":\"Context: Archived transcript of completed conversations, for memory only. These utterances already happened; do not repeat or continue them.\\n[{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\" Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is crimson.Hey there! Ready when you are.\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\"Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking that.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking that, I'll be right back.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is golden.Hey! What's on your mind?\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\" Ask the hub for the current test beacon status.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Okay,\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" checking.Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is indigo.Hey, what's up? I'm all ears.\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\"Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Sure. Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking the current test beacon status.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is turquoise.Hey! What's up?\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\"Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is copper.\\\"}]\"}],\"wake\":\"The previous conversation ended and you went to sleep about 5 seconds ago. You have just been woken for a new conversation. Any earlier goodbye or request to sleep was already completed. Keep the earlier conversation as memory; greet briefly and listen for a new request.\"}"
+      },
+      {
+        "at": 435903,
+        "dir": "in",
+        "verb": "hub",
+        "text": "hub\n{\"reply\":\"The test beacon is magenta.\",\"stamp\":\"reply-8\"}"
+      },
+      {
+        "at": 459195,
+        "dir": "out",
+        "verb": "offer",
+        "text": "offer\n{\"context\":[{\"speaker\":\"user\",\"text\":\"Context: Archived transcript of completed conversations, for memory only. These utterances already happened; do not repeat or continue them.\\n[{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\"Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking that.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking that, I'll be right back.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is golden.Hey! What's on your mind?\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\" Ask the hub for the current test beacon status.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Okay,\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" checking.Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is indigo.Hey, what's up? I'm all ears.\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\"Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Sure. Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking the current test beacon status.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is turquoise.Hey! What's up?\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\"Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is copper.Hey, what's on your mind?\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\"Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is magenta.\\\"}]\"}],\"wake\":\"The previous conversation ended and you went to sleep about 5 seconds ago. You have just been woken for a new conversation. Any earlier goodbye or request to sleep was already completed. Keep the earlier conversation as memory; greet briefly and listen for a new request.\"}"
+      },
+      {
+        "at": 476891,
+        "dir": "in",
+        "verb": "hub",
+        "text": "hub\n{\"reply\":\"The test beacon is ivory.\",\"stamp\":\"reply-9\"}"
+      },
+      {
+        "at": 500342,
+        "dir": "out",
+        "verb": "offer",
+        "text": "offer\n{\"context\":[{\"speaker\":\"user\",\"text\":\"Context: Archived transcript of completed conversations, for memory only. These utterances already happened; do not repeat or continue them.\\n[{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\" Ask the hub for the current test beacon status.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Okay,\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" checking.Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is indigo.Hey, what's up? I'm all ears.\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\"Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Sure. Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking the current test beacon status.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is turquoise.Hey! What's up?\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\"Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is copper.Hey, what's on your mind?\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\"Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\" Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is magenta.Hey there! What's up?\\\"},{\\\"speaker\\\":\\\"user\\\",\\\"text\\\":\\\"Ask the hub for the current test beacon status\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Checking.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"Sure, I'm checking now.\\\"},{\\\"speaker\\\":\\\"live\\\",\\\"text\\\":\\\"The test beacon is ivory.\\\"}]\"}],\"wake\":\"The previous conversation ended and you went to sleep about 5 seconds ago. You have just been woken for a new conversation. Any earlier goodbye or request to sleep was already completed. Keep the earlier conversation as memory; greet briefly and listen for a new request.\"}"
+      },
+      {
+        "at": 515635,
+        "dir": "in",
+        "verb": "hub",
+        "text": "hub\n{\"reply\":\"The test beacon is emerald.\",\"stamp\":\"reply-10\"}"
+      }
+    ],
+    "marks": [
+      {
+        "at": 0,
+        "kind": "page-ready"
+      },
+      {
+        "at": 18346,
+        "kind": "request-start",
+        "ch": 0,
+        "reply": "The test beacon is amber."
+      },
+      {
+        "at": 41395,
+        "kind": "reply-end",
+        "ch": 0,
+        "audio": [
+          {
+            "bytesReceived": 111724,
+            "totalSamplesReceived": 1255680
+          }
+        ]
+      },
+      {
+        "at": 41396,
+        "kind": "sleep-start",
+        "ch": 0
+      },
+      {
+        "at": 80907,
+        "kind": "request-start",
+        "ch": 1,
+        "reply": "The test beacon is violet."
+      },
+      {
+        "at": 104548,
+        "kind": "reply-end",
+        "ch": 1,
+        "audio": [
+          {
+            "bytesReceived": 119054,
+            "totalSamplesReceived": 1303680
+          }
+        ]
+      },
+      {
+        "at": 104563,
+        "kind": "sleep-start",
+        "ch": 1
+      },
+      {
+        "at": 152414,
+        "kind": "request-start",
+        "ch": 2,
+        "reply": "The test beacon is silver."
+      },
+      {
+        "at": 176952,
+        "kind": "reply-end",
+        "ch": 2,
+        "audio": [
+          {
+            "bytesReceived": 123571,
+            "totalSamplesReceived": 1290240
+          }
+        ]
+      },
+      {
+        "at": 176952,
+        "kind": "sleep-start",
+        "ch": 2
+      },
+      {
+        "at": 211017,
+        "kind": "request-start",
+        "ch": 3,
+        "reply": "The test beacon is crimson."
+      },
+      {
+        "at": 235004,
+        "kind": "reply-end",
+        "ch": 3,
+        "audio": [
+          {
+            "bytesReceived": 123073,
+            "totalSamplesReceived": 1282560
+          }
+        ]
+      },
+      {
+        "at": 235004,
+        "kind": "sleep-start",
+        "ch": 3
+      },
+      {
+        "at": 254936,
+        "kind": "request-start",
+        "ch": 4,
+        "reply": "The test beacon is golden."
+      },
+      {
+        "at": 279084,
+        "kind": "reply-end",
+        "ch": 4,
+        "audio": [
+          {
+            "bytesReceived": 124254,
+            "totalSamplesReceived": 1312320
+          }
+        ]
+      },
+      {
+        "at": 279084,
+        "kind": "sleep-start",
+        "ch": 4
+      },
+      {
+        "at": 299530,
+        "kind": "request-start",
+        "ch": 5,
+        "reply": "The test beacon is indigo."
+      },
+      {
+        "at": 323934,
+        "kind": "reply-end",
+        "ch": 5,
+        "audio": [
+          {
+            "bytesReceived": 123918,
+            "totalSamplesReceived": 1370400
+          }
+        ]
+      },
+      {
+        "at": 323934,
+        "kind": "sleep-start",
+        "ch": 5
+      },
+      {
+        "at": 341902,
+        "kind": "request-start",
+        "ch": 6,
+        "reply": "The test beacon is turquoise."
+      },
+      {
+        "at": 366407,
+        "kind": "reply-end",
+        "ch": 6,
+        "audio": [
+          {
+            "bytesReceived": 134252,
+            "totalSamplesReceived": 1348800
+          }
+        ]
+      },
+      {
+        "at": 366408,
+        "kind": "sleep-start",
+        "ch": 6
+      },
+      {
+        "at": 383815,
+        "kind": "request-start",
+        "ch": 7,
+        "reply": "The test beacon is copper."
+      },
+      {
+        "at": 408155,
+        "kind": "reply-end",
+        "ch": 7,
+        "audio": [
+          {
+            "bytesReceived": 116445,
+            "totalSamplesReceived": 1264800
+          }
+        ]
+      },
+      {
+        "at": 408156,
+        "kind": "sleep-start",
+        "ch": 7
+      },
+      {
+        "at": 426467,
+        "kind": "request-start",
+        "ch": 8,
+        "reply": "The test beacon is magenta."
+      },
+      {
+        "at": 448509,
+        "kind": "reply-end",
+        "ch": 8,
+        "audio": [
+          {
+            "bytesReceived": 114648,
+            "totalSamplesReceived": 1289760
+          }
+        ]
+      },
+      {
+        "at": 448510,
+        "kind": "sleep-start",
+        "ch": 8
+      },
+      {
+        "at": 466191,
+        "kind": "request-start",
+        "ch": 9,
+        "reply": "The test beacon is ivory."
+      },
+      {
+        "at": 489732,
+        "kind": "reply-end",
+        "ch": 9,
+        "audio": [
+          {
+            "bytesReceived": 127379,
+            "totalSamplesReceived": 1365120
+          }
+        ]
+      },
+      {
+        "at": 489733,
+        "kind": "sleep-start",
+        "ch": 9
+      },
+      {
+        "at": 505628,
+        "kind": "request-start",
+        "ch": 10,
+        "reply": "The test beacon is emerald."
+      },
+      {
+        "at": 528447,
+        "kind": "reply-end",
+        "ch": 10,
+        "audio": [
+          {
+            "bytesReceived": 108775,
+            "totalSamplesReceived": 1247520
+          }
+        ]
+      },
+      {
+        "at": 528447,
+        "kind": "sleep-start",
+        "ch": 10
+      }
+    ],
+    "rt": [
+      {
+        "at": 13659,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.started"
+        }
+      },
+      {
+        "at": 22604,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 8200,
+          "end_ms": 10800,
+          "delta": " Okay. Checking."
+        }
+      },
+      {
+        "at": 30445,
+        "ch": 0,
+        "dir": "out",
+        "event": {
+          "type": "session.instructions.append",
+          "event_id": "hub_script_reply-0",
+          "delegation_id": null,
+          "content": "The next application commentary is a new hub reply. Read that reply exactly once, word for word, without an introduction or any other text. Then remain silent until the user speaks again. Do not resume the archived conversation or repeat earlier replies, greetings, or pending acknowledgments."
+        }
+      },
+      {
+        "at": 30445,
+        "ch": 0,
+        "dir": "out",
+        "event": {
+          "type": "session.commentary.append",
+          "event_id": "hub_reply-0",
+          "delegation_id": null,
+          "content": "The test beacon is amber."
+        }
+      },
+      {
+        "at": 31238,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 16800,
+          "end_ms": 17800,
+          "delta": "The test beacon is amber."
+        }
+      },
+      {
+        "at": 31240,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.instructions.appended",
+          "start_ms": 16800,
+          "end_ms": 17000,
+          "client_event_id": "hub_script_reply-0"
+        }
+      },
+      {
+        "at": 31240,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.commentary.appended",
+          "start_ms": 16800,
+          "end_ms": 17000,
+          "client_event_id": "hub_reply-0"
+        }
+      },
+      {
+        "at": 42660,
+        "ch": 0,
+        "dir": "state",
+        "event": {
+          "raw": "close"
+        }
+      },
+      {
+        "at": 75304,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.started"
+        }
+      },
+      {
+        "at": 85151,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 9000,
+          "end_ms": 11600,
+          "delta": "Checking. Checking."
+        }
+      },
+      {
+        "at": 92917,
+        "ch": 1,
+        "dir": "out",
+        "event": {
+          "type": "session.instructions.append",
+          "event_id": "hub_script_reply-1",
+          "delegation_id": null,
+          "content": "The next application commentary is a new hub reply. Read that reply exactly once, word for word, without an introduction or any other text. Then remain silent until the user speaks again. Do not resume the archived conversation or repeat earlier replies, greetings, or pending acknowledgments."
+        }
+      },
+      {
+        "at": 92917,
+        "ch": 1,
+        "dir": "out",
+        "event": {
+          "type": "session.commentary.append",
+          "event_id": "hub_reply-1",
+          "delegation_id": null,
+          "content": "The test beacon is violet."
+        }
+      },
+      {
+        "at": 93613,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 17600,
+          "end_ms": 18800,
+          "delta": "The test beacon is violet."
+        }
+      },
+      {
+        "at": 93615,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.instructions.appended",
+          "start_ms": 17600,
+          "end_ms": 17800,
+          "client_event_id": "hub_script_reply-1"
+        }
+      },
+      {
+        "at": 93615,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.commentary.appended",
+          "start_ms": 17600,
+          "end_ms": 17800,
+          "client_event_id": "hub_reply-1"
+        }
+      },
+      {
+        "at": 106356,
+        "ch": 1,
+        "dir": "state",
+        "event": {
+          "raw": "close"
+        }
+      },
+      {
+        "at": 146751,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.started"
+        }
+      },
+      {
+        "at": 157257,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 9200,
+          "end_ms": 11800,
+          "delta": "Checking. Checking that."
+        }
+      },
+      {
+        "at": 165883,
+        "ch": 2,
+        "dir": "out",
+        "event": {
+          "type": "session.instructions.append",
+          "event_id": "hub_script_reply-2",
+          "delegation_id": null,
+          "content": "The next application commentary is a new hub reply. Read that reply exactly once, word for word, without an introduction or any other text. Then remain silent until the user speaks again. Do not resume the archived conversation or repeat earlier replies, greetings, or pending acknowledgments."
+        }
+      },
+      {
+        "at": 165883,
+        "ch": 2,
+        "dir": "out",
+        "event": {
+          "type": "session.commentary.append",
+          "event_id": "hub_reply-2",
+          "delegation_id": null,
+          "content": "The test beacon is silver."
+        }
+      },
+      {
+        "at": 167340,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 19200,
+          "end_ms": 20200,
+          "delta": "The test beacon is silver."
+        }
+      },
+      {
+        "at": 167350,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.instructions.appended",
+          "start_ms": 19200,
+          "end_ms": 19400,
+          "client_event_id": "hub_script_reply-2"
+        }
+      },
+      {
+        "at": 167352,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.commentary.appended",
+          "start_ms": 19200,
+          "end_ms": 19400,
+          "client_event_id": "hub_reply-2"
+        }
+      },
+      {
+        "at": 178528,
+        "ch": 2,
+        "dir": "state",
+        "event": {
+          "raw": "close"
+        }
+      },
+      {
+        "at": 204938,
+        "ch": 3,
+        "dir": "in",
+        "event": {
+          "type": "session.started"
+        }
+      },
+      {
+        "at": 215817,
+        "ch": 3,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 10400,
+          "end_ms": 13400,
+          "delta": " Checking.Checking."
+        }
+      },
+      {
+        "at": 223970,
+        "ch": 3,
+        "dir": "out",
+        "event": {
+          "type": "session.instructions.append",
+          "event_id": "hub_script_reply-3",
+          "delegation_id": null,
+          "content": "The next application commentary is a new hub reply. Read that reply exactly once, word for word, without an introduction or any other text. Then remain silent until the user speaks again. Do not resume the archived conversation or repeat earlier replies, greetings, or pending acknowledgments."
+        }
+      },
+      {
+        "at": 223974,
+        "ch": 3,
+        "dir": "out",
+        "event": {
+          "type": "session.commentary.append",
+          "event_id": "hub_reply-3",
+          "delegation_id": null,
+          "content": "The test beacon is crimson."
+        }
+      },
+      {
+        "at": 224710,
+        "ch": 3,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 19600,
+          "end_ms": 20800,
+          "delta": "The test beacon is crimson."
+        }
+      },
+      {
+        "at": 224719,
+        "ch": 3,
+        "dir": "in",
+        "event": {
+          "type": "session.instructions.appended",
+          "start_ms": 19600,
+          "end_ms": 19800,
+          "client_event_id": "hub_script_reply-3"
+        }
+      },
+      {
+        "at": 224720,
+        "ch": 3,
+        "dir": "in",
+        "event": {
+          "type": "session.commentary.appended",
+          "start_ms": 19600,
+          "end_ms": 19800,
+          "client_event_id": "hub_reply-3"
+        }
+      },
+      {
+        "at": 236339,
+        "ch": 3,
+        "dir": "state",
+        "event": {
+          "raw": "close"
+        }
+      },
+      {
+        "at": 249720,
+        "ch": 4,
+        "dir": "in",
+        "event": {
+          "type": "session.started"
+        }
+      },
+      {
+        "at": 259162,
+        "ch": 4,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 8600,
+          "end_ms": 12400,
+          "delta": " Checking that. Checking that, I'll be right back."
+        }
+      },
+      {
+        "at": 268261,
+        "ch": 4,
+        "dir": "out",
+        "event": {
+          "type": "session.instructions.append",
+          "event_id": "hub_script_reply-4",
+          "delegation_id": null,
+          "content": "The next application commentary is a new hub reply. Read that reply exactly once, word for word, without an introduction or any other text. Then remain silent until the user speaks again. Do not resume the archived conversation or repeat earlier replies, greetings, or pending acknowledgments."
+        }
+      },
+      {
+        "at": 268261,
+        "ch": 4,
+        "dir": "out",
+        "event": {
+          "type": "session.commentary.append",
+          "event_id": "hub_reply-4",
+          "delegation_id": null,
+          "content": "The test beacon is golden."
+        }
+      },
+      {
+        "at": 268994,
+        "ch": 4,
+        "dir": "in",
+        "event": {
+          "type": "session.instructions.appended",
+          "start_ms": 18400,
+          "end_ms": 18600,
+          "client_event_id": "hub_script_reply-4"
+        }
+      },
+      {
+        "at": 268994,
+        "ch": 4,
+        "dir": "in",
+        "event": {
+          "type": "session.commentary.appended",
+          "start_ms": 18400,
+          "end_ms": 18600,
+          "client_event_id": "hub_reply-4"
+        }
+      },
+      {
+        "at": 269000,
+        "ch": 4,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 18600,
+          "end_ms": 19800,
+          "delta": "The test beacon is golden."
+        }
+      },
+      {
+        "at": 280708,
+        "ch": 4,
+        "dir": "state",
+        "event": {
+          "raw": "close"
+        }
+      },
+      {
+        "at": 293104,
+        "ch": 5,
+        "dir": "in",
+        "event": {
+          "type": "session.started"
+        }
+      },
+      {
+        "at": 304324,
+        "ch": 5,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 10600,
+          "end_ms": 12800,
+          "delta": "Okay, checking.Checking."
+        }
+      },
+      {
+        "at": 311901,
+        "ch": 5,
+        "dir": "out",
+        "event": {
+          "type": "session.instructions.append",
+          "event_id": "hub_script_reply-5",
+          "delegation_id": null,
+          "content": "The next application commentary is a new hub reply. Read that reply exactly once, word for word, without an introduction or any other text. Then remain silent until the user speaks again. Do not resume the archived conversation or repeat earlier replies, greetings, or pending acknowledgments."
+        }
+      },
+      {
+        "at": 311901,
+        "ch": 5,
+        "dir": "out",
+        "event": {
+          "type": "session.commentary.append",
+          "event_id": "hub_reply-5",
+          "delegation_id": null,
+          "content": "The test beacon is indigo."
+        }
+      },
+      {
+        "at": 312603,
+        "ch": 5,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 19200,
+          "end_ms": 20600,
+          "delta": "The test beacon is indigo."
+        }
+      },
+      {
+        "at": 312627,
+        "ch": 5,
+        "dir": "in",
+        "event": {
+          "type": "session.instructions.appended",
+          "start_ms": 19200,
+          "end_ms": 19400,
+          "client_event_id": "hub_script_reply-5"
+        }
+      },
+      {
+        "at": 312627,
+        "ch": 5,
+        "dir": "in",
+        "event": {
+          "type": "session.commentary.appended",
+          "start_ms": 19200,
+          "end_ms": 19400,
+          "client_event_id": "hub_reply-5"
+        }
+      },
+      {
+        "at": 325144,
+        "ch": 5,
+        "dir": "state",
+        "event": {
+          "raw": "close"
+        }
+      },
+      {
+        "at": 336613,
+        "ch": 6,
+        "dir": "in",
+        "event": {
+          "type": "session.started"
+        }
+      },
+      {
+        "at": 346346,
+        "ch": 6,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 9000,
+          "end_ms": 12600,
+          "delta": "Sure. Checking. Checking the current test beacon status."
+        }
+      },
+      {
+        "at": 354929,
+        "ch": 6,
+        "dir": "out",
+        "event": {
+          "type": "session.instructions.append",
+          "event_id": "hub_script_reply-6",
+          "delegation_id": null,
+          "content": "The next application commentary is a new hub reply. Read that reply exactly once, word for word, without an introduction or any other text. Then remain silent until the user speaks again. Do not resume the archived conversation or repeat earlier replies, greetings, or pending acknowledgments."
+        }
+      },
+      {
+        "at": 354930,
+        "ch": 6,
+        "dir": "out",
+        "event": {
+          "type": "session.commentary.append",
+          "event_id": "hub_reply-6",
+          "delegation_id": null,
+          "content": "The test beacon is turquoise."
+        }
+      },
+      {
+        "at": 356060,
+        "ch": 6,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 18400,
+          "end_ms": 19600,
+          "delta": "The test beacon is turquoise."
+        }
+      },
+      {
+        "at": 356071,
+        "ch": 6,
+        "dir": "in",
+        "event": {
+          "type": "session.instructions.appended",
+          "start_ms": 18400,
+          "end_ms": 18600,
+          "client_event_id": "hub_script_reply-6"
+        }
+      },
+      {
+        "at": 356071,
+        "ch": 6,
+        "dir": "in",
+        "event": {
+          "type": "session.commentary.appended",
+          "start_ms": 18400,
+          "end_ms": 18600,
+          "client_event_id": "hub_reply-6"
+        }
+      },
+      {
+        "at": 367613,
+        "ch": 6,
+        "dir": "state",
+        "event": {
+          "raw": "close"
+        }
+      },
+      {
+        "at": 378888,
+        "ch": 7,
+        "dir": "in",
+        "event": {
+          "type": "session.started"
+        }
+      },
+      {
+        "at": 388365,
+        "ch": 7,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 8800,
+          "end_ms": 12200,
+          "delta": "Checking.Checking."
+        }
+      },
+      {
+        "at": 397217,
+        "ch": 7,
+        "dir": "out",
+        "event": {
+          "type": "session.instructions.append",
+          "event_id": "hub_script_reply-7",
+          "delegation_id": null,
+          "content": "The next application commentary is a new hub reply. Read that reply exactly once, word for word, without an introduction or any other text. Then remain silent until the user speaks again. Do not resume the archived conversation or repeat earlier replies, greetings, or pending acknowledgments."
+        }
+      },
+      {
+        "at": 397217,
+        "ch": 7,
+        "dir": "out",
+        "event": {
+          "type": "session.commentary.append",
+          "event_id": "hub_reply-7",
+          "delegation_id": null,
+          "content": "The test beacon is copper."
+        }
+      },
+      {
+        "at": 397975,
+        "ch": 7,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 18400,
+          "end_ms": 19400,
+          "delta": "The test beacon is copper."
+        }
+      },
+      {
+        "at": 397992,
+        "ch": 7,
+        "dir": "in",
+        "event": {
+          "type": "session.instructions.appended",
+          "start_ms": 18400,
+          "end_ms": 18600,
+          "client_event_id": "hub_script_reply-7"
+        }
+      },
+      {
+        "at": 397992,
+        "ch": 7,
+        "dir": "in",
+        "event": {
+          "type": "session.commentary.appended",
+          "start_ms": 18400,
+          "end_ms": 18600,
+          "client_event_id": "hub_reply-7"
+        }
+      },
+      {
+        "at": 409200,
+        "ch": 7,
+        "dir": "state",
+        "event": {
+          "raw": "close"
+        }
+      },
+      {
+        "at": 420436,
+        "ch": 8,
+        "dir": "in",
+        "event": {
+          "type": "session.started"
+        }
+      },
+      {
+        "at": 430720,
+        "ch": 8,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 9600,
+          "end_ms": 11600,
+          "delta": " Checking.Checking."
+        }
+      },
+      {
+        "at": 438084,
+        "ch": 8,
+        "dir": "out",
+        "event": {
+          "type": "session.instructions.append",
+          "event_id": "hub_script_reply-8",
+          "delegation_id": null,
+          "content": "The next application commentary is a new hub reply. Read that reply exactly once, word for word, without an introduction or any other text. Then remain silent until the user speaks again. Do not resume the archived conversation or repeat earlier replies, greetings, or pending acknowledgments."
+        }
+      },
+      {
+        "at": 438084,
+        "ch": 8,
+        "dir": "out",
+        "event": {
+          "type": "session.commentary.append",
+          "event_id": "hub_reply-8",
+          "delegation_id": null,
+          "content": "The test beacon is magenta."
+        }
+      },
+      {
+        "at": 438890,
+        "ch": 8,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 17800,
+          "end_ms": 19200,
+          "delta": "The test beacon is magenta."
+        }
+      },
+      {
+        "at": 438931,
+        "ch": 8,
+        "dir": "in",
+        "event": {
+          "type": "session.instructions.appended",
+          "start_ms": 17800,
+          "end_ms": 18000,
+          "client_event_id": "hub_script_reply-8"
+        }
+      },
+      {
+        "at": 438931,
+        "ch": 8,
+        "dir": "in",
+        "event": {
+          "type": "session.commentary.appended",
+          "start_ms": 17800,
+          "end_ms": 18000,
+          "client_event_id": "hub_reply-8"
+        }
+      },
+      {
+        "at": 448987,
+        "ch": 8,
+        "dir": "state",
+        "event": {
+          "raw": "close"
+        }
+      },
+      {
+        "at": 460092,
+        "ch": 9,
+        "dir": "in",
+        "event": {
+          "type": "session.started"
+        }
+      },
+      {
+        "at": 470286,
+        "ch": 9,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 9600,
+          "end_ms": 13200,
+          "delta": "Checking.Sure, I'm checking now."
+        }
+      },
+      {
+        "at": 478975,
+        "ch": 9,
+        "dir": "out",
+        "event": {
+          "type": "session.instructions.append",
+          "event_id": "hub_script_reply-9",
+          "delegation_id": null,
+          "content": "The next application commentary is a new hub reply. Read that reply exactly once, word for word, without an introduction or any other text. Then remain silent until the user speaks again. Do not resume the archived conversation or repeat earlier replies, greetings, or pending acknowledgments."
+        }
+      },
+      {
+        "at": 478975,
+        "ch": 9,
+        "dir": "out",
+        "event": {
+          "type": "session.commentary.append",
+          "event_id": "hub_reply-9",
+          "delegation_id": null,
+          "content": "The test beacon is ivory."
+        }
+      },
+      {
+        "at": 479785,
+        "ch": 9,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 19000,
+          "end_ms": 20200,
+          "delta": "The test beacon is ivory."
+        }
+      },
+      {
+        "at": 479796,
+        "ch": 9,
+        "dir": "in",
+        "event": {
+          "type": "session.instructions.appended",
+          "start_ms": 19000,
+          "end_ms": 19200,
+          "client_event_id": "hub_script_reply-9"
+        }
+      },
+      {
+        "at": 479796,
+        "ch": 9,
+        "dir": "in",
+        "event": {
+          "type": "session.commentary.appended",
+          "start_ms": 19000,
+          "end_ms": 19200,
+          "client_event_id": "hub_reply-9"
+        }
+      },
+      {
+        "at": 490328,
+        "ch": 9,
+        "dir": "state",
+        "event": {
+          "raw": "close"
+        }
+      },
+      {
+        "at": 501241,
+        "ch": 10,
+        "dir": "in",
+        "event": {
+          "type": "session.started"
+        }
+      },
+      {
+        "at": 509777,
+        "ch": 10,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 7800,
+          "end_ms": 10400,
+          "delta": " Checking.Checking."
+        }
+      },
+      {
+        "at": 517721,
+        "ch": 10,
+        "dir": "out",
+        "event": {
+          "type": "session.instructions.append",
+          "event_id": "hub_script_reply-10",
+          "delegation_id": null,
+          "content": "The next application commentary is a new hub reply. Read that reply exactly once, word for word, without an introduction or any other text. Then remain silent until the user speaks again. Do not resume the archived conversation or repeat earlier replies, greetings, or pending acknowledgments."
+        }
+      },
+      {
+        "at": 517722,
+        "ch": 10,
+        "dir": "out",
+        "event": {
+          "type": "session.commentary.append",
+          "event_id": "hub_reply-10",
+          "delegation_id": null,
+          "content": "The test beacon is emerald."
+        }
+      },
+      {
+        "at": 518533,
+        "ch": 10,
+        "dir": "in",
+        "event": {
+          "type": "session.instructions.appended",
+          "start_ms": 16400,
+          "end_ms": 16600,
+          "client_event_id": "hub_script_reply-10"
+        }
+      },
+      {
+        "at": 518533,
+        "ch": 10,
+        "dir": "in",
+        "event": {
+          "type": "session.commentary.appended",
+          "start_ms": 16400,
+          "end_ms": 16600,
+          "client_event_id": "hub_reply-10"
+        }
+      },
+      {
+        "at": 518654,
+        "ch": 10,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 16600,
+          "end_ms": 17600,
+          "delta": "The test beacon is emerald."
+        }
+      },
+      {
+        "at": 529447,
+        "ch": 10,
+        "dir": "state",
+        "event": {
+          "raw": "close"
+        }
+      }
+    ]
+  }
+}

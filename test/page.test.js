@@ -176,14 +176,25 @@ Object.defineProperty(globalThis, 'caches', { value: { open: async () => ({
   match: async (request) => puppetCache.get(request.url)?.clone(),
   put: async (request, response) => puppetCache.set(request.url, response.clone()),
 }) } });
-const microphoneTrack = { enabled: true, stop() {} };
-const stream = { getTracks: () => [microphoneTrack], getAudioTracks: () => [microphoneTrack] };
-globalThis.testMicrophoneTrack = microphoneTrack;
-Object.defineProperty(navigator, 'mediaDevices', { value: { getUserMedia: async () => stream } });
+globalThis.microphoneOpens = 0;
+Object.defineProperty(navigator, 'mediaDevices', { value: Object.assign(new EventTarget(), { getUserMedia: async () => {
+  if (globalThis.microphoneMissing) throw new DOMException('Requested device not found', 'NotFoundError');
+  const track = Object.assign(new EventTarget(), { enabled: true, readyState: 'live', stop() { this.readyState = 'ended'; } });
+  globalThis.testMicrophoneTrack = track;
+  microphoneOpens++;
+  return { getTracks: () => [track], getAudioTracks: () => [track] };
+} }) });
+globalThis.endMicrophone = () => {
+  testMicrophoneTrack.readyState = 'ended';
+  testMicrophoneTrack.dispatchEvent(new Event('ended'));
+};
 class FakeMediaRecorder extends EventTarget {
   static isTypeSupported(type) { return type === 'audio/webm;codecs=opus'; }
-  constructor() { super(); this.state = 'inactive'; }
-  start() { this.state = 'recording'; }
+  constructor(stream) { super(); this.stream = stream; this.state = 'inactive'; }
+  start() {
+    if (this.stream.getAudioTracks().every((track) => track.readyState === 'ended')) throw new DOMException("Failed to execute 'start' on 'MediaRecorder': There was an error starting the MediaRecorder.", 'NotSupportedError');
+    this.state = 'recording';
+  }
   stop() { this.state = 'inactive'; this.dispatchEvent(new Event('stop')); }
 }
 globalThis.MediaRecorder = FakeMediaRecorder;
@@ -201,8 +212,12 @@ class FakePeerConnection {
   createDataChannel() { this.channel = new FakeChannel(); globalThis.testChannel = this.channel; return this.channel; }
   async createOffer() { return { type: 'offer', sdp: 'offer' }; }
   async setLocalDescription(description) { this.localDescription = description; }
-  async setRemoteDescription() { queueMicrotask(() => this.channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.started', session: { model: 'gpt-live-1', delegation: { type: 'client' } } }) }))); }
-  addTrack() {}
+  async setRemoteDescription() {
+    const start = () => this.channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.started', session: { model: 'gpt-live-1', delegation: { type: 'client' } } }) }));
+    if (globalThis.holdSessionStart) globalThis.heldSessionStart = start;
+    else queueMicrotask(start);
+  }
+  addTrack(track) { (globalThis.sentTracks ??= []).push(track); }
   close() {}
 }
 globalThis.RTCPeerConnection = FakePeerConnection;
@@ -1529,6 +1544,83 @@ test('the spotter stops throughout a conversation and restarts when it ends', as
   assert.deepEqual(result, { mid: { closed: 1, replaced: false, running: false }, unmuted: { closed: 1, replaced: false, running: false }, restarted: true });
 });
 
+for (const [phase, enter, status] of [
+  ['while asleep', '', ''],
+  ['while a session starts', "globalThis.holdSessionStart = true; document.querySelector('#puppet').click(); await until(() => globalThis.heldSessionStart);", 'microphone lost'],
+  ['during a session', "document.querySelector('#puppet').click(); await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');", 'microphone lost'],
+]) test(`a microphone that ends ${phase} is reopened, and the next session sends and records the live one`, async () => {
+  const result = await runWakePage(`
+    await sleepNow();
+    await until(() => globalThis.testSpotter && !testSpotter.closed);
+    const spotter = testSpotter;
+    const opens = microphoneOpens;
+    ${enter}
+    endMicrophone();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const lost = { status: document.querySelector('#status').textContent, pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), events: sessionEvents('microphone-ended').length, opens: microphoneOpens - opens, closed: spotter.closed, replaced: testSpotter !== spotter, running: !testSpotter.closed, hears: testSpotter.stream.getAudioTracks()[0].readyState };
+    globalThis.holdSessionStart = false;
+    document.querySelector('#puppet').click();
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return { lost, sends: sentTracks.at(-1).readyState, errors: fleetLines };
+  `);
+  assert.deepEqual(result, { lost: { status, pressed: 'false', events: 1, opens: 1, closed: 1, replaced: true, running: true, hears: 'live' }, sends: 'live', errors: [] });
+});
+
+test('a microphone that cannot reopen after it ends comes back on the next device change', async () => {
+  const result = await runWakePage(`
+    await sleepNow();
+    await until(() => globalThis.testSpotter && !testSpotter.closed);
+    const opens = microphoneOpens;
+    globalThis.microphoneMissing = true;
+    endMicrophone();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const missing = { opens: microphoneOpens - opens, running: !testSpotter.closed };
+    globalThis.microphoneMissing = false;
+    navigator.mediaDevices.dispatchEvent(new Event('devicechange'));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return { missing, returned: { opens: microphoneOpens - opens, running: !testSpotter.closed, hears: testSpotter.stream.getAudioTracks()[0].readyState }, errors: fleetLines };
+  `);
+  assert.deepEqual(result, { missing: { opens: 0, running: false }, returned: { opens: 1, running: true, hears: 'live' }, errors: ['fleet-error: voice/page — NotFoundError: Requested device not found'] });
+});
+
+test('with no microphone at load, mute is available at once and holds when a device arrives', async () => {
+  const result = await runWakePage(`
+    const button = document.querySelector('#mic-mute');
+    const before = { opens: microphoneOpens, disabled: button.disabled };
+    button.click();
+    globalThis.microphoneMissing = false;
+    navigator.mediaDevices.dispatchEvent(new Event('devicechange'));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const arrived = { opens: microphoneOpens, pressed: button.getAttribute('aria-pressed') };
+    document.querySelector('#puppet').click();
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+    return { before, arrived, sends: { state: sentTracks.at(-1).readyState, enabled: sentTracks.at(-1).enabled } };
+  `, { setup: 'globalThis.microphoneMissing = true;' });
+  assert.deepEqual(result, { before: { opens: 0, disabled: false }, arrived: { opens: 0, pressed: 'true' }, sends: { state: 'live', enabled: false } });
+});
+
+test('a mute set while no microphone is open holds, and the next session opens the microphone muted', async () => {
+  const result = await runWakePage(`
+    await sleepNow();
+    await until(() => globalThis.testSpotter && !testSpotter.closed);
+    const opens = microphoneOpens;
+    globalThis.microphoneMissing = true;
+    endMicrophone();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    document.querySelector('#mic-mute').click();
+    globalThis.microphoneMissing = false;
+    navigator.mediaDevices.dispatchEvent(new Event('devicechange'));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const button = document.querySelector('#mic-mute');
+    const muted = { opens: microphoneOpens - opens, running: !testSpotter.closed, pressed: button.getAttribute('aria-pressed'), disabled: button.disabled };
+    document.querySelector('#puppet').click();
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+    return { muted, sends: { state: sentTracks.at(-1).readyState, enabled: sentTracks.at(-1).enabled } };
+  `);
+  assert.deepEqual(result, { muted: { opens: 0, running: false, pressed: 'true', disabled: false }, sends: { state: 'live', enabled: false } });
+});
+
 test('a running spotter survives relay loss and the wake phrase reconnects', async () => {
   const result = await runWakePage(`
     await sleepNow();
@@ -1550,16 +1642,16 @@ test('a running spotter survives relay loss and the wake phrase reconnects', asy
   assert.equal(result.offers, 1);
 });
 
-for (const control of ['reenter', 'forget']) test(control + ' stops the spotter before waiting for uploads', async () => {
+for (const control of ['reenter', 'forget']) test(control + ' stops the spotter and disables mute before waiting for uploads', async () => {
   const result = await runWakePage(`
     await sleepNow();
     await until(() => !testSpotter.closed);
     const asleep = testSpotter;
     document.querySelector('#${control}').click();
     await Promise.resolve();
-    return { closed: asleep.closed, replaced: testSpotter !== asleep };
+    return { closed: asleep.closed, replaced: testSpotter !== asleep, mute: document.querySelector('#mic-mute').disabled };
   `);
-  assert.deepEqual(result, { closed: 1, replaced: false });
+  assert.deepEqual(result, { closed: 1, replaced: false, mute: true });
 });
 
 test('relay loss during a conversation restarts the listener and its wake reconnects', async () => {

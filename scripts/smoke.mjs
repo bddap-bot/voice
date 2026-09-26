@@ -70,7 +70,7 @@ export class PuppetRuntime {
 }`;
 
 const browserMocks = `
-Object.defineProperty(navigator,'mediaDevices',{value:{getUserMedia:async()=>({getTracks:()=>[{stop(){}}]})}});
+Object.defineProperty(navigator,'mediaDevices',{value:Object.assign(new EventTarget(),{getUserMedia:async()=>{const track=Object.assign(new EventTarget(),{stop(){}});return{getTracks:()=>[track]};}})});
 class Recorder extends EventTarget { static isTypeSupported(){return true} start(){this.state='recording'} stop(){this.state='inactive';this.dispatchEvent(new Event('stop'))} } globalThis.MediaRecorder=Recorder;
 class Channel extends EventTarget { constructor(){super();this.readyState='open'} send(value){const e=JSON.parse(value);if(e.type==='session.close')queueMicrotask(()=>this.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'session.closed',usage:{seconds:0}})})))} close(){this.readyState='closed'} }
 class Peer { constructor(){this.iceGatheringState='complete';this.localDescription={sdp:'offer'}} createDataChannel(){this.channel=new Channel();globalThis.__smokeChannel=this.channel;return this.channel}async createOffer(){return {type:'offer',sdp:'offer'}}async setLocalDescription(v){this.localDescription=v}async setRemoteDescription(){queueMicrotask(()=>this.channel.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'session.started',session:{model:'gpt-live-1',delegation:{type:'client'}}})})))}addTrack(){}close(){} } globalThis.RTCPeerConnection=Peer;

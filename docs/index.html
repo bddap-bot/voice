@@ -241,7 +241,7 @@ function savedState(saved) {
   if (saved && !document.hidden) puppetRuntime?.start();
   else puppetRuntime?.pause();
   listening = saved;
-  if (saved) syncSpotter();
+  if (saved) setMicrophoneMuted(microphoneMuted);
   else stopListening();
 }
 function syncPuppetUi() {
@@ -253,9 +253,9 @@ function syncPuppetUi() {
   $('puppet').setAttribute('aria-label', active || starting ? 'stop conversation' : 'start conversation');
 }
 function setMicrophoneMuted(muted) {
-  microphoneMuted = Boolean(muted && microphoneStream);
+  microphoneMuted = muted;
   for (const track of microphoneStream?.getAudioTracks?.() ?? microphoneStream?.getTracks?.() ?? []) track.enabled = !microphoneMuted;
-  $('mic-mute').disabled = !microphoneStream;
+  $('mic-mute').disabled = !listening;
   $('mic-mute').textContent = microphoneMuted ? 'Unmute mic' : 'Mute mic';
   $('mic-mute').setAttribute('aria-pressed', String(microphoneMuted));
   syncSpotter();
@@ -647,6 +647,7 @@ function acquireMicrophone() {
       throw new Error('microphone released while opening');
     }
     microphoneStream = stream;
+    for (const track of stream.getTracks()) track.addEventListener('ended', () => microphoneEnded(stream));
     setMicrophoneMuted(microphoneMuted);
     return stream;
   }, (error) => {
@@ -654,6 +655,16 @@ function acquireMicrophone() {
     throw error;
   });
   return opening;
+}
+function microphoneEnded(stream) {
+  if (microphoneStream !== stream) return;
+  microphone = undefined;
+  microphoneStream = undefined;
+  recordSession('microphone-ended');
+  closeSpotter();
+  if (conversation?.audioOwner.stream === stream) stopConversation('microphone lost');
+  else if (starting?.stream === stream) cancelStarting('microphone lost');
+  syncSpotter();
 }
 function wakeable() {
   return listening && puppetReady && !microphoneMuted && !conversation && !starting;
@@ -1165,8 +1176,9 @@ $('puppet-choice').addEventListener('change', () => showPuppet($('puppet-choice'
 $('connect').addEventListener('click', () => start($('token').value).catch((error) => setStatus(error.message, 'err')));
 $('token-toggle').addEventListener('click', () => setTokenPanel($('token-toggle').getAttribute('aria-expanded') !== 'true'));
 $('mic-mute').addEventListener('click', () => setMicrophoneMuted(!microphoneMuted));
-$('reenter').addEventListener('click', async () => { listening = false; syncSpotter(); await stopConversation(); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); savedState(false); $('token').focus(); });
-$('forget').addEventListener('click', async () => { listening = false; syncSpotter(); await stopConversation(); localStorage.removeItem(KEY); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); await sendFrame('bye').catch(() => {}); generation++; connected = false; resetPuppetConnection(new Error('connection replaced'), true); await puppetChannel.clearCache().catch(() => {}); savedState(false); setStatus('token forgotten'); });
+$('reenter').addEventListener('click', async () => { listening = false; setMicrophoneMuted(microphoneMuted); await stopConversation(); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); savedState(false); $('token').focus(); });
+$('forget').addEventListener('click', async () => { listening = false; setMicrophoneMuted(microphoneMuted); await stopConversation(); localStorage.removeItem(KEY); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); await sendFrame('bye').catch(() => {}); generation++; connected = false; resetPuppetConnection(new Error('connection replaced'), true); await puppetChannel.clearCache().catch(() => {}); savedState(false); setStatus('token forgotten'); });
+navigator.mediaDevices?.addEventListener('devicechange', syncSpotter);
 document.addEventListener('visibilitychange', () => { if (document.hidden) puppetRuntime?.pause(); else if (!$('conversation').classList.contains('hidden')) puppetRuntime?.start(); });
 window.addEventListener('beforeunload', () => puppetRuntime?.dispose());
 const saved = configuredToken(config, localStorage.getItem(KEY));

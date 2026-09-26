@@ -907,7 +907,7 @@ window.addEventListener('test-ready', async () => {
   assert.ok(frames.every((frame) => Number.isFinite(frame.duration_ms) && /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/.test(frame.traceparent)));
 });
 
-test('a delegation is closed at once with a checking result, its hub reply reaches Live later after an exact-speech instruction, and a display-only push says nothing', async () => {
+test('a delegation appends nothing until its hub reply, which reaches Live after an exact-speech instruction, while a display-only push says nothing', async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {
   const pause = () => new Promise((resolve) => setTimeout(resolve, 30));
@@ -934,21 +934,16 @@ window.addEventListener('test-ready', async () => {
   const result = JSON.parse(encoded ?? 'null');
   assert.ok(result, stderr);
   const shape = (events) => events.map(([type, event_id, delegation_id]) => [type, event_id, delegation_id]);
-  assert.deepEqual(shape(result.closed), [['session.instructions.append', 'waiting_slow', 'slow'], ['session.commentary.append', 'checking_slow', 'slow']]);
-  assert.match(result.closed[0][3], /No answer to this request has arrived/);
-  assert.equal(result.closed[1][3], 'Checking.');
+  assert.deepEqual(result.closed, []);
   assert.deepEqual(result.pushed, { told: 0, waiting: [true] });
-  const later = result.told.slice(2);
-  assert.deepEqual(shape(later), [
+  assert.deepEqual(shape(result.told), [
     ['session.instructions.append', 'hub_script_reply_1', 'slow'],
     ['session.commentary.append', 'hub_reply_1', 'slow'],
-    ['session.instructions.append', 'waiting_lost', 'lost'],
-    ['session.commentary.append', 'checking_lost', 'lost'],
     ['session.commentary.append', 'hub_error_lost', 'lost'],
   ]);
-  assert.match(later[0][3], /Read that reply exactly once, word for word/);
-  assert.equal(later[1][3], 'Four jobs are queued.');
-  assert.equal(later[4][3], 'The hub request failed.');
+  assert.match(result.told[0][3], /Read that reply exactly once, word for word/);
+  assert.equal(result.told[1][3], 'Four jobs are queued.');
+  assert.equal(result.told[2][3], 'The hub request failed.');
   assert.match(result.log, /Is the printer busy\?[\s\S]*delegation queue is full/);
   assert.deepEqual(result.acks, ['push_1', 'reply_1']);
   assert.deepEqual(result.waiting, [true, false, true, false]);
@@ -1693,13 +1688,11 @@ test('a woken session receives only the fresh hub reply after its speech instruc
     await until(() => count('delegate') > 0);
     replyFromHub('fresh', 'fresh', { commentary: ['The test beacon is violet.'] });
     await until(() => sentLiveEvents.some((event) => event.event_id === 'hub_fresh'));
-    return { sent: delegateFrames.at(-1).text, context: lastOffer.context, pending: sentLiveEvents.find((event) => event.event_id === 'waiting_fresh'), instruction: sentLiveEvents.find((event) => event.event_id === 'hub_script_fresh'), reply: sentLiveEvents.find((event) => event.event_id === 'hub_fresh') };
+    return { sent: delegateFrames.at(-1).text, context: lastOffer.context, pending: sentLiveEvents.filter((event) => event.type.endsWith('.append') && ['waiting_fresh', 'checking_fresh'].includes(event.event_id)).length, instruction: sentLiveEvents.find((event) => event.event_id === 'hub_script_fresh'), reply: sentLiveEvents.find((event) => event.event_id === 'hub_fresh') };
   `);
   assert.equal(result.sent, 'Check the test beacon.');
   assert.ok(result.context.some((turn) => turn.text.includes('amber')));
-  assert.equal(result.pending.type, 'session.instructions.append');
-  assert.equal(result.pending.delegation_id, 'fresh');
-  assert.match(result.pending.content, /No answer to this request has arrived/);
+  assert.equal(result.pending, 0);
   assert.equal(result.instruction.type, 'session.instructions.append');
   assert.match(result.instruction.content, /Read that reply exactly once, word for word/);
   assert.equal(result.reply.type, 'session.commentary.append');

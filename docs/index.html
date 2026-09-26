@@ -850,8 +850,6 @@ function delegate(id, owner) {
   puppetRuntime?.waiting(true);
   const traceparent = stageTrace?.delegationCreated(id);
   if (!turn.sent) return hubFailed(id, 'no transcript before the delegation');
-  tell(owner, 'session.instructions.append', `waiting_${id}`, id, 'A new hub request is now pending. No answer to this request has arrived. Do not use or repeat any archived answer, even when the request sounds identical. After a brief checking acknowledgment, stay silent until the new application reply arrives or the user speaks again.');
-  tell(owner, 'session.commentary.append', `checking_${id}`, id, 'Checking.');
   sendFrame(`delegate\n${JSON.stringify({ id, text: turn.sent, context: turn.context, duration_ms: turn.duration_ms, traceparent })}`).catch((error) => hubFailed(id, error.message));
 }
 function hubFailed(id, message) {

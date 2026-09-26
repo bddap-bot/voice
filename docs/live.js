@@ -1,3 +1,27 @@
+export function modelToolFields(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const result = {};
+  if (typeof value.model === 'string') result.model = value.model;
+  if (Array.isArray(value.tools)) {
+    result.tools = value.tools.flatMap((tool) => {
+      const name = tool?.name ?? tool?.function?.name ?? (tool?.type === 'web_search' ? 'web_search' : undefined);
+      return typeof name === 'string' ? [name] : [];
+    });
+  }
+  if (value.delegation && typeof value.delegation === 'object') {
+    const delegation = modelToolFields({ model: value.delegation.model, tools: value.delegation.tools, responses: value.delegation.responses });
+    for (const key of ['type', 'target']) {
+      if (typeof value.delegation[key] === 'string') delegation[key] = value.delegation[key];
+    }
+    result.delegation = delegation;
+  }
+  for (const key of ['session', 'responses', 'response']) {
+    if (value[key] && typeof value[key] === 'object') result[key] = modelToolFields(value[key]);
+  }
+  if (value.item?.type === 'function_call' && typeof value.item.name === 'string') result.tools = [value.item.name];
+  return result;
+}
+
 
 export function formatElapsed(seconds) {
   const whole = Math.max(0, Math.floor(seconds));

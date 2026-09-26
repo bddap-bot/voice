@@ -752,7 +752,7 @@ window.addEventListener('test-ready', () => {
 });
 `);
   const encoded = /data-telemetry-session-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), ['open', 'close'], stderr);
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), ['live-config-sdp-answer', 'live-config-session-started', 'open', 'close'], stderr);
 });
 
 test('the page loads a clip, moves a humanoid bone, and preloads inactive puppets', async () => {
@@ -1597,4 +1597,27 @@ for (const loseRefresh of [false, true]) test('a cached model remains wakeable d
     return { cached, refreshed, running: !testSpotter.closed, threshold: testSpotter.model.threshold };
   `, { budget: 15000 });
   assert.deepEqual(result, { cached: true, refreshed: 1, running: true, threshold: loseRefresh ? 0.5 : 0.9 });
+});
+
+test('provider configuration reaches private telemetry with only allowlisted fields', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  const emit = (event) => testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(event) }));
+  for (const type of ['session.created', 'session.updated']) emit({ type, session: { model: 'live-model', instructions: 'private instructions', delegation: { type: 'responses', responses: { model: 'delegate-model', tools: [{ name: 'hub', description: 'private description' }] } } } });
+  emit({ type: 'session.delegation.created', delegation: { id: 'd', target: 'responses', model: 'delegate-model', instructions: 'private state' } });
+  emit({ type: 'response.event', event: { type: 'response.created', response: { model: 'response-model', output: [{ text: 'private text' }] } } });
+  setTimeout(() => { document.body.dataset.configTelemetry = JSON.stringify(telemetryBatches.flat().filter((event) => event.name?.startsWith('live-config-'))); }, 600);
+});
+`);
+  const encoded = /data-config-telemetry="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  const events = JSON.parse(encoded ?? 'null');
+  assert.ok(events, stderr);
+  assert.ok(events.every((event) => event.session_id && /^[a-zA-Z0-9_-]+$/.test(event.name)));
+  const records = Object.fromEntries(events.map((event) => [event.name, JSON.parse(event.detail)]));
+  assert.deepEqual(records['live-config-sdp-answer'], {});
+  assert.deepEqual(records['live-config-session-started'], { session: { delegation: { type: 'responses', responses: { tools: ['hub'] } } } });
+  for (const type of ['created', 'updated']) assert.deepEqual(records['live-config-session-' + type], { session: { model: 'live-model', delegation: { type: 'responses', responses: { model: 'delegate-model', tools: ['hub'] } } } });
+  assert.deepEqual(records['live-config-session-delegation-created'], { delegation: { target: 'responses', model: 'delegate-model' } });
+  assert.deepEqual(records['live-config-response-created'], { response: { model: 'response-model' } });
+  assert.doesNotMatch(JSON.stringify(events), /private instructions|private description|private state|private text/);
 });

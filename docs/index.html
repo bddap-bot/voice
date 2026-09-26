@@ -120,7 +120,7 @@
 <audio id="speaker" autoplay></audio>
 <script type="module">
 import wbgInit, { init as wasmInit, connect, send_only, recv } from 'https://bddap-bot.github.io/botq/botq_dash_wasm.js';
-import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, SessionClock, TranscriptBatcher, errorEvent, formatElapsed, formatStartError, isOfferFor, shareFrame } from './live.js';
+import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, SessionClock, TranscriptBatcher, errorEvent, modelToolFields, formatElapsed, formatStartError, isOfferFor, shareFrame } from './live.js';
 import { PuppetChannel } from './puppet-client.js';
 import { ListeningReactionDriver, TranscriptActionDriver, webGpuAdapter } from './puppet-drivers.js';
 import { PuppetTools } from './puppet-tools.js';
@@ -798,6 +798,12 @@ function onLiveEvent(message, source) {
   if (source !== conversation?.channel && source !== starting?.channel) return;
   let event;
   try { event = JSON.parse(message.data); } catch { return; }
+  if (['session.created', 'session.started', 'session.updated', 'session.delegation.created', 'session.delegation.updated', 'session.delegation.completed', 'session.delegation.done'].includes(event.type)) {
+    recordSession(`live-config-${event.type.replaceAll('.', '-')}`, JSON.stringify(modelToolFields(event)));
+  }
+  if (event.type === 'response.event' && ['response.created', 'response.completed', 'response.output_item.added', 'response.output_item.done'].includes(event.event?.type)) {
+    recordSession(`live-config-${event.event.type.replaceAll('.', '-')}`, JSON.stringify(modelToolFields(event.event)));
+  }
   if (event.type === 'error') {
     recordPageError(new Error(event.error?.message ?? 'Live protocol error'));
     stopConversation('Live protocol error');
@@ -1002,6 +1008,7 @@ async function startConversation() {
     const answer = await answerPromise;
     answerWaiter = null;
     if (attempt.cancelled) return;
+    recordSession('live-config-sdp-answer', JSON.stringify(modelToolFields(answer)), attempt.offerId);
     await attempt.pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
     const { session } = await started;
     if (attempt.cancelled) return;

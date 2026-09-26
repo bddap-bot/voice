@@ -281,6 +281,7 @@ async function runPage(testSetup = '', { scale = 1, size = '390,844', budget = 3
   const server = createServer(async (request, response) => {
     const path = new URL(request.url, 'http://localhost').pathname;
     requests.push(path);
+    if (path === '/panel-link-destination') { response.writeHead(200, { 'content-type': 'text/html', 'cache-control': 'no-store' }); response.end('<!doctype html><script>window.close()</script>'); return; }
     const served = path === '/botq_dash_wasm.js' ? mockWasm : path === '/fake-puppet.js' ? fakePuppet : path === '/puppet-client.js' ? puppetClient : path === '/puppet-drivers.js' ? puppetDrivers : path === '/puppet-tools.js' ? puppetTools : path === '/live.js' ? live : path === '/' ? index : await readFile(new URL(`../docs${path}`, import.meta.url)).catch(() => null);
     if (served === null) { response.writeHead(404); response.end(); return; }
     response.writeHead(200, { 'content-type': path.endsWith('.js') ? 'text/javascript' : path.endsWith('.css') ? 'text/css' : path.endsWith('.woff2') ? 'font/woff2' : 'text/html' });
@@ -293,6 +294,9 @@ async function runPage(testSetup = '', { scale = 1, size = '390,844', budget = 3
       '--headless=new',
       '--no-sandbox',
       '--disable-gpu',
+      '--disable-popup-blocking',
+      '--disable-background-timer-throttling',
+      '--disable-renderer-backgrounding',
       `--force-device-scale-factor=${scale}`,
       `--window-size=${size}`,
       ...(mobile ? ['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36'] : []),
@@ -1072,16 +1076,32 @@ window.addEventListener('test-ready', () => {
   assert.ok(await libBytes(requests) < 8192, requests.join(' '));
 });
 
-test('panel links use the default browsing target', async () => {
-  const { stdout, stderr } = await runPage(`
+for (const standalone of [false, true]) test(`panel links preserve the page only in standalone mode: ${standalone}`, async () => {
+  const { stdout, stderr, requests } = await runPage(`
+const originalMatchMedia = window.matchMedia.bind(window);
+window.matchMedia = (query) => query === '(display-mode: standalone)' ? { matches: ${standalone} } : originalMatchMedia(query);
 window.addEventListener('test-ready', () => {
-  deliverRelay(new TextEncoder().encode('display\\n' + JSON.stringify({ markdown: '[linked](https://example.test/linked) https://example.test/bare', link: 'https://example.test/panel' }) + '\\n'));
-  setTimeout(() => { document.body.dataset.targets = JSON.stringify([...document.querySelectorAll('.display-item a')].map(a => [a.href, a.target])); }, 500);
+  const url = location.origin + '/panel-link-destination';
+  deliverRelay(new TextEncoder().encode('display\\n' + JSON.stringify({ markdown: '[label](' + url + '#markdown) ' + url + '#bare', link: url + '#payload' }) + '\\n'));
+  setTimeout(async () => {
+    const channel = testChannel;
+    const links = [...document.querySelectorAll('.display-item a')];
+    const attributes = links.map(link => [link.textContent === 'label' ? 'label' : new URL(link.href).hash, new URL(link.href).hash, link.getAttribute('target'), link.rel]);
+    for (const link of links) {
+      if (${standalone} && link.target !== '_blank') continue;
+      if (!${standalone}) link.href = '#' + new URL(link.href).hash.slice(1);
+      link.click();
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    document.body.dataset.linkTest = JSON.stringify({ attributes, hash: location.hash, active: document.querySelector('#puppet').getAttribute('aria-pressed'), sameSession: channel === testChannel && channel.readyState === 'open', closed: sentLiveEvents.some(event => event.type === 'session.close') });
+  }, 100);
 });`);
-  const encoded = /data-targets="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), [
-    ['https://example.test/linked', ''], ['https://example.test/bare', ''], ['https://example.test/panel', ''],
-  ], stderr);
+  const encoded = /data-link-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), {
+    attributes: [['label', '#markdown'], ['#bare', '#bare'], ['#payload', '#payload']].map(([label, hash]) => [label, hash, standalone ? '_blank' : null, 'noopener noreferrer']),
+    hash: standalone ? '' : '#payload', active: 'true', sameSession: true, closed: false,
+  }, stderr);
+  assert.equal(requests.filter(path => path === '/panel-link-destination').length, standalone ? 3 : 0, 'each standalone link loads outside the original page');
 });
 
 test('adopted renderer output loses scripts, handlers, remote references and unsafe links in both SVG and HTML', async () => {

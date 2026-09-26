@@ -31,7 +31,6 @@ export class StageTrace {
     this.now = now;
     this.listening = null;
     this.delegations = new Map();
-    this.tools = new Set();
     this.awaitingSpeech = [];
   }
   inputTranscript() {
@@ -51,49 +50,18 @@ export class StageTrace {
       this.send(closeSpan(openSpan(turn.root, 'hear', listening.first), listening.last));
       this.send(closeSpan(openSpan(turn.root, 'decide', listening.last), at));
     }
-    this.delegations.set(id, { turn, round: null, ready: null });
+    const span = openSpan(turn.root, 'delegate', at);
+    this.delegations.set(id, span);
+    return `00-${turn.traceId}-${span.spanId}-01`;
   }
-  responseEvent(envelope) {
-    const delegation = this.delegations.get(envelope?.delegation_id);
-    const event = envelope?.event;
-    if (!delegation || !event) return;
-    const at = this.now();
-    if (event.type === 'response.created') {
-      if (delegation.ready !== null) this.send(closeSpan(openSpan(delegation.turn.root, 'resume', delegation.ready), at));
-      delegation.ready = null;
-      delegation.round = { span: openSpan(delegation.turn.root, 'respond', at), output: [], thinking: null };
-      return;
-    }
-    const round = delegation.round;
-    if (!round) return;
-    if (event.type === 'response.output_item.added' && event.item?.type === 'reasoning') round.thinking = openSpan(round.span, 'think', at);
-    else if (event.type === 'response.output_item.done' && event.item) {
-      if (event.item.type === 'reasoning' && round.thinking) {
-        this.send(closeSpan(round.thinking, at));
-        round.thinking = null;
-      }
-      round.output.push(event.item.type === 'function_call' ? event.item.name : event.item.type);
-    } else if (event.type === 'response.completed') this.#closeRound(delegation, at);
-  }
-  async tool(delegationId, item, run) {
-    const delegation = this.delegations.get(delegationId);
-    if (!delegation) return run(null);
-    const entry = { delegation, span: openSpan(delegation.turn.root, 'tool', this.now(), { 'tool.name': item.name, 'tool.arguments': item.arguments ?? '' }) };
-    this.tools.add(entry);
-    try {
-      const result = await run(`00-${delegation.turn.traceId}-${entry.span.spanId}-01`);
-      this.#finishTool(entry, result?.ok === false ? 'failed' : null);
-      return result;
-    } catch (error) {
-      this.#finishTool(entry, 'failed');
-      throw error;
-    }
-  }
-  delegationSettled(id) {
-    const delegation = this.delegations.get(id);
-    if (!delegation) return;
+  hubReplied(id, failure = null) {
+    const span = this.delegations.get(id);
+    if (!span) return;
     this.delegations.delete(id);
-    this.awaitingSpeech.push({ turn: delegation.turn, at: this.now() });
+    const at = this.now();
+    this.send(closeSpan(span, at, failure));
+    if (failure) this.send(closeSpan(span.turn.root, at));
+    else this.awaitingSpeech.push({ turn: span.turn, at });
   }
   outputTranscript(delay = 0) {
     const waiting = this.awaitingSpeech.shift();
@@ -107,28 +75,13 @@ export class StageTrace {
   }
   sessionEnded() {
     const at = this.now();
-    for (const entry of [...this.tools]) this.#finishTool(entry, 'cancelled');
-    for (const delegation of this.delegations.values()) {
-      if (delegation.round) this.#closeRound(delegation, at);
-      this.awaitingSpeech.push({ turn: delegation.turn, at });
+    for (const span of this.delegations.values()) {
+      this.send(closeSpan(span, at, 'cancelled'));
+      this.send(closeSpan(span.turn.root, at));
     }
     for (const waiting of this.awaitingSpeech) this.send(closeSpan(waiting.turn.root, waiting.at));
     this.listening = null;
     this.delegations.clear();
     this.awaitingSpeech = [];
-  }
-  #closeRound(delegation, at) {
-    const round = delegation.round;
-    if (round.thinking) this.send(closeSpan(round.thinking, at));
-    round.span.attributes.output = round.output.join(',');
-    this.send(closeSpan(round.span, at));
-    delegation.round = null;
-    delegation.ready = at;
-  }
-  #finishTool(entry, failure) {
-    if (!this.tools.delete(entry)) return;
-    const at = this.now();
-    this.send(closeSpan(entry.span, at, failure));
-    entry.delegation.ready = at;
   }
 }

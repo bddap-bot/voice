@@ -15,11 +15,16 @@ export function modelToolFields(value) {
     }
     result.delegation = delegation;
   }
-  for (const key of ['session', 'responses', 'response']) {
+  for (const key of ['session', 'responses']) {
     if (value[key] && typeof value[key] === 'object') result[key] = modelToolFields(value[key]);
   }
-  if (value.item?.type === 'function_call' && typeof value.item.name === 'string') result.tools = [value.item.name];
   return result;
+}
+
+const phraseKey = (text) => text.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+
+export function includesPhrase(text, phrase) {
+  return phraseKey(text).includes(phraseKey(phrase));
 }
 
 
@@ -350,6 +355,7 @@ export class ConversationTrace {
     entry.text += delta;
     this.pendingTurns[this.pendingTurns.length - 1] += delta;
     this.onChange(this.entries);
+    return entry;
   }
   sleepContext() {
     const turns = this.context();
@@ -383,10 +389,12 @@ export class ConversationTrace {
     this.onChange(this.entries);
     return entry;
   }
-  hub(id, reply, timing) {
+  hub(id, { commentary, thinking, instructions }, timing) {
     const entry = this.entries.find((item) => item.kind === 'delegation' && item.id === id);
     if (!entry) return false;
-    entry.reply = reply;
+    entry.reply = commentary.join(' ');
+    entry.thinking = thinking.join(' ');
+    entry.instructions = instructions.join(' ');
     entry.timing = timing;
     this.nextSpeechSource = 'model after hub reply';
     this.activeSpeechSource = null;

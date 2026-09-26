@@ -3,96 +3,56 @@ import test from 'node:test';
 import { PlaybackBuffer } from '../docs/playback-buffer.js';
 import { LivePlayback } from '../docs/live-playback.js';
 
-test('held audio is silent and releases every sample in original order', () => {
+test('audio plays in original order after its delay', () => {
   const buffer = new PlaybackBuffer(12, 2);
   const output = new Float32Array(4);
-  buffer.held = true;
   buffer.process([1, 2, 3, 4], output);
-  assert.deepEqual([...output], [0, 0, 0, 0]);
+  assert.deepEqual([...output], [1, 2, 0, 0]);
   buffer.process([5, 6, 7, 8], output);
-  assert.deepEqual([...output], [0, 0, 0, 0]);
-  buffer.held = false;
-  buffer.process([], output);
-  assert.deepEqual([...output], [1, 2, 3, 4]);
-  buffer.process([9, 10, 11, 12], output);
-  assert.deepEqual([...output], [5, 6, 7, 8]);
-  buffer.process([13, 14], output);
-  assert.deepEqual([...output], [9, 10, 11, 12]);
+  assert.deepEqual([...output], [3, 4, 5, 6]);
 });
 
 test('interruption discards old audio and overflow fails closed', () => {
-  const buffer = new PlaybackBuffer(4);
+  const buffer = new PlaybackBuffer(8, 2);
   const output = new Float32Array(4);
-  buffer.held = true;
-  buffer.process([1, 2, 3, 4], output);
-  assert.throws(() => buffer.process([5], output), /overflow/);
-  assert.deepEqual([...output], [0, 0, 0, 0]);
+  buffer.process([1, 2, 3], output);
+  assert.deepEqual([...output], [1, 0, 0, 0]);
   buffer.clear();
-  buffer.held = false;
-  buffer.process([9, 10], output);
-  assert.deepEqual([...output], [9, 10, 0, 0]);
+  buffer.process([7, 8, 9], output);
+  assert.deepEqual([...output], [7, 0, 0, 0]);
+  assert.throws(() => new PlaybackBuffer(4).process([1, 2, 3, 4, 5], output), /overflow/);
 });
 
-test('interleaved delegations hold transcripts until all settle; shutdown discards pending speech', async () => {
-  const presented = [];
-  const playback = new LivePlayback((event) => presented.push(event), assert.fail);
-  playback.hold('one'); playback.hold('two');
-  playback.transcript('early speech');
-  playback.release('one');
-  assert.deepEqual(presented, []);
-  playback.release('two');
-  assert.deepEqual(presented, ['early speech']);
-  playback.hold('three'); playback.transcript('interrupted'); playback.interrupt();
-  playback.release('three');
-  assert.deepEqual(presented, ['early speech']);
-  playback.hold('four'); playback.transcript('cancelled'); await playback.close(); playback.release('four');
-  assert.deepEqual(presented, ['early speech']);
-});
-
-test('long holds discard queued silence and catch up after buffered words', () => {
+test('silence queued beyond the delay is skipped so speech keeps its latency', () => {
   const buffer = new PlaybackBuffer(24, 2);
   const output = new Float32Array(4);
-  buffer.held = true;
-  for (let i = 0; i < 100; i++) buffer.process([0, 0, 0, 0], output);
+  buffer.process(new Array(16).fill(0), output);
   assert.ok(buffer.size <= 6);
   buffer.process([1, 2, 3, 4], output);
-  buffer.held = false;
-  const spoken = [];
-  for (let i = 0; i < 10; i++) {
-    buffer.process([0, 0, 0, 0], output);
-    spoken.push(...output.filter(value => value !== 0));
-  }
-  assert.deepEqual(spoken, [1, 2, 3, 4]);
-  assert.ok(buffer.size <= 6);
+  const spoken = [...output];
+  buffer.process([0, 0, 0, 0], output);
+  spoken.push(...output);
+  assert.deepEqual(spoken.filter((value) => value !== 0), [1, 2, 3, 4]);
 });
 
-test('quiet waits for release, for held speech to play out, and for a run of silence', async () => {
-  const buffer = new PlaybackBuffer(64);
+test('quiet waits for queued speech to play out and for a run of silence', async () => {
+  const buffer = new PlaybackBuffer(64, 4);
   const output = new Float32Array(4);
-  const idle = new PlaybackBuffer(64);
-  idle.held = true;
-  idle.process([0, 0, 0, 0], output);
-  idle.process([0, 0, 0, 0], output);
-  assert.equal(idle.quiet(4), false);
-  buffer.held = true;
   buffer.process([0.5, 0.5, 0.5, 0.5], output);
-  buffer.process([0, 0, 0, 0], output);
-  assert.equal(buffer.quiet(4), false);
-  buffer.held = false;
   assert.equal(buffer.quiet(4), false);
   buffer.process([0, 0, 0, 0], output);
   assert.deepEqual([...output], [0.5, 0.5, 0.5, 0.5]);
   assert.equal(buffer.quiet(4), true);
-  assert.equal(buffer.quiet(12), false);
+  assert.equal(buffer.quiet(8), false);
   buffer.process([0, 0, 0, 0], output);
-  assert.equal(buffer.quiet(12), true);
+  assert.equal(buffer.quiet(8), true);
   buffer.process([0, 0.5, 0, 0], output);
   assert.equal(buffer.quiet(4), false);
-  await new LivePlayback(assert.fail, assert.fail).quiet();
+  await new LivePlayback(assert.fail).quiet();
 });
 
 test('closing playback releases quiet waiters so delayed replies can be discarded', async () => {
-  const playback = new LivePlayback(() => {}, assert.fail);
+  const playback = new LivePlayback(assert.fail);
   playback.node = { port: { postMessage() {} }, disconnect() {} };
   const quiet = playback.quiet();
   await playback.close();

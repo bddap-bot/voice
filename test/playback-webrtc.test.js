@@ -5,7 +5,7 @@ import { launchChromium } from '../scripts/chromium.mjs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 
-test('remote WebRTC audio stays silent while held, plays after release, and closes its decoder', { timeout: 30000 }, async () => {
+test('remote WebRTC audio plays through the playback pipeline and closes its decoder', { timeout: 30000 }, async () => {
   const server = createServer(async (request, response) => {
     if (request.url === '/') return response.end('<!doctype html><title>Playback</title>');
     try { response.setHeader('content-type', 'text/javascript'); response.end(await readFile(new URL('../docs' + request.url, import.meta.url))); }
@@ -46,8 +46,7 @@ test('remote WebRTC audio stays silent while held, plays after release, and clos
         await receiver.setLocalDescription(await receiver.createAnswer());
         await sender.setRemoteDescription(receiver.localDescription);
         let failure;
-        const playback = new LivePlayback(() => {}, e => failure = e.message);
-        playback.hold('gesture');
+        const playback = new LivePlayback(e => failure = e.message);
         const output = await playback.attach(await incoming);
         const analyser = context.createAnalyser();
         context.createMediaStreamSource(output).connect(analyser);
@@ -61,24 +60,20 @@ test('remote WebRTC audio stays silent while held, plays after release, and clos
           }
           return max;
         };
-        const held = await peak();
+        const played = await peak();
         oscillator.stop();
-        await new Promise(resolve => setTimeout(resolve, 300));
-        playback.release('gesture');
-        const released = await peak();
         const sink = playback.sink;
         await playback.close();
         const closed = sink?.paused && sink.srcObject === null;
         sender.close(); receiver.close(); await context.close();
-        return { held, released, closed, muted: sink?.muted, failure };
+        return { played, closed, muted: sink?.muted, failure };
       })()` } }));
     let timer;
     const evaluated = await Promise.race([result, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('WebRTC decoding timed out')), 15000); })]).finally(() => clearTimeout(timer));
     assert.ok(!evaluated.result.exceptionDetails, JSON.stringify(evaluated.result.exceptionDetails));
     const values = evaluated.result.result.value;
     assert.equal(values.failure, undefined);
-    assert.equal(values.held, 0);
-    assert.ok(values.released > 0.1, JSON.stringify(values));
+    assert.ok(values.played > 0.1, JSON.stringify(values));
     assert.equal(values.closed, true);
     assert.equal(values.muted, true);
   } finally {

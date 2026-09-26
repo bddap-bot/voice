@@ -23,8 +23,8 @@ test('session telemetry allowlists model and tool fields without private text', 
 test('missing models remain absent and SDP, arguments and output are excluded', () => {
   assert.deepEqual(modelToolFields({ sdp: 'private SDP', session_id: 'id', transport: { sdp: 'private SDP' } }), {});
   assert.deepEqual(modelToolFields({ delegation: { target: 'responses', instructions: 'secret' } }), { delegation: { target: 'responses' } });
-  assert.deepEqual(modelToolFields({ response: { model: 'reported-model', output: [{ text: 'private' }] } }), { response: { model: 'reported-model' } });
-  assert.deepEqual(modelToolFields({ item: { type: 'function_call', name: 'hub', arguments: 'private arguments' } }), { tools: ['hub'] });
+  assert.deepEqual(modelToolFields({ session: { model: 'gpt-live-1', instructions: 'private card', delegation: { type: 'client' } } }), { session: { model: 'gpt-live-1', delegation: { type: 'client' } } });
+  assert.deepEqual(modelToolFields({ delegation: { id: 'item_private', type: 'delegation', target: 'client' } }), { delegation: { type: 'delegation', target: 'client' } });
   for (const input of [null, undefined, [], 'private', { model: {}, tools: [null, { name: {} }, { description: 'private' }], delegation: { type: {}, target: {} } }]) {
     assert.doesNotMatch(JSON.stringify(modelToolFields(input)), /private/);
   }

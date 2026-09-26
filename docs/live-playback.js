@@ -1,10 +1,7 @@
 export class LivePlayback {
-  constructor(onTranscript, onError, speaker = null) {
-    this.onTranscript = onTranscript;
+  constructor(onError, speaker = null) {
     this.onError = onError;
     this.speaker = speaker;
-    this.holds = new Set();
-    this.transcripts = [];
     this.quietWaiters = [];
     this.closed = false;
   }
@@ -25,7 +22,6 @@ export class LivePlayback {
     this.source = context.createMediaStreamSource(stream);
     const destination = context.createMediaStreamDestination();
     this.source.connect(this.node).connect(destination);
-    this.node.port.postMessage({ type: 'hold', held: this.holds.size > 0 });
     this.outputStream = destination.stream;
     this.lifecycle = new AbortController();
     const options = { signal: this.lifecycle.signal };
@@ -48,23 +44,7 @@ export class LivePlayback {
       if (!this.closed && error.name !== 'NotAllowedError' && error.name !== 'AbortError') this.onError(error);
     });
   }
-  hold(id) {
-    if (this.closed) return;
-    this.holds.add(id);
-    this.node?.port.postMessage({ type: 'hold', held: true });
-  }
-  release(id) {
-    if (this.closed || !this.holds.delete(id) || this.holds.size) return;
-    this.node?.port.postMessage({ type: 'hold', held: false });
-    for (const event of this.transcripts.splice(0)) this.onTranscript(event);
-  }
-  transcript(event) {
-    if (this.closed) return;
-    if (this.holds.size) this.transcripts.push(event);
-    else this.onTranscript(event);
-  }
   interrupt() {
-    this.transcripts.length = 0;
     this.node?.port.postMessage({ type: 'clear' });
   }
   quiet(ms = 2000) {
@@ -78,8 +58,6 @@ export class LivePlayback {
     this.closed = true;
     for (const resolve of this.quietWaiters.splice(0)) resolve();
     this.lifecycle?.abort();
-    this.transcripts.length = 0;
-    this.holds.clear();
     if (this.sink) { this.sink.pause(); this.sink.srcObject = null; }
     this.source?.disconnect();
     this.node?.disconnect();

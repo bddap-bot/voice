@@ -6,11 +6,10 @@ export class PlaybackBuffer {
     this.delay = delay;
     this.read = 0;
     this.size = 0;
-    this.held = false;
     this.silentRun = 0;
   }
   clear() { this.read = 0; this.size = 0; }
-  quiet(samples) { return !this.held && this.silentRun >= Math.max(samples, this.size); }
+  quiet(samples) { return this.silentRun >= Math.max(samples, this.size); }
   process(input, output) {
     output.fill(0);
     for (const sample of input) {
@@ -27,7 +26,6 @@ export class PlaybackBuffer {
       this.read = (this.read + output.length) % this.samples.length;
       this.size -= output.length;
     }
-    if (this.held) return;
     for (let i = 0; i < output.length && this.size > this.delay; i++) {
       output[i] = this.samples[this.read];
       this.read = (this.read + 1) % this.samples.length;

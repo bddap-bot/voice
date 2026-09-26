@@ -61,8 +61,8 @@ for (const mobile of [false, true]) test(`audio returns after ${mobile ? 'standa
       window.events = [];
       document.addEventListener('visibilitychange', () => events.push(document.visibilityState));
       for (const name of ['blur', 'focus']) addEventListener(name, () => events.push(name));
-      window.failures = []; window.transcripts = [];
-      window.playback = new LivePlayback(text => transcripts.push(text), error => failures.push(error.message), document.querySelector('#speaker'));
+      window.failures = [];
+      window.playback = new LivePlayback(error => failures.push(error.message), document.querySelector('#speaker'));
       window.context = new AudioContext();
       const oscillator = context.createOscillator(), destination = context.createMediaStreamDestination();
       oscillator.connect(destination); oscillator.start(); await context.resume();
@@ -96,7 +96,6 @@ for (const mobile of [false, true]) test(`audio returns after ${mobile ? 'standa
     if (mobile) await evaluate(`dispatchEvent(new Event('blur')); Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' }); Object.defineProperty(document, 'hidden', { configurable: true, value: true }); document.dispatchEvent(new Event('visibilitychange'));`);
     await evaluate(`(async () => {
       await playback.context.suspend(); playback.sink.pause(); document.querySelector('#speaker').pause();
-      playback.transcript('Reply while covered');
       await new Promise(resolve => setTimeout(resolve, 300));
     })()`);
     assert.equal(await evaluate('document.visibilityState'), 'hidden');
@@ -104,9 +103,8 @@ for (const mobile of [false, true]) test(`audio returns after ${mobile ? 'standa
     await call('Target.activateTarget', { targetId: page.id });
     if (mobile) await evaluate(`delete document.visibilityState; delete document.hidden; document.dispatchEvent(new Event('visibilitychange')); dispatchEvent(new Event('focus'));`);
     const peak = await evaluate('peak()');
-    const state = await evaluate(`({ events, transcripts, failures, state: playback.context.state, muted: document.querySelector('#speaker').muted, volume: document.querySelector('#speaker').volume, paused: document.querySelector('#speaker').paused, decoderPaused: playback.sink.paused, target: document.querySelector('a').target })`);
+    const state = await evaluate(`({ events, failures, state: playback.context.state, muted: document.querySelector('#speaker').muted, volume: document.querySelector('#speaker').volume, paused: document.querySelector('#speaker').paused, decoderPaused: playback.sink.paused, target: document.querySelector('a').target })`);
     for (const event of ['blur', 'hidden', 'visible', 'focus']) assert.ok(state.events.includes(event), JSON.stringify(state.events));
-    assert.deepEqual(state.transcripts, ['Reply while covered']);
     assert.ok(peak > 0.1, `audio must recover without reload: ${JSON.stringify({ peak, ...state })}`);
     assert.deepEqual(state.failures, []);
     assert.equal(state.target, '');

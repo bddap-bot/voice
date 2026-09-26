@@ -120,15 +120,13 @@
 <audio id="speaker" autoplay></audio>
 <script type="module">
 import wbgInit, { init as wasmInit, connect, send_only, recv } from 'https://bddap-bot.github.io/botq/botq_dash_wasm.js';
-import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, SessionClock, TranscriptBatcher, errorEvent, modelToolFields, formatElapsed, formatStartError, isOfferFor, shareFrame } from './live.js';
+import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, SessionClock, TranscriptBatcher, errorEvent, includesPhrase, modelToolFields, formatElapsed, formatStartError, isOfferFor, shareFrame } from './live.js';
 import { PuppetChannel } from './puppet-client.js';
 import { ListeningReactionDriver, TranscriptActionDriver, webGpuAdapter } from './puppet-drivers.js';
-import { PuppetTools } from './puppet-tools.js';
-import { ResponsesTools } from './responses-tools.js';
 import { StageTrace } from './stage-trace.js';
 import { LivePlayback } from './live-playback.js';
 import { PuppetRuntime } from './puppet.js';
-import { INACTIVITY_MS, NAME, WAKE_PHRASE } from './identity.js';
+import { INACTIVITY_MS, NAME, SLEEP_PHRASE, WAKE_PHRASE } from './identity.js';
 import { loadHead, startWakeSpotter } from './wake.js';
 import { disposeRenderer, renderChart, renderMath, renderMermaid } from './lib/render.js';
 
@@ -140,7 +138,6 @@ const DISPLAY_FRESH_MS = 45000;
 const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function syncVisualViewport() {
   const height = Math.round(window.visualViewport?.height ?? window.innerHeight);
   $('conversation').style.setProperty('--stage-height', `${height}px`);
@@ -170,7 +167,6 @@ let displayFreshTimer;
 let puppetActive;
 let puppetScope;
 let puppetRuntime;
-let puppetTools;
 let selectedImage;
 let sharing = false;
 let microphoneMuted = false;
@@ -197,7 +193,6 @@ function applyTranscriptAction(action, timing) {
 const actionDriver = new TranscriptActionDriver(applyTranscriptAction);
 const listeningDriver = new ListeningReactionDriver((motion) => puppetRuntime?.listening(motion));
 const hubWaiting = new Set();
-let responseTools;
 let stageTrace;
 const traces = new EventBatcher((spans) => sendFrame(`spans\n${JSON.stringify({ spans })}`));
 const telemetryWaiters = new Map();
@@ -269,7 +264,6 @@ try {
   puppetRuntime = new PuppetRuntime($('puppet'), $('display'));
   puppetRuntime.onAnimation = (state) => recordSession('animation', JSON.stringify(state));
   puppetRuntime.pause();
-  puppetTools = new PuppetTools(puppetRuntime, () => puppetCatalog?.avatars ?? [], () => puppetActive, (id, valid) => showPuppet(id, valid), sleep);
 } catch (error) {
   console.warn('puppet:', error);
   syncPuppetUi();
@@ -337,7 +331,7 @@ function render(entries) {
     record.tag.textContent = name;
     const lines = entry.kind === 'heard' ? [['heard', entry.text]]
       : entry.kind === 'spoken' ? [['spoke', entry.text]]
-      : [['sent to hub', entry.sent], ['context sent', JSON.stringify(entry.context)], ['hub reply', entry.reply || 'waiting…'], ['hub timing', entry.timing === null ? 'waiting…' : `${entry.timing} ms`]];
+      : [['sent to hub', entry.sent], ['context sent', JSON.stringify(entry.context)], ...(entry.timing === null && !entry.failed ? [['hub reply', 'waiting…']] : [['hub reply', entry.reply], ['hub thinking', entry.thinking], ['hub instructions', entry.instructions]].filter(([, value]) => value)), ['hub timing', entry.timing === null ? 'waiting…' : `${entry.timing} ms`]];
     record.body.replaceChildren(...lines.map(([key, value]) => {
       const line = document.createElement('div');
       line.className = 'line';
@@ -374,7 +368,10 @@ async function listen(mine) {
       else if (verb === 'wake-model') wakeModelWaiter?.resolve(JSON.parse(body));
       else if (verb === 'wake-model-none') wakeModelWaiter?.resolve(null);
       else if (verb === 'hub') await receiveHub(JSON.parse(body));
-      else if (verb === 'hub-error') receiveHubError(JSON.parse(body));
+      else if (verb === 'hub-error') {
+        const failure = JSON.parse(body);
+        hubFailed(failure.id, failure.message);
+      }
       else if (verb === 'share-ok') receiveShare(JSON.parse(body));
       else if (verb === 'share-error') receiveShareError(JSON.parse(body));
       else if (verb === 'transcript-ack') {
@@ -577,7 +574,7 @@ async function submitShare() {
     $('share-file').value = '';
     sharing = false;
     chooseImage();
-    appendCommentary(`share_${result.stamp}`, result.summary);
+    tell(conversation?.audioOwner, 'session.commentary.append', `share_${result.stamp}`, null, result.summary);
     setStatus('sent', 'ok');
   } finally {
     sharing = false;
@@ -798,41 +795,28 @@ function onLiveEvent(message, source) {
   if (['session.created', 'session.started', 'session.updated', 'session.delegation.created', 'session.delegation.updated', 'session.delegation.completed', 'session.delegation.done'].includes(event.type)) {
     recordSession(`live-config-${event.type.replaceAll('.', '-')}`, JSON.stringify(modelToolFields(event)));
   }
-  if (event.type === 'response.event' && ['response.created', 'response.completed', 'response.output_item.added', 'response.output_item.done'].includes(event.event?.type)) {
-    recordSession(`live-config-${event.event.type.replaceAll('.', '-')}`, JSON.stringify(modelToolFields(event.event)));
-  }
   if (event.type === 'error') {
     recordPageError(new Error(event.error?.message ?? 'Live protocol error'));
     stopConversation('Live protocol error');
     return;
   }
-  const playback = (source === starting?.channel ? starting : conversation?.audioOwner)?.playback;
-  if (event.type === 'session.delegation.created' && event.delegation?.target === 'responses') {
-    stageTrace?.delegationCreated(event.delegation.id);
-    playback?.hold(event.delegation.id);
-    return;
-  }
-  if (event.type === 'response.event') {
-    stageTrace?.responseEvent(event);
-    Promise.resolve(responseTools?.handle(event)).catch(recordPageError);
-    return;
-  }
-  if (event.type === 'session.input_transcript.delta') {
-    playback?.interrupt();
+  const owner = source === starting?.channel ? starting : conversation?.audioOwner;
+  if (event.type === 'session.delegation.created') delegate(event.delegation?.id, owner);
+  else if (event.type === 'session.input_transcript.delta') {
+    owner?.playback?.interrupt();
     recordSession('input_utterance', event.delta ?? '');
     stageTrace?.inputTranscript();
     stayAwake();
-    trace.heard(event.delta ?? '', Date.now(), event.start_ms);
+    const turn = trace.heard(event.delta ?? '', Date.now(), event.start_ms);
     conversation?.transcript?.add('user', event.delta ?? '');
+    if (includesPhrase(turn.text, SLEEP_PHRASE)) fallAsleep();
   }
   else if (event.type === 'input_audio_buffer.speech_started') {
     recordSession('input_speech_started');
     listeningDriver.activity(true);
   }
   else if (event.type === 'input_audio_buffer.speech_stopped') listeningDriver.activity(false);
-  else if (event.type === 'session.output_transcript.delta') {
-    playback?.transcript(event);
-  }
+  else if (event.type === 'session.output_transcript.delta') presentTranscript(event);
   else if (event.type === 'session.usage.updated') usageSeconds = Number(event.usage?.seconds ?? usageSeconds);
   else if (event.type === 'session.closed') {
     usageSeconds = Number(event.usage?.seconds ?? usageSeconds);
@@ -851,70 +835,63 @@ function presentTranscript(event) {
     actionDriver.push(event.delta ?? '', playAt);
     conversation?.transcript?.add('model', event.delta ?? '');
 }
-const SLEEP_TOOL = { type: 'function', name: 'sleep', description: 'End this conversation and go back to sleep.', parameters: { type: 'object', properties: {}, additionalProperties: false } };
-function awaken(channel, session) {
-  channel.send(JSON.stringify({ type: 'session.update', event_id: 'tools', session: { delegation: { type: 'responses', responses: { tools: [...session.delegation.responses.tools, SLEEP_TOOL] } } } }));
-  channel.send(JSON.stringify({ type: 'session.instructions.append', event_id: 'identity', delegation_id: null, content: `Your name is ${NAME}. The Responses backend can end this session, which puts you back to sleep. Earlier turns are memory of completed conversations, not results for this conversation. If the user asks the hub or requests a fresh or current check, always delegate again, even if an earlier turn seems to answer it. Never speak an earlier hub answer as a new result; wait for the new application reply.` }));
+function awaken(channel) {
+  channel.send(JSON.stringify({ type: 'session.instructions.append', event_id: 'identity', delegation_id: null, content: `Your name is ${NAME}. Earlier turns are memory of completed conversations, not results for this conversation. If the user asks the hub or requests a fresh or current check, always delegate again, even if an earlier turn seems to answer it. Never speak an earlier hub answer as a new result; wait for the new application reply.` }));
   channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: 'wake', delegation_id: null, content: `Context: ${NAME} was just woken.` }));
 }
-async function executeLiveTool(item, source, delegation, traceparent) {
-  if (item.name === 'hub') {
-    (source === starting?.channel ? starting : conversation?.audioOwner)?.playback?.release(delegation);
-    const args = JSON.parse(item.arguments);
-    if (typeof args.text !== 'string' || !args.text.trim() || new TextEncoder().encode(args.text).length > 8192) throw new Error('invalid hub request');
-    const id = item.call_id;
-    const turn = trace.delegated(id);
-    turn.sent = args.text;
-    render(trace.entries);
-    hubWaiting.add(id);
-    source.send(JSON.stringify({ type: 'session.instructions.append', event_id: `waiting_${id}`, delegation_id: null, content: 'A new hub request is now pending. No answer to this request has arrived. Do not use or repeat any archived answer, even when the request sounds identical. After a brief checking acknowledgment, stay silent until the new application reply arrives or the user speaks again.' }));
-    puppetRuntime?.waiting(true);
-    try {
-      await sendFrame(`delegate\n${JSON.stringify({ id, text: args.text, context: turn.context, duration_ms: turn.duration_ms, traceparent })}`);
-    } catch (error) {
-      finishHubWait(id);
-      trace.failed(id, error.message);
-      return { ok: false, error: 'hub request failed' };
-    }
-    return { ok: true, status: 'The hub answers later in this conversation.' };
-  }
-  if (item.name === 'sleep') {
-    const current = conversation;
-    recordSession('sleep', 'farewell');
-    current?.audioOwner.playback.quiet().then(() => { if (conversation === current) stopConversation(); });
-    return { ok: true };
-  }
-  if (!puppetTools) throw new Error('puppet renderer unavailable');
-  return puppetTools.execute(item.name, item.arguments, () => source === conversation?.channel || source === starting?.channel);
+function tell(owner, type, event_id, delegation_id, content) {
+  if (owner?.channel?.readyState === 'open') owner.channel.send(JSON.stringify({ type, event_id, delegation_id, content }));
+}
+function delegate(id, owner) {
+  if (!owner || typeof id !== 'string') return;
+  owner.delegations.add(id);
+  const turn = trace.delegated(id);
+  hubWaiting.add(id);
+  puppetRuntime?.waiting(true);
+  const traceparent = stageTrace?.delegationCreated(id);
+  if (!turn.sent) return hubFailed(id, 'no transcript before the delegation');
+  tell(owner, 'session.instructions.append', `waiting_${id}`, id, 'A new hub request is now pending. No answer to this request has arrived. Do not use or repeat any archived answer, even when the request sounds identical. After a brief checking acknowledgment, stay silent until the new application reply arrives or the user speaks again.');
+  tell(owner, 'session.commentary.append', `checking_${id}`, id, 'Checking.');
+  sendFrame(`delegate\n${JSON.stringify({ id, text: turn.sent, context: turn.context, duration_ms: turn.duration_ms, traceparent })}`).catch((error) => hubFailed(id, error.message));
+}
+function hubFailed(id, message) {
+  if (!hubWaiting.has(id)) return;
+  finishHubWait(id);
+  trace.failed(id, message);
+  stageTrace?.hubReplied(id, 'failed');
+  const owner = conversation?.audioOwner.delegations.has(id) ? conversation.audioOwner : starting?.delegations.has(id) ? starting : null;
+  tell(owner, 'session.commentary.append', `hub_error_${id}`, id, 'The hub request failed.');
+}
+function fallAsleep() {
+  const current = conversation;
+  if (!current || current.sleeping) return;
+  current.sleeping = true;
+  recordSession('sleep', 'phrase');
+  current.audioOwner.playback.quiet().then(() => { if (conversation === current) stopConversation(); });
 }
 function finishHubWait(id) {
   hubWaiting.delete(id);
   if (!hubWaiting.size) puppetRuntime?.waiting(false);
 }
-function appendCommentary(event_id, content) {
-  if (conversation?.channel?.readyState === 'open') conversation.channel.send(JSON.stringify({ type: 'session.commentary.append', event_id, delegation_id: null, content }));
-}
 async function receiveHub(result) {
-  if (result.reply) {
+  if (result.commentary.length || result.thinking.length || result.instructions.length) {
     finishHubWait(result.id);
-    trace.hub(result.id, result.reply, result.timing_ms);
+    trace.hub(result.id, result, result.timing_ms);
+    stageTrace?.hubReplied(result.id);
     const current = conversation;
     await current?.audioOwner.playback.quiet();
-    if (current && conversation === current && current.channel.readyState === 'open') {
-      current.channel.send(JSON.stringify({ type: 'session.instructions.append', event_id: `hub_script_${result.stamp}`, delegation_id: null, content: 'The next application commentary is a new hub reply. Read that reply exactly once, word for word, without an introduction or any other text. Then remain silent until the user speaks again. Do not resume the archived conversation or repeat earlier replies, greetings, or pending acknowledgments.' }));
-      appendCommentary(`hub_${result.stamp}`, result.reply);
+    if (current && conversation === current) {
+      const owner = current.audioOwner;
+      const delegation = owner.delegations.has(result.id) ? result.id : null;
+      result.instructions.forEach((content, index) => tell(owner, 'session.instructions.append', `instructions_${result.stamp}_${index}`, delegation, content));
+      result.thinking.forEach((content, index) => tell(owner, 'session.thinking.append', `thinking_${result.stamp}_${index}`, delegation, content));
+      if (result.commentary.length) tell(owner, 'session.instructions.append', `hub_script_${result.stamp}`, delegation, 'The next application commentary is a new hub reply. Read that reply exactly once, word for word, without an introduction or any other text. Then remain silent until the user speaks again. Do not resume the archived conversation or repeat earlier replies, greetings, or pending acknowledgments.');
+      result.commentary.forEach((content, index) => tell(owner, 'session.commentary.append', index ? `hub_${result.stamp}_${index}` : `hub_${result.stamp}`, delegation, content));
     }
   }
   await sendFrame(`hub-ack\n${JSON.stringify({ id: result.id, stamp: result.stamp })}`);
 }
-function receiveHubError(result) {
-  if (!hubWaiting.has(result.id)) return;
-  finishHubWait(result.id);
-  trace.failed(result.id, result.message);
-  appendCommentary(`hub_error_${result.id}`, 'The hub request failed.');
-}
 function paintOff() {
-  responseTools?.close();
   hubWaiting.clear();
   actionDriver.reset();
   listeningDriver.reset();
@@ -948,8 +925,8 @@ function cancelStarting(reason = '') {
   setStatus(reason, reason ? 'err' : '');
 }
 async function startConversation() {
-  const attempt = { cancelled: false, offered: false, cancelSent: false, cancelMic: null, cancelIce: null, cancelData: null, stream: null, outputStream: null, recorders: [], pc: null, channel: null };
-  attempt.playback = new LivePlayback(presentTranscript, (error) => {
+  const attempt = { cancelled: false, offered: false, cancelSent: false, cancelMic: null, cancelIce: null, cancelData: null, stream: null, outputStream: null, recorders: [], pc: null, channel: null, delegations: new Set() };
+  attempt.playback = new LivePlayback((error) => {
     if (attempt.cancelled || (starting !== attempt && conversation?.audioOwner !== attempt)) return;
     recordPageError(error);
     stopConversation('Live playback failed');
@@ -974,11 +951,7 @@ async function startConversation() {
     if (attempt.cancelled) return;
     attempt.pc = new RTCPeerConnection();
     attempt.channel = attempt.pc.createDataChannel('oai-events');
-    const stages = stageTrace = new StageTrace((span) => traces.add(span));
-    responseTools = new ResponsesTools((item, delegation) => stages.tool(delegation, item, (traceparent) => executeLiveTool(item, attempt.channel, delegation, traceparent)), (event) => attempt.channel.send(JSON.stringify(event)), () => attempt.channel.readyState === 'open' && (attempt.channel === conversation?.channel || attempt.channel === starting?.channel), (delegation) => {
-      stages.delegationSettled(delegation);
-      attempt.playback.release(delegation);
-    });
+    stageTrace = new StageTrace((span) => traces.add(span));
     const started = waitData(attempt.channel, (event) => event.type === 'session.started', 30000, attempt);
     started.catch(() => {});
     attempt.channel.addEventListener('close', () => { if (attempt.channel === conversation?.channel) stopConversation('Session ended — tap to continue', true); });
@@ -1013,9 +986,9 @@ async function startConversation() {
     if (attempt.cancelled) return;
     recordSession('live-config-sdp-answer', JSON.stringify(modelToolFields(answer)), attempt.offerId);
     await attempt.pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
-    const { session } = await started;
+    await started;
     if (attempt.cancelled) return;
-    awaken(attempt.channel, session);
+    awaken(attempt.channel);
     conversation = { pc: attempt.pc, channel: attempt.channel, clock: null, id: attempt.offerId, audioOwner: attempt, transcript: new TranscriptBatcher(attempt.offerId, persistenceUploads, { onTurn: (side, at) => telemetry.add({ kind: 'transcript', session_id: attempt.offerId, name: side, at }) }) };
     startRecorders(attempt, attempt.offerId);
     const clock = new SessionClock({ onTick: (seconds) => { $('elapsed').textContent = formatElapsed(seconds); } });
@@ -1051,7 +1024,6 @@ function stopConversation(reason = '', remoteClosed = false) {
 async function finishStop(reason, remoteClosed) {
   const current = conversation;
   if (!current) return;
-  responseTools?.close();
   recordSession('close', reason, current.id);
   await stopRecorders(current.audioOwner);
   current.clock?.stop();
@@ -1114,14 +1086,14 @@ async function start(raw) {
   loadPrivatePuppets().catch((error) => setStatus(`puppet unavailable: ${error.message}`, 'err'));
 }
 
-function showPuppet(id, valid = () => true) {
+function showPuppet(id) {
   const epoch = puppetEpoch;
   const request = Symbol('puppet request');
   puppetRequest = request;
   puppetLoading = true;
   $('puppet-choice').disabled = true;
   syncPuppetUi();
-  const operation = puppetLoadTail.then(() => loadPuppet(id, epoch, request, valid));
+  const operation = puppetLoadTail.then(() => loadPuppet(id, epoch, request));
   puppetLoadTail = operation.catch(() => {});
   return operation.finally(() => {
     if (puppetRequest !== request) return;
@@ -1131,8 +1103,8 @@ function showPuppet(id, valid = () => true) {
   });
 }
 
-async function loadPuppet(id, epoch, request, valid) {
-  const current = () => epoch === puppetEpoch && request === puppetRequest && valid();
+async function loadPuppet(id, epoch, request) {
+  const current = () => epoch === puppetEpoch && request === puppetRequest;
   if (!current()) throw new Error('puppet load replaced');
   const avatar = puppetCatalog.avatars.find((item) => item.id === id);
   if (!avatar) throw new Error('puppet is unavailable');

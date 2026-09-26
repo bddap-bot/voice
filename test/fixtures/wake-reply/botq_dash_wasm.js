@@ -24,7 +24,7 @@ export async function recv() {
 }
 globalThis.__deliverHubReply = (reply, stamp) => {
   const request = globalThis.__lastHubRequest;
-  const value = enc.encode('hub\n' + JSON.stringify({ id: request?.id ?? stamp, heard: request?.text ?? '', reply, directives: [], timing_ms: 0, stamp }));
+  const value = enc.encode('hub\n' + JSON.stringify({ id: request?.id ?? stamp, commentary: [reply], thinking: [], instructions: [], timing_ms: 0, stamp }));
   keep('in', value, ['hub'], 16384);
   deliver(value);
 };

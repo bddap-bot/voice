@@ -123,7 +123,7 @@ const mark = (kind, data = {}) => { capture.marks.push({ at: Date.now(), kind, .
 const readyCount = () => capture.heard.filter((m) => m.ready).length;
 const started = (ch) => capture.rt.find((c) => c.ch === ch && c.dir === 'in' && c.event.type === 'session.started');
 const offerErrors = () => capture.frames.filter((f) => f.verb === 'offer-error');
-const lastActivity = (ch) => capture.rt.filter((c) => c.ch === ch && c.dir === 'in' && ['session.output_transcript.delta', 'response.event', 'session.delegation.created', 'session.input_transcript.delta'].includes(c.event.type)).at(-1)?.at ?? 0;
+const lastActivity = (ch) => capture.rt.filter((c) => c.ch === ch && c.dir === 'in' && ['session.output_transcript.delta', 'session.delegation.created', 'session.input_transcript.delta'].includes(c.event.type)).at(-1)?.at ?? 0;
 const pressed = async () => (await state()).pressed === 'true';
 const waitPressed = async (want, ms) => { const dl = Date.now() + ms; while (Date.now() < dl) { await drain(); if ((await pressed()) === want) return Date.now(); await sleep(150); } return null; };
 

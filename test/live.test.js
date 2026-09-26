@@ -150,6 +150,20 @@ test('the sleep phrase is found in a transcript regardless of case, spacing and 
   for (const text of ['Good night everyone.', 'Corvus, good night.', 'Goodnight, Corv']) assert.equal(includesPhrase(text, SLEEP_PHRASE), false, text);
 });
 
+test('an ended session closes its undelegated turn, so the next session hands the hub only its own words', () => {
+  const trace = new ConversationTrace();
+  trace.heard('Goodnight, Corvus.');
+  trace.delegated('item_answered');
+  trace.hub('item_answered', { commentary: [], thinking: ['Noted.'], instructions: [] }, 5);
+  trace.heard('Goodnight, ');
+  trace.heard('Corvus.');
+  trace.cancel();
+  const next = trace.heard('What is new?');
+  assert.equal(next.text, 'What is new?');
+  assert.equal(trace.delegated('item_next').sent, 'What is new?');
+  assert.deepEqual(trace.entries.filter((entry) => entry.kind === 'delegation').map(({ id, failed }) => [id, Boolean(failed)]), [['item_answered', false], ['item_next', false]]);
+});
+
 test('shared material and its hub reply remain in the conversation trace', () => {
   const trace = new ConversationTrace();
   trace.shared('share_1', 'https://example.test/a?q=one');

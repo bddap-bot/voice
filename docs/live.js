@@ -341,12 +341,14 @@ export class ConversationTrace {
     this.activeSpeechSource = null;
     this.lastOutputEnd = null;
     this.forceNewSpeech = false;
+    this.forceNewHeard = false;
   }
   heard(delta, now = Date.now(), startMs = null) {
     if (this.activeSpeechSource === 'model after hub reply' && Number.isFinite(startMs) && Number.isFinite(this.lastOutputEnd) && startMs >= this.lastOutputEnd) this.activeSpeechSource = null;
     if (!this.pendingTurns.length) this.heardAt = now;
     let entry = this.entries.at(-1);
-    if (entry?.kind !== 'heard') {
+    if (entry?.kind !== 'heard' || this.forceNewHeard) {
+      this.forceNewHeard = false;
       entry = { kind: 'heard', text: '' };
       this.entries.push(entry);
       this.pendingEntries.add(entry);
@@ -412,11 +414,15 @@ export class ConversationTrace {
   }
   cancel() {
     for (const entry of this.entries) {
-      if (entry.kind === 'delegation' && !entry.shared && !entry.reply) {
+      if (entry.kind === 'delegation' && !entry.shared && entry.timing === null && !entry.failed) {
         entry.reply = 'cancelled';
         entry.failed = true;
       }
     }
+    this.pendingTurns = [];
+    this.pendingEntries.clear();
+    this.heardAt = 0;
+    this.forceNewHeard = true;
     this.onChange(this.entries);
   }
   spoke(delta, startMs = null, endMs = null) {

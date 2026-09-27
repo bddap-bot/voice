@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, TranscriptBatcher, audioFrame, errorEvent, formatElapsed, formatStartError, includesPhrase, isOfferFor, shareFrame } from '../docs/live.js';
-import { SLEEP_PHRASE } from '../docs/identity.js';
+import { SIGN_OFF } from '../docs/identity.js';
 
 test('start errors include their name and first stack frame', () => {
   const error = new TypeError('Illegal invocation');
@@ -145,9 +145,9 @@ test('a hub reply records each channel it chose on its delegation', () => {
   assert.deepEqual(['reply', 'thinking', 'instructions', 'timing'].map((key) => trace.entries[1][key]), ['Two jobs. Both run.', 'Job 7 failed.', 'Answer briefly.', 9]);
 });
 
-test('the sleep phrase is found in a transcript regardless of case, spacing and punctuation', () => {
-  for (const text of ['Goodnight, Corvus.', 'good night corvus', 'OK. Good night, Corvus!', 'goodnight\ncorvus']) assert.equal(includesPhrase(text, SLEEP_PHRASE), true, text);
-  for (const text of ['Good night everyone.', 'Corvus, good night.', 'Goodnight, Corv']) assert.equal(includesPhrase(text, SLEEP_PHRASE), false, text);
+test('the sign-off is found in a transcript regardless of case, spacing and punctuation', () => {
+  for (const text of ['The raven returns to Odin.', 'the raven returns to odin', 'Goodnight. The raven returns to Odin!', 'The raven\nreturns to Odin —']) assert.equal(includesPhrase(text, SIGN_OFF), true, text);
+  for (const text of ['Goodnight, Corvus.', 'The raven returns.', 'The raven flies back to Odin.', 'The raven returns to Od']) assert.equal(includesPhrase(text, SIGN_OFF), false, text);
 });
 
 test('an ended session closes its undelegated turn, so the next session hands the hub only its own words', () => {

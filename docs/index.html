@@ -126,7 +126,7 @@ import { ListeningReactionDriver, TranscriptActionDriver, webGpuAdapter } from '
 import { StageTrace } from './stage-trace.js';
 import { LivePlayback } from './live-playback.js';
 import { PuppetRuntime } from './puppet.js';
-import { INACTIVITY_MS, NAME, SLEEP_PHRASE, WAKE_PHRASE } from './identity.js';
+import { INACTIVITY_MS, NAME, SIGN_OFF, WAKE_PHRASE } from './identity.js';
 import { loadHead, startWakeSpotter } from './wake.js';
 import { disposeRenderer, renderChart, renderMath, renderMermaid } from './lib/render.js';
 
@@ -818,9 +818,8 @@ function onLiveEvent(message, source) {
     recordSession('input_utterance', event.delta ?? '');
     stageTrace?.inputTranscript();
     stayAwake();
-    const turn = trace.heard(event.delta ?? '', Date.now(), event.start_ms);
+    trace.heard(event.delta ?? '', Date.now(), event.start_ms);
     conversation?.transcript?.add('user', event.delta ?? '');
-    if (includesPhrase(turn.text, SLEEP_PHRASE)) fallAsleep();
   }
   else if (event.type === 'input_audio_buffer.speech_started') {
     recordSession('input_speech_started');
@@ -845,9 +844,12 @@ function presentTranscript(event) {
     puppetRuntime?.speak(event.delta ?? '', playAt);
     actionDriver.push(event.delta ?? '', playAt);
     conversation?.transcript?.add('model', event.delta ?? '');
+    const said = (conversation?.said ?? '') + (event.delta ?? '');
+    if (conversation) conversation.said = said.slice(-4 * SIGN_OFF.length);
+    if (includesPhrase(said, SIGN_OFF)) fallAsleep();
 }
 function awaken(channel) {
-  channel.send(JSON.stringify({ type: 'session.instructions.append', event_id: 'identity', delegation_id: null, content: `Your name is ${NAME}. Earlier turns are memory of completed conversations, not results for this conversation. If the user asks the hub or requests a fresh or current check, always delegate again, even if an earlier turn seems to answer it. Never speak an earlier hub answer as a new result; wait for the new application reply.` }));
+  channel.send(JSON.stringify({ type: 'session.instructions.append', event_id: 'identity', delegation_id: null, content: `Your name is ${NAME}. Earlier turns are memory of completed conversations, not results for this conversation. If the user asks the hub or requests a fresh or current check, always delegate again, even if an earlier turn seems to answer it. Never speak an earlier hub answer as a new result; wait for the new application reply. When the user asks you to sleep or signals that the conversation is over, for example with a goodbye, "that'll be all", or a hint that it is bedtime, end your reply with "${SIGN_OFF}" and do not delegate, even while a hub request is pending. Never say "${SIGN_OFF}" at any other time; it ends the conversation.` }));
   channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: 'wake', delegation_id: null, content: `Context: ${NAME} was just woken.` }));
 }
 function tell(owner, type, event_id, delegation_id, content) {
@@ -875,7 +877,7 @@ function fallAsleep() {
   const current = conversation;
   if (!current || current.sleeping) return;
   current.sleeping = true;
-  recordSession('sleep', 'phrase');
+  recordSession('sleep', 'sign-off');
   current.audioOwner.playback.quiet().then(() => { if (conversation === current) stopConversation(); });
 }
 function finishHubWait(id) {
@@ -889,7 +891,7 @@ async function receiveHub(result) {
     stageTrace?.hubReplied(result.id);
     const current = conversation;
     await current?.audioOwner.playback.quiet();
-    if (current && conversation === current) {
+    if (current && conversation === current && !current.sleeping) {
       const owner = current.audioOwner;
       const delegation = owner.delegations.has(result.id) ? result.id : null;
       result.instructions.forEach((content, index) => tell(owner, 'session.instructions.append', `instructions_${result.stamp}_${index}`, delegation, content));
@@ -998,7 +1000,7 @@ async function startConversation() {
     await started;
     if (attempt.cancelled) return;
     awaken(attempt.channel);
-    conversation = { pc: attempt.pc, channel: attempt.channel, clock: null, id: attempt.offerId, audioOwner: attempt, transcript: new TranscriptBatcher(attempt.offerId, persistenceUploads, { onTurn: (side, at) => telemetry.add({ kind: 'transcript', session_id: attempt.offerId, name: side, at }) }) };
+    conversation = { pc: attempt.pc, channel: attempt.channel, clock: null, id: attempt.offerId, audioOwner: attempt, said: '', transcript: new TranscriptBatcher(attempt.offerId, persistenceUploads, { onTurn: (side, at) => telemetry.add({ kind: 'transcript', session_id: attempt.offerId, name: side, at }) }) };
     startRecorders(attempt, attempt.offerId);
     const clock = new SessionClock({ onTick: (seconds) => { $('elapsed').textContent = formatElapsed(seconds); } });
     conversation.clock = clock;

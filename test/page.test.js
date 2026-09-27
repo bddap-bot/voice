@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
-import { INACTIVITY_MS, NAME, WAKE_PHRASE } from '../docs/identity.js';
+import { INACTIVITY_MS, NAME, SIGN_OFF, WAKE_PHRASE } from '../docs/identity.js';
 import { WIDTH, WINDOW } from '../docs/wake.js';
 import { assessSmoke, canvasAspectMatches, clipClearsStage, evidenceRegion, installSmokeMeasurements, smokeLimits, smokeStatusText, smokeViewports } from './smoke-measurements.js';
 
@@ -1255,6 +1255,7 @@ window.addEventListener('test-ready', () => {
 
 const untilAsleep = `
 const until = async (check) => { while (!check()) await new Promise((resolve) => setTimeout(resolve, 10)); };
+const signOff = (delta = ${JSON.stringify(SIGN_OFF)}) => emitLive({ type: 'session.output_transcript.delta', delta });
 const count = (verb) => sentVerbs.filter((item) => item === verb).length;
 const sessionEvents = (name) => telemetryBatches.flat().filter((event) => event.kind === 'session' && event.name === name);
 const sleepNow = async () => {
@@ -1293,6 +1294,7 @@ test('the wake phrase carries earlier turns and a completed-sleep marker into on
   const result = await runWakePage(`
     emitLive({ type: 'session.output_transcript.delta', delta: 'The beacon is green.' });
     hear('Goodnight, Corvus.');
+    signOff();
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false');
     testPuppet.calls.length = 0;
     sentLiveEvents.length = 0;
@@ -1317,12 +1319,12 @@ test('the wake phrase carries earlier turns and a completed-sleep marker into on
   assert.equal(result.context.length, 1);
   assert.equal(result.context[0].speaker, 'user');
   assert.match(result.context[0].text, /^Context: Archived transcript of completed conversations/);
-  assert.deepEqual(JSON.parse(result.context[0].text.split('\n').slice(1).join('\n')), [{ speaker: 'live', text: 'The beacon is green.' }, { speaker: 'user', text: 'Goodnight, Corvus.' }]);
+  assert.deepEqual(JSON.parse(result.context[0].text.split('\n').slice(1).join('\n')), [{ speaker: 'live', text: 'The beacon is green.' }, { speaker: 'user', text: 'Goodnight, Corvus.' }, { speaker: 'live', text: SIGN_OFF }]);
   assert.match(result.marker, /^The previous conversation ended and you went to sleep about \d+ seconds ago\. You have just been woken for a new conversation\. Any earlier goodbye or request to sleep was already completed\./);
   assert.deepEqual(result.wakes, ['0.930']);
   assert.deepEqual(result.puppet, [['asleep', false], ['pose', 'stand'], ['pose', 'listen']]);
   assert.deepEqual(result.live, [
-    { type: 'session.instructions.append', delegation_id: null, content: `Your name is ${NAME}. Earlier turns are memory of completed conversations, not results for this conversation. If the user asks the hub or requests a fresh or current check, always delegate again, even if an earlier turn seems to answer it. Never speak an earlier hub answer as a new result; wait for the new application reply.` },
+    { type: 'session.instructions.append', delegation_id: null, content: `Your name is ${NAME}. Earlier turns are memory of completed conversations, not results for this conversation. If the user asks the hub or requests a fresh or current check, always delegate again, even if an earlier turn seems to answer it. Never speak an earlier hub answer as a new result; wait for the new application reply. When the user asks you to sleep or signals that the conversation is over, for example with a goodbye, "that'll be all", or a hint that it is bedtime, end your reply with "${SIGN_OFF}" and do not delegate, even while a hub request is pending. Never say "${SIGN_OFF}" at any other time; it ends the conversation.` },
     { type: 'session.commentary.append', delegation_id: null, content: `Context: ${NAME} was just woken.` },
   ]);
 });
@@ -1420,13 +1422,14 @@ test('a reconnect cancelled while it dials still listens for the wake phrase onc
   assert.deepEqual(result, { requests: 1 });
 });
 
-test('the spoken sleep phrase ends the session once speech goes quiet and the puppet falls asleep listening again', async () => {
+test('the model speaking the sign-off ends the session once speech goes quiet and the puppet falls asleep listening again', async () => {
   const result = await runWakePage(`
     const { LivePlayback } = await import('/live-playback.js');
     let quiet;
     LivePlayback.prototype.quiet = () => new Promise((resolve) => { quiet = resolve; });
-    hear('Good night,');
-    hear(' Corvus.');
+    hear('That will be all.');
+    signOff('Goodnight. THE RAVEN RETURNS');
+    signOff(' to Odin!');
     await new Promise((resolve) => setTimeout(resolve, 200));
     const speaking = document.querySelector('#puppet').getAttribute('aria-pressed');
     quiet?.();
@@ -1441,17 +1444,82 @@ test('the spoken sleep phrase ends the session once speech goes quiet and the pu
       rewoken: await (async () => { testSpotter.heard({ wake: 0.9 }); await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true'); return true; })(),
     };
   `);
-  assert.deepEqual(result, { speaking: 'true', sleeps: ['phrase'], delegates: 0, live: ['identity', 'wake'], puppet: ['asleep', true], microphone: { enabled: true, button: false }, rewoken: true });
+  assert.deepEqual(result, { speaking: 'true', sleeps: ['sign-off'], delegates: 0, live: ['identity', 'wake'], puppet: ['asleep', true], microphone: { enabled: true, button: false }, rewoken: true });
 });
 
-test('talk of night or sleep without the phrase keeps the session open', async () => {
+test('a goodbye from the user or a partial sign-off keeps the session open', async () => {
   const result = await runWakePage(`
-    hear('Good night everyone, I will sleep soon.');
-    hear(' Corvus, what is left?');
+    hear('Goodnight, Corvus. Go to sleep.');
+    signOff('The raven returns.');
+    hear(' ${SIGN_OFF}');
     await new Promise((resolve) => setTimeout(resolve, 300));
     return { pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), sleeps: sessionEvents('sleep').length };
   `);
   assert.deepEqual(result, { pressed: 'true', sleeps: 0 });
+});
+
+test('a sign-off with a delegation outstanding ends the session and its late hub reply is never spoken', async () => {
+  const result = await runWakePage(`
+    const { LivePlayback } = await import('/live-playback.js');
+    const quiets = [];
+    LivePlayback.prototype.quiet = () => new Promise((resolve) => quiets.push(resolve));
+    hear('Check the test beacon.');
+    delegateTurn('pending');
+    await until(() => count('delegate'));
+    hear('Corvus, go to sleep.');
+    signOff();
+    await until(() => quiets.length === 1);
+    replyFromHub('pending', 'late', { commentary: ['The test beacon is amber.'], instructions: ['Answer briefly.'] });
+    await until(() => quiets.length === 2);
+    for (const resolve of quiets) resolve();
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && sessionEvents('close').length && globalThis.hubAcks?.length);
+    return { delegates: count('delegate'), sleeps: sessionEvents('sleep').map((event) => event.detail), appended: sentLiveEvents.filter((event) => event.event_id?.includes('late')).length, acks: hubAcks };
+  `);
+  assert.deepEqual(result, { delegates: 1, sleeps: ['sign-off'], appended: 0, acks: ['late'] });
+});
+
+test('a sign-off while a hub reply waits for speech to go quiet drops that reply', async () => {
+  const result = await runWakePage(`
+    const { LivePlayback } = await import('/live-playback.js');
+    const quiets = [];
+    LivePlayback.prototype.quiet = () => new Promise((resolve) => quiets.push(resolve));
+    hear('Check the test beacon.');
+    delegateTurn('pending');
+    await until(() => count('delegate'));
+    replyFromHub('pending', 'late', { commentary: ['The test beacon is amber.'], instructions: ['Answer briefly.'] });
+    await until(() => quiets.length === 1);
+    signOff();
+    await until(() => quiets.length === 2);
+    for (const resolve of quiets) resolve();
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && sessionEvents('close').length && globalThis.hubAcks?.length);
+    return { sleeps: sessionEvents('sleep').map((event) => event.detail), appended: sentLiveEvents.filter((event) => event.event_id?.includes('late')).length };
+  `);
+  assert.deepEqual(result, { sleeps: ['sign-off'], appended: 0 });
+});
+
+test('a sign-off split by user speech still ends the session, and more speech after it sleeps only once', async () => {
+  const result = await runWakePage(`
+    signOff('The raven returns');
+    hear('Mm.');
+    signOff(' to Odin.');
+    signOff(' Sleep well.');
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && sessionEvents('close').length);
+    return { sleeps: sessionEvents('sleep').map((event) => event.detail) };
+  `);
+  assert.deepEqual(result, { sleeps: ['sign-off'] });
+});
+
+test('a session woken after a sign-off stays awake through its greeting', async () => {
+  const result = await runWakePage(`
+    signOff();
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && sessionEvents('close').length);
+    testSpotter.heard({ wake: 0.95 });
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+    emitLive({ type: 'session.output_transcript.delta', delta: 'Hi, I am listening.' });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return { pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), sleeps: sessionEvents('sleep').map((event) => event.detail) };
+  `);
+  assert.deepEqual(result, { pressed: 'true', sleeps: ['sign-off'] });
 });
 
 test('inactivity sleeps after the generous window even while a hub request is pending', async () => {
@@ -1771,7 +1839,7 @@ window.addEventListener('test-ready', () => {
 test('a woken session receives only the fresh hub reply after its speech instruction', async () => {
   const result = await runWakePage(`
     emitLive({ type: 'session.output_transcript.delta', delta: 'The test beacon is amber.' });
-    hear('Goodnight, Corvus.');
+    signOff();
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false');
     testSpotter.heard({ wake: 0.95 });
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');

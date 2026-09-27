@@ -9,7 +9,8 @@ import { assessSmoke, clipClearsStage, evidenceRegion, installSmokeMeasurements,
 
 const execute = promisify(execFile);
 import { serveDevelopment } from './dev.mjs';
-import { SLEEP_PHRASE, WAKE_PHRASE } from '../docs/identity.js';
+import { NAME, SIGN_OFF, WAKE_PHRASE } from '../docs/identity.js';
+import { includesPhrase } from '../docs/live.js';
 import { RATE } from '../docs/wake.js';
 
 const development = process.argv.includes('--dev');
@@ -27,7 +28,8 @@ async function developmentSpeech() {
   const { HELD_OUT, HELD_OUT_SENTENCES, synthesize } = await import('./wake.mjs');
   const [voice] = HELD_OUT;
   const spoken = async (texts) => (await synthesize(voice, 1, texts)).map((clip) => Buffer.from(clip.buffer, clip.byteOffset, clip.byteLength).toString('base64'));
-  return { wake: (await spoken([WAKE_PHRASE]))[0], farewell: (await spoken([SLEEP_PHRASE]))[0], ordinary: await spoken(HELD_OUT_SENTENCES.slice(0, 8)) };
+  const [wake, request, farewell] = await spoken([WAKE_PHRASE, 'Ask the hub for the current test beacon status.', `${NAME}, go to sleep.`]);
+  return { wake, request, farewell, ordinary: await spoken(HELD_OUT_SENTENCES.slice(0, 8)) };
 }
 const speech = live ? await developmentSpeech() : null;
 const outputFlag = process.argv.indexOf('--output');
@@ -196,11 +198,14 @@ async function runViewport(viewport, executable, server) {
       globalThis.RTCPeerConnection = class extends Peer {
         createDataChannel(...args) {
           const channel = super.createDataChannel(...args);
-          const record = { channel, events: [], spoken: '' }; globalThis.__smokeLiveChannels.push(record);
+          const record = { channel, events: [], spoken: '', spokeAt: 0, delegations: 0, replies: 0 }; globalThis.__smokeLiveChannels.push(record);
+          const send = channel.send.bind(channel);
+          channel.send = (data) => { if (/^(hub|instructions|thinking)_/.test(JSON.parse(data).event_id)) record.replies++; return send(data); };
           channel.addEventListener('message', ({ data }) => {
             const event = JSON.parse(data);
             if (['session.started', 'session.closed'].includes(event.type)) record.events.push(event.type);
-            if (event.type === 'session.output_transcript.delta') record.spoken += event.delta;
+            if (event.type === 'session.output_transcript.delta') { record.spoken += event.delta; record.spokeAt = Date.now(); }
+            if (event.type === 'session.delegation.created') record.delegations++;
           });
           return channel;
         }
@@ -239,15 +244,21 @@ async function runViewport(viewport, executable, server) {
     }
     const frames=[];
     let liveSessionOpened = false;
+    let beforeFarewell;
+    const liveRecord = () => cdp.evaluate('__smokeLiveChannels.map(({ channel, events, spoken, delegations, replies }) => ({ events, spoken, delegations, replies, state: channel.readyState }))');
+    const quietLive = () => cdp.evaluate(`new Promise((resolve) => { const deadline = Date.now() + 30000; const check = () => { if (Date.now() - __smokeLiveChannels.at(-1).spokeAt > 2000 || Date.now() > deadline) return resolve(); setTimeout(check, 100); }; check(); })`);
     for(let second=0;second<duration;second++){
       if(second===1){await cdp.evaluate(`${transitions[0]}`);if(mode==='public')await cdp.evaluate(`new Promise(async(resolve)=>{while(!globalThis.__smokeChannel)await new Promise(done=>setTimeout(done,10));const emit=(event)=>__smokeChannel.dispatchEvent(new MessageEvent('message',{data:JSON.stringify(event)}));emit({type:'session.output_transcript.delta',delta:'I will inspect the fixture.',start_ms:0,end_ms:20});emit({type:'session.input_transcript.delta',delta:'Check the fixture stream.'});emit({type:'session.delegation.created',delegation:{id:'fixture',type:'delegation',target:'client'}});setTimeout(resolve,150)})`)}
       if (development && second === 2) {
         await cdp.evaluate(`new Promise((resolve, reject) => { const deadline = Date.now() + 60000; const check = () => { if (document.querySelector('#puppet').getAttribute('aria-pressed') === 'true') return resolve(); if (Date.now() > deadline || document.querySelector('#status').classList.contains('err')) return reject(new Error(document.querySelector('#status').textContent + ' heard ' + JSON.stringify(globalThis.__smokeHeard ?? []))); setTimeout(check, 100); }; check(); })`);
         liveSessionOpened = true;
         await cdp.evaluate(`new Promise((resolve, reject) => { const deadline = Date.now() + 30000; const check = () => { if (__smokeLiveChannels.at(-1).spoken.trim()) return resolve(); if (Date.now() > deadline) return reject(new Error('the woken session did not greet: ' + JSON.stringify(__smokeLiveChannels.map(({ events, spoken }) => ({ events, spoken }))))); setTimeout(check, 100); }; check(); })`);
+        await quietLive();
+        await cdp.evaluate('__smokeSay(__smokeSpeech.request)');
+        await cdp.evaluate(`new Promise((resolve, reject) => { const deadline = Date.now() + 30000; const check = () => { if (__smokeLiveChannels.at(-1).delegations) return resolve(); if (Date.now() > deadline) return reject(new Error('the request was not delegated: ' + __smokeLiveChannels.at(-1).spoken)); setTimeout(check, 100); }; check(); })`);
       }
       if(second===3)await cdp.evaluate(`document.querySelector('#status').textContent=${JSON.stringify(smokeStatusText)}`);
-      if(second===Math.max(8,duration-6)){await cdp.evaluate(`${transitions[1]}`)}
+      if(second===Math.max(8,duration-6)){if(development){await quietLive();beforeFarewell=(await liveRecord()).at(-1);if(beforeFarewell.state!=='open'||beforeFarewell.replies)throw new Error('the sleep request needs an open session with its delegation unanswered: '+JSON.stringify(beforeFarewell))}await cdp.evaluate(`${transitions[1]}`)}
       await cdp.evaluate('__smoke.sample()');
       if(!neutralSilhouette&&!clipClearsStage(region,(await stageGeometry()).canvas))throw new Error(`the stage canvas reached the evidence crop at second ${second}; this run did not load the neutral silhouette`);
       const shot=await cdp.call('Page.captureScreenshot',{format:'png',captureBeyondViewport:false,clip:{...region,scale:1}});
@@ -256,9 +267,10 @@ async function runViewport(viewport, executable, server) {
     }
     if (development) {
       if (!liveSessionOpened) throw new Error('development smoke did not open a Live session');
-      await cdp.evaluate(`new Promise((resolve, reject) => { const deadline = Date.now() + 60000; const check = () => { if (document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && document.querySelector('#puppet').getAttribute('aria-disabled') === 'false') return resolve(); if (Date.now() > deadline) return reject(new Error('Live session did not close after the farewell')); setTimeout(check, 100); }; check(); })`);
-      const channels = await cdp.evaluate('__smokeLiveChannels.map(({ channel, events, spoken }) => ({ events, spoken, state: channel.readyState }))');
-      if (channels.length !== 1 || !channels[0].events.includes('session.started') || channels[0].state !== 'closed') throw new Error('the wake phrase did not open one session that the sleep phrase closed: ' + JSON.stringify(channels));
+      await cdp.evaluate(`new Promise((resolve, reject) => { const deadline = Date.now() + 60000; const check = () => { if (document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && document.querySelector('#puppet').getAttribute('aria-disabled') === 'false') return resolve(); if (Date.now() > deadline) return reject(new Error('Live session did not close after the sleep request: ' + JSON.stringify(__smokeLiveChannels.map(({ events, spoken, delegations }) => ({ events, spoken, delegations }))))); setTimeout(check, 100); }; check(); })`);
+      const channels = await liveRecord();
+      if (channels.length !== 1 || !channels[0].events.includes('session.started') || channels[0].state !== 'closed') throw new Error('the wake phrase did not open one session that the sleep request closed: ' + JSON.stringify(channels));
+      if (!includesPhrase(channels[0].spoken.slice(beforeFarewell.spoken.length), SIGN_OFF) || channels[0].delegations !== beforeFarewell.delegations) throw new Error('the sleep request did not end the session through the sign-off without a hub call: ' + JSON.stringify(channels));
       const heard = await cdp.evaluate('__smokeHeard');
       const sessions = { channels, heard, endpoint: JSON.parse(Buffer.from(server.token, 'base64url')).endpoint_id, liveSessionOpened, liveSessionClosed: true };
       await writeFile(path.join(output, `${viewport.name}-connection.json`), JSON.stringify(sessions, null, 2));

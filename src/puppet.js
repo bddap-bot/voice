@@ -483,10 +483,6 @@ export class PuppetRuntime {
   releaseGesture(now) {
     this.gestureState = { name: this.gestureState?.name, from: copyOffsets(this.gestureOffsets), to: {}, started: now, releaseAt: Infinity, releasing: true };
   }
-  look(direction) {
-    if (direction !== 'toward' && direction !== 'away') throw new Error(`unknown look ${direction}`);
-    this.setGaze(direction === 'away' ? 'away' : 'camera', 1800);
-  }
   setGaze(mode, duration, now = performance.now()) {
     this.gazeMode = mode;
     this.gazeUntil = now + duration;

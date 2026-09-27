@@ -143,7 +143,6 @@ export class PuppetRuntime {
   async loadClips(entries) { const before = this.humanoidBone; this.humanoidBone += entries.reduce((sum, entry) => sum + entry.bytes.byteLength, 0); globalThis.clipMovement = { before, after: this.humanoidBone, loaded: entries.map((entry) => [entry.action, entry.format]) }; }
   pose(...args) { this.calls.push(['pose', ...args]); }
   gesture(...args) { this.calls.push(['gesture', ...args]); }
-  look(...args) { this.calls.push(['look', ...args]); }
   mood(...args) { this.calls.push(['mood', ...args]); }
   waiting(...args) { this.calls.push(['waiting', ...args]); }
   asleep(...args) { this.calls.push(['asleep', ...args]); }

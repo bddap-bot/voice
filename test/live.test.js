@@ -157,11 +157,29 @@ test('an ended session closes its undelegated turn, so the next session hands th
   trace.hub('item_answered', { commentary: [], thinking: ['Noted.'], instructions: [] }, 5);
   trace.heard('Goodnight, ');
   trace.heard('Corvus.');
-  trace.cancel();
+  trace.slept();
   const next = trace.heard('What is new?');
   assert.equal(next.text, 'What is new?');
   assert.equal(trace.delegated('item_next').sent, 'What is new?');
   assert.deepEqual(trace.entries.filter((entry) => entry.kind === 'delegation').map(({ id, failed }) => [id, Boolean(failed)]), [['item_answered', false], ['item_next', false]]);
+});
+
+test('an ended session keeps its last spoken turn apart from the next session greeting', () => {
+  const trace = new ConversationTrace();
+  trace.heard('status');
+  trace.delegated('item_before_sleep');
+  trace.hub('item_before_sleep', said('The beacon is amber.'), 5);
+  trace.spoke('The beacon is amber.');
+  trace.slept();
+  trace.spoke('Hello again.');
+  assert.deepEqual(trace.context().slice(-2), [{ speaker: 'live', text: 'The beacon is amber.' }, { speaker: 'live', text: 'Hello again.' }]);
+  assert.equal(trace.entries.at(-1).source, 'model alone');
+  trace.heard('status again');
+  trace.delegated('item_unspoken');
+  trace.hub('item_unspoken', said('The beacon is violet.'), 5);
+  trace.slept();
+  trace.spoke('Hello once more.');
+  assert.equal(trace.entries.at(-1).source, 'model alone');
 });
 
 test('shared material and its hub reply remain in the conversation trace', () => {
@@ -176,7 +194,7 @@ test('ending voice does not cancel a pending shared request', () => {
   trace.shared('share_pending', 'image');
   trace.heard('stop voice');
   trace.delegated('spoken_pending');
-  trace.cancel();
+  trace.slept();
   assert.equal(trace.entries[0].reply, '');
   assert.equal(trace.entries[2].reply, 'cancelled');
 });
@@ -286,7 +304,7 @@ test('failed and cancelled delegations remain visible', () => {
   trace.failed('item_4', 'hub reply timed out');
   trace.heard('second');
   trace.delegated('item_5');
-  trace.cancel();
+  trace.slept();
   assert.deepEqual(trace.entries.filter((entry) => entry.kind === 'delegation').map(({ reply, failed }) => ({ reply, failed })), [
     { reply: 'hub reply timed out', failed: true },
     { reply: 'cancelled', failed: true },
@@ -303,25 +321,42 @@ test('delegation context preserves transcript text exactly', () => {
   assert.deepEqual(entry.context, [{ speaker: 'user', text: 'what about [this]' }, { speaker: 'live', text: 'Yes [nod], the [thumbs up] build is green [shru' }]);
 });
 
-test('sleep memory quotes completed turns without replaying assistant messages', () => {
+test('a woken session carries each earlier conversation and how long ago it went to sleep', () => {
   const trace = new ConversationTrace();
-  trace.entries = [{ kind: 'heard', text: 'Remember the blue lantern.' }, { kind: 'said', text: 'The lantern is blue.' }];
-  const context = trace.sleepContext();
+  assert.deepEqual(trace.wake(), {});
+  trace.heard('Remember the blue lantern.');
+  trace.spoke('The lantern is blue.');
+  trace.slept(0);
+  trace.spoke('Hello again.');
+  trace.heard('status');
+  trace.delegated('item_status');
+  trace.slept(170000);
+  const { context, wake } = trace.wake(200000);
   assert.equal(context.length, 1);
   assert.equal(context[0].speaker, 'user');
-  assert.match(context[0].text, /for memory only/);
-  assert.deepEqual(JSON.parse(context[0].text.slice(context[0].text.indexOf('\n') + 1)), trace.context());
-  assert.equal(trace.entries.length, 2);
+  assert.match(context[0].text, /^Context: Archived transcripts of completed conversations, oldest first, for memory only\. Each ended when you went to sleep\./);
+  assert.deepEqual(JSON.parse(context[0].text.slice(context[0].text.indexOf('\n') + 1)), [
+    { turns: [{ speaker: 'user', text: 'Remember the blue lantern.' }, { speaker: 'live', text: 'The lantern is blue.' }], went_to_sleep: 'about 3 minutes ago' },
+    { turns: [{ speaker: 'live', text: 'Hello again.' }, { speaker: 'user', text: 'status' }], went_to_sleep: 'about 30 seconds ago' },
+  ]);
+  assert.match(wake, /^The previous conversation ended and you went to sleep about 30 seconds ago\. You have just been woken for a new conversation\./);
+  assert.deepEqual([171000, 170000 + 5 * 3600000, 170000 + 3 * 86400000].map((now) => /about (.+) ago\. You/.exec(trace.wake(now).wake)[1]), ['1 second', '5 hours', '3 days']);
 });
 
-test('sleep memory stays within the wire limit after quoting and retains newest turns', () => {
+test('woken-session memory stays within the wire limit by dropping the oldest turns first', () => {
   const trace = new ConversationTrace();
-  assert.deepEqual(trace.sleepContext(), []);
-  trace.entries = Array.from({ length: 20 }, (_, i) => ({ kind: i % 2 ? 'said' : 'heard', text: `${i}:` + '"\\雪'.repeat(110) }));
-  const context = trace.sleepContext();
+  for (let session = 0; session < 3; session++) {
+    for (let turn = 0; turn < 10; turn++) {
+      trace.heard(`${session}.${turn}:` + '"\\雪'.repeat(110));
+      trace.spoke('ok');
+    }
+    trace.slept(session);
+  }
+  const { context } = trace.wake(10);
   assert.ok(new TextEncoder().encode(JSON.stringify(context)).length <= 8192);
-  const turns = JSON.parse(context[0].text.slice(context[0].text.indexOf('\n') + 1));
-  assert.ok(turns.length > 0 && turns.length < 20);
-  assert.equal(turns.at(-1).text, trace.entries.at(-1).text);
-  assert.equal(trace.entries.length, 20);
+  const turns = JSON.parse(context[0].text.slice(context[0].text.indexOf('\n') + 1)).flatMap((conversation) => conversation.turns);
+  assert.ok(turns.length > 1 && turns.length < 60);
+  assert.ok(turns.at(-2).text.startsWith('2.9:'));
+  assert.equal(turns.at(-1).text, 'ok');
+  assert.equal(trace.entries.length, 60);
 });

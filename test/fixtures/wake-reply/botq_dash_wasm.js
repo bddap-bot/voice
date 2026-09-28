@@ -18,7 +18,7 @@ let pumping = false;
 export async function recv() {
   if (!pumping) {
     pumping = true;
-    (async () => { for (;;) { const value = await mod.recv(); if (value instanceof Uint8Array) keep('in', value, ['answer', 'offer-error', 'hub', 'hub-error', 'error'], 16384); deliver(value); } })();
+    (async () => { for (;;) { const value = await mod.recv(); globalThis.__relayAt = Date.now(); if (value instanceof Uint8Array) keep('in', value, ['answer', 'offer-error', 'hub', 'hub-error', 'error'], 16384); deliver(value); } })();
   }
   return queue.length ? queue.shift() : new Promise((resolve) => { waiting = resolve; });
 }

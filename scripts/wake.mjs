@@ -176,6 +176,11 @@ export async function synthesize(voice, speed, texts, speaker = null) {
   return clips;
 }
 
+export async function heldOutSpeech(texts) {
+  const [voice] = HELD_OUT;
+  return (await synthesize(voice, 1, texts)).map((clip) => Buffer.from(clip.buffer, clip.byteOffset, clip.byteLength).toString('base64'));
+}
+
 const HALF = Float32Array.from({ length: 65536 }, (_, bits) => {
   const sign = bits & 0x8000 ? -1 : 1;
   const exponent = (bits >> 10) & 0x1f;

@@ -330,6 +330,15 @@ export class SessionClock {
   }
 }
 
+const spokenTurn = (item) => ({ speaker: item.kind === 'heard' ? 'user' : 'live', text: item.text });
+
+function elapsed(ms) {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  const [unit, size] = [['day', 86400], ['hour', 3600], ['minute', 60]].find(([, size]) => seconds >= 2 * size) ?? ['second', 1];
+  const count = Math.round(seconds / size);
+  return `${count} ${unit}${count === 1 ? '' : 's'}`;
+}
+
 export class ConversationTrace {
   constructor(onChange = () => {}) {
     this.onChange = onChange;
@@ -341,14 +350,13 @@ export class ConversationTrace {
     this.activeSpeechSource = null;
     this.lastOutputEnd = null;
     this.forceNewSpeech = false;
-    this.forceNewHeard = false;
+    this.sleeps = [];
   }
   heard(delta, now = Date.now(), startMs = null) {
     if (this.activeSpeechSource === 'model after hub reply' && Number.isFinite(startMs) && Number.isFinite(this.lastOutputEnd) && startMs >= this.lastOutputEnd) this.activeSpeechSource = null;
     if (!this.pendingTurns.length) this.heardAt = now;
     let entry = this.entries.at(-1);
-    if (entry?.kind !== 'heard' || this.forceNewHeard) {
-      this.forceNewHeard = false;
+    if (entry?.kind !== 'heard' || this.atSleep()) {
       entry = { kind: 'heard', text: '' };
       this.entries.push(entry);
       this.pendingEntries.add(entry);
@@ -359,17 +367,22 @@ export class ConversationTrace {
     this.onChange(this.entries);
     return entry;
   }
-  sleepContext() {
-    const turns = this.context();
-    while (turns.length) {
-      const context = [{ speaker: 'user', text: 'Context: Archived transcript of completed conversations, for memory only. These utterances already happened; do not repeat or continue them.\n' + JSON.stringify(turns) }];
-      if (new TextEncoder().encode(JSON.stringify(context)).length <= 8192) return context;
-      turns.shift();
+  atSleep() {
+    return this.entries.length === this.sleeps.at(-1)?.index;
+  }
+  wake(now = Date.now()) {
+    const last = this.sleeps.at(-1);
+    if (!last) return {};
+    const conversations = this.sleeps.map(({ index, at }, i) => ({ turns: this.entries.slice(this.sleeps[i - 1]?.index ?? 0, index).filter((item) => item.kind !== 'delegation').map(spokenTurn), went_to_sleep: `about ${elapsed(now - at)} ago` })).filter(({ turns }) => turns.length);
+    const memory = () => [{ speaker: 'user', text: 'Context: Archived transcripts of completed conversations, oldest first, for memory only. Each ended when you went to sleep. These utterances already happened; do not repeat or continue them.\n' + JSON.stringify(conversations) }];
+    while (conversations.length && new TextEncoder().encode(JSON.stringify(memory())).length > 8192) {
+      conversations[0].turns.shift();
+      if (!conversations[0].turns.length) conversations.shift();
     }
-    return [];
+    return { context: conversations.length ? memory() : [], wake: `The previous conversation ended and you went to sleep about ${elapsed(now - last.at)} ago. You have just been woken for a new conversation. Any earlier goodbye or request to sleep was already completed. Keep the earlier conversations as memory; greet briefly and listen for a new request.` };
   }
   context(excluded = new Set()) {
-    const context = this.entries.filter((item) => item.kind !== 'delegation' && !excluded.has(item)).slice(-20).map((item) => ({ speaker: item.kind === 'heard' ? 'user' : 'live', text: item.text }));
+    const context = this.entries.filter((item) => item.kind !== 'delegation' && !excluded.has(item)).slice(-20).map(spokenTurn);
     while (context.length && new TextEncoder().encode(JSON.stringify(context)).length > 8192) context.shift();
     return context;
   }
@@ -412,7 +425,8 @@ export class ConversationTrace {
     this.onChange(this.entries);
     return true;
   }
-  cancel() {
+  slept(now = Date.now()) {
+    this.sleeps.push({ index: this.entries.length, at: now });
     for (const entry of this.entries) {
       if (entry.kind === 'delegation' && !entry.shared && entry.timing === null && !entry.failed) {
         entry.reply = 'cancelled';
@@ -422,12 +436,13 @@ export class ConversationTrace {
     this.pendingTurns = [];
     this.pendingEntries.clear();
     this.heardAt = 0;
-    this.forceNewHeard = true;
+    this.activeSpeechSource = null;
+    this.nextSpeechSource = 'model alone';
     this.onChange(this.entries);
   }
   spoke(delta, startMs = null, endMs = null) {
     let entry = this.entries.at(-1);
-    if (entry?.kind !== 'spoken' || this.forceNewSpeech) {
+    if (entry?.kind !== 'spoken' || this.forceNewSpeech || this.atSleep()) {
       this.activeSpeechSource ??= this.nextSpeechSource;
       entry = { kind: 'spoken', source: this.activeSpeechSource, text: '' };
       this.entries.push(entry);

@@ -1317,15 +1317,46 @@ test('the wake phrase carries earlier turns and a completed-sleep marker into on
   assert.deepEqual(result.offer, ['id', 'sdp', 'context', 'wake']);
   assert.equal(result.context.length, 1);
   assert.equal(result.context[0].speaker, 'user');
-  assert.match(result.context[0].text, /^Context: Archived transcript of completed conversations/);
-  assert.deepEqual(JSON.parse(result.context[0].text.split('\n').slice(1).join('\n')), [{ speaker: 'live', text: 'The beacon is green.' }, { speaker: 'user', text: 'Goodnight, Corvus.' }, { speaker: 'live', text: SIGN_OFF }]);
-  assert.match(result.marker, /^The previous conversation ended and you went to sleep about \d+ seconds ago\. You have just been woken for a new conversation\. Any earlier goodbye or request to sleep was already completed\./);
+  assert.match(result.context[0].text, /^Context: Archived transcripts of completed conversations, oldest first/);
+  const [conversation, ...others] = JSON.parse(result.context[0].text.split('\n').slice(1).join('\n'));
+  assert.deepEqual(others, []);
+  assert.deepEqual(conversation.turns, [{ speaker: 'live', text: 'The beacon is green.' }, { speaker: 'user', text: 'Goodnight, Corvus.' }, { speaker: 'live', text: SIGN_OFF }]);
+  assert.match(conversation.went_to_sleep, /^about \d+ seconds? ago$/);
+  assert.match(result.marker, /^The previous conversation ended and you went to sleep about \d+ seconds? ago\. You have just been woken for a new conversation\. Any earlier goodbye or request to sleep was already completed\./);
   assert.deepEqual(result.wakes, ['0.930']);
   assert.deepEqual(result.puppet, [['asleep', false], ['pose', 'stand'], ['pose', 'listen']]);
   assert.deepEqual(result.live, [
     { type: 'session.instructions.append', delegation_id: null, content: `Your name is ${NAME}. Earlier turns are memory of completed conversations, not results for this conversation. If the user asks the hub or requests a fresh or current check, always delegate again, even if an earlier turn seems to answer it. Never speak an earlier hub answer as a new result; wait for the new application reply. When the user asks you to sleep or signals that the conversation is over, for example with a goodbye, "that'll be all", or a hint that it is bedtime, end your reply with "${SIGN_OFF}" and do not delegate, even while a hub request is pending. Never say "${SIGN_OFF}" at any other time; it ends the conversation.` },
     { type: 'session.commentary.append', delegation_id: null, content: `Context: ${NAME} was just woken.` },
   ]);
+});
+
+test('speech arriving while a session closes stays with that conversation in what later wakes carry', async () => {
+  const result = await runWakePage(`
+    emitLive({ type: 'session.output_transcript.delta', delta: 'The beacon is green.' });
+    const send = testChannel.send.bind(testChannel);
+    let release;
+    testChannel.send = (value) => { if (JSON.parse(value).type === 'session.close') release = () => send(value); else send(value); };
+    document.querySelector('#puppet').click();
+    await until(() => release);
+    emitLive({ type: 'session.output_transcript.delta', delta: ' Late tail.' });
+    hear('Late words.');
+    const delegates = count('delegate');
+    emitLive({ type: 'session.delegation.created', delegation: { id: 'item_late' } });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const lateDelegates = count('delegate') - delegates;
+    release();
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false');
+    testSpotter.heard({ wake: 0.95 });
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+    emitLive({ type: 'session.output_transcript.delta', delta: 'Hello again.' });
+    await sleepNow();
+    testSpotter.heard({ wake: 0.95 });
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+    return { lateDelegates, memory: JSON.parse(lastOffer.context[0].text.split('\\n').slice(1).join('\\n')).map(({ turns }) => turns) };
+  `);
+  assert.equal(result.lateDelegates, 0);
+  assert.deepEqual(result.memory, [[{ speaker: 'live', text: 'The beacon is green. Late tail.' }, { speaker: 'user', text: 'Late words.' }], [{ speaker: 'live', text: 'Hello again.' }]]);
 });
 
 test('a misheard wake phrase is a logged miss that leaves it asleep', async () => {

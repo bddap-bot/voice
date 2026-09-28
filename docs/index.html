@@ -151,7 +151,6 @@ let listener;
 let sendQueue = Promise.resolve();
 let answerWaiter;
 let conversation;
-let sleptAt = null;
 let usageSeconds = 0;
 let connected = false;
 let everConnected = false;
@@ -856,7 +855,7 @@ function tell(owner, type, event_id, delegation_id, content) {
   if (owner?.channel?.readyState === 'open') owner.channel.send(JSON.stringify({ type, event_id, delegation_id, content }));
 }
 function delegate(id, owner) {
-  if (!owner || typeof id !== 'string') return;
+  if (!owner || typeof id !== 'string' || stopping) return;
   owner.delegations.add(id);
   const turn = trace.delegated(id);
   hubWaiting.add(id);
@@ -987,7 +986,7 @@ async function startConversation() {
     attempt.offerId = crypto.randomUUID();
     const answerPromise = waitForAnswer(attempt.offerId);
     attempt.offered = true;
-    await sendFrame(`offer\n${JSON.stringify({ id: attempt.offerId, sdp: attempt.pc.localDescription.sdp, ...(sleptAt === null ? {} : { context: trace.sleepContext(), wake: `The previous conversation ended and you went to sleep about ${Math.max(0, Math.round((Date.now() - sleptAt) / 1000))} seconds ago. You have just been woken for a new conversation. Any earlier goodbye or request to sleep was already completed. Keep the earlier conversation as memory; greet briefly and listen for a new request.` }) })}`);
+    await sendFrame(`offer\n${JSON.stringify({ id: attempt.offerId, sdp: attempt.pc.localDescription.sdp, ...trace.wake() })}`);
     if (attempt.cancelled) {
       cancelOffer(attempt);
       return;
@@ -1040,7 +1039,6 @@ async function finishStop(reason, remoteClosed) {
   current.clock?.stop();
   stageTrace?.sessionEnded();
   stageTrace = null;
-  trace.cancel();
   paintOff();
   sendFrame('cancel').catch(() => {});
   if (!remoteClosed && current.channel.readyState === 'open') {
@@ -1051,7 +1049,7 @@ async function finishStop(reason, remoteClosed) {
   }
   current.transcript.flush();
   conversation = null;
-  sleptAt = Date.now();
+  trace.slept();
   syncPuppetUi();
   current.channel.close();
   current.pc.close();

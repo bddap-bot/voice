@@ -25,11 +25,9 @@ const transitions = mode === 'private' && !live
   : live ? ['__smokeSay(__smokeSpeech.wake)', '__smokeSay(__smokeSpeech.farewell)']
   : ["document.querySelector('#puppet').click()", "document.querySelector('#puppet').click()"];
 async function developmentSpeech() {
-  const { HELD_OUT, HELD_OUT_SENTENCES, synthesize } = await import('./wake.mjs');
-  const [voice] = HELD_OUT;
-  const spoken = async (texts) => (await synthesize(voice, 1, texts)).map((clip) => Buffer.from(clip.buffer, clip.byteOffset, clip.byteLength).toString('base64'));
-  const [wake, request, farewell] = await spoken([WAKE_PHRASE, 'Ask the hub for the current test beacon status.', `${NAME}, go to sleep.`]);
-  return { wake, request, farewell, ordinary: await spoken(HELD_OUT_SENTENCES.slice(0, 8)) };
+  const { HELD_OUT_SENTENCES, heldOutSpeech } = await import('./wake.mjs');
+  const [wake, request, farewell, ...ordinary] = await heldOutSpeech([WAKE_PHRASE, 'Ask the hub for the current test beacon status.', `${NAME}, go to sleep.`, ...HELD_OUT_SENTENCES.slice(0, 8)]);
+  return { wake, request, farewell, ordinary };
 }
 const speech = live ? await developmentSpeech() : null;
 const outputFlag = process.argv.indexOf('--output');

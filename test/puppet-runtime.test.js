@@ -671,3 +671,98 @@ for (const name of ['surprised', 'Surprised', 'SURPRISED']) test(`mood actions r
   assert.ok(head.quaternion.angleTo(new THREE.Quaternion()) < 1e-6);
   assert.throws(() => runtime.mood('unknown'), /unknown mood/);
 });
+
+test('loaded root tracks keep hips XZ fixed through sitting, loops, gestures and standing', async () => {
+  const scene = new THREE.Group();
+  scene.position.set(2, 0, -3);
+  scene.rotation.y = 0.4;
+  scene.scale.setScalar(1.7);
+  const hips = new THREE.Bone();
+  hips.name = 'RootHips';
+  hips.position.set(0.125, 1, -0.25);
+  const hand = new THREE.Bone();
+  hand.name = 'Hand';
+  hips.add(hand);
+  scene.add(hips);
+  const rest = hips.position.toArray();
+  const vrm = { scene, humanoid: { getNormalizedBoneNode: () => hips, normalizedRestPose: { hips: { position: rest } } } };
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+    vrm, mixer: new THREE.AnimationMixer(scene), clips: new Map(), handovers: new Map(),
+    bones: new Map(), poseName: 'stand', idleClip: 'idle', nextIdleAt: Infinity,
+  });
+  const payload = (name, heights, offset) => new TextEncoder().encode(JSON.stringify({
+    name, duration: 1, tracks: [
+      { name: `${name === 'clap' ? hips.uuid : hips.name}.position`, times: [0, 0.5, 1], values: heights.flatMap((height, i) => [offset + i * 0.2, height, offset - i * 0.3]) },
+      { name: `${hips.name}.quaternion`, times: [0, 1], values: [0, 0, 0, 1, 0, 0, 0, 1] },
+      { name: `${hand.name}.position`, times: [0, 1], values: [1, 2, 3, 4, 5, 6] },
+    ],
+  }));
+  const entries = [
+    ['idle', [1, 1.02, 1], 0.1], ['sit', [1, 0.7, 0.5], 0.4],
+    ['sit-idle', [0.5, 0.52, 0.5], -0.2], ['stand', [0.5, 0.8, 1], -0.5],
+  ].map(([action, heights, offset]) => ({ action, format: 'tracks', bytes: payload(action, heights, offset) }));
+  await runtime.loadClips(entries);
+  const source = JSON.parse(new TextDecoder().decode(entries[1].bytes));
+  assert.equal(source.tracks[0].values[0], 0.4);
+  assert.deepEqual(Array.from(runtime.clips.get('sit').tracks[2].values), [1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(Array.from(runtime.clips.get('sit').tracks[0].values).filter((_, i) => i % 3 === 1), [1, Math.fround(0.7), 0.5]);
+  const position = new THREE.Vector3();
+  const anchor = hips.getWorldPosition(new THREE.Vector3());
+  let time = 0;
+  const heights = [];
+  const advance = (seconds) => {
+    for (let frame = 0; frame < seconds * 60; frame++) {
+      time += 1 / 60;
+      runtime.updateBasePose(1 / 60);
+      runtime.updatePose(time * 1000);
+      hips.getWorldPosition(position);
+      assert.ok(Math.abs(position.x - anchor.x) < 1e-6, `hips X drift at ${time}: ${position.x - anchor.x}`);
+      assert.ok(Math.abs(position.z - anchor.z) < 1e-6, `hips Z drift at ${time}: ${position.z - anchor.z}`);
+      heights.push(position.y);
+    }
+  };
+  runtime.playClip('idle', 'idle');
+  advance(1);
+  runtime.pose('sit');
+  advance(7);
+  await runtime.loadClips([{ action: 'clap', format: 'tracks', bytes: payload('clap', [0.5, 0.55, 0.5], 0.8) }]);
+  assert.equal(runtime.clipStance('clap'), 'sit');
+  runtime.gesture('clap');
+  assert.equal(runtime.poseName, 'sit');
+  advance(4);
+  runtime.pose('stand');
+  advance(5);
+  assert.ok(Math.max(...heights) - Math.min(...heights) > 0.8);
+  assert.ok(Math.abs(position.y - 1.7) < 0.04);
+});
+
+test('VRMA cubic root tracks hold rest XZ without changing height interpolation', async (t) => {
+  const previous = globalThis.ProgressEvent;
+  globalThis.ProgressEvent = class { constructor(type, properties) { Object.assign(this, properties); } };
+  t.after(() => { if (previous) globalThis.ProgressEvent = previous; else delete globalThis.ProgressEvent; });
+  const hips = new THREE.Bone();
+  hips.name = 'RootHips';
+  hips.position.set(0.125, 1, -0.25);
+  const scene = new THREE.Group();
+  scene.add(hips);
+  const vrm = { scene, meta: { metaVersion: '1' }, humanoid: { getNormalizedBoneNode: () => hips, normalizedRestPose: { hips: { position: hips.position.toArray() } } } };
+  const data = new Float32Array([0, 1, 1, 0, 2, 3, 1, 4, 5, -0.5, 6, 7, -0.5, 8, 9, 0.5, 10, 11, 0, 12]);
+  const payload = new TextEncoder().encode(JSON.stringify({
+    asset: { version: '2.0' }, scene: 0, scenes: [{ nodes: [0] }], nodes: [{ name: 'Hips', translation: [0, 1, 0] }],
+    extensionsUsed: ['VRMC_vrm_animation'], extensions: { VRMC_vrm_animation: { specVersion: '1.0', humanoid: { humanBones: { hips: { node: 0 } } } } },
+    buffers: [{ uri: `data:application/octet-stream;base64,${Buffer.from(data.buffer).toString('base64')}`, byteLength: data.byteLength }],
+    bufferViews: [{ buffer: 0, byteOffset: 0, byteLength: 8 }, { buffer: 0, byteOffset: 8, byteLength: 72 }],
+    accessors: [{ bufferView: 0, componentType: 5126, count: 2, type: 'SCALAR', min: [0], max: [1] }, { bufferView: 1, componentType: 5126, count: 6, type: 'VEC3' }],
+    animations: [{ samplers: [{ input: 0, output: 1, interpolation: 'CUBICSPLINE' }], channels: [{ sampler: 0, target: { node: 0, path: 'translation' } }] }],
+  }));
+  const clip = await animationClip(payload, 'vrma', vrm);
+  const track = clip.tracks[0];
+  const sample = track.createInterpolant();
+  for (let frame = 0; frame <= 60; frame++) {
+    const time = frame / 60;
+    const value = sample.evaluate(time);
+    assert.ok(Math.abs(value[0] - 0.125) < 1e-7);
+    assert.ok(Math.abs(value[2] + 0.25) < 1e-7);
+    assert.ok(Math.abs(value[1] - (1 - time * 0.5)) < 1e-7);
+  }
+});

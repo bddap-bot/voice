@@ -76,6 +76,21 @@ function handoverFor(from, to) {
   return { offset: best.offset, duration: THREE.MathUtils.clamp(1.5 + best.distance * 4, 1.5, 2.5) };
 }
 
+function inPlaceClip(clip, vrm) {
+  const hips = vrm.humanoid?.getNormalizedBoneNode('hips');
+  const rest = vrm.humanoid?.normalizedRestPose.hips?.position;
+  if (!hips || !rest) return clip;
+  for (const track of clip.tracks) {
+    if (track.name !== `${hips.name}.position` && track.name !== `${hips.uuid}.position`) continue;
+    for (let index = 0; index < track.values.length; index += 3) {
+      const tangent = track.createInterpolant.isInterpolantFactoryMethodGLTFCubicSpline && index % 9 !== 3;
+      track.values[index] = tangent ? 0 : rest[0];
+      track.values[index + 2] = tangent ? 0 : rest[2];
+    }
+  }
+  return clip;
+}
+
 export async function animationClip(bytes, format, vrm) {
   if (format === 'vrma') {
     const loader = new GLTFLoader();
@@ -85,7 +100,7 @@ export async function animationClip(bytes, format, vrm) {
       const gltf = await loader.loadAsync(url);
       const animation = gltf.userData.vrmAnimations?.[0];
       if (!animation) throw new Error('VRMA has no animation');
-      return createVRMAnimationClip(animation, vrm);
+      return inPlaceClip(createVRMAnimationClip(animation, vrm), vrm);
     } finally { URL.revokeObjectURL(url); }
   }
   if (format === 'tracks') {
@@ -98,7 +113,7 @@ export async function animationClip(bytes, format, vrm) {
         : new THREE.VectorKeyframeTrack(track.name, track.times, track.values);
     });
     if (!tracks.some((track) => track.name.endsWith('.quaternion'))) throw new Error('animation has no rotation tracks');
-    const clip = new THREE.AnimationClip(value.name, value.duration, tracks);
+    const clip = inPlaceClip(new THREE.AnimationClip(value.name, value.duration, tracks), vrm);
     clip.userData.poseTracks = tracks.map((track) => ({ name: track.name, valueSize: track.getValueSize(), interpolant: track.createInterpolant() }));
     return clip;
   }

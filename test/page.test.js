@@ -161,7 +161,7 @@ const browserSetup = `
 globalThis.emitLive = (event) => testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(event) }));
 globalThis.hear = (delta) => emitLive({ type: 'session.input_transcript.delta', delta });
 globalThis.delegateTurn = (id) => emitLive({ type: 'session.delegation.created', event_id: 'event_' + id, offset_ms: 0, delegation: { id, type: 'delegation', target: 'client' } });
-globalThis.replyFromHub = (id, stamp, channels, timing_ms = 5) => deliverRelay(new TextEncoder().encode('hub\\n' + JSON.stringify({ id, commentary: [], thinking: [], instructions: [], timing_ms, stamp, ...channels })));
+globalThis.replyFromHub = (id, stamp, commentary = [], timing_ms = 5) => deliverRelay(new TextEncoder().encode('hub\\n' + JSON.stringify({ id, commentary, timing_ms, stamp })));
 window.addEventListener('error', (event) => { document.body.dataset.browserError = event.message; });
 window.addEventListener('unhandledrejection', (event) => { document.body.dataset.browserError = String(event.reason?.stack || event.reason); });
 globalThis.__voiceLoadEmbedder = async () => async (texts) => texts.map((text) => {
@@ -694,7 +694,7 @@ window.addEventListener('test-ready', () => {
   testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.input_transcript.delta', delta: 'Where is the report?' }) }));
   delegateTurn('state_1');
   const waiting = text();
-  replyFromHub('state_1', 'state_stamp', { commentary: ['On the display.'] }, 12);
+  replyFromHub('state_1', 'state_stamp', ['On the display.'], 12);
   setTimeout(() => {
     const answered = text();
     document.querySelector('#puppet').click();
@@ -813,7 +813,7 @@ window.addEventListener('test-ready', () => {
   const image = Uint8Array.from([137,80,78,71,13,10,26,10]);
   const frame = new Uint8Array(metadata.length + image.length);
   frame.set(metadata); frame.set(image, metadata.length);
-  replyFromHub('unknown', undefined, { commentary: ['plain'] }, 1);
+  replyFromHub('unknown', undefined, ['plain'], 1);
   deliverRelay(frame);
   deliverRelay(enc.encode('display\\n' + JSON.stringify({ markdown: 'Newest' }) + '\\n'));
   const fresh = () => document.querySelector('#display').classList.contains('fresh');
@@ -849,12 +849,12 @@ window.addEventListener('test-ready', () => {
   emit({ type: 'session.output_transcript.delta', delta: 'I will inspect the fixture.', start_ms: 0, end_ms: 20 });
   emit({ type: 'session.input_transcript.delta', delta: 'Check the fixture stream.' });
   delegateTurn('fixture');
-  replyFromHub('fixture', 'fixture', { commentary: ['The fixture is complete.'], thinking: ['The fixture ran twice.'], instructions: ['Keep fixture answers short.'] }, 42);
+  replyFromHub('fixture', 'fixture', ['The fixture is complete.'], 42);
   setTimeout(() => { document.body.dataset.delegationLogTest = document.querySelector('#log').innerText; }, 30);
 });
 `, { size: '1440,900' });
   const observed = /data-delegation-log-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"') ?? '';
-  const expected = ['MODEL ALONE', 'spoke: I will inspect the fixture.', 'MODEL HEARD', 'heard: Check the fixture stream.', 'DELEGATED', 'sent to hub: Check the fixture stream.', 'context sent: [{"speaker":"live","text":"I will inspect the fixture."}]', 'hub reply: The fixture is complete.', 'hub thinking: The fixture ran twice.', 'hub instructions: Keep fixture answers short.', 'hub timing: 42 ms'];
+  const expected = ['MODEL ALONE', 'spoke: I will inspect the fixture.', 'MODEL HEARD', 'heard: Check the fixture stream.', 'DELEGATED', 'sent to hub: Check the fixture stream.', 'context sent: [{"speaker":"live","text":"I will inspect the fixture."}]', 'hub reply: The fixture is complete.', 'hub timing: 42 ms'];
   for (const value of expected) assert.ok(observed.includes(value), `${value}\n${observed}\n${stderr}`);
 });
 
@@ -882,7 +882,7 @@ window.addEventListener('test-ready', async () => {
   hear('Check the weather.');
   delegateTurn('dlg');
   await pause();
-  replyFromHub('dlg', 'stamp_1', { commentary: ['Sunny.'] });
+  replyFromHub('dlg', 'stamp_1', ['Sunny.']);
   await pause();
   emitLive({ type: 'session.output_transcript.delta', delta: 'Sunny.' });
   await new Promise((resolve) => setTimeout(resolve, 200));
@@ -921,7 +921,7 @@ window.addEventListener('test-ready', async () => {
   assert.ok(frames.every((frame) => Number.isFinite(frame.duration_ms) && /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/.test(frame.traceparent)));
 });
 
-test('a delegation appends nothing until its hub reply, which reaches Live after an exact-speech instruction, while a display-only push says nothing', async () => {
+test('a delegation appends nothing until its hub reply, which reaches Live as commentary alone, while a display-only push says nothing', async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {
   const pause = () => new Promise((resolve) => setTimeout(resolve, 30));
@@ -930,10 +930,10 @@ window.addEventListener('test-ready', async () => {
   delegateTurn('slow');
   await pause();
   const closed = told();
-  replyFromHub('slow', 'push_1', {});
+  replyFromHub('slow', 'push_1');
   await pause();
   const pushed = { told: told().length - closed.length, waiting: testPuppet.calls.filter(([name]) => name === 'waiting').map(([, value]) => value) };
-  replyFromHub('slow', 'reply_1', { commentary: ['Four jobs are queued.'] }, 180000);
+  replyFromHub('slow', 'reply_1', ['Four jobs are queued.'], 180000);
   await pause();
   deliverRelay(new TextEncoder().encode('hub-error\\n' + JSON.stringify({ id: 'slow', message: 'invalid hub reply' })));
   hear('Is the printer busy?');
@@ -951,59 +951,43 @@ window.addEventListener('test-ready', async () => {
   assert.deepEqual(result.closed, []);
   assert.deepEqual(result.pushed, { told: 0, waiting: [true] });
   assert.deepEqual(shape(result.told), [
-    ['session.instructions.append', 'hub_script_reply_1', 'slow'],
     ['session.commentary.append', 'hub_reply_1', 'slow'],
     ['session.commentary.append', 'hub_error_lost', 'lost'],
   ]);
-  assert.match(result.told[0][3], /Read that reply exactly once, word for word/);
-  assert.equal(result.told[1][3], 'Four jobs are queued.');
-  assert.equal(result.told[2][3], 'The hub request failed.');
+  assert.equal(result.told[0][3], 'Four jobs are queued.');
+  assert.equal(result.told[1][3], 'The hub request failed.');
   assert.match(result.log, /Is the printer busy\?[\s\S]*delegation queue is full/);
   assert.deepEqual(result.acks, ['push_1', 'reply_1']);
   assert.deepEqual(result.waiting, [true, false, true, false]);
   assert.match(result.log, /sent to hub: How many jobs are queued\?[\s\S]*hub reply: Four jobs are queued\./);
 });
 
-test('each channel of a hub reply reaches Live as its matching append event, alone or mixed', async () => {
+test('a hub reply appends each part as commentary, with a delegation ID only when it answers one', async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {
   const pause = () => new Promise((resolve) => setTimeout(resolve, 30));
+  hear('How many jobs need attention?');
+  delegateTurn('item_mix');
+  await pause();
   const replies = {};
-  for (const [id, channels, delegated] of [
-    ['item_thinking', { thinking: ['Job 7 failed at noon.'] }, true],
-    ['item_instructions', { instructions: ['Keep answers under ten words.'] }, true],
-    ['item_mix', { instructions: ['Answer briefly.'], thinking: ['Job 7 failed.', 'Job 8 runs.'], commentary: ['Two jobs need attention.', 'Both are on the display.'] }, true],
-    ['share_1', { commentary: ['The link is the release notes.'] }, false],
-  ]) {
-    if (delegated) {
-      hear('Question for ' + id + '.');
-      delegateTurn(id);
-      await pause();
-    }
+  for (const [id, commentary] of [['item_mix', ['Two jobs need attention.', 'Both are on the display.']], ['share_1', ['The link is the release notes.']]]) {
     const before = sentLiveEvents.length;
-    replyFromHub(id, id, channels);
+    replyFromHub(id, id, commentary);
     await pause();
-    replies[id] = sentLiveEvents.slice(before).map(({ type, event_id, delegation_id, content }) => [type, event_id, delegation_id, content.startsWith('The next application commentary is a new hub reply.') ? 'exact-read' : content]);
+    replies[id] = sentLiveEvents.slice(before).map(({ type, event_id, delegation_id, content }) => [type, event_id, delegation_id, content]);
   }
   document.body.dataset.channelTest = JSON.stringify(replies);
 });
 `);
   const replies = JSON.parse(/data-channel-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"') ?? 'null');
   assert.ok(replies, stderr);
-  assert.deepEqual(replies.item_thinking, [['session.thinking.append', 'thinking_item_thinking_0', 'item_thinking', 'Job 7 failed at noon.']]);
-  assert.deepEqual(replies.item_instructions, [['session.instructions.append', 'instructions_item_instructions_0', 'item_instructions', 'Keep answers under ten words.']]);
-  assert.deepEqual(replies.item_mix, [
-    ['session.instructions.append', 'instructions_item_mix_0', 'item_mix', 'Answer briefly.'],
-    ['session.thinking.append', 'thinking_item_mix_0', 'item_mix', 'Job 7 failed.'],
-    ['session.thinking.append', 'thinking_item_mix_1', 'item_mix', 'Job 8 runs.'],
-    ['session.instructions.append', 'hub_script_item_mix', 'item_mix', 'exact-read'],
-    ['session.commentary.append', 'hub_item_mix', 'item_mix', 'Two jobs need attention.'],
-    ['session.commentary.append', 'hub_item_mix_1', 'item_mix', 'Both are on the display.'],
-  ]);
-  assert.deepEqual(replies.share_1, [
-    ['session.instructions.append', 'hub_script_share_1', null, 'exact-read'],
-    ['session.commentary.append', 'hub_share_1', null, 'The link is the release notes.'],
-  ]);
+  assert.deepEqual(replies, {
+    item_mix: [
+      ['session.commentary.append', 'hub_item_mix', 'item_mix', 'Two jobs need attention.'],
+      ['session.commentary.append', 'hub_item_mix_1', 'item_mix', 'Both are on the display.'],
+    ],
+    share_1: [['session.commentary.append', 'hub_share_1', null, 'The link is the release notes.']],
+  });
 });
 
 test('output transcript drives mood and delegation drives the waiting pose', async () => {
@@ -1499,7 +1483,7 @@ test('a sign-off with a delegation outstanding ends the session and its late hub
     hear('Corvus, go to sleep.');
     signOff();
     await until(() => quiets.length === 1);
-    replyFromHub('pending', 'late', { commentary: ['The test beacon is amber.'], instructions: ['Answer briefly.'] });
+    replyFromHub('pending', 'late', ['The test beacon is amber.']);
     await until(() => quiets.length === 2);
     for (const resolve of quiets) resolve();
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && sessionEvents('close').length && globalThis.hubAcks?.length);
@@ -1516,7 +1500,7 @@ test('a sign-off while a hub reply waits for speech to go quiet drops that reply
     hear('Check the test beacon.');
     delegateTurn('pending');
     await until(() => count('delegate'));
-    replyFromHub('pending', 'late', { commentary: ['The test beacon is amber.'], instructions: ['Answer briefly.'] });
+    replyFromHub('pending', 'late', ['The test beacon is amber.']);
     await until(() => quiets.length === 1);
     signOff();
     await until(() => quiets.length === 2);
@@ -1866,7 +1850,7 @@ window.addEventListener('test-ready', () => {
   assert.doesNotMatch(JSON.stringify(events), /private instructions|private state/);
 });
 
-test('a woken session receives only the fresh hub reply after its speech instruction', async () => {
+test('a woken session receives only the fresh hub reply', async () => {
   const result = await runWakePage(`
     emitLive({ type: 'session.output_transcript.delta', delta: 'The test beacon is amber.' });
     signOff();
@@ -1876,15 +1860,13 @@ test('a woken session receives only the fresh hub reply after its speech instruc
     hear('Check the test beacon.');
     delegateTurn('fresh');
     await until(() => count('delegate') > 0);
-    replyFromHub('fresh', 'fresh', { commentary: ['The test beacon is violet.'] });
+    replyFromHub('fresh', 'fresh', ['The test beacon is violet.']);
     await until(() => sentLiveEvents.some((event) => event.event_id === 'hub_fresh'));
-    return { sent: delegateFrames.at(-1).text, context: lastOffer.context, pending: sentLiveEvents.filter((event) => event.type.endsWith('.append') && ['waiting_fresh', 'checking_fresh'].includes(event.event_id)).length, instruction: sentLiveEvents.find((event) => event.event_id === 'hub_script_fresh'), reply: sentLiveEvents.find((event) => event.event_id === 'hub_fresh') };
+    return { sent: delegateFrames.at(-1).text, context: lastOffer.context, appended: sentLiveEvents.filter((event) => event.type.endsWith('.append') && !['identity', 'wake'].includes(event.event_id)).map((event) => event.event_id), reply: sentLiveEvents.find((event) => event.event_id === 'hub_fresh') };
   `);
   assert.equal(result.sent, 'Check the test beacon.');
   assert.ok(result.context.some((turn) => turn.text.includes('amber')));
-  assert.equal(result.pending, 0);
-  assert.equal(result.instruction.type, 'session.instructions.append');
-  assert.match(result.instruction.content, /Read that reply exactly once, word for word/);
+  assert.deepEqual(result.appended, ['hub_fresh']);
   assert.equal(result.reply.type, 'session.commentary.append');
   assert.equal(result.reply.delegation_id, 'fresh');
   assert.equal(result.reply.content, 'The test beacon is violet.');
@@ -1899,7 +1881,7 @@ test('a reply waiting for quiet cannot become speech in the next woken session',
     hear('Check the test beacon.');
     delegateTurn('previous');
     await until(() => count('delegate') > 0);
-    replyFromHub('previous', 'previous', { commentary: ['The test beacon is amber.'] });
+    replyFromHub('previous', 'previous', ['The test beacon is amber.']);
     await until(() => quiet);
     const before = sentLiveEvents.filter((event) => event.event_id === 'hub_previous').length;
     document.querySelector('#puppet').click();

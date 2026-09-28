@@ -14,7 +14,7 @@ export function spokenBetween(capture, ch, from, to) {
 }
 
 export function spokenReply(capture, ch, stamp, end) {
-  const applied = capture.rt.find((row) => row.ch === ch && row.dir === 'in' && ['session.instructions.appended', 'session.commentary.appended'].includes(row.event.type) && row.event.client_event_id === `hub_${stamp}`);
+  const applied = capture.rt.find((row) => row.ch === ch && row.dir === 'in' && row.event.type === 'session.commentary.appended' && row.event.client_event_id === `hub_${stamp}`);
   assert.ok(Number.isFinite(applied?.event.start_ms), `session ${ch}: reply was not applied to the audio timeline`);
   const sent = capture.rt.find((row) => row.ch === ch && row.dir === 'out' && row.event.event_id === `hub_${stamp}`);
   assert.ok(sent, `session ${ch}: missing reply submission`);

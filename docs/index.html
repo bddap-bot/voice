@@ -330,7 +330,7 @@ function render(entries) {
     record.tag.textContent = name;
     const lines = entry.kind === 'heard' ? [['heard', entry.text]]
       : entry.kind === 'spoken' ? [['spoke', entry.text]]
-      : [['sent to hub', entry.sent], ['context sent', JSON.stringify(entry.context)], ...(entry.timing === null && !entry.failed ? [['hub reply', 'waiting…']] : [['hub reply', entry.reply], ['hub thinking', entry.thinking], ['hub instructions', entry.instructions]].filter(([, value]) => value)), ['hub timing', entry.timing === null ? 'waiting…' : `${entry.timing} ms`]];
+      : [['sent to hub', entry.sent], ['context sent', JSON.stringify(entry.context)], ...(entry.timing === null && !entry.failed ? [['hub reply', 'waiting…']] : (entry.reply ? [['hub reply', entry.reply]] : [])), ['hub timing', entry.timing === null ? 'waiting…' : `${entry.timing} ms`]];
     record.body.replaceChildren(...lines.map(([key, value]) => {
       const line = document.createElement('div');
       line.className = 'line';
@@ -884,18 +884,15 @@ function finishHubWait(id) {
   if (!hubWaiting.size) puppetRuntime?.waiting(false);
 }
 async function receiveHub(result) {
-  if (result.commentary.length || result.thinking.length || result.instructions.length) {
+  if (result.commentary.length) {
     finishHubWait(result.id);
-    trace.hub(result.id, result, result.timing_ms);
+    trace.hub(result.id, result.commentary, result.timing_ms);
     stageTrace?.hubReplied(result.id);
     const current = conversation;
     await current?.audioOwner.playback.quiet();
     if (current && conversation === current && !current.sleeping) {
       const owner = current.audioOwner;
       const delegation = owner.delegations.has(result.id) ? result.id : null;
-      result.instructions.forEach((content, index) => tell(owner, 'session.instructions.append', `instructions_${result.stamp}_${index}`, delegation, content));
-      result.thinking.forEach((content, index) => tell(owner, 'session.thinking.append', `thinking_${result.stamp}_${index}`, delegation, content));
-      if (result.commentary.length) tell(owner, 'session.instructions.append', `hub_script_${result.stamp}`, delegation, 'The next application commentary is a new hub reply. Read that reply exactly once, word for word, without an introduction or any other text. Then remain silent until the user speaks again. Do not resume the archived conversation or repeat earlier replies, greetings, or pending acknowledgments.');
       result.commentary.forEach((content, index) => tell(owner, 'session.commentary.append', index ? `hub_${result.stamp}_${index}` : `hub_${result.stamp}`, delegation, content));
     }
   }

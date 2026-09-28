@@ -134,15 +134,13 @@ test('retryable storage errors resend while permanent ones release only their ma
   assert.deepEqual(sent, ['sent', 'sent']);
 });
 
-const said = (text) => ({ commentary: [text], thinking: [], instructions: [] });
-
-test('a hub reply records each channel it chose on its delegation', () => {
+test('a hub reply records its spoken text on its delegation', () => {
   const trace = new ConversationTrace();
   const heard = trace.heard('check the queue');
   assert.equal(heard, trace.entries[0]);
   trace.delegated('item_channels');
-  assert.equal(trace.hub('item_channels', { commentary: ['Two jobs.', 'Both run.'], thinking: ['Job 7 failed.'], instructions: ['Answer briefly.'] }, 9), true);
-  assert.deepEqual(['reply', 'thinking', 'instructions', 'timing'].map((key) => trace.entries[1][key]), ['Two jobs. Both run.', 'Job 7 failed.', 'Answer briefly.', 9]);
+  assert.equal(trace.hub('item_channels', ['Two jobs.', 'Both run.'], 9), true);
+  assert.deepEqual(['reply', 'timing'].map((key) => trace.entries[1][key]), ['Two jobs. Both run.', 9]);
 });
 
 test('the sign-off is found in a transcript regardless of case, spacing and punctuation', () => {
@@ -154,7 +152,7 @@ test('an ended session closes its undelegated turn, so the next session hands th
   const trace = new ConversationTrace();
   trace.heard('Goodnight, Corvus.');
   trace.delegated('item_answered');
-  trace.hub('item_answered', { commentary: [], thinking: ['Noted.'], instructions: [] }, 5);
+  trace.hub('item_answered', ['Noted.'], 5);
   trace.heard('Goodnight, ');
   trace.heard('Corvus.');
   trace.slept();
@@ -168,7 +166,7 @@ test('an ended session keeps its last spoken turn apart from the next session gr
   const trace = new ConversationTrace();
   trace.heard('status');
   trace.delegated('item_before_sleep');
-  trace.hub('item_before_sleep', said('The beacon is amber.'), 5);
+  trace.hub('item_before_sleep', ['The beacon is amber.'], 5);
   trace.spoke('The beacon is amber.');
   trace.slept();
   trace.spoke('Hello again.');
@@ -176,7 +174,7 @@ test('an ended session keeps its last spoken turn apart from the next session gr
   assert.equal(trace.entries.at(-1).source, 'model alone');
   trace.heard('status again');
   trace.delegated('item_unspoken');
-  trace.hub('item_unspoken', said('The beacon is violet.'), 5);
+  trace.hub('item_unspoken', ['The beacon is violet.'], 5);
   trace.slept();
   trace.spoke('Hello once more.');
   assert.equal(trace.entries.at(-1).source, 'model alone');
@@ -185,8 +183,8 @@ test('an ended session keeps its last spoken turn apart from the next session gr
 test('shared material and its hub reply remain in the conversation trace', () => {
   const trace = new ConversationTrace();
   trace.shared('share_1', 'https://example.test/a?q=one');
-  assert.equal(trace.hub('share_1', said('received'), 12), true);
-  assert.deepEqual(trace.entries[0], { kind: 'delegation', id: 'share_1', sent: 'https://example.test/a?q=one', context: [], reply: 'received', thinking: '', instructions: '', timing: 12, shared: true });
+  assert.equal(trace.hub('share_1', ['received'], 12), true);
+  assert.deepEqual(trace.entries[0], { kind: 'delegation', id: 'share_1', sent: 'https://example.test/a?q=one', context: [], reply: 'received', timing: 12, shared: true });
 });
 
 test('ending voice does not cancel a pending shared request', () => {
@@ -205,7 +203,7 @@ test('timeline preserves every heard and spoken fragment around delegation', () 
   trace.spoke('One moment.');
   trace.heard('deployment', 200);
   const delegation = trace.delegated('item_1', 500);
-  trace.hub('item_1', said('running'), 870);
+  trace.hub('item_1', ['running'], 870);
   trace.spoke('It is running.');
   assert.equal(delegation.sent, 'check the\ndeployment');
   assert.equal(delegation.duration_ms, 400);
@@ -213,7 +211,7 @@ test('timeline preserves every heard and spoken fragment around delegation', () 
     { kind: 'heard', text: 'check the ' },
     { kind: 'spoken', source: 'model alone', text: 'One moment.' },
     { kind: 'heard', text: 'deployment' },
-    { kind: 'delegation', id: 'item_1', sent: 'check the\ndeployment', context: [{ speaker: 'live', text: 'One moment.' }], reply: 'running', thinking: '', instructions: '', timing: 870, duration_ms: 400 },
+    { kind: 'delegation', id: 'item_1', sent: 'check the\ndeployment', context: [{ speaker: 'live', text: 'One moment.' }], reply: 'running', timing: 870, duration_ms: 400 },
     { kind: 'spoken', source: 'model after hub reply', text: 'It is running.' },
   ]);
 });
@@ -268,7 +266,7 @@ test('speech received after a hub reply keeps chronological attribution when inp
   const trace = new ConversationTrace();
   trace.heard('status');
   trace.delegated('item_overlap');
-  trace.hub('item_overlap', said('running'), 10);
+  trace.hub('item_overlap', ['running'], 10);
   trace.spoke('It is ', 100, 200);
   trace.heard('sorry', 0, 150);
   trace.spoke('running.', 200, 300);
@@ -279,7 +277,7 @@ test('speech after a later user turn is tagged model alone', () => {
   const trace = new ConversationTrace();
   trace.heard('status');
   trace.delegated('item_later');
-  trace.hub('item_later', said('running'), 10);
+  trace.hub('item_later', ['running'], 10);
   trace.spoke('Running.', 100, 200);
   trace.heard('thanks', 0, 300);
   trace.spoke('You are welcome.', 320, 400);
@@ -292,7 +290,7 @@ test('hub results remain on their delegation when later speech occurs', () => {
   trace.delegated('item_3');
   trace.heard('thanks');
   trace.spoke('Welcome.');
-  trace.hub('item_3', said('deployed'), 50);
+  trace.hub('item_3', ['deployed'], 50);
   assert.equal(trace.entries[1].reply, 'deployed');
   assert.equal(trace.entries.at(-1).text, 'Welcome.');
 });

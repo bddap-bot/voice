@@ -172,6 +172,7 @@ Object.defineProperty(globalThis, 'caches', { value: { open: async () => ({
 globalThis.microphoneOpens = 0;
 Object.defineProperty(navigator, 'mediaDevices', { value: Object.assign(new EventTarget(), { getUserMedia: async () => {
   if (globalThis.microphoneMissing) throw new DOMException('Requested device not found', 'NotFoundError');
+  if (globalThis.microphoneRefused) throw new DOMException('Permission denied', 'NotAllowedError');
   const track = Object.assign(new EventTarget(), { enabled: true, readyState: 'live', stop() { this.readyState = 'ended'; } });
   globalThis.testMicrophoneTrack = track;
   microphoneOpens++;
@@ -1612,6 +1613,28 @@ test('a microphone that cannot reopen after it ends comes back on the next devic
     return { missing, returned: { opens: microphoneOpens - opens, running: !testSpotter.closed, hears: testSpotter.stream.getAudioTracks()[0].readyState }, errors: fleetLines };
   `);
   assert.deepEqual(result, { missing: { opens: 0, running: false }, returned: { opens: 1, running: true, hears: 'live' }, errors: ['fleet-error: voice/page — NotFoundError: Requested device not found'] });
+});
+
+test('a refused microphone shows on the status line, asleep or tapped, as a session event and no page error, and clears once allowed', async () => {
+  const result = await runWakePage(`
+    await sleepNow();
+    await until(() => globalThis.testSpotter && !testSpotter.closed);
+    const status = () => document.querySelector('#status').textContent;
+    globalThis.microphoneRefused = true;
+    endMicrophone();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const asleep = { status: status(), refusals: sessionEvents('microphone-refused').map((event) => event.detail), running: !testSpotter.closed };
+    document.querySelector('#mic-mute').click();
+    document.querySelector('#puppet').click();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const tapped = { status: status(), pressed: document.querySelector('#puppet').getAttribute('aria-pressed') };
+    globalThis.microphoneRefused = false;
+    document.querySelector('#mic-mute').click();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return { asleep, tapped, allowed: { status: status(), running: !testSpotter.closed, hears: testSpotter.stream.getAudioTracks()[0].readyState }, errors: fleetLines };
+  `);
+  const refused = "microphone not allowed — enable it in this site's settings";
+  assert.deepEqual(result, { asleep: { status: refused, refusals: ['Permission denied'], running: false }, tapped: { status: refused, pressed: 'false' }, allowed: { status: '', running: true, hears: 'live' }, errors: [] });
 });
 
 test('with no microphone at load, mute is available at once and holds when a device arrives', async () => {

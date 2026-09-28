@@ -202,7 +202,8 @@ const persistenceUploads = new AckUploader(sendBytes, { maximumBytes: 128 * 1024
 function sessionId() { return conversation?.id ?? starting?.offerId ?? null; }
 let webGpuAdapterFound = null;
 webGpuAdapter().then((adapter) => { webGpuAdapterFound = Boolean(adapter); });
-function recordPageError(error, id = sessionId()) { telemetry.add(errorEvent(error, id, Date.now(), { userAgent: navigator.userAgent, webgpuAdapter: webGpuAdapterFound })); }
+const microphoneRefusal = new Error("microphone not allowed — enable it in this site's settings");
+function recordPageError(error, id = sessionId()) { if (error !== microphoneRefusal) telemetry.add(errorEvent(error, id, Date.now(), { userAgent: navigator.userAgent, webgpuAdapter: webGpuAdapterFound })); }
 function recordSession(name, detail = '', id = sessionId()) { telemetry.add({ kind: 'session', session_id: id, name, detail: String(detail).slice(0, 2048), at: Date.now() }); }
 window.addEventListener('error', (event) => recordPageError(event.error || Object.assign(new Error(event.message), { stack: `${event.filename || ''}:${event.lineno || 0}:${event.colno || 0}` })));
 window.addEventListener('unhandledrejection', (event) => recordPageError(event.reason));
@@ -648,10 +649,14 @@ function acquireMicrophone() {
     microphoneStream = stream;
     for (const track of stream.getTracks()) track.addEventListener('ended', () => microphoneEnded(stream));
     setMicrophoneMuted(microphoneMuted);
+    if ($('status').textContent === microphoneRefusal.message) setStatus();
     return stream;
   }, (error) => {
     if (microphone === opening) microphone = undefined;
-    throw error;
+    if (error?.name !== 'NotAllowedError') throw error;
+    recordSession('microphone-refused', error.message);
+    setStatus(microphoneRefusal.message, 'err');
+    throw microphoneRefusal;
   });
   return opening;
 }
@@ -1063,7 +1068,7 @@ async function toggleConversation() {
     if (conversation) stopConversation('conversation could not start');
     else paintOff();
     console.warn('voice:', error);
-    setStatus(`conversation could not start: ${formatStartError(error)}`, 'err');
+    if (error !== microphoneRefusal) setStatus(`conversation could not start: ${formatStartError(error)}`, 'err');
   }
 }
 async function start(raw) {

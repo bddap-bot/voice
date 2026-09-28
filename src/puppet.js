@@ -193,12 +193,7 @@ export class PuppetRuntime {
     rim.position.set(-3, 2, -2);
     this.scene.add(rim);
     this.mixer = new THREE.AnimationMixer(this.idleRoot);
-    const idle = new THREE.AnimationClip('base-idle', 6, [
-      new THREE.NumberKeyframeTrack('.position[y]', [0, 1.5, 3, 4.5, 6], [0, 0.018, 0, 0.012, 0]),
-      new THREE.NumberKeyframeTrack('.rotation[z]', [0, 2, 4, 6], [-0.012, 0.015, -0.008, -0.012]),
-      new THREE.NumberKeyframeTrack('.rotation[y]', [0, 2.5, 4.5, 6], [0, 0.018, -0.015, 0]),
-    ]);
-    this.animationActions = new Set([this.mixer.clipAction(idle).play()]);
+    this.animationActions = new Set();
     this.clips = new Map();
     this.handovers = new Map();
     this.clipAction = null;

@@ -1,11 +1,9 @@
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { access, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
 import { setTimeout } from 'node:timers/promises';
-
-const execute = promisify(execFile);
 
 export async function chromiumExecutable() {
   if (process.env.CHROMIUM_BIN) return process.env.CHROMIUM_BIN;
@@ -19,8 +17,8 @@ export async function chromiumExecutable() {
 
 export async function launchChromium({ executable, args = [], prefix = '.chromium-' } = {}) {
   executable ??= await chromiumExecutable();
-  const scratch = await mkdtemp(join(process.cwd(), prefix));
-  const chrome = spawn(executable, [...args, `--user-data-dir=${scratch}`, '--remote-debugging-pipe'], { detached: true, stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'], env: { ...process.env, TMPDIR: scratch } });
+  const scratch = await mkdtemp(join(tmpdir(), prefix));
+  const chrome = spawn(executable, [...args, `--user-data-dir=${scratch}`, '--remote-debugging-pipe'], { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'], env: { ...process.env, TMPDIR: scratch } });
   let stderr = '', failure;
   chrome.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-500); });
   chrome.on('error', error => { failure = error; });
@@ -29,23 +27,8 @@ export async function launchChromium({ executable, args = [], prefix = '.chromiu
   }));
   let closing;
   const close = () => closing ??= (async () => {
-    if (chrome.pid) {
-      try { process.kill(-chrome.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
-    }
+    if (chrome.pid) chrome.kill('SIGKILL');
     await exited;
-    if (chrome.pid) {
-      const deadline = Date.now() + 10000;
-      while (true) {
-        const { stdout } = await execute('ps', ['-eo', 'pgid=,stat=']);
-        const running = stdout.trim().split('\n').some(line => {
-          const [group, state] = line.trim().split(/\s+/);
-          return Number(group) === chrome.pid && !state.startsWith('Z');
-        });
-        if (!running) break;
-        if (Date.now() >= deadline) throw new Error('Chromium process group did not exit; profile retained');
-        await setTimeout(20);
-      }
-    }
     await rm(scratch, { recursive: true, force: true });
   })();
   return { scratch, exited, close, devtools: devtools(chrome.stdio[3], chrome.stdio[4]), get stderr() { return stderr; } };

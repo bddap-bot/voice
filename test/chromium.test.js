@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { access, readdir, readFile } from 'node:fs/promises';
+import { access, readdir } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { launchChromium, renderDom } from '../scripts/chromium.mjs';
 
@@ -17,34 +18,55 @@ async function running(pid) {
   });
 }
 
-test('Chromium cleanup waits for an orphaned profile writer after the browser closes', { timeout: 15000 }, async () => {
+async function launchFake(browser) {
+  const chrome = await launchChromium({ executable: process.execPath, args: ['-e', browser, '--'] });
+  let ended = false;
+  chrome.exited.then(() => { ended = true; });
+  while (!chrome.stderr.includes('\n')) {
+    if (ended) throw await chrome.exited;
+    await delay(10);
+  }
+  return chrome;
+}
+
+test('Chromium cleanup waits for every process holding the browser output, even outside its session, then removes its scratch directory', { timeout: 30000 }, async () => {
   const writer = `
-    const fs = require('node:fs');
-    const profile = process.argv[1];
-    fs.writeFileSync(profile + '/child', String(process.pid));
-    const timer = setInterval(() => fs.writeFileSync(profile + '/writing', 'active'), 1);
-    process.send('ready');
-    setTimeout(() => { clearInterval(timer); process.exit(); }, 10000);
+    const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+    const browser = process.ppid, temporary = path.join(os.tmpdir(), 'writer');
+    fs.writeFileSync(temporary, 'active');
+    let file = 0;
+    setInterval(() => { try { fs.writeFileSync(process.argv[1] + '/' + file++, 'active'); } catch {} }, 1);
+    process.stderr.write(process.pid + ' ' + temporary + '\\n');
+    const watch = setInterval(() => { if (process.ppid !== browser) { clearInterval(watch); process.stderr.write('orphaned\\n'); } }, 5);
   `;
-  const parent = `
-    const { spawn } = require('node:child_process');
-    const profile = process.argv[1].split('=')[1];
-    const child = spawn(process.execPath, ['-e', ${JSON.stringify(writer)}, profile], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
-    child.once('message', () => process.exit());
-  `;
-  const browser = await launchChromium({ executable: process.execPath, args: ['-e', parent, '--'] });
+  const chrome = await launchFake(`
+    require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(writer)}, process.argv[1].split('=')[1]], { detached: true, stdio: ['ignore', 'ignore', 'inherit'] });
+    setInterval(() => {}, 1000);
+  `);
   let child;
   try {
-    await browser.exited;
-    child = Number(await readFile(join(browser.scratch, 'child'), 'utf8'));
-    assert.ok(await running(child), 'the child outlives the browser and its stdio');
-    await browser.close();
-    assert.equal(await running(child), false, 'the child has exited before cleanup returns');
-    await assert.rejects(access(browser.scratch), { code: 'ENOENT' });
-    await browser.close();
+    const [, pid, temporary] = /^(\d+) (.+)$/m.exec(chrome.stderr);
+    child = Number(pid);
+    const closing = chrome.close();
+    while (!chrome.stderr.includes('orphaned')) await delay(10);
+    assert.equal(await Promise.race([closing.then(() => 'closed', () => 'closed'), delay(1000, 'waiting')]), 'waiting', 'cleanup finished while the writer still ran');
+    process.kill(child, 'SIGKILL');
+    child = undefined;
+    await closing;
+    for (const path of [chrome.scratch, temporary]) await assert.rejects(access(path), { code: 'ENOENT' });
   } finally {
-    if (child && await running(child)) process.kill(child, 'SIGKILL');
-    await browser.close();
+    if (child) process.kill(child, 'SIGKILL');
+    await chrome.close();
+  }
+});
+
+test('Chromium shares the launcher process group, so an interrupt reaches it', async () => {
+  const chrome = await launchFake(`process.stderr.write(process.pid + '\\n'); setInterval(() => {}, 1000);`);
+  const group = async pid => Number((await execute('ps', ['-o', 'pgid=', '-p', String(pid)])).stdout);
+  try {
+    assert.equal(await group(Number(chrome.stderr)), await group(process.pid));
+  } finally {
+    await chrome.close();
   }
 });
 

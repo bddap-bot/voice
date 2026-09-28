@@ -209,9 +209,4 @@ export class PuppetChannel {
   clearCache() {
     return this.cacheStorage.delete('voice-puppets-v2');
   }
-  async preload(avatars, active) {
-    for (const avatar of avatars) {
-      if (avatar.id !== active) await this.bytes(avatar.id, avatar.contentHash);
-    }
-  }
 }

@@ -131,28 +131,6 @@ test('a stalled mobile transfer reports a timeout and releases the request', asy
   await assert.rejects(channel.bytes('7'), /puppet transfer timed out/);
 });
 
-test('a puppet request queued during preload runs before the next preload item', async () => {
-  const sent = [];
-  const channel = new PuppetChannel(async (value) => sent.push(value), cacheStorage());
-  const preload = channel.preload([
-    { id: '1', contentHash: 'hash-1' },
-    { id: '2', contentHash: 'hash-2' },
-    { id: '4', contentHash: 'hash-4' },
-  ], '1');
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(sent.at(-1), 'puppet\n{"id":"2","encodings":["gzip"]}');
-  const selected = channel.bytes('3', 'hash-3');
-  await deliverPuppet(channel, '2', Uint8Array.of(2), 'hash-2');
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(sent.at(-1), 'puppet\n{"id":"3","encodings":["gzip"]}');
-  await deliverPuppet(channel, '3', Uint8Array.of(3), 'hash-3');
-  assert.deepEqual(new Uint8Array(await selected), Uint8Array.of(3));
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(sent.at(-1), 'puppet\n{"id":"4","encodings":["gzip"]}');
-  await deliverPuppet(channel, '4', Uint8Array.of(4), 'hash-4');
-  await preload;
-});
-
 const tick = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 test('a slow transfer that keeps arriving outlives the stall timeout', async () => {

@@ -1143,7 +1143,6 @@ async function loadPrivatePuppets() {
     return option;
   }));
   await showPuppet(puppetCatalog.active);
-  puppetChannel.preload(puppetCatalog.avatars, puppetCatalog.active).catch(() => {});
 }
 
 $('puppet').addEventListener('click', toggleConversation);

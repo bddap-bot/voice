@@ -728,14 +728,27 @@ window.addEventListener('test-ready', () => {
   assert.deepEqual(JSON.parse(encoded ?? 'null'), ['live-config-sdp-answer', 'live-config-session-started', 'open', 'close'], stderr);
 });
 
-test('the page loads a clip, moves a humanoid bone, and preloads inactive puppets', async () => {
+test('the page loads the active puppet and its clips without fetching inactive puppets', async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => setTimeout(() => {
-  document.body.dataset.preloadTest = JSON.stringify({ requests: puppetRequests, cacheKeys: [...puppetCache.keys()].map((url) => new URL(url).pathname.split('/').at(-1)), clipMovement, firstVisible });
+  document.body.dataset.initialPuppetTest = JSON.stringify({ requests: puppetRequests, cacheKeys: [...puppetCache.keys()].map((url) => new URL(url).pathname.split('/').at(-1)), clipMovement, firstVisible });
 }, 100));
 `);
-  const encoded = /data-preload-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { requests: ['42', '43', '44'], cacheKeys: ['hash-42-idle-hash.json', 'hash-42.vrm', 'hash-42-sit-hash.json', 'hash-43.vrm', 'hash-44.vrm'], clipMovement: { before: 3, after: 6, loaded: [['sit', 'tracks']] }, firstVisible: { playable: 'idle', order: ['idle.fbx', '42'] } }, stderr);
+  const encoded = /data-initial-puppet-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { requests: ['42'], cacheKeys: ['hash-42-idle-hash.json', 'hash-42.vrm', 'hash-42-sit-hash.json'], clipMovement: { before: 3, after: 6, loaded: [['sit', 'tracks']] }, firstVisible: { playable: 'idle', order: ['idle.fbx', '42'] } }, stderr);
+});
+
+test('choosing an inactive puppet fetches only that puppet on demand', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  const choice = document.querySelector('#puppet-choice');
+  choice.value = '43';
+  choice.dispatchEvent(new Event('change'));
+  setTimeout(() => { document.body.dataset.selectionTest = JSON.stringify({ requests: puppetRequests, selected: choice.value, disabled: choice.disabled }); }, 100);
+});
+`);
+  const encoded = /data-selection-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { requests: ['42', '43'], selected: '43', disabled: false }, stderr);
 });
 
 test('authenticated text box sends a URL verbatim and informs an open Live session', async () => {

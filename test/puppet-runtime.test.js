@@ -685,7 +685,7 @@ test('loaded root tracks keep hips XZ fixed through sitting, loops, gestures and
   hips.add(hand);
   scene.add(hips);
   const rest = hips.position.toArray();
-  const vrm = { scene, humanoid: { getNormalizedBoneNode: () => hips, normalizedRestPose: { hips: { position: rest } } } };
+  const vrm = { scene, meta: { metaVersion: '1' }, humanoid: { getNormalizedBoneNode: (name) => name === 'hips' ? hips : null, normalizedRestPose: { hips: { position: rest } } } };
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
     vrm, mixer: new THREE.AnimationMixer(scene), clips: new Map(), handovers: new Map(),
     bones: new Map(), poseName: 'stand', idleClip: 'idle', nextIdleAt: Infinity,

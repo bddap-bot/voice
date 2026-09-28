@@ -1,22 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { spawn } from 'node:child_process';
-import { access, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
-import { constants } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
+import { launchChromium } from '../scripts/chromium.mjs';
 
 // Exercise actual decoded audio. Inject the platform audio interruption and,
 // in mobile app mode, overlay lifecycle events: desktop Chromium cannot open an
 // Android embedded browser. Desktop coverage uses real tab visibility/focus.
 for (const mobile of [false, true]) test(`audio returns after ${mobile ? 'standalone Android app cover' : 'another tab'}`, { timeout: 30000 }, async (t) => {
-  const candidates = process.env.CHROMIUM_BIN ? [process.env.CHROMIUM_BIN] : [];
-  candidates.push(...(process.env.PATH ?? '').split(':').map(p => join(p, 'chromium')));
-  try { candidates.push(...(await readdir('/nix/store')).filter(n => n.includes('-chromium-')).map(n => `/nix/store/${n}/bin/chromium`)); } catch {}
-  let executable;
-  for (const candidate of candidates) { try { await access(candidate, constants.X_OK); executable = candidate; break; } catch {} }
-  assert.ok(executable, 'Chromium required');
-  const scratch = await mkdtemp(join(process.cwd(), '.playback-return-'));
   const server = createServer(async (request, response) => {
     if (request.url === '/') return response.end('<!doctype html><title>Return</title><audio id="speaker" autoplay></audio><a href="/covered">Panel link</a>');
     if (request.url === '/covered') return response.end('<!doctype html><title>Covered</title>Linked page');
@@ -27,9 +19,9 @@ for (const mobile of [false, true]) test(`audio returns after ${mobile ? 'standa
   try {
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     const origin = `http://127.0.0.1:${server.address().port}`;
-    chrome = spawn(executable, ['--headless=new', '--no-sandbox', '--autoplay-policy=no-user-gesture-required', `--user-data-dir=${scratch}`, '--remote-debugging-port=0', ...(mobile ? [`--app=${origin}`] : [origin])], { stdio: 'ignore' });
+    chrome = await launchChromium({ prefix: '.playback-return-', args: ['--headless=new', '--no-sandbox', '--autoplay-policy=no-user-gesture-required', '--remote-debugging-port=0', ...(mobile ? [`--app=${origin}`] : [origin])] });
     let port;
-    for (let i = 0; i < 100; i++) { try { port = Number((await readFile(join(scratch, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); break; } catch { await new Promise(r => setTimeout(r, 50)); } }
+    for (let i = 0; i < 100; i++) { try { port = Number((await readFile(join(chrome.scratch, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); break; } catch { await new Promise(r => setTimeout(r, 50)); } }
     assert.ok(port);
     let page;
     for (let i = 0; i < 100; i++) {
@@ -140,8 +132,7 @@ for (const mobile of [false, true]) test(`audio returns after ${mobile ? 'standa
     assert.deepEqual(await evaluate('failures'), []);
   } finally {
     socket?.close();
-    if (chrome && chrome.exitCode === null) { const exited = new Promise(resolve => chrome.once('exit', resolve)); chrome.kill('SIGKILL'); await exited; }
+    await chrome?.close();
     await new Promise(resolve => server.close(resolve));
-    await rm(scratch, { recursive: true, force: true });
   }
 });

@@ -142,6 +142,7 @@ const KEY = config.storageKey;
 const PAGE_KEY = `${KEY}.page`;
 const ALPN = 'voice-web/1';
 const DISPLAY_FRESH_MS = 45000;
+const UNANSWERED_MS = 3000;
 const HUB_TURN_START_MS = 20000;
 const HUB_TURN_QUIET_MS = 1500;
 const $ = (id) => document.getElementById(id);
@@ -186,6 +187,7 @@ let spotter;
 let wakeModelWaiter;
 let listeningModel;
 let inactivity;
+let unanswered;
 const startSpotter = globalThis.__voiceStartSpotter ?? startWakeSpotter;
 const speaker = globalThis.__voiceSpeaker ?? { learnVoice, prepareSpeaker, startSpeakerGate };
 const VOICEPRINT = `${config.storageKey}.voiceprint`;
@@ -973,6 +975,10 @@ function onLiveEvent(message, source) {
     stayAwake();
     trace.heard(event.delta ?? '', Date.now(), event.start_ms);
     conversation?.transcript?.add('user', event.delta ?? '');
+    if (/[\p{L}\p{N}]/u.test(event.delta ?? '')) {
+      clearTimeout(unanswered);
+      if (hubWaiting.size && !conversation?.sleeping) unanswered = setTimeout(() => handOff(`turn_${crypto.randomUUID()}`), UNANSWERED_MS);
+    }
   }
   else if (event.type === 'input_audio_buffer.speech_started') {
     recordSession('input_speech_started');
@@ -988,6 +994,7 @@ function onLiveEvent(message, source) {
   }
 }
 function presentTranscript(event) {
+    clearTimeout(unanswered);
     stayAwake();
     hubTurn?.spoke();
     trace.spoke(event.delta ?? '', event.start_ms, event.end_ms);
@@ -1012,6 +1019,10 @@ function tell(owner, type, event_id, delegation_id, content) {
 function delegate(id, owner) {
   if (!owner || typeof id !== 'string') return;
   owner.delegations.add(id);
+  handOff(id);
+}
+function handOff(id) {
+  clearTimeout(unanswered);
   const turn = trace.delegated(id);
   hubWaiting.add(id);
   puppetRuntime?.waiting(true);
@@ -1024,8 +1035,8 @@ function hubFailed(id, message) {
   finishHubWait(id);
   trace.failed(id, message);
   stageTrace?.hubReplied(id, 'failed');
-  const owner = conversation?.audioOwner.delegations.has(id) ? conversation.audioOwner : starting?.delegations.has(id) ? starting : null;
-  tell(owner, 'session.commentary.append', `hub_error_${id}`, id, 'The hub request failed.');
+  const owner = starting?.delegations.has(id) ? starting : conversation?.audioOwner;
+  tell(owner, 'session.commentary.append', `hub_error_${id}`, owner?.delegations.has(id) ? id : null, 'The hub request failed.');
 }
 function fallAsleep() {
   const current = conversation;
@@ -1097,6 +1108,7 @@ function interruptHubReplies(reason) {
 function paintOff() {
   syncSpotter();
   hubWaiting.clear();
+  clearTimeout(unanswered);
   interruptHubReplies('conversation ended');
   actionDriver.reset();
   listeningDriver.reset();

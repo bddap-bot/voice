@@ -1250,6 +1250,58 @@ window.addEventListener('test-ready', async () => {
   assert.match(result.log, /sent to hub: How many jobs are queued\?[\s\S]*hub reply: Four jobs are queued\./);
 });
 
+test('while a delegation is pending, a turn the model ignores for three seconds goes to the hub, and its reply or failure carries a null delegation id', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const frames = () => (globalThis.delegateFrames ?? []).map(({ id, text }) => ({ id, text }));
+  hear('Hello there.');
+  await wait(3100);
+  const nothingPending = frames().length;
+  delegateTurn('item_first');
+  hear(' How are you?');
+  await wait(1000);
+  emitLive({ type: 'session.output_transcript.delta', delta: 'Fine.', start_ms: 0, end_ms: 10 });
+  await wait(2500);
+  const afterSpeech = frames().length;
+  hear(' Also, is the printer');
+  await wait(2000);
+  hear(' busy right now?');
+  await wait(2900);
+  const beforeTimeout = frames().length;
+  await wait(200);
+  const printer = frames().at(-1).id;
+  hear(' And the backup?');
+  await wait(1000);
+  delegateTurn('item_backup');
+  hear('?');
+  hear(' ');
+  await wait(3100);
+  const afterModelDelegation = frames().length;
+  replyFromHub(printer, 'printer', ['The printer is idle.']);
+  hear(' Is the door locked?');
+  await wait(3100);
+  const door = frames().at(-1).id;
+  deliverRelay(new TextEncoder().encode('hub-error\\n' + JSON.stringify({ id: door, message: 'delegation queue is full' })));
+  await wait(50);
+  document.body.dataset.forwardTest = JSON.stringify({ nothingPending, afterSpeech, beforeTimeout, afterModelDelegation, door, frames: frames(), told: sentLiveEvents.filter(({ event_id }) => event_id === 'hub_printer' || event_id?.startsWith('hub_error_')).map(({ type, event_id, delegation_id, content }) => [type, event_id, delegation_id, content]) });
+});
+`, { budget: 20000 });
+  const result = JSON.parse(/data-forward-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"') ?? 'null');
+  assert.ok(result, stderr);
+  assert.deepEqual([result.nothingPending, result.afterSpeech, result.beforeTimeout, result.afterModelDelegation], [0, 1, 1, 3]);
+  assert.deepEqual(result.frames.map(({ id, text }) => [id.startsWith('turn_') ? 'page' : id, text]), [
+    ['item_first', 'Hello there.'],
+    ['page', 'How are you?\nAlso, is the printer busy right now?'],
+    ['item_backup', 'And the backup?'],
+    ['page', '?  Is the door locked?'],
+  ]);
+  assert.deepEqual(result.told, [
+    ['session.commentary.append', 'hub_printer', null, 'The printer is idle.'],
+    ['session.commentary.append', 'hub_error_' + result.door, null, 'The hub request failed.'],
+  ]);
+});
+
 test('a hub reply appends each part as commentary, with a delegation ID only when it answers one', async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {
@@ -1768,12 +1820,14 @@ test('a sign-off with a delegation outstanding ends the session and its late hub
     hear('Corvus, go to sleep.');
     signOff();
     await until(() => quiets.length === 1);
+    hear(' Goodnight.');
+    await new Promise((resolve) => setTimeout(resolve, 3100));
     replyFromHub('pending', 'late', ['The test beacon is amber.']);
     await until(() => globalThis.hubAcks?.length);
     quiets[0]();
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && sessionEvents('close').length);
     return { delegates: count('delegate'), sleeps: sessionEvents('sleep').map((event) => event.detail), appended: sentLiveEvents.filter((event) => event.event_id?.includes('late')).length, acks: hubAcks };
-  `);
+  `, { budget: 6000 });
   assert.deepEqual(result, { delegates: 1, sleeps: ['sign-off'], appended: 0, acks: ['late'] });
 });
 

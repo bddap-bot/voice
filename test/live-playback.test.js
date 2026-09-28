@@ -58,4 +58,6 @@ test('closing playback releases quiet waiters so delayed replies can be discarde
   await playback.close();
   await quiet;
   assert.equal(playback.quietWaiters.length, 0);
+  await playback.quiet();
+  assert.equal(playback.quietWaiters.length, 0);
 });

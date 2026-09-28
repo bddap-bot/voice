@@ -48,7 +48,7 @@ export class LivePlayback {
     this.node?.port.postMessage({ type: 'clear' });
   }
   quiet(ms = 2000) {
-    if (!this.node) return Promise.resolve();
+    if (!this.node || this.closed) return Promise.resolve();
     return new Promise((resolve) => {
       this.quietWaiters.push(resolve);
       this.node.port.postMessage({ type: 'quiet', ms });

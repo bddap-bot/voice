@@ -155,7 +155,7 @@ let usageSeconds = 0;
 let connected = false;
 let everConnected = false;
 let starting;
-let stopping;
+let recorderFlush = Promise.resolve();
 let puppetCatalog;
 let puppetLoadTail = Promise.resolve();
 let puppetEpoch = 0;
@@ -410,7 +410,7 @@ async function listen(mine) {
     wakeModelWaiter?.reject(error);
     puppetChannel.fail(error);
     connected = false;
-    if (conversation) await stopConversation('connection lost');
+    if (conversation) stopConversation('connection lost');
     else setStatus('connection lost', 'err');
   }
 }
@@ -714,7 +714,7 @@ function heard({ wake, miss, error }) {
 }
 function stayAwake() {
   clearTimeout(inactivity);
-  if (!conversation || stopping) return;
+  if (!conversation) return;
   inactivity = setTimeout(() => {
     recordSession('sleep', 'inactivity');
     stopConversation();
@@ -776,7 +776,7 @@ async function stopRecorders(attempt) {
     await item.recorder.voiceChunks?.tail;
   }));
 }
-function waitData(channel, predicate, timeout = 10000, attempt = null) {
+function waitData(channel, predicate, timeout, attempt) {
   return new Promise((resolve, reject) => {
     let settled = false;
     const finish = (action, value) => {
@@ -784,7 +784,7 @@ function waitData(channel, predicate, timeout = 10000, attempt = null) {
       settled = true;
       clearTimeout(timer);
       channel.removeEventListener('message', onMessage);
-      if (attempt) attempt.cancelData = null;
+      attempt.cancelData = null;
       action(value);
     };
     const timer = setTimeout(() => finish(reject, new Error('Live session timed out')), timeout);
@@ -794,7 +794,7 @@ function waitData(channel, predicate, timeout = 10000, attempt = null) {
       if (!predicate(event)) return;
       finish(resolve, event);
     };
-    if (attempt) attempt.cancelData = () => finish(reject, new Error('conversation start cancelled'));
+    attempt.cancelData = () => finish(reject, new Error('conversation start cancelled'));
     channel.addEventListener('message', onMessage);
   });
 }
@@ -829,7 +829,7 @@ function onLiveEvent(message, source) {
   else if (event.type === 'session.usage.updated') usageSeconds = Number(event.usage?.seconds ?? usageSeconds);
   else if (event.type === 'session.closed') {
     usageSeconds = Number(event.usage?.seconds ?? usageSeconds);
-    if (source === conversation?.channel) stopConversation('Session ended — tap to continue', true);
+    if (source === conversation?.channel) stopConversation('Session ended — tap to continue');
     else cancelStarting();
   }
 }
@@ -855,7 +855,7 @@ function tell(owner, type, event_id, delegation_id, content) {
   if (owner?.channel?.readyState === 'open') owner.channel.send(JSON.stringify({ type, event_id, delegation_id, content }));
 }
 function delegate(id, owner) {
-  if (!owner || typeof id !== 'string' || stopping) return;
+  if (!owner || typeof id !== 'string') return;
   owner.delegations.add(id);
   const turn = trace.delegated(id);
   hubWaiting.add(id);
@@ -949,8 +949,6 @@ async function startConversation() {
   puppetRuntime?.pose('stand');
   syncPuppetUi();
   try {
-    if (stopping) await stopping;
-    if (attempt.cancelled) return;
     if (!connected) {
       await dial();
       await loadPrivatePuppets();
@@ -967,7 +965,7 @@ async function startConversation() {
     stageTrace = new StageTrace((span) => traces.add(span));
     const started = waitData(attempt.channel, (event) => event.type === 'session.started', 30000, attempt);
     started.catch(() => {});
-    attempt.channel.addEventListener('close', () => { if (attempt.channel === conversation?.channel) stopConversation('Session ended — tap to continue', true); });
+    attempt.channel.addEventListener('close', () => { if (attempt.channel === conversation?.channel) stopConversation('Session ended — tap to continue'); });
     attempt.channel.addEventListener('message', (event) => onLiveEvent(event, attempt.channel));
     attempt.pc.ontrack = async (event) => {
       try {
@@ -1002,10 +1000,9 @@ async function startConversation() {
     await started;
     if (attempt.cancelled) return;
     awaken(attempt.channel);
-    conversation = { pc: attempt.pc, channel: attempt.channel, clock: null, id: attempt.offerId, audioOwner: attempt, said: '', transcript: new TranscriptBatcher(attempt.offerId, persistenceUploads, { onTurn: (side, at) => telemetry.add({ kind: 'transcript', session_id: attempt.offerId, name: side, at }) }) };
-    startRecorders(attempt, attempt.offerId);
     const clock = new SessionClock({ onTick: (seconds) => { $('elapsed').textContent = formatElapsed(seconds); } });
-    conversation.clock = clock;
+    conversation = { pc: attempt.pc, channel: attempt.channel, clock, id: attempt.offerId, audioOwner: attempt, said: '', transcript: new TranscriptBatcher(attempt.offerId, persistenceUploads, { onTurn: (side, at) => telemetry.add({ kind: 'transcript', session_id: attempt.offerId, name: side, at }) }) };
+    startRecorders(attempt, attempt.offerId);
     clock.start();
     puppetRuntime?.pose('listen');
     stayAwake();
@@ -1019,46 +1016,34 @@ async function startConversation() {
   } finally {
     if (conversation?.pc !== attempt.pc) {
       cancelOffer(attempt);
-      await stopRecorders(attempt);
-      attempt.channel?.close();
-      attempt.pc?.close();
-      await puppetRuntime?.detachAudio(attempt);
-      await attempt.playback?.close();
+      release(attempt);
     }
     if (starting === attempt) starting = null;
   }
 }
-function stopConversation(reason = '', remoteClosed = false) {
-  if (starting) cancelStarting();
-  if (stopping) return stopping;
-  stopping = finishStop(reason, remoteClosed).finally(() => { stopping = null; });
-  return stopping;
+function release(attempt) {
+  const flushed = stopRecorders(attempt);
+  attempt.channel?.close();
+  attempt.pc?.close();
+  puppetRuntime?.detachAudio(attempt).catch(recordPageError);
+  attempt.playback?.close().catch(recordPageError);
+  return flushed;
 }
-async function finishStop(reason, remoteClosed) {
+function stopConversation(reason = '') {
+  if (starting) cancelStarting();
   const current = conversation;
   if (!current) return;
+  conversation = null;
+  recorderFlush = Promise.all([recorderFlush, release(current.audioOwner)]).then(() => {});
   recordSession('close', reason, current.id);
-  await stopRecorders(current.audioOwner);
-  current.clock?.stop();
+  sendFrame('cancel').catch(() => {});
+  current.clock.stop();
   stageTrace?.sessionEnded();
   stageTrace = null;
-  paintOff();
-  sendFrame('cancel').catch(() => {});
-  if (!remoteClosed && current.channel.readyState === 'open') {
-    const closed = waitData(current.channel, (event) => event.type === 'session.closed', 5000).catch(() => null);
-    current.channel.send(JSON.stringify({ type: 'session.close' }));
-    const final = await closed;
-    usageSeconds = Number(final?.usage?.seconds ?? usageSeconds);
-  }
   current.transcript.flush();
-  conversation = null;
   trace.slept();
-  syncPuppetUi();
-  current.channel.close();
-  current.pc.close();
+  paintOff();
   $('speaker').srcObject = null;
-  await puppetRuntime?.detachAudio(current.audioOwner);
-  await current.audioOwner.playback.close();
   const cost = usageSeconds * 0.05 / 60;
   const item = document.createElement('div');
   item.className = 'usage';
@@ -1071,11 +1056,11 @@ async function toggleConversation() {
   if ($('puppet').getAttribute('aria-disabled') === 'true') return;
   try {
     if (starting) cancelStarting();
-    else if (conversation) await stopConversation();
+    else if (conversation) stopConversation();
     else await startConversation();
   } catch (error) {
     if (error.message === 'conversation start cancelled') return;
-    if (conversation) await stopConversation('conversation could not start');
+    if (conversation) stopConversation('conversation could not start');
     else paintOff();
     console.warn('voice:', error);
     setStatus(`conversation could not start: ${formatStartError(error)}`, 'err');
@@ -1179,8 +1164,8 @@ $('puppet-choice').addEventListener('change', () => showPuppet($('puppet-choice'
 $('connect').addEventListener('click', () => start($('token').value).catch((error) => setStatus(error.message, 'err')));
 $('token-toggle').addEventListener('click', () => setTokenPanel($('token-toggle').getAttribute('aria-expanded') !== 'true'));
 $('mic-mute').addEventListener('click', () => setMicrophoneMuted(!microphoneMuted));
-$('reenter').addEventListener('click', async () => { listening = false; setMicrophoneMuted(microphoneMuted); await stopConversation(); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); savedState(false); $('token').focus(); });
-$('forget').addEventListener('click', async () => { listening = false; setMicrophoneMuted(microphoneMuted); await stopConversation(); localStorage.removeItem(KEY); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); await sendFrame('bye').catch(() => {}); generation++; connected = false; resetPuppetConnection(new Error('connection replaced'), true); await puppetChannel.clearCache().catch(() => {}); savedState(false); setStatus('token forgotten'); });
+$('reenter').addEventListener('click', async () => { listening = false; setMicrophoneMuted(microphoneMuted); stopConversation(); await recorderFlush; setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); savedState(false); $('token').focus(); });
+$('forget').addEventListener('click', async () => { listening = false; setMicrophoneMuted(microphoneMuted); stopConversation(); await recorderFlush; localStorage.removeItem(KEY); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); await sendFrame('bye').catch(() => {}); generation++; connected = false; resetPuppetConnection(new Error('connection replaced'), true); await puppetChannel.clearCache().catch(() => {}); savedState(false); setStatus('token forgotten'); });
 navigator.mediaDevices?.addEventListener('devicechange', syncSpotter);
 document.addEventListener('visibilitychange', () => { if (document.hidden) puppetRuntime?.pause(); else if (!$('conversation').classList.contains('hidden')) puppetRuntime?.start(); });
 window.addEventListener('beforeunload', () => puppetRuntime?.dispose());

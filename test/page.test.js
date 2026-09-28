@@ -194,9 +194,7 @@ globalThis.MediaRecorder = FakeMediaRecorder;
 class FakeChannel extends EventTarget {
   constructor() { super(); this.readyState = 'open'; }
   send(value) {
-    const event = JSON.parse(value);
-    globalThis.sentLiveEvents.push(event);
-    if (event.type === 'session.close') queueMicrotask(() => this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.closed', usage: { seconds: 0 } }) })));
+    globalThis.sentLiveEvents.push(JSON.parse(value));
   }
   close() { this.readyState = 'closed'; }
 }
@@ -1102,13 +1100,13 @@ window.addEventListener('test-ready', () => {
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     await fetch('/panel-links-loaded?count=' + opened);
-    document.body.dataset.linkTest = JSON.stringify({ attributes, hash: location.hash, active: document.querySelector('#puppet').getAttribute('aria-pressed'), sameSession: channel === testChannel && channel.readyState === 'open', closed: sentLiveEvents.some(event => event.type === 'session.close') });
+    document.body.dataset.linkTest = JSON.stringify({ attributes, hash: location.hash, active: document.querySelector('#puppet').getAttribute('aria-pressed'), sameSession: channel === testChannel && channel.readyState === 'open' });
   }, 100);
 });`);
   const encoded = /data-link-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   assert.deepEqual(JSON.parse(encoded ?? 'null'), {
     attributes: [['label', '#markdown'], ['#bare', '#bare'], ['#payload', '#payload']].map(([label, hash]) => [label, hash, standalone ? '_blank' : null, 'noopener noreferrer']),
-    hash: standalone ? '' : '#payload', active: 'true', sameSession: true, closed: false,
+    hash: standalone ? '' : '#payload', active: 'true', sameSession: true,
   }, stderr);
   assert.equal(requests.filter(path => path === '/panel-link-destination').length, standalone ? 3 : 0, 'each standalone link loads outside the original page');
 });
@@ -1277,32 +1275,20 @@ test('the wake phrase carries earlier turns and a completed-sleep marker into on
   ]);
 });
 
-test('speech arriving while a session closes stays with that conversation in what later wakes carry', async () => {
+for (const [label, endScript] of [['the sign-off', 'signOff()'], ['a tap', "document.querySelector('#puppet').click()"]]) test(`a tap as soon as ${label} seats the puppet opens a fresh session that hears the microphone`, async () => {
   const result = await runWakePage(`
-    emitLive({ type: 'session.output_transcript.delta', delta: 'The beacon is green.' });
-    const send = testChannel.send.bind(testChannel);
-    let release;
-    testChannel.send = (value) => { if (JSON.parse(value).type === 'session.close') release = () => send(value); else send(value); };
+    const ended = testChannel;
+    testPuppet.calls.length = 0;
+    ${endScript};
+    await until(() => testPuppet.calls.some(([name, value]) => name === 'asleep' && value));
+    const offers = count('offer');
     document.querySelector('#puppet').click();
-    await until(() => release);
-    emitLive({ type: 'session.output_transcript.delta', delta: ' Late tail.' });
-    hear('Late words.');
-    const delegates = count('delegate');
-    emitLive({ type: 'session.delegation.created', delegation: { id: 'item_late' } });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    const lateDelegates = count('delegate') - delegates;
-    release();
-    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false');
-    testSpotter.heard({ wake: 0.95 });
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
-    emitLive({ type: 'session.output_transcript.delta', delta: 'Hello again.' });
-    await sleepNow();
-    testSpotter.heard({ wake: 0.95 });
-    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
-    return { lateDelegates, memory: JSON.parse(lastOffer.context[0].text.split('\\n').slice(1).join('\\n')).map(({ turns }) => turns) };
+    hear('Can you hear me?');
+    await until(() => sessionEvents('input_utterance').some((event) => event.session_id === lastOffer.id));
+    return { offers: count('offer') - offers, fresh: testChannel !== ended, microphone: sentTracks.at(-1).readyState, heard: sessionEvents('input_utterance').filter((event) => event.session_id === lastOffer.id).map((event) => event.detail) };
   `);
-  assert.equal(result.lateDelegates, 0);
-  assert.deepEqual(result.memory, [[{ speaker: 'live', text: 'The beacon is green. Late tail.' }, { speaker: 'user', text: 'Late words.' }], [{ speaker: 'live', text: 'Hello again.' }]]);
+  assert.deepEqual(result, { offers: 1, fresh: true, microphone: 'live', heard: ['Can you hear me?'] });
 });
 
 test('a misheard wake phrase is a logged miss that leaves it asleep', async () => {
@@ -1414,7 +1400,7 @@ test('the model speaking the sign-off ends the session once speech goes quiet an
       speaking,
       sleeps: sessionEvents('sleep').map((event) => event.detail),
       delegates: count('delegate'),
-      live: sentLiveEvents.filter((event) => event.type !== 'session.close').map((event) => event.event_id),
+      live: sentLiveEvents.map((event) => event.event_id),
       puppet: testPuppet.calls.filter(([name]) => name === 'asleep').at(-1),
       microphone: { enabled: testMicrophoneTrack.enabled, button: document.querySelector('#mic-mute').disabled },
       rewoken: await (async () => { testSpotter.heard({ wake: 0.9 }); await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true'); return true; })(),
@@ -1690,6 +1676,7 @@ for (const control of ['reenter', 'forget']) test(control + ' stops the spotter 
   const result = await runWakePage(`
     await sleepNow();
     await until(() => !testSpotter.closed);
+    await new Promise((resolve) => setTimeout(resolve, 0));
     const asleep = testSpotter;
     document.querySelector('#${control}').click();
     await Promise.resolve();

@@ -269,6 +269,7 @@ export class PuppetRuntime {
     vrm.scene.position.y -= fitted.min.y;
     vrm.scene.position.z -= center.z;
     vrm.scene.traverse((object) => { object.frustumCulled = false; });
+    VRMUtils.removeUnnecessaryVertices(vrm.scene);
     const preparedClip = await animationClip(initialClip.bytes, initialClip.format, vrm);
     if (!valid()) {
       VRMUtils.deepDispose(vrm.scene);

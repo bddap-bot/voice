@@ -1143,10 +1143,10 @@ async function loadPrivatePuppets() {
   const epoch = puppetEpoch;
   puppetCatalog = await puppetChannel.catalog();
   if (epoch !== puppetEpoch) throw new Error('puppet catalog replaced');
-  $('puppet-choice').replaceChildren(...puppetCatalog.avatars.map((avatar, index) => {
+  $('puppet-choice').replaceChildren(...puppetCatalog.avatars.map((avatar) => {
     const option = document.createElement('option');
     option.value = avatar.id;
-    option.textContent = `puppet ${index + 1}`;
+    option.textContent = avatar.file;
     return option;
   }));
   $('puppet-choice').value = puppetActive ?? puppetCatalog.active;

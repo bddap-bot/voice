@@ -80,7 +80,7 @@ export async function send_only(bytes) {
     deliver(enc.encode('audio-ack\\n' + JSON.stringify({ session_id: chunk.session_id, side: chunk.side, seq: chunk.seq })));
   }
   else if (frame === 'puppets') {
-    const sendCatalog = () => deliver(enc.encode('puppets\\n' + JSON.stringify({ active: '42', avatars: ['42', '43', '44'].map((id) => ({ id, size: 3, contentHash: 'hash-' + id, creditLine: '', licenseFlags: { creditRequired: false } })) })));
+    const sendCatalog = () => deliver(enc.encode('puppets\\n' + JSON.stringify({ active: '42', avatars: ['42', '43', '44'].map((id) => ({ id, file: 'model-' + id + '.vrm', size: 3, contentHash: 'hash-' + id, creditLine: '', licenseFlags: { creditRequired: false } })) })));
     if (globalThis.holdPuppetCatalog) globalThis.releasePuppetCatalog = sendCatalog;
     else sendCatalog();
   }
@@ -776,11 +776,11 @@ window.addEventListener('test-ready', () => {
   const choice = document.querySelector('#puppet-choice');
   choice.value = '43';
   choice.dispatchEvent(new Event('change'));
-  setTimeout(() => { document.body.dataset.selectionTest = JSON.stringify({ requests: puppetRequests, selected: choice.value, disabled: choice.disabled }); }, 100);
+  setTimeout(() => { document.body.dataset.selectionTest = JSON.stringify({ requests: puppetRequests, selected: choice.value, disabled: choice.disabled, options: [...choice.options].map((option) => [option.value, option.textContent]) }); }, 100);
 });
 `);
   const encoded = /data-selection-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { requests: ['42', '43'], selected: '43', disabled: false }, stderr);
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { requests: ['42', '43'], selected: '43', disabled: false, options: [['42', 'model-42.vrm'], ['43', 'model-43.vrm'], ['44', 'model-44.vrm']] }, stderr);
 });
 
 test('authenticated text box sends a URL verbatim and informs an open Live session', async () => {

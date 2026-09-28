@@ -26,6 +26,7 @@
   .display, .ledger { background: linear-gradient(145deg, #201e22ee, #111217ee); border: 1px solid #6d5c49; border-radius: 4px; box-shadow: 0 18px 42px #0008, inset 0 0 35px #8a684111; }
   .control::before { content: ''; position: absolute; z-index: 1; left: 30%; top: calc(var(--feet) * var(--canvas-height)); bottom: 0; width: 40%; background: linear-gradient(#665746, #252127); clip-path: polygon(12% 0, 88% 0, 100% 100%, 0 100%); }
   #puppet { position: absolute; z-index: 2; left: var(--stage-column); top: 0; width: calc(100% - 2 * var(--stage-column)); height: var(--canvas-height); touch-action: manipulation; cursor: pointer; }
+  #puppet-prompt { position: absolute; z-index: 3; top: 35%; left: 30%; width: 40%; text-align: center; pointer-events: none; }
   .puppet-picker { position: absolute; z-index: 4; left: 3%; top: calc(100% - 150px); width: 20%; display: flex; gap: 10px; align-items: center; justify-content: center; }
   #puppet-choice { min-width: 150px; background: #1d1d20; color: inherit; border: 1px solid #414148; border-radius: 8px; padding: 8px; }
   #puppet-credit { position: absolute; z-index: 4; left: 3%; top: calc(100% - 106px); width: 20%; min-height: 21px; color: #cfc4b6; text-align: center; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -104,6 +105,7 @@
 <main id="conversation" class="hidden">
   <section class="control">
     <canvas id="puppet" role="button" tabindex="0" aria-pressed="false" aria-label="start conversation" aria-disabled="true"></canvas>
+    <div id="puppet-prompt" aria-hidden="true">Tap to talk</div>
     <label class="puppet-picker">appearance <select id="puppet-choice" aria-label="puppet appearance"></select></label>
     <div id="puppet-credit"></div>
     <div id="elapsed" aria-live="polite">00:00</div>
@@ -161,7 +163,6 @@ let puppetLoadTail = Promise.resolve();
 let puppetEpoch = 0;
 let puppetRequest;
 let puppetLoading = false;
-let puppetReady = false;
 let displayFreshTimer;
 let puppetActive;
 let puppetScope;
@@ -243,11 +244,12 @@ function savedState(saved) {
   listening = saved;
   if (saved) setMicrophoneMuted(microphoneMuted);
   else stopListening();
+  syncPuppetUi();
 }
 function syncPuppetUi() {
-  syncSpotter();
   const active = Boolean(conversation);
-  const disabled = !puppetReady && !active && !starting;
+  const disabled = !listening && !active && !starting;
+  $('puppet-prompt').classList.toggle('hidden', Boolean(puppetActive) || active || Boolean(starting));
   $('puppet').setAttribute('aria-disabled', String(disabled));
   $('puppet').setAttribute('aria-pressed', String(active));
   $('puppet').setAttribute('aria-label', active || starting ? 'stop conversation' : 'start conversation');
@@ -275,7 +277,6 @@ function resetPuppetConnection(error = new Error('connection replaced'), clearAp
   puppetLoading = false;
   puppetCatalog = undefined;
   if (clearAppearance) {
-    puppetReady = false;
     puppetActive = undefined;
     puppetScope = undefined;
     puppetRuntime?.clear();
@@ -671,7 +672,7 @@ function microphoneEnded(stream) {
   syncSpotter();
 }
 function wakeable() {
-  return listening && puppetReady && !microphoneMuted && !conversation && !starting;
+  return listening && !microphoneMuted && !conversation && !starting;
 }
 async function wakeModel() {
   const model = await new Promise((resolve, reject) => {
@@ -910,6 +911,7 @@ async function receiveHub(result) {
   await sendFrame(`hub-ack\n${JSON.stringify({ id: result.id, stamp: result.stamp })}`);
 }
 function paintOff() {
+  syncSpotter();
   hubWaiting.clear();
   actionDriver.reset();
   listeningDriver.reset();
@@ -950,13 +952,14 @@ async function startConversation() {
     stopConversation('Live playback failed');
   }, $('speaker'));
   starting = attempt;
+  syncSpotter();
   puppetRuntime?.asleep(false);
   puppetRuntime?.pose('stand');
   syncPuppetUi();
   try {
     if (!connected) {
       await dial();
-      await loadPrivatePuppets();
+      loadPrivatePuppets().catch(reportPuppetError);
     }
     if (attempt.cancelled) return;
 
@@ -1014,6 +1017,7 @@ async function startConversation() {
     syncPuppetUi();
     setStatus();
     recordSession('open', '', attempt.offerId);
+    if (puppetCatalog && !puppetActive && !puppetLoading) showPuppet(puppetCatalog.active).catch(reportPuppetError);
   } catch (error) {
     if (attempt.cancelled) throw new Error('conversation start cancelled');
     recordPageError(error, attempt.offerId ?? null);
@@ -1085,7 +1089,7 @@ async function start(raw) {
   $('token').value = '';
   savedState(true);
   setStatus();
-  loadPrivatePuppets().catch((error) => setStatus(`puppet unavailable: ${error.message}`, 'err'));
+  loadPrivatePuppets().catch(reportPuppetError);
 }
 
 function showPuppet(id) {
@@ -1128,8 +1132,11 @@ async function loadPuppet(id, epoch, request) {
   $('puppet-choice').value = id;
   puppetActive = id;
   puppetScope = token.endpoint_id;
-  puppetReady = true;
   syncPuppetUi();
+}
+
+function reportPuppetError(error) {
+  if (connected) setStatus(`puppet unavailable: ${error.message}`, 'err');
 }
 
 async function loadPrivatePuppets() {
@@ -1142,7 +1149,8 @@ async function loadPrivatePuppets() {
     option.textContent = `puppet ${index + 1}`;
     return option;
   }));
-  await showPuppet(puppetCatalog.active);
+  $('puppet-choice').value = puppetActive ?? puppetCatalog.active;
+  if (conversation && !puppetActive && !puppetLoading) await showPuppet(puppetCatalog.active);
 }
 
 $('puppet').addEventListener('click', toggleConversation);
@@ -1163,7 +1171,7 @@ $('share-target').addEventListener('drop', (event) => { try { chooseImage([...ev
 $('share-send').addEventListener('click', () => submitShare().catch((error) => setStatus(error.message, 'err')));
 $('puppet-choice').addEventListener('change', () => showPuppet($('puppet-choice').value).catch((error) => {
   if (puppetActive) $('puppet-choice').value = puppetActive;
-  setStatus(error.message, 'err');
+  reportPuppetError(error);
 }));
 $('connect').addEventListener('click', () => start($('token').value).catch((error) => setStatus(error.message, 'err')));
 $('token-toggle').addEventListener('click', () => setTokenPanel($('token-toggle').getAttribute('aria-expanded') !== 'true'));

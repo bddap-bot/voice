@@ -79,7 +79,11 @@ export async function send_only(bytes) {
     const chunk = JSON.parse(frame.slice(6, boundary));
     deliver(enc.encode('audio-ack\\n' + JSON.stringify({ session_id: chunk.session_id, side: chunk.side, seq: chunk.seq })));
   }
-  else if (frame === 'puppets') deliver(enc.encode('puppets\\n' + JSON.stringify({ active: '42', avatars: ['42', '43', '44'].map((id) => ({ id, size: 3, contentHash: 'hash-' + id, creditLine: '', licenseFlags: { creditRequired: false } })) })));
+  else if (frame === 'puppets') {
+    const sendCatalog = () => deliver(enc.encode('puppets\\n' + JSON.stringify({ active: '42', avatars: ['42', '43', '44'].map((id) => ({ id, size: 3, contentHash: 'hash-' + id, creditLine: '', licenseFlags: { creditRequired: false } })) })));
+    if (globalThis.holdPuppetCatalog) globalThis.releasePuppetCatalog = sendCatalog;
+    else sendCatalog();
+  }
   else if (frame === 'clips') deliver(enc.encode('clips\\n' + JSON.stringify({ clips: [{ action: 'sit', name: 'sit.fbx', format: 'fbx', contentHash: 'sit-hash' }, { action: 'idle', name: 'idle.fbx', format: 'fbx', contentHash: 'idle-hash' }] })));
   else if (frame.startsWith('track\\n')) {
     const request = JSON.parse(frame.slice(frame.indexOf('\\n') + 1));
@@ -728,7 +732,34 @@ window.addEventListener('test-ready', () => {
   assert.deepEqual(JSON.parse(encoded ?? 'null'), ['live-config-sdp-answer', 'live-config-session-started', 'open', 'close'], stderr);
 });
 
-test('the page loads the active puppet and its clips without fetching inactive puppets', async () => {
+test('wake detection and signalling start before any avatar transfer', async () => {
+  const { stdout, stderr } = await runPage(`
+globalThis.holdSessionStart = true;
+const poll = setInterval(() => {
+  if (!globalThis.heldSessionStart) return;
+  clearInterval(poll);
+  document.body.dataset.beforeAvatarTest = JSON.stringify({ requests: puppetRequests, transfers: transferOrder, spotter: Boolean(testSpotter) });
+  heldSessionStart();
+}, 10);
+`);
+  const encoded = /data-before-avatar-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { requests: [], transfers: [], spotter: true }, stderr);
+});
+
+test('a late avatar catalog loads once after the voice session is already open', async () => {
+  const { stdout, stderr } = await runPage(`
+globalThis.holdPuppetCatalog = true;
+window.addEventListener('test-ready', () => {
+  const before = { pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), transfers: [...transferOrder] };
+  releasePuppetCatalog();
+  setTimeout(() => { document.body.dataset.lateAvatarTest = JSON.stringify({ before, requests: puppetRequests, pressed: document.querySelector('#puppet').getAttribute('aria-pressed') }); }, 100);
+});
+`);
+  const encoded = /data-late-avatar-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { before: { pressed: 'true', transfers: [] }, requests: ['42'], pressed: 'true' }, stderr);
+});
+
+test('the session loads the active puppet and its clips without fetching inactive puppets', async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => setTimeout(() => {
   document.body.dataset.initialPuppetTest = JSON.stringify({ requests: puppetRequests, cacheKeys: [...puppetCache.keys()].map((url) => new URL(url).pathname.split('/').at(-1)), clipMovement, firstVisible });

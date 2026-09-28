@@ -231,6 +231,18 @@ async function runViewport(viewport, executable, server) {
     let ready=false;
     while(Date.now()<deadline){try{const page=JSON.parse(await cdp.evaluate("JSON.stringify({ready:document.querySelector('#puppet')?.getAttribute('aria-disabled')==='false',status:document.querySelector('#status')?.textContent,error:document.querySelector('#status')?.classList.contains('err')})"));ready=page.ready;if(ready)break;if(page.error)throw new Error(`page connection failed: ${page.status}`)}catch(error){if(error.message?.startsWith('page connection failed:'))throw error}await new Promise((resolve)=>setTimeout(resolve,250));}
     if(!ready){const probe=await cdp.evaluate(`JSON.stringify({status:document.querySelector('#status')?.textContent,disabled:document.querySelector('#puppet')?.getAttribute('aria-disabled'),body:document.body?.innerText?.slice(0,500)})`);throw new Error(`page did not become ready: ${probe} ${cdp.consoleErrors.join('; ')} ${chrome.stderr}`)}
+    await cdp.evaluate(`new Promise((resolve, reject) => {
+      const deadline = Date.now() + 240000;
+      let selected = false;
+      const check = () => {
+        const choice = document.querySelector('#puppet-choice');
+        if (!selected && choice.options.length) { selected = true; choice.dispatchEvent(new Event('change')); }
+        if (selected && !choice.disabled && document.querySelector('#puppet-prompt').classList.contains('hidden')) return resolve();
+        if (Date.now() > deadline) return reject(new Error('selected avatar did not load'));
+        setTimeout(check, 100);
+      };
+      check();
+    })`);
     await cdp.evaluate(`const smokeLimits = ${JSON.stringify(smokeLimits)}; globalThis.__smoke = (${installSmokeMeasurements.toString()})()`);
     const stageGeometry = async () => JSON.parse(await cdp.evaluate("JSON.stringify((() => { const box = document.querySelector('#puppet').getBoundingClientRect(); return { canvas: { left: box.left + scrollX, right: box.right + scrollX, top: box.top + scrollY, bottom: box.bottom + scrollY }, viewport: { x: scrollX, y: scrollY, width: innerWidth, height: innerHeight } }; })())"));
     const region = evidenceRegion({ neutralSilhouette, ...(await stageGeometry()) });

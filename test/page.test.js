@@ -342,6 +342,9 @@ const runtime = new PuppetRuntime(document.querySelector('#puppet'));
 runtime.pause();
 let renders = 0;
 runtime.renderer.render = () => { renders++; };
+runtime.animate(0);
+runtime.pause();
+const beforeAvatar = renders;
 runtime.vrm = { update() {} };
 runtime.animate(0);
 runtime.pause();
@@ -349,15 +352,15 @@ const beforePlayable = renders;
 runtime.clipAction = { isRunning: () => true, getClip: () => null };
 runtime.animate(16);
 runtime.pause();
-document.body.dataset.visibilityTest = JSON.stringify({ beforePlayable, afterPlayable: renders });
+document.body.dataset.visibilityTest = JSON.stringify({ beforeAvatar, beforePlayable, afterPlayable: renders });
 runtime.dispose();
 </script>`);
 }
 
-test('headless Chromium renders no puppet frame until an animation clip is playable', async () => {
+test('headless Chromium renders an avatar before its animation clips arrive', async () => {
   const { stdout, stderr } = await runVisibilityPage();
   const encoded = /data-visibility-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { beforePlayable: 0, afterPlayable: 1 }, stderr);
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { beforeAvatar: 0, beforePlayable: 1, afterPlayable: 2 }, stderr);
 });
 
 async function runLayoutPage() {

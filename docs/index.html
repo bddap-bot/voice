@@ -366,7 +366,7 @@ async function listen(mine) {
       }
       else if (verb === 'wake-model') wakeModelWaiter?.resolve(JSON.parse(body));
       else if (verb === 'wake-model-none') wakeModelWaiter?.resolve(null);
-      else if (verb === 'hub') await receiveHub(JSON.parse(body));
+      else if (verb === 'hub') receiveHub(JSON.parse(body)).catch(recordPageError);
       else if (verb === 'hub-error') {
         const failure = JSON.parse(body);
         hubFailed(failure.id, failure.message);
@@ -889,11 +889,17 @@ async function receiveHub(result) {
     trace.hub(result.id, result.commentary, result.timing_ms);
     stageTrace?.hubReplied(result.id);
     const current = conversation;
-    await current?.audioOwner.playback.quiet();
-    if (current && conversation === current && !current.sleeping) {
-      const owner = current.audioOwner;
-      const delegation = owner.delegations.has(result.id) ? result.id : null;
-      result.commentary.forEach((content, index) => tell(owner, 'session.commentary.append', index ? `hub_${result.stamp}_${index}` : `hub_${result.stamp}`, delegation, content));
+    if (current) {
+      const delivery = (current.hubReplies ?? Promise.resolve()).then(async () => {
+        await current.audioOwner.playback.quiet();
+        if (conversation === current && !current.sleeping) {
+          const owner = current.audioOwner;
+          const delegation = owner.delegations.has(result.id) ? result.id : null;
+          result.commentary.forEach((content, index) => tell(owner, 'session.commentary.append', index ? `hub_${result.stamp}_${index}` : `hub_${result.stamp}`, delegation, content));
+        }
+      });
+      current.hubReplies = delivery.catch(() => {});
+      await delivery;
     }
   }
   await sendFrame(`hub-ack\n${JSON.stringify({ id: result.id, stamp: result.stamp })}`);

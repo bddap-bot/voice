@@ -1855,3 +1855,30 @@ test('a reply waiting for quiet cannot become speech in the next woken session',
   `);
   assert.deepEqual(result, { before: 0, after: 0 });
 });
+
+test('relay frames keep moving while ordered hub replies wait for playback quiet', async () => {
+  const result = await runWakePage(`
+    const { LivePlayback } = await import('/live-playback.js');
+    const quiets = [];
+    LivePlayback.prototype.quiet = () => new Promise(resolve => quiets.push(resolve));
+    const replies = () => sentLiveEvents.filter(event => event.event_id?.startsWith('hub_ordered')).map(event => event.content);
+    replyFromHub('first', 'ordered_first', ['First part.', 'Second part.']);
+    await until(() => quiets.length === 1);
+    replyFromHub('second', 'ordered_second', ['Next reply.']);
+    deliverRelay(new TextEncoder().encode('display\\n' + JSON.stringify({ markdown: 'Relay frame handled.' }) + '\\n'));
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const waiting = { frameHandled: document.querySelector('#display-items').textContent.includes('Relay frame handled.'), replies: replies(), quiets: quiets.length };
+    quiets[0]();
+    await until(() => quiets.length === 2);
+    const first = replies();
+    quiets[1]();
+    await until(() => globalThis.hubAcks?.includes('ordered_second'));
+    return { waiting, first, all: replies(), acks: hubAcks };
+  `);
+  assert.deepEqual(result, {
+    waiting: { frameHandled: true, replies: [], quiets: 1 },
+    first: ['First part.', 'Second part.'],
+    all: ['First part.', 'Second part.', 'Next reply.'],
+    acks: ['ordered_first', 'ordered_second'],
+  });
+});

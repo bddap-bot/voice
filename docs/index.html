@@ -157,6 +157,7 @@ let usageSeconds = 0;
 let connected = false;
 let everConnected = false;
 let starting;
+let screenLock;
 let recorderFlush = Promise.resolve();
 let puppetCatalog;
 let puppetLoadTail = Promise.resolve();
@@ -253,6 +254,24 @@ function syncPuppetUi() {
   $('puppet').setAttribute('aria-disabled', String(disabled));
   $('puppet').setAttribute('aria-pressed', String(active));
   $('puppet').setAttribute('aria-label', active || starting ? 'stop conversation' : 'start conversation');
+  syncScreenLock();
+}
+function syncScreenLock() {
+  const awake = Boolean(conversation || starting);
+  if (!awake && screenLock) {
+    const held = screenLock;
+    screenLock = null;
+    held.then((sentinel) => sentinel.release()).catch(() => {});
+  }
+  if (!awake || screenLock || document.visibilityState !== 'visible' || !navigator.wakeLock) return;
+  const request = screenLock = navigator.wakeLock.request('screen');
+  request.then((sentinel) => {
+    if (screenLock !== request) return sentinel.release();
+    sentinel.addEventListener('release', () => { if (screenLock === request) screenLock = null; });
+  }, (error) => {
+    if (screenLock === request) screenLock = null;
+    recordSession('screen-lock', `refused: ${error.message}`);
+  });
 }
 function setMicrophoneMuted(muted) {
   microphoneMuted = muted;
@@ -1168,7 +1187,7 @@ $('mic-mute').addEventListener('click', () => setMicrophoneMuted(!microphoneMute
 $('reenter').addEventListener('click', async () => { listening = false; setMicrophoneMuted(microphoneMuted); stopConversation(); await recorderFlush; setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); savedState(false); $('token').focus(); });
 $('forget').addEventListener('click', async () => { listening = false; setMicrophoneMuted(microphoneMuted); stopConversation(); await recorderFlush; localStorage.removeItem(KEY); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); await sendFrame('bye').catch(() => {}); generation++; connected = false; resetPuppetConnection(new Error('connection replaced'), true); await puppetChannel.clearCache().catch(() => {}); savedState(false); setStatus('token forgotten'); });
 navigator.mediaDevices?.addEventListener('devicechange', syncSpotter);
-document.addEventListener('visibilitychange', () => { if (document.hidden) puppetRuntime?.pause(); else if (!$('conversation').classList.contains('hidden')) puppetRuntime?.start(); });
+document.addEventListener('visibilitychange', () => { syncScreenLock(); if (document.hidden) puppetRuntime?.pause(); else if (!$('conversation').classList.contains('hidden')) puppetRuntime?.start(); });
 window.addEventListener('beforeunload', () => puppetRuntime?.dispose());
 const saved = configuredToken(config, localStorage.getItem(KEY));
 if (saved) { setTokenPanel(false); start(saved).catch((error) => { localStorage.removeItem(KEY); savedState(false); setStatus(error.message, 'err'); }); }

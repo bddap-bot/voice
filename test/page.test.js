@@ -1514,6 +1514,71 @@ test('a session woken after a sign-off stays awake through its greeting', async 
   assert.deepEqual(result, { pressed: 'true', sleeps: ['sign-off'] });
 });
 
+test('the screen stays on only while awake, and a lock the browser drops on hide returns with the page', async () => {
+  const result = await runWakePage(`
+    await until(() => held() === 1 && !document.querySelector('#puppet-choice').disabled);
+    const awake = { held: held(), requests: screenLocks.length };
+    showPage(false);
+    await until(() => held() === 0);
+    const hidden = { held: held(), requests: screenLocks.length };
+    showPage(true);
+    await until(() => held() === 1);
+    const returned = { held: held(), requests: screenLocks.length };
+    await sleepNow();
+    await until(() => held() === 0);
+    showPage(false);
+    showPage(true);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const asleep = { held: held(), requests: screenLocks.length };
+    globalThis.holdSessionStart = true;
+    document.querySelector('#puppet').click();
+    await until(() => held() === 1 && globalThis.heldSessionStart);
+    const starting = { held: held(), requests: screenLocks.length, pressed: document.querySelector('#puppet').getAttribute('aria-pressed') };
+    globalThis.holdSessionStart = false;
+    heldSessionStart();
+    await sleepNow();
+    holdScreenLock = true;
+    document.querySelector('#puppet').click();
+    await until(() => grantScreenLock);
+    await sleepNow();
+    grantScreenLock();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    return { awake, hidden, returned, asleep, starting, late: { held: held(), requests: screenLocks.length }, types: [...new Set(screenLocks.map((lock) => lock.type))] };
+  `, { setup: `
+    const screenLocks = [];
+    let pageHidden = false;
+    Object.defineProperty(document, 'hidden', { get: () => pageHidden });
+    Object.defineProperty(document, 'visibilityState', { get: () => pageHidden ? 'hidden' : 'visible' });
+    let holdScreenLock = false, grantScreenLock;
+    Object.defineProperty(navigator, 'wakeLock', { value: { request: async (type) => {
+      if (pageHidden) throw new DOMException('The requesting page is not visible', 'NotAllowedError');
+      const lock = Object.assign(new EventTarget(), { type, released: false, async release() {
+        if (lock.released) return;
+        lock.released = true;
+        lock.dispatchEvent(new Event('release'));
+      } });
+      screenLocks.push(lock);
+      if (holdScreenLock) await new Promise((resolve) => { grantScreenLock = resolve; });
+      return lock;
+    } } });
+    const held = () => screenLocks.filter((lock) => !lock.released).length;
+    const showPage = (visible) => {
+      pageHidden = !visible;
+      if (!visible) for (const lock of screenLocks) lock.release();
+      document.dispatchEvent(new Event('visibilitychange'));
+    };
+  ` });
+  assert.deepEqual(result, {
+    awake: { held: 1, requests: 1 },
+    hidden: { held: 0, requests: 1 },
+    returned: { held: 1, requests: 2 },
+    asleep: { held: 0, requests: 2 },
+    starting: { held: 1, requests: 3, pressed: 'false' },
+    late: { held: 0, requests: 4 },
+    types: ['screen'],
+  });
+});
+
 test('inactivity sleeps after the generous window even while a hub request is pending', async () => {
   const result = await runWakePage(`
     hear('Take your time.');

@@ -1,17 +1,11 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
-import { access, mkdir, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
-import { constants } from 'node:fs';
+import { readFile, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { join } from 'node:path';
 import test from 'node:test';
-import { promisify } from 'node:util';
 import { INACTIVITY_MS, NAME, SIGN_OFF, WAKE_PHRASE } from '../docs/identity.js';
 import { WIDTH, WINDOW } from '../docs/wake.js';
+import { launchChromium, renderDom } from '../scripts/chromium.mjs';
 import { assessSmoke, canvasAspectMatches, clipClearsStage, evidenceRegion, installSmokeMeasurements, smokeLimits, smokeStatusText, smokeViewports } from './smoke-measurements.js';
-
-const execute = promisify(execFile);
-
 
 test('private smoke uses the same authenticated relay transport as the page', async () => {
   const source = await readFile(new URL('../scripts/smoke.mjs', import.meta.url), 'utf8');
@@ -254,26 +248,13 @@ for (let index = 0; index < 10; index++) {
 }
 `;
 
-async function chromiumExecutable() {
-  if (process.env.CHROMIUM_BIN) {
-    await access(process.env.CHROMIUM_BIN, constants.X_OK);
-    return process.env.CHROMIUM_BIN;
-  }
-  const candidates = ['chromium', 'chromium-browser', 'google-chrome', 'google-chrome-stable'];
+async function dumpDom(url, args, budget) {
+  const chrome = await launchChromium({ args: ['--headless=new', '--no-sandbox', ...args] });
   try {
-    const stores = await readdir('/nix/store');
-    candidates.push(...stores.filter((name) => name.includes('-chromium-')).map((name) => `/nix/store/${name}/bin/chromium`));
-  } catch {}
-  for (const candidate of candidates) {
-    const paths = candidate.includes('/') ? [candidate] : (process.env.PATH ?? '').split(':').map((directory) => join(directory, candidate));
-    for (const path of paths) {
-      try {
-        await access(path, constants.X_OK);
-        return path;
-      } catch {}
-    }
+    return { stdout: await renderDom(chrome, url, { budget }), stderr: chrome.stderr };
+  } finally {
+    await chrome.close();
   }
-  throw new Error('headless Chromium is required; set CHROMIUM_BIN');
 }
 
 async function runPage(testSetup = '', { scale = 1, size = '390,844', budget = 3000, mobile = false } = {}) {
@@ -284,15 +265,13 @@ async function runPage(testSetup = '', { scale = 1, size = '390,844', budget = 3
   const live = await readFile(new URL('../docs/live.js', import.meta.url));
   const puppetClient = await readFile(new URL('../docs/puppet-client.js', import.meta.url));
   const puppetDrivers = await readFile(new URL('../docs/puppet-drivers.js', import.meta.url));
-  const scratch = await mkdtemp(join(process.cwd(), '.chromium-'));
-  const profile = join(scratch, 'profile');
-  const temporary = join(scratch, 'tmp');
-  await Promise.all([mkdir(profile), mkdir(temporary)]);
   const requests = [];
+  let destinations = 0, destinationArrived = () => {};
   const server = createServer(async (request, response) => {
-    const path = new URL(request.url, 'http://localhost').pathname;
+    const { pathname: path, searchParams } = new URL(request.url, 'http://localhost');
     requests.push(path);
-    if (path === '/panel-link-destination') { response.writeHead(200, { 'content-type': 'text/html', 'cache-control': 'no-store' }); response.end('<!doctype html><script>window.close()</script>'); return; }
+    if (path === '/panel-link-destination') { destinations++; destinationArrived(); response.writeHead(200, { 'content-type': 'text/html', 'cache-control': 'no-store' }); response.end('<!doctype html><script>window.close()</script>'); return; }
+    if (path === '/panel-links-loaded') { while (destinations < Number(searchParams.get('count'))) await new Promise((resolve) => { destinationArrived = resolve; }); response.end(); return; }
     const served = path === '/botq_dash_wasm.js' ? mockWasm : path === '/fake-puppet.js' ? fakePuppet : path === '/puppet-client.js' ? puppetClient : path === '/puppet-drivers.js' ? puppetDrivers : path === '/live.js' ? live : path === '/' ? index : await readFile(new URL(`../docs${path}`, import.meta.url)).catch(() => null);
     if (served === null) { response.writeHead(404); response.end(); return; }
     response.writeHead(200, { 'content-type': path.endsWith('.js') ? 'text/javascript' : path.endsWith('.css') ? 'text/css' : path.endsWith('.woff2') ? 'font/woff2' : 'text/html' });
@@ -300,10 +279,7 @@ async function runPage(testSetup = '', { scale = 1, size = '390,844', budget = 3
   });
   try {
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const executable = await chromiumExecutable();
-    const { stdout, stderr } = await execute(executable, [
-      '--headless=new',
-      '--no-sandbox',
+    const { stdout, stderr } = await dumpDom(`http://127.0.0.1:${server.address().port}/`, [
       '--disable-gpu',
       '--disable-popup-blocking',
       '--disable-background-timer-throttling',
@@ -311,24 +287,15 @@ async function runPage(testSetup = '', { scale = 1, size = '390,844', budget = 3
       `--force-device-scale-factor=${scale}`,
       `--window-size=${size}`,
       ...(mobile ? ['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36'] : []),
-      `--user-data-dir=${profile}`,
-      `--virtual-time-budget=${budget}`,
-      '--dump-dom',
-      `http://127.0.0.1:${server.address().port}/`,
-    ], { timeout: 15000, killSignal: 'SIGKILL', env: { ...process.env, TMPDIR: temporary } });
+    ], budget);
     return { stdout, stderr, requests };
   } finally {
     if (server.listening) await new Promise((resolve) => server.close(resolve));
-    await rm(scratch, { recursive: true, force: true });
   }
 }
 
 async function runPuppetPage(html, { scale = 1, size = '390,844', budget = 3000, mobile = false } = {}) {
   const puppet = await readFile(new URL('../docs/puppet.js', import.meta.url));
-  const scratch = await mkdtemp(join(process.cwd(), '.chromium-'));
-  const profile = join(scratch, 'profile');
-  const temporary = join(scratch, 'tmp');
-  await Promise.all([mkdir(profile), mkdir(temporary)]);
   const server = createServer((request, response) => {
     const body = request.url === '/puppet.js' ? puppet : html;
     response.writeHead(200, { 'content-type': request.url === '/puppet.js' ? 'text/javascript' : 'text/html' });
@@ -336,23 +303,15 @@ async function runPuppetPage(html, { scale = 1, size = '390,844', budget = 3000,
   });
   try {
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const executable = await chromiumExecutable();
-    return await execute(executable, [
-      '--headless=new',
-      '--no-sandbox',
+    return await dumpDom(`http://127.0.0.1:${server.address().port}/`, [
       '--use-angle=swiftshader',
       '--enable-unsafe-swiftshader',
       `--force-device-scale-factor=${scale}`,
       `--window-size=${size}`,
-      `--user-data-dir=${profile}`,
-      `--virtual-time-budget=${budget}`,
       ...(mobile ? ['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36'] : []),
-      '--dump-dom',
-      `http://127.0.0.1:${server.address().port}/`,
-    ], { timeout: 15000, killSignal: 'SIGKILL', env: { ...process.env, TMPDIR: temporary } });
+    ], budget);
   } finally {
     if (server.listening) await new Promise((resolve) => server.close(resolve));
-    await rm(scratch, { recursive: true, force: true });
   }
 }
 
@@ -1134,12 +1093,15 @@ window.addEventListener('test-ready', () => {
     const channel = testChannel;
     const links = [...document.querySelectorAll('.display-item a')];
     const attributes = links.map(link => [link.textContent === 'label' ? 'label' : new URL(link.href).hash, new URL(link.href).hash, link.getAttribute('target'), link.rel]);
+    let opened = 0;
     for (const link of links) {
       if (${standalone} && link.target !== '_blank') continue;
       if (!${standalone}) link.href = '#' + new URL(link.href).hash.slice(1);
+      else opened++;
       link.click();
       await new Promise(resolve => setTimeout(resolve, 50));
     }
+    await fetch('/panel-links-loaded?count=' + opened);
     document.body.dataset.linkTest = JSON.stringify({ attributes, hash: location.hash, active: document.querySelector('#puppet').getAttribute('aria-pressed'), sameSession: channel === testChannel && channel.readyState === 'open', closed: sentLiveEvents.some(event => event.type === 'session.close') });
   }, 100);
 });`);

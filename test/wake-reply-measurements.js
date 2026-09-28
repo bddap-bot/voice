@@ -3,6 +3,7 @@ import { SIGN_OFF } from '../docs/identity.js';
 import { includesPhrase } from '../docs/live.js';
 
 const MEMORY = 'Context: Archived transcripts of completed conversations';
+const VOCALIZATION = /\[[a-z]+\]/g;
 const FAREWELL = /\b(good ?bye|bye|good ?night|sleep (well|tight)|see you (later|soon|around)|talk (to you )?(later|soon)|end(ing)? (the|this) (session|conversation)|going (back )?to sleep|already asleep)\b/i;
 const EVENTS = new Set(['session.started', 'session.input_transcript.delta', 'session.output_transcript.delta', 'session.delegation.created', 'session.instructions.append', 'session.instructions.appended', 'session.commentary.append', 'session.commentary.appended']);
 const FIELDS = new Set(['type', 'raw', 'delta', 'content', 'event_id', 'client_event_id', 'start_ms', 'end_ms']);
@@ -10,7 +11,7 @@ const subject = (reply) => /(\w+)\W*$/.exec(reply)[1].toLowerCase();
 const names = (text, reply) => new RegExp(`\\b${subject(reply)}\\b`, 'i').test(text);
 
 export function spokenBetween(capture, ch, from, to) {
-  return capture.rt.filter((row) => row.ch === ch && row.dir === 'in' && row.at >= from && row.at <= to && row.event.type === 'session.output_transcript.delta').map(({ event }) => event.delta).join('').trim();
+  return capture.rt.filter((row) => row.ch === ch && row.dir === 'in' && row.at >= from && row.at <= to && row.event.type === 'session.output_transcript.delta').map(({ event }) => event.delta).join('').replace(VOCALIZATION, '').replace(/\s{2,}/g, ' ').trim();
 }
 
 export function spokenReply(capture, ch, stamp, end) {

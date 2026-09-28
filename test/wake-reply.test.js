@@ -32,6 +32,12 @@ test('a carried sign-off split around a late input transcript still counts', () 
   assert.equal(assessWakeReplies(data).length, 11);
 });
 
+test('a vocalization in the transcript around a fresh reply is not speech', () => {
+  const data = recorded();
+  outputDeltas(data, 1, data.capture.rt.find((row) => row.ch === 1 && row.dir === 'out' && row.event.type === 'session.commentary.append' && row.event.event_id?.startsWith('hub_')).at, mark(data, 'reply-end', 1).at)[0].event.delta = '[exhale] The test';
+  assert.equal(assessWakeReplies(data).length, 11);
+});
+
 for (let session = 1; session <= 10; session++) {
   test(`a prior answer substituted in woken session ${session} fails the live oracle`, () => {
     const data = recorded();
@@ -58,6 +64,7 @@ for (const [label, mutate, error] of [
   ['farewell greeting', (data) => { outputDeltas(data, 1, 0, mark(data, 'recall-start', 1).at)[0].event.delta = 'Goodbye. '; }, /session 1: opened with a farewell/],
   ['delegated recall', (data) => data.capture.rt.push({ at: mark(data, 'recall-start', 1).at + 1, ch: 1, dir: 'in', event: { type: 'session.delegation.created' } }), /session 1: delegated the recall question/],
   ['recall naming an older answer too', (data) => overwrite(outputDeltas(data, 2, mark(data, 'recall-start', 2).at, mark(data, 'recall-end', 2).at), `It was ${data.replies[1].split(' ').at(-1)}, and before that ${data.replies[0].split(' ').at(-1)}`), /session 2: did not recall the answer from before the sleep/],
+  ['spoken delegation label', (data) => { outputDeltas(data, 1, data.capture.rt.find((row) => row.ch === 1 && row.dir === 'out' && row.event.type === 'session.commentary.append' && row.event.event_id?.startsWith('hub_')).at, mark(data, 'reply-end', 1).at)[0].event.delta = '[delegation_result] The test'; }, /session 1: spoke something other than the fresh hub reply/],
   ['extra speech', (data) => { data.capture.rt.find((row) => row.ch === 1 && row.dir === 'in' && row.at >= mark(data, 'request-start', 1).at && row.event.type === 'session.output_transcript.delta' && row.event.delta.includes('violet')).event.delta += ' The hub will answer later.'; }, /spoke something other than the fresh hub reply/],
 ]) {
   test(`${label} cannot produce a passing wake measurement`, () => {

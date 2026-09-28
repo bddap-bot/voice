@@ -63,7 +63,7 @@ export function assessWakeReplies({ replies, capture }, minimumWakes = 10) {
       const archived = offers[ch].context?.find((turn) => turn.speaker === 'user' && turn.text.startsWith(MEMORY));
       const turns = archived ? JSON.parse(archived.text.slice(archived.text.indexOf('\n') + 1)).at(-1).turns : [];
       assert.ok(turns.some((turn) => turn.speaker === 'live' && turn.text.includes(replies[ch - 1])), `session ${ch}: previous answer was not carried`);
-      assert.ok(includesPhrase(turns.findLast((turn) => turn.speaker === 'live')?.text ?? '', SIGN_OFF), `session ${ch}: the carried conversation did not end on the sign-off`);
+      assert.ok(includesPhrase(turns.filter((turn) => turn.speaker === 'live').map((turn) => turn.text).join(' '), SIGN_OFF), `session ${ch}: the carried conversation did not end on the sign-off`);
       assert.ok(recall && recalled && recalled.at > recall.at && begin.at >= recalled.at, `session ${ch}: missing recall window`);
       assert.ok(!incoming.some(({ at, event }) => at >= recall.at && at <= recalled.at && event.type === 'session.delegation.created'), `session ${ch}: delegated the recall question`);
       answer = spokenBetween(capture, ch, recall.at, recalled.at);

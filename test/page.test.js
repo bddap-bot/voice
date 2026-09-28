@@ -138,7 +138,7 @@ export async function recv() {
 const fakePuppet = `
 export class PuppetRuntime {
   constructor(canvas) { this.canvas = canvas; this.calls = []; this.humanoidBone = 0; globalThis.testPuppet = this; }
-  async load(bytes, initialClip, valid, beforeCommit) { await beforeCommit(); globalThis.firstVisible = { playable: initialClip.action, order: [...transferOrder] }; this.humanoidBone += initialClip.bytes.byteLength; const context = this.canvas.getContext('2d'); context.fillStyle = '#50c878'; context.fillRect(0, 0, this.canvas.width, this.canvas.height); return valid(); }
+  async load(bytes, initialClip, valid, beforeCommit) { await beforeCommit(); globalThis.firstVisible = { playable: initialClip?.action ?? 'Standing', order: [...transferOrder] }; this.humanoidBone += initialClip?.bytes.byteLength ?? 0; const context = this.canvas.getContext('2d'); context.fillStyle = '#50c878'; context.fillRect(0, 0, this.canvas.width, this.canvas.height); return valid(); }
   async loadClips(entries) { const before = this.humanoidBone; this.humanoidBone += entries.reduce((sum, entry) => sum + entry.bytes.byteLength, 0); globalThis.clipMovement = { before, after: this.humanoidBone, loaded: entries.map((entry) => [entry.action, entry.format]) }; }
   pose(...args) { this.calls.push(['pose', ...args]); }
   gesture(...args) { this.calls.push(['gesture', ...args]); }
@@ -767,7 +767,7 @@ window.addEventListener('test-ready', () => setTimeout(() => {
 }, 100));
 `);
   const encoded = /data-initial-puppet-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { requests: ['42'], cacheKeys: ['hash-42-idle-hash.json', 'hash-42.vrm', 'hash-42-sit-hash.json'], clipMovement: { before: 3, after: 6, loaded: [['sit', 'tracks']] }, firstVisible: { playable: 'idle', order: ['idle.fbx', '42'] } }, stderr);
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { requests: ['42'], cacheKeys: ['hash-42.vrm', 'hash-42-sit-hash.json', 'hash-42-idle-hash.json'], clipMovement: { before: 0, after: 6, loaded: [['sit', 'tracks'], ['idle', 'tracks']] }, firstVisible: { playable: 'Standing', order: ['42'] } }, stderr);
 });
 
 test('choosing an inactive puppet fetches only that puppet on demand', async () => {

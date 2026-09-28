@@ -3,6 +3,8 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { VRMAnimationLoaderPlugin, createVRMAnimationClip } from '@pixiv/three-vrm-animation';
 
+import { standingPose, anchorStandingIdle } from './standing.js';
+
 const VISEMES = ['aa', 'ih', 'ou', 'ee', 'oh'];
 const MOOD_EXPRESSIONS = ['happy', 'angry', 'sad', 'relaxed', 'surprised'];
 
@@ -203,7 +205,7 @@ export class PuppetRuntime {
     this.idleClip = null;
     this.nextIdleAt = Infinity;
     this.clock = new THREE.Clock();
-    this.poseName = 'sit';
+    this.poseName = 'stand';
     this.bones = new Map();
     this.gazeTarget = new THREE.Object3D();
     this.gazeTarget.position.fromArray(GAZE_POINTS.camera);
@@ -246,7 +248,7 @@ export class PuppetRuntime {
     cancelAnimationFrame(this.frame);
     this.frame = 0;
   }
-  async load(bytes, initialClip, valid = () => true, beforeCommit = async () => {}) {
+  async load(bytes, initialClip = null, valid = () => true, beforeCommit = async () => {}) {
     const loader = new GLTFLoader();
     loader.register((parser) => new VRMLoaderPlugin(parser));
     const url = URL.createObjectURL(new Blob([bytes], { type: 'model/gltf-binary' }));
@@ -280,11 +282,8 @@ export class PuppetRuntime {
     vrm.scene.position.z -= center.z;
     vrm.scene.traverse((object) => { object.frustumCulled = false; });
     VRMUtils.removeUnnecessaryVertices(vrm.scene);
-    const preparedClip = await animationClip(initialClip.bytes, initialClip.format, vrm);
-    if (!valid()) {
-      VRMUtils.deepDispose(vrm.scene);
-      return false;
-    }
+    vrm.humanoid.setNormalizedPose(standingPose(vrm));
+    vrm.update(0);
     if (this.vrm) {
       this.idleRoot.remove(this.vrm.scene);
       VRMUtils.deepDispose(this.vrm.scene);
@@ -305,21 +304,29 @@ export class PuppetRuntime {
       expression.overrideLookAt = 'none';
     }
     this.clips.clear();
-    preparedClip.userData.action = initialClip.action;
-    this.clips.set(initialClip.action, preparedClip);
-    this.prepareHandovers();
+    this.clipAction = null;
+    this.clipFallback = null;
+    this.clipGesture = null;
+    this.idleClip = null;
+    this.pendingGesture = null;
+    this.gestureState = null;
+    this.gestureOffsets = {};
     this.idleRoot.add(vrm.scene);
-    this.playClip(initialClip.action, initialClip.action);
+    if (initialClip) await this.loadClips([initialClip]);
     return true;
   }
   async loadClips(entries) {
+    const vrm = this.vrm;
     for (const entry of entries) {
-      const clip = await animationClip(entry.bytes, entry.format, this.vrm);
+      const clip = await animationClip(entry.bytes, entry.format, vrm);
+      if (this.vrm !== vrm) return;
+      if (IDLE_CLIPS.stand.includes(entry.action)) anchorStandingIdle(clip, vrm);
       clip.userData.action = entry.action;
       this.clips.set(entry.action, clip);
     }
     this.prepareHandovers();
     if (this.poseName === 'sit') this.playClip('sit', 'sit-idle');
+    else if (!this.clipAction) this.playIdle();
   }
   prepareHandovers() {
     this.handovers.clear();
@@ -458,7 +465,7 @@ export class PuppetRuntime {
     if (!clip) return;
     const previous = this.clipAction;
     const handover = previous && this.handovers?.get(`${previous.getClip().userData.action}:${name}`);
-    const duration = handover?.duration ?? 0.18;
+    const duration = handover?.duration ?? (IDLE_CLIPS.stand.includes(name) ? 0.6 : 0.18);
     const scheduled = [...this.clips.values()].map((loaded) => this.mixer.existingAction(loaded, this.vrm.scene)).filter((existing) => existing?.isScheduled());
     for (const outgoing of scheduled) outgoing.setEffectiveWeight(outgoing.getEffectiveWeight()).fadeOut(duration);
     const action = this.mixer.clipAction(clip, this.vrm.scene).reset().setEffectiveWeight(1);
@@ -672,7 +679,7 @@ export class PuppetRuntime {
     this.updateFace(now);
     this.vrm?.update(delta);
     this.recordAnimation();
-    if (this.clipAction) this.renderer.render(this.scene, this.camera);
+    if (this.vrm) this.renderer.render(this.scene, this.camera);
     this.frame = requestAnimationFrame(this.animate);
   }
   dispose() {

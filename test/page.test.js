@@ -51,7 +51,7 @@ function deliver(value) {
 }
 globalThis.deliverRelay = deliver;
 globalThis.loseRelay = (error) => {
-  lost = true;
+  lost = error;
   queued.length = 0;
   for (const receiver of waiting.splice(0)) receiver.reject(error);
 };
@@ -129,6 +129,7 @@ export async function send_only(bytes) {
   }
 }
 export async function recv() {
+  if (lost) throw lost;
   if (queued.length) return queued.shift();
   return new Promise((resolve, reject) => waiting.push({ resolve, reject }));
 }

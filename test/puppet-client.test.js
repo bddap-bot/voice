@@ -236,3 +236,20 @@ test('connection replacement cancels a transfer waiting in the queue', async () 
   await assert.rejects(second, /connection replaced/);
   assert.deepEqual(sent, ['puppet\n{"id":"1","encodings":["gzip"]}']);
 });
+
+test('a connection lost while a request is still sending rejects it without an unhandled rejection', async () => {
+  const unhandled = [];
+  const record = (reason) => unhandled.push(reason);
+  process.on('unhandledRejection', record);
+  let release;
+  const sending = new Promise((resolve) => { release = resolve; });
+  const channel = new PuppetChannel(() => sending, cacheStorage());
+  const rejected = [channel.catalog(), channel.select('1'), channel.clips(), channel.bytes('1')].map((request) => assert.rejects(request, /relay closed/));
+  await new Promise((resolve) => setImmediate(resolve));
+  channel.fail(new Error('relay closed'));
+  await new Promise((resolve) => setImmediate(resolve));
+  release();
+  await Promise.all(rejected);
+  process.off('unhandledRejection', record);
+  assert.deepEqual(unhandled, []);
+});

@@ -223,6 +223,8 @@ export class AckUploader {
               reject: (error) => { this.cancel(timer); reject(error); },
             };
           });
+          // Awaited only once the send settles; handled now so an earlier rejection is not reported as unhandled.
+          acknowledged.catch(() => {});
           await this.send(item.frame);
           await acknowledged;
           break;

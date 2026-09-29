@@ -173,10 +173,10 @@ export function shouldBeat(energy, previousEnergy, waiting) {
 }
 
 export class PuppetRuntime {
-  constructor(canvas, panel) {
+  constructor(canvas, panel, renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true })) {
     this.canvas = canvas;
     this.panel = panel;
-    this.renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+    this.renderer = renderer;
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.scene = new THREE.Scene();

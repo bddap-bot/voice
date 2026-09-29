@@ -67,6 +67,7 @@ export async function send_only(bytes) {
   if (frame.startsWith('telemetry\\n')) {
     const batch = JSON.parse(frame.slice(frame.indexOf('\\n') + 1));
     globalThis.telemetryBatches.push(batch.events);
+    globalThis.onTelemetry?.();
     for (const event of batch.events.filter((item) => item.kind === 'error')) globalThis.fleetLines.push('fleet-error: voice/page — ' + event.name + ': ' + event.message);
     deliver(enc.encode('telemetry-ack\\n' + JSON.stringify({ batch_id: batch.batch_id })));
   }
@@ -729,7 +730,10 @@ test('session open and close arrive as two batched telemetry events', async () =
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   document.querySelector('#puppet').click();
-  setTimeout(() => { document.body.dataset.telemetrySessionTest = JSON.stringify(telemetryBatches.flat().filter((event) => event.kind === 'session').map((event) => event.name)); }, 300);
+  globalThis.onTelemetry = () => {
+    const names = telemetryBatches.flat().filter((event) => event.kind === 'session').map((event) => event.name);
+    if (names.includes('close')) document.body.dataset.telemetrySessionTest = JSON.stringify(names);
+  };
 });
 `);
   const encoded = /data-telemetry-session-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
@@ -1202,7 +1206,11 @@ test('animation deltas and input utterances reach session telemetry', async () =
 window.addEventListener('test-ready', () => {
   testPuppet.onAnimation({ clips: [{ name: 'sit', weight: 0.5 }], hip_height: 1.2 });
   for (const event of [{ type: 'input_audio_buffer.speech_started' }, { type: 'session.input_transcript.delta', delta: 'Please stand.' }]) emitLive(event);
-  setTimeout(() => { document.body.dataset.poseTelemetry = JSON.stringify(telemetryBatches.flat().filter((event) => ['animation', 'input_utterance', 'input_speech_started'].includes(event.name))); }, 600);
+  globalThis.onTelemetry = () => {
+    const events = telemetryBatches.flat().filter((event) => ['animation', 'input_utterance', 'input_speech_started'].includes(event.name));
+    if (events.length >= 3) document.body.dataset.poseTelemetry = JSON.stringify(events);
+  };
+  onTelemetry();
 });
 `);
   const encoded = /data-pose-telemetry="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
@@ -1681,12 +1689,12 @@ for (const [phase, enter, status] of [
     const opens = microphoneOpens;
     ${enter}
     endMicrophone();
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await until(() => sessionEvents('microphone-ended').length && testSpotter !== spotter && !testSpotter.closed);
     const lost = { status: document.querySelector('#status').textContent, pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), events: sessionEvents('microphone-ended').length, opens: microphoneOpens - opens, closed: spotter.closed, replaced: testSpotter !== spotter, running: !testSpotter.closed, hears: testSpotter.stream.getAudioTracks()[0].readyState };
     globalThis.holdSessionStart = false;
+    const tracks = globalThis.sentTracks?.length ?? 0;
     document.querySelector('#puppet').click();
-    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true' && sentTracks?.length > tracks);
     return { lost, sends: sentTracks.at(-1).readyState, errors: fleetLines };
   `);
   assert.deepEqual(result, { lost: { status, pressed: 'false', events: 1, opens: 1, closed: 1, replaced: true, running: true, hears: 'live' }, sends: 'live', errors: [] });

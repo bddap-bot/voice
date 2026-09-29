@@ -9,6 +9,8 @@ function deferred() {
   let resolve;
   let reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  // Awaited only once the send settles; handled now so an earlier rejection is not reported as unhandled.
+  promise.catch(() => {});
   return { promise, resolve, reject };
 }
 

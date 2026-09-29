@@ -134,6 +134,29 @@ test('retryable storage errors resend while permanent ones release only their ma
   assert.deepEqual(sent, ['sent', 'sent']);
 });
 
+test('a retryable rejection that arrives while its frame is still sending is retried without an unhandled rejection', async () => {
+  const unhandled = [];
+  const record = (reason) => unhandled.push(reason);
+  process.on('unhandledRejection', record);
+  let release;
+  const sending = new Promise((resolve) => { release = resolve; });
+  const sent = [];
+  let uploader;
+  uploader = new AckUploader(async () => {
+    sent.push('sent');
+    if (sent.length === 1) return sending;
+    queueMicrotask(() => uploader.ack('transcript:session_5:0'));
+  }, { pause: async () => {}, timeout: 1000 });
+  uploader.add('transcript:session_5:0', Uint8Array.of(1));
+  uploader.fail('transcript:session_5:0', true);
+  await new Promise((resolve) => setImmediate(resolve));
+  release();
+  while (uploader.running) await new Promise((resolve) => setImmediate(resolve));
+  process.off('unhandledRejection', record);
+  assert.deepEqual(unhandled, []);
+  assert.deepEqual(sent, ['sent', 'sent']);
+});
+
 test('a hub reply records its spoken text on its delegation', () => {
   const trace = new ConversationTrace();
   const heard = trace.heard('check the queue');

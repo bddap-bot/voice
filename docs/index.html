@@ -222,6 +222,8 @@ async function sendTelemetry(events) {
       reject: (error) => { clearTimeout(timer); telemetryWaiters.delete(batchId); reject(error); },
     });
   });
+  // Awaited only once the send settles; handled now so an earlier rejection is not reported as unhandled.
+  acknowledged.catch(() => {});
   try {
     await sendFrame(`telemetry\n${JSON.stringify({ batch_id: batchId, events })}`);
   } catch (error) {

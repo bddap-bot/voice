@@ -251,6 +251,7 @@ window.addEventListener('load', () => {
   const ready = poll(() => {
     if (document.querySelector('#puppet').getAttribute('aria-disabled') === 'true') return;
     clearInterval(ready);
+    if (globalThis.skipTap) return window.dispatchEvent(new Event('test-ready'));
     document.querySelector('#puppet').click();
     const started = poll(() => {
       const status = document.querySelector('#status').textContent;
@@ -419,6 +420,17 @@ document.body.dataset.visibilityTest = JSON.stringify({ beforeAvatar, beforePlay
 runtime.dispose();
 </script>`);
 }
+
+test('a new puppet runtime rests seated and asleep', async () => {
+  const { stdout, stderr } = await runPuppetPage(`<!doctype html><canvas id="puppet"></canvas><script type="module">
+import { PuppetRuntime } from '/puppet.js';
+const runtime = new PuppetRuntime(document.querySelector('#puppet'));
+document.body.dataset.restTest = JSON.stringify({ pose: runtime.poseName, asleep: runtime.sleeping });
+runtime.dispose();
+</script>`);
+  const encoded = /data-rest-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { pose: 'sit', asleep: true }, stderr);
+});
 
 test('headless Chromium renders an avatar before its animation clips arrive', async () => {
   const { stdout, stderr } = await runVisibilityPage();
@@ -945,34 +957,35 @@ window.addEventListener('test-ready', () => {
   assert.deepEqual(JSON.parse(encoded ?? 'null'), ['live-config-sdp-answer', 'live-config-session-started', 'open', 'close'], stderr);
 });
 
-test('wake detection and signalling start before any avatar transfer', async () => {
+test('a fresh page shows the active puppet at rest before anything taps it', async () => {
   const { stdout, stderr } = await runPage(`
-globalThis.holdSessionStart = true;
-const poll = setInterval(() => {
-  if (!globalThis.heldSessionStart) return;
-  clearInterval(poll);
-  document.body.dataset.beforeAvatarTest = JSON.stringify({ requests: puppetRequests, transfers: transferOrder, spotter: Boolean(testSpotter) });
-  heldSessionStart();
-}, 10);
+globalThis.skipTap = true;
+window.addEventListener('test-ready', () => {
+  const poll = setInterval(() => {
+    if (!globalThis.clipMovement) return;
+    clearInterval(poll);
+    document.body.dataset.bootTest = JSON.stringify({ requests: puppetRequests, prompt: !document.querySelector('#puppet-prompt').classList.contains('hidden'), pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), calls: testPuppet.calls });
+  }, 10);
+});
 `);
-  const encoded = /data-before-avatar-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { requests: [], transfers: [], spotter: true }, stderr);
+  const encoded = /data-boot-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { requests: ['42'], prompt: false, pressed: 'false', calls: [] }, stderr);
 });
 
 test('a late avatar catalog loads once after the voice session is already open', async () => {
   const { stdout, stderr } = await runPage(`
 globalThis.holdPuppetCatalog = true;
 window.addEventListener('test-ready', () => {
-  const before = { pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), transfers: [...transferOrder] };
+  const before = { pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), transfers: [...transferOrder], spotter: Boolean(testSpotter) };
   releasePuppetCatalog();
   setTimeout(() => { document.body.dataset.lateAvatarTest = JSON.stringify({ before, requests: puppetRequests, pressed: document.querySelector('#puppet').getAttribute('aria-pressed') }); }, 100);
 });
 `);
   const encoded = /data-late-avatar-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { before: { pressed: 'true', transfers: [] }, requests: ['42'], pressed: 'true' }, stderr);
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { before: { pressed: 'true', transfers: [], spotter: true }, requests: ['42'], pressed: 'true' }, stderr);
 });
 
-test('the session loads the active puppet and its clips without fetching inactive puppets', async () => {
+test('the page loads the active puppet and its clips without fetching inactive puppets', async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => setTimeout(() => {
   document.body.dataset.initialPuppetTest = JSON.stringify({ requests: puppetRequests, cacheKeys: [...puppetCache.keys()].map((url) => new URL(url).pathname.split('/').at(-1)), clipMovement, firstVisible });

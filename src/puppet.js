@@ -205,7 +205,7 @@ export class PuppetRuntime {
     this.idleClip = null;
     this.nextIdleAt = Infinity;
     this.clock = new THREE.Clock();
-    this.poseName = 'stand';
+    this.poseName = 'sit';
     this.bones = new Map();
     this.gazeTarget = new THREE.Object3D();
     this.gazeTarget.position.fromArray(GAZE_POINTS.camera);

@@ -1162,7 +1162,6 @@ async function startConversation() {
     syncPuppetUi();
     setStatus(attempt.notice, attempt.notice ? 'err' : '');
     recordSession('open', '', attempt.offerId);
-    if (puppetCatalog && !puppetActive && !puppetLoading) showPuppet(puppetCatalog.active).catch(reportPuppetError);
   } catch (error) {
     if (attempt.cancelled) throw new Error('conversation start cancelled');
     recordPageError(error, attempt.offerId ?? null);
@@ -1294,7 +1293,7 @@ async function loadPrivatePuppets() {
     return option;
   }));
   $('puppet-choice').value = puppetActive ?? puppetCatalog.active;
-  if (conversation && !puppetActive && !puppetLoading) await showPuppet(puppetCatalog.active);
+  if (!puppetActive && !puppetLoading) await showPuppet(puppetCatalog.active);
 }
 
 $('puppet').addEventListener('click', toggleConversation);

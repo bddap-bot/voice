@@ -3,7 +3,7 @@ const SHELL = ['.', 'index.html', 'live.js', 'config.js', 'puppet-client.js', 'p
 const HASHED = /\/lib\/[^/]+-[A-Z0-9]{8}\.(js|css|woff2)$/;
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL.map((path) => new Request(path, { cache: 'no-cache' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {
@@ -19,12 +19,12 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
-  const network = () => fetch(req).then((res) => {
+  const network = (init) => fetch(req, init).then((res) => {
     if (res && res.ok) {
       const copy = res.clone();
       e.waitUntil(caches.open(CACHE).then((c) => c.put(req, copy)));
     }
     return res;
   });
-  e.respondWith(HASHED.test(url.pathname) ? caches.match(req).then((hit) => hit || network()) : network().catch(() => caches.match(req)));
+  e.respondWith(HASHED.test(url.pathname) ? caches.match(req).then((hit) => hit || network()) : network({ cache: 'no-cache' }).catch(() => caches.match(req)));
 });

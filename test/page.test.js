@@ -410,6 +410,7 @@ runtime.animate(0);
 runtime.pause();
 const beforeAvatar = renders;
 runtime.vrm = { update() {} };
+runtime.plantFeet = () => {};
 runtime.animate(0);
 runtime.pause();
 const beforePlayable = renders;

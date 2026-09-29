@@ -395,13 +395,23 @@ test('sit and stand transitions keep model-root and head velocity bounded', () =
   const head = new THREE.Bone();
   head.position.y = 1;
   hips.add(head);
+  const feet = [0.1, -0.1].map((x) => {
+    const foot = new THREE.Bone();
+    foot.position.set(x, -1, 0);
+    hips.add(foot);
+    return foot;
+  });
   model.add(hips);
   stage.add(model);
+  const clip = (name, times, angles) => new THREE.AnimationClip(name, times.at(-1), [
+    new THREE.QuaternionKeyframeTrack(`${hips.uuid}.quaternion`, times, angles.flatMap((angle) => new THREE.Quaternion().setFromEuler(new THREE.Euler(angle, 0, 0)).toArray())),
+    new THREE.VectorKeyframeTrack(`${hips.uuid}.position`, times, times.flatMap(() => [0, 1, 0])),
+  ]);
   const clips = new Map([
-    ['idle', new THREE.AnimationClip('idle', 1, [new THREE.VectorKeyframeTrack(`${hips.uuid}.position`, [0, 0.35, 1], [0, 1.34, 0, 0, 1.38, 0, 0, 1.34, 0])])],
-    ['sit-idle', new THREE.AnimationClip('sit-idle', 1, [new THREE.VectorKeyframeTrack(`${hips.uuid}.position`, [0, 0.6, 1], [0, 0.69, 0, 0, 0.74, 0, 0, 0.69, 0])])],
-    ['sit', new THREE.AnimationClip('sit', 0.8, [new THREE.VectorKeyframeTrack(`${hips.uuid}.position`, [0, 0.5, 0.8], [0, 1.4, 0, 0, 0.75, 0, 0, 0.75, 0])])],
-    ['stand', new THREE.AnimationClip('stand', 0.8, [new THREE.VectorKeyframeTrack(`${hips.uuid}.position`, [0, 0.5, 0.8], [0, 0.75, 0, 0, 1.4, 0, 0, 1.4, 0])])],
+    ['idle', clip('idle', [0, 0.35, 1], [0.12, 0.04, 0.12])],
+    ['sit-idle', clip('sit-idle', [0, 0.6, 1], [1.42, 1.32, 1.42])],
+    ['sit', clip('sit', [0, 0.5, 0.8], [0, 1.3, 1.3])],
+    ['stand', clip('stand', [0, 0.5, 0.8], [1.3, 0, 0])],
   ]);
   for (const [name, clip] of clips) {
     clip.userData.action = name;
@@ -409,7 +419,8 @@ test('sit and stand transitions keep model-root and head velocity bounded', () =
   }
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
     stage,
-    vrm: { scene: model },
+    vrm: { scene: model, humanoid: { update() {}, getRawBoneNode: (name) => ({ leftFoot: feet[0], rightFoot: feet[1] })[name] } },
+    ankleHeight: 0.1,
     mixer: new THREE.AnimationMixer(model),
     clips,
     clipAction: null,
@@ -437,6 +448,7 @@ test('sit and stand transitions keep model-root and head velocity bounded', () =
   };
   runtime.playClip('idle', 'idle');
   for (let frame = 0; frame < 15; frame++) runtime.mixer.update(1 / 60);
+  runtime.plantFeet();
   stage.updateMatrixWorld(true);
   model.getWorldPosition(previousModel);
   head.getWorldPosition(previousHead);
@@ -445,14 +457,16 @@ test('sit and stand transitions keep model-root and head velocity bounded', () =
     for (let frame = 0; frame < 60; frame++) {
       runtime.mixer.update(1 / 60);
       runtime.updatePose(frame * 1000 / 60);
+      runtime.plantFeet();
       sample();
       if (frame >= 30) handoverVelocities.push(velocities.at(-1));
     }
   }
   assert.equal(stage.position.y, 0);
-  assert.ok(Math.max(...velocities.map(({ model: velocity }) => velocity)) < 0.001);
-  const peakHeadVelocity = Math.max(...handoverVelocities.map(({ head: velocity }) => velocity));
-  assert.ok(peakHeadVelocity < 0.3, `peak head velocity ${peakHeadVelocity}`);
+  for (const part of ['model', 'head']) {
+    const peak = Math.max(...handoverVelocities.map((velocity) => velocity[part]));
+    assert.ok(peak < 0.3, `peak ${part} velocity ${peak}`);
+  }
   assert.ok(runtime.handovers.get('sit:sit-idle').offset > 0.3, JSON.stringify(runtime.handovers.get('sit:sit-idle')));
   assert.ok(runtime.handovers.get('stand:idle').offset > 0.3, JSON.stringify(runtime.handovers.get('stand:idle')));
   assert.ok(runtime.handovers.get('sit:sit-idle').duration > 1.5);
@@ -672,97 +686,76 @@ for (const name of ['surprised', 'Surprised', 'SURPRISED']) test(`mood actions r
   assert.throws(() => runtime.mood('unknown'), /unknown mood/);
 });
 
-test('loaded root tracks keep hips XZ fixed through sitting, loops, gestures and standing', async () => {
+test('the feet anchor the puppet through sitting, gestures and standing while the hips move', async () => {
   const scene = new THREE.Group();
-  scene.position.set(2, 0, -3);
-  scene.rotation.y = 0.4;
   scene.scale.setScalar(1.7);
-  const hips = new THREE.Bone();
-  hips.name = 'RootHips';
-  hips.position.set(0.125, 1, -0.25);
-  const hand = new THREE.Bone();
-  hand.name = 'Hand';
-  hips.add(hand);
-  scene.add(hips);
-  const rest = hips.position.toArray();
-  const vrm = { scene, meta: { metaVersion: '1' }, humanoid: { getNormalizedBoneNode: (name) => name === 'hips' ? hips : null, normalizedRestPose: { hips: { position: rest } } } };
+  new THREE.Group().add(scene);
+  const bone = (name, parent, x, y) => {
+    const node = new THREE.Bone();
+    node.name = name;
+    node.position.set(x, y, 0);
+    parent.add(node);
+    return node;
+  };
+  const hips = bone('Hips', scene, 0.3, 1);
+  const legs = ['Left', 'Right'].map((side, index) => {
+    const upper = bone(`${side}UpperLeg`, hips, index ? -0.1 : 0.1, 0);
+    const lower = bone(`${side}LowerLeg`, upper, 0, -0.45);
+    return { upper, lower, foot: bone(`${side}Foot`, lower, 0, -0.45) };
+  });
+  const nodes = { hips, leftFoot: legs[0].foot, rightFoot: legs[1].foot, leftUpperLeg: legs[0].upper, rightUpperLeg: legs[1].upper, leftLowerLeg: legs[0].lower, rightLowerLeg: legs[1].lower };
+  const node = (name) => nodes[name] ?? null;
+  const vrm = { scene, meta: { metaVersion: '1' }, humanoid: { update() {}, getRawBoneNode: node, getNormalizedBoneNode: node } };
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
-    vrm, mixer: new THREE.AnimationMixer(scene), clips: new Map(), handovers: new Map(),
+    vrm, ankleHeight: 0.1, mixer: new THREE.AnimationMixer(scene), clips: new Map(), handovers: new Map(),
     bones: new Map(), poseName: 'stand', idleClip: 'idle', nextIdleAt: Infinity,
   });
-  const payload = (name, heights, offset) => new TextEncoder().encode(JSON.stringify({
+  const bend = (angle, sign) => new THREE.Quaternion().setFromEuler(new THREE.Euler(sign * angle, 0, 0)).toArray();
+  const payload = (name, heights, offset, angles) => new TextEncoder().encode(JSON.stringify({
     name, duration: 1, tracks: [
-      { name: `${name === 'clap' ? hips.uuid : hips.name}.position`, times: [0, 0.5, 1], values: heights.flatMap((height, i) => [offset + i * 0.2, height, offset - i * 0.3]) },
-      { name: `${hips.name}.quaternion`, times: [0, 1], values: [0, 0, 0, 1, 0, 0, 0, 1] },
-      { name: `${hand.name}.position`, times: [0, 1], values: [1, 2, 3, 4, 5, 6] },
+      { name: `${hips.name}.position`, times: [0, 0.5, 1], values: heights.flatMap((height, i) => [offset + i * 0.2, height, offset - i * 0.3]) },
+      ...legs.flatMap(({ upper, lower }) => [
+        { name: `${upper.name}.quaternion`, times: [0, 1], values: angles.flatMap((angle) => bend(angle, -1)) },
+        { name: `${lower.name}.quaternion`, times: [0, 1], values: angles.flatMap((angle) => bend(angle, 1)) },
+      ]),
     ],
   }));
   const entries = [
-    ['idle', [1, 1.02, 1], 0.1], ['sit', [1, 0.7, 0.5], 0.4],
-    ['sit-idle', [0.5, 0.52, 0.5], -0.2], ['stand', [0.5, 0.8, 1], -0.5],
-  ].map(([action, heights, offset]) => ({ action, format: 'tracks', bytes: payload(action, heights, offset) }));
+    ['idle', [1, 1.02, 1], 0.1, [0, 0.05]], ['sit', [1, 0.7, 0.5], 0.4, [0, 1.5]],
+    ['sit-idle', [0.5, 0.52, 0.5], -0.2, [1.5, 1.45]], ['stand', [0.5, 0.8, 1], -0.5, [1.5, 0]],
+  ].map(([action, heights, offset, angles]) => ({ action, format: 'tracks', bytes: payload(action, heights, offset, angles) }));
   await runtime.loadClips(entries);
-  const source = JSON.parse(new TextDecoder().decode(entries[1].bytes));
-  assert.equal(source.tracks[0].values[0], 0.4);
-  assert.deepEqual(Array.from(runtime.clips.get('sit').tracks[2].values), [1, 2, 3, 4, 5, 6]);
-  assert.deepEqual(Array.from(runtime.clips.get('sit').tracks[0].values).filter((_, i) => i % 3 === 1), [1, Math.fround(0.7), 0.5]);
-  const position = new THREE.Vector3();
-  const anchor = hips.getWorldPosition(new THREE.Vector3());
+  const left = new THREE.Vector3();
+  const right = new THREE.Vector3();
+  const hip = new THREE.Vector3();
+  const hipsSeen = [];
   let time = 0;
-  const heights = [];
   const advance = (seconds) => {
     for (let frame = 0; frame < seconds * 60; frame++) {
       time += 1 / 60;
       runtime.updateBasePose(1 / 60);
       runtime.updatePose(time * 1000);
-      hips.getWorldPosition(position);
-      assert.ok(Math.abs(position.x - anchor.x) < 1e-6, `hips X drift at ${time}: ${position.x - anchor.x}`);
-      assert.ok(Math.abs(position.z - anchor.z) < 1e-6, `hips Z drift at ${time}: ${position.z - anchor.z}`);
-      heights.push(position.y);
+      runtime.plantFeet();
+      legs[0].foot.getWorldPosition(left);
+      legs[1].foot.getWorldPosition(right);
+      assert.ok(Math.abs(left.x + right.x) < 1e-6, `feet X drift at ${time}`);
+      assert.ok(Math.abs(left.z + right.z) < 1e-6, `feet Z drift at ${time}`);
+      assert.ok(Math.abs(Math.min(left.y, right.y) - 0.1) < 1e-6, `feet height drift at ${time}`);
+      hipsSeen.push(hips.getWorldPosition(hip).clone());
     }
   };
   runtime.playClip('idle', 'idle');
   advance(1);
   runtime.pose('sit');
   advance(7);
-  await runtime.loadClips([{ action: 'clap', format: 'tracks', bytes: payload('clap', [0.5, 0.55, 0.5], 0.8) }]);
+  await runtime.loadClips([{ action: 'clap', format: 'tracks', bytes: payload('clap', [0.5, 0.55, 0.5], 0.8, [1.5, 1.5]) }]);
   assert.equal(runtime.clipStance('clap'), 'sit');
   runtime.gesture('clap');
   assert.equal(runtime.poseName, 'sit');
   advance(4);
   runtime.pose('stand');
   advance(5);
-  assert.ok(Math.max(...heights) - Math.min(...heights) > 0.8);
-  assert.ok(Math.abs(position.y - 1.7) < 0.04);
-});
-
-test('VRMA cubic root tracks hold rest XZ without changing height interpolation', async (t) => {
-  const previous = globalThis.ProgressEvent;
-  globalThis.ProgressEvent = class { constructor(type, properties) { Object.assign(this, properties); } };
-  t.after(() => { if (previous) globalThis.ProgressEvent = previous; else delete globalThis.ProgressEvent; });
-  const hips = new THREE.Bone();
-  hips.name = 'RootHips';
-  hips.position.set(0.125, 1, -0.25);
-  const scene = new THREE.Group();
-  scene.add(hips);
-  const vrm = { scene, meta: { metaVersion: '1' }, humanoid: { getNormalizedBoneNode: () => hips, normalizedRestPose: { hips: { position: hips.position.toArray() } } } };
-  const data = new Float32Array([0, 1, 1, 0, 2, 3, 1, 4, 5, -0.5, 6, 7, -0.5, 8, 9, 0.5, 10, 11, 0, 12]);
-  const payload = new TextEncoder().encode(JSON.stringify({
-    asset: { version: '2.0' }, scene: 0, scenes: [{ nodes: [0] }], nodes: [{ name: 'Hips', translation: [0, 1, 0] }],
-    extensionsUsed: ['VRMC_vrm_animation'], extensions: { VRMC_vrm_animation: { specVersion: '1.0', humanoid: { humanBones: { hips: { node: 0 } } } } },
-    buffers: [{ uri: `data:application/octet-stream;base64,${Buffer.from(data.buffer).toString('base64')}`, byteLength: data.byteLength }],
-    bufferViews: [{ buffer: 0, byteOffset: 0, byteLength: 8 }, { buffer: 0, byteOffset: 8, byteLength: 72 }],
-    accessors: [{ bufferView: 0, componentType: 5126, count: 2, type: 'SCALAR', min: [0], max: [1] }, { bufferView: 1, componentType: 5126, count: 6, type: 'VEC3' }],
-    animations: [{ samplers: [{ input: 0, output: 1, interpolation: 'CUBICSPLINE' }], channels: [{ sampler: 0, target: { node: 0, path: 'translation' } }] }],
-  }));
-  const clip = await animationClip(payload, 'vrma', vrm);
-  const track = clip.tracks[0];
-  const sample = track.createInterpolant();
-  for (let frame = 0; frame <= 60; frame++) {
-    const time = frame / 60;
-    const value = sample.evaluate(time);
-    assert.ok(Math.abs(value[0] - 0.125) < 1e-7);
-    assert.ok(Math.abs(value[2] + 0.25) < 1e-7);
-    assert.ok(Math.abs(value[1] - (1 - time * 0.5)) < 1e-7);
-  }
+  const spread = (axis) => Math.max(...hipsSeen.map((point) => point[axis])) - Math.min(...hipsSeen.map((point) => point[axis]));
+  assert.ok(spread('y') > 0.6, `hips height spread ${spread('y')}`);
+  assert.ok(spread('z') > 0.8, `hips depth spread ${spread('z')}`);
 });

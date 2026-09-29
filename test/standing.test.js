@@ -12,8 +12,7 @@ function rig(version) {
     scene.add(node);
     return [name, node];
   }));
-  nodes.hips.position.y = 1;
-  return { scene, meta: { metaVersion: version }, humanoid: { getNormalizedBoneNode: name => nodes[name], normalizedRestPose: { hips: { position: [0, 1, 0] } } } };
+  return { scene, meta: { metaVersion: version }, humanoid: { getNormalizedBoneNode: name => nodes[name] } };
 }
 
 test('Standing converts the facing convention and legacy thumb joints without changing the source', () => {
@@ -53,8 +52,6 @@ for (const version of ['0', '1']) test(`standing idle preserves motion and retur
   });
   runtime.playIdle(0);
   runtime.mixer.update(0);
-  const hips = vrm.humanoid.getNormalizedBoneNode('hips');
-  assert.ok(hips.position.distanceTo(new THREE.Vector3(0, 1, 0)) < 1e-6);
   runtime.gesture('wave');
   let previous = vrm.humanoid.getNormalizedBoneNode('head').quaternion.clone();
   let peakStep = 0;

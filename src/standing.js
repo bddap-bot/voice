@@ -24,13 +24,6 @@ export function anchorStandingIdle(clip, vrm) {
       for (let i = 0; i < track.values.length; i += 4) sample.fromArray(track.values, i).premultiply(anchor).normalize().toArray(track.values, i);
     } else clip.tracks.push(new THREE.QuaternionKeyframeTrack(`${node.name}.quaternion`, [0, clip.duration], [...rotation, ...rotation]));
   }
-  const hips = vrm.humanoid.getNormalizedBoneNode('hips');
-  const position = tracks.get(`${hips.name}.position`) ?? tracks.get(`${hips.uuid}.position`);
-  if (position) {
-    const rest = vrm.humanoid.normalizedRestPose.hips.position;
-    const offset = rest.map((value, axis) => value - position.values[axis]);
-    for (let i = 0; i < position.values.length; i++) position.values[i] += offset[i % 3];
-  }
   clip.userData.poseTracks = clip.tracks.map(track => ({ name: track.name, valueSize: track.getValueSize(), interpolant: track.createInterpolant() }));
   return clip;
 }

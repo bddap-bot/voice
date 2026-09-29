@@ -59,7 +59,7 @@ export function pointAtOffsets(target, bones = new Map()) {
 
 function handoverFor(from, to) {
   const fromTracks = new Map((from.userData.poseTracks ?? []).map((track) => [track.name, track]));
-  const pairs = (to.userData.poseTracks ?? []).flatMap((track) => fromTracks.has(track.name) ? [[fromTracks.get(track.name), track]] : []);
+  const pairs = (to.userData.poseTracks ?? []).flatMap((track) => track.valueSize === 4 && fromTracks.has(track.name) ? [[fromTracks.get(track.name), track]] : []);
   if (!pairs.length) return { offset: 0, duration: 1.5 };
   const samples = Math.max(2, Math.ceil(to.duration * 60));
   let best = { offset: 0, distance: Infinity };
@@ -69,28 +69,12 @@ function handoverFor(from, to) {
     for (const [left, right] of pairs) {
       const a = left.interpolant.evaluate(from.duration);
       const b = right.interpolant.evaluate(offset);
-      if (left.valueSize === 4) square += new THREE.Quaternion().fromArray(a).angleTo(new THREE.Quaternion().fromArray(b)) ** 2;
-      else square += new THREE.Vector3().fromArray(a).distanceToSquared(new THREE.Vector3().fromArray(b));
+      square += new THREE.Quaternion().fromArray(a).angleTo(new THREE.Quaternion().fromArray(b)) ** 2;
     }
     const distance = Math.sqrt(square / pairs.length);
     if (distance < best.distance) best = { offset, distance };
   }
   return { offset: best.offset, duration: THREE.MathUtils.clamp(1.5 + best.distance * 4, 1.5, 2.5) };
-}
-
-function inPlaceClip(clip, vrm) {
-  const hips = vrm.humanoid?.getNormalizedBoneNode('hips');
-  const rest = vrm.humanoid?.normalizedRestPose.hips?.position;
-  if (!hips || !rest) return clip;
-  for (const track of clip.tracks) {
-    if (track.name !== `${hips.name}.position` && track.name !== `${hips.uuid}.position`) continue;
-    for (let index = 0; index < track.values.length; index += 3) {
-      const tangent = track.createInterpolant.isInterpolantFactoryMethodGLTFCubicSpline && index % 9 !== 3;
-      track.values[index] = tangent ? 0 : rest[0];
-      track.values[index + 2] = tangent ? 0 : rest[2];
-    }
-  }
-  return clip;
 }
 
 export async function animationClip(bytes, format, vrm) {
@@ -102,7 +86,7 @@ export async function animationClip(bytes, format, vrm) {
       const gltf = await loader.loadAsync(url);
       const animation = gltf.userData.vrmAnimations?.[0];
       if (!animation) throw new Error('VRMA has no animation');
-      return inPlaceClip(createVRMAnimationClip(animation, vrm), vrm);
+      return createVRMAnimationClip(animation, vrm);
     } finally { URL.revokeObjectURL(url); }
   }
   if (format === 'tracks') {
@@ -115,7 +99,7 @@ export async function animationClip(bytes, format, vrm) {
         : new THREE.VectorKeyframeTrack(track.name, track.times, track.values);
     });
     if (!tracks.some((track) => track.name.endsWith('.quaternion'))) throw new Error('animation has no rotation tracks');
-    const clip = inPlaceClip(new THREE.AnimationClip(value.name, value.duration, tracks), vrm);
+    const clip = new THREE.AnimationClip(value.name, value.duration, tracks);
     clip.userData.poseTracks = tracks.map((track) => ({ name: track.name, valueSize: track.getValueSize(), interpolant: track.createInterpolant() }));
     return clip;
   }
@@ -170,6 +154,10 @@ export function audioEnergy(waveform) {
 
 export function shouldBeat(energy, previousEnergy, waiting) {
   return !waiting && energy > 0.075 && energy > previousEnergy * 1.28;
+}
+
+function feetOf(vrm) {
+  return ['leftFoot', 'rightFoot'].map((name) => vrm.humanoid.getRawBoneNode(name).getWorldPosition(new THREE.Vector3()));
 }
 
 export class PuppetRuntime {
@@ -277,11 +265,8 @@ export class PuppetRuntime {
     const size = box.getSize(new THREE.Vector3());
     const scale = size.y ? 2.7 / size.y : 1;
     vrm.scene.scale.setScalar(scale);
-    const fitted = new THREE.Box3().setFromObject(vrm.scene);
-    const center = fitted.getCenter(new THREE.Vector3());
-    vrm.scene.position.x -= center.x;
-    vrm.scene.position.y -= fitted.min.y;
-    vrm.scene.position.z -= center.z;
+    const ground = new THREE.Box3().setFromObject(vrm.scene).min.y;
+    const ankleHeight = Math.min(...feetOf(vrm).map((foot) => foot.y)) - ground;
     vrm.scene.traverse((object) => { object.frustumCulled = false; });
     vrm.humanoid.setNormalizedPose(standingPose(vrm));
     vrm.update(0);
@@ -290,6 +275,7 @@ export class PuppetRuntime {
       VRMUtils.deepDispose(this.vrm.scene);
     }
     this.vrm = vrm;
+    this.ankleHeight = ankleHeight;
     if (vrm.lookAt) vrm.lookAt.target = this.gazeTarget;
     this.bones.clear();
     for (const bone of ['leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg', 'spine', 'head', 'leftShoulder', 'rightShoulder', 'leftUpperArm', 'rightUpperArm', 'leftLowerArm', 'rightLowerArm']) {
@@ -652,6 +638,14 @@ export class PuppetRuntime {
     }
     if (!this.audio) this.previousEnergy = 0;
   }
+  plantFeet() {
+    const { humanoid, scene } = this.vrm;
+    humanoid.update();
+    const [left, right] = feetOf(this.vrm);
+    scene.position.x -= (left.x + right.x) / 2;
+    scene.position.y += this.ankleHeight - Math.min(left.y, right.y);
+    scene.position.z -= (left.z + right.z) / 2;
+  }
   recordAnimation() {
     if (!this.onAnimation) return;
     const clips = [];
@@ -678,6 +672,7 @@ export class PuppetRuntime {
     this.updateGesture(now);
     this.updateListening();
     this.updateFace(now);
+    if (this.vrm) this.plantFeet();
     this.vrm?.update(delta);
     this.recordAnimation();
     if (this.vrm) this.renderer.render(this.scene, this.camera);

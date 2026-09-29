@@ -131,20 +131,21 @@ test('a stalled mobile transfer reports a timeout and releases the request', asy
   await assert.rejects(channel.bytes('7'), /puppet transfer timed out/);
 });
 
-const tick = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const settle = () => new Promise(setImmediate);
 
-test('a slow transfer that keeps arriving outlives the stall timeout', async () => {
+test('a slow transfer that keeps arriving outlives the stall timeout', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const cache = cacheStorage();
   const channel = new PuppetChannel(async () => {}, cache, () => '', 20);
   const original = Uint8Array.from({ length: 4096 }, (_, i) => i % 251);
   const compressed = gzipSync(original);
   const result = channel.bytes('7');
-  await tick(0);
+  await settle();
   await channel.receive(puppetFrame('puppet-start', JSON.stringify({ id: '7', size: compressed.length, originalSize: original.length, contentHash: '', encoding: 'gzip' })));
   const pieces = 5;
   const step = Math.ceil(compressed.length / pieces);
   for (let at = 0; at < compressed.length; at += step) {
-    await tick(12);
+    t.mock.timers.tick(12);
     await channel.receive(binaryFrame('7', compressed.subarray(at, at + step)));
   }
   await channel.receive(puppetFrame('puppet-end', '7'));
@@ -152,17 +153,21 @@ test('a slow transfer that keeps arriving outlives the stall timeout', async () 
   assert.equal(cache.entries.size, 1);
 });
 
-test('frames of a transfer the client gave up on are ignored and the next request proceeds', async () => {
+test('frames of a transfer the client gave up on are ignored and the next request proceeds', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const sent = [];
   const cache = cacheStorage();
   const channel = new PuppetChannel(async (value) => sent.push(value), cache, () => '', 10);
-  await assert.rejects(channel.bytes('7'), /puppet transfer timed out/);
+  const abandoned = channel.bytes('7');
+  await settle();
+  t.mock.timers.tick(10);
+  await assert.rejects(abandoned, /puppet transfer timed out/);
   const late = gzipSync(Uint8Array.of(9));
   assert.equal(await channel.receive(puppetFrame('puppet-start', JSON.stringify({ id: '7', size: late.length, originalSize: 1, contentHash: '', encoding: 'gzip' }))), true);
   assert.equal(await channel.receive(binaryFrame('7', late)), true);
   assert.equal(await channel.receive(puppetFrame('puppet-end', '7')), true);
   const next = channel.bytes('8');
-  await tick(0);
+  await settle();
   assert.equal(sent.at(-1), 'puppet\n{"id":"8","encodings":["gzip"]}');
   await channel.receive(puppetFrame('puppet-error', JSON.stringify({ id: '7', code: 'failed', message: 'stale' })));
   await deliverPuppet(channel, '8', Uint8Array.of(8));
@@ -173,7 +178,7 @@ test('frames of a transfer the client gave up on are ignored and the next reques
 test('an oversize transfer fails only itself, not the connection', async () => {
   const channel = new PuppetChannel(async () => {}, cacheStorage());
   const result = channel.bytes('7');
-  await tick(0);
+  await settle();
   await channel.receive(puppetFrame('puppet-start', JSON.stringify({ id: '7', size: 1, originalSize: 1, contentHash: '', encoding: 'gzip' })));
   assert.equal(await channel.receive(binaryFrame('7', Uint8Array.of(1, 2))), true);
   await assert.rejects(result, /puppet exceeds advertised size/);

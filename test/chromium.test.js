@@ -29,7 +29,7 @@ async function launchFake(browser) {
   return chrome;
 }
 
-test('Chromium cleanup waits for every process holding the browser output, even outside its session, then removes its scratch directory', { timeout: 30000 }, async () => {
+test('Chromium cleanup waits for every process holding the browser output, even outside its session, then removes its scratch directory', async () => {
   const writer = `
     const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
     const browser = process.ppid, temporary = path.join(os.tmpdir(), 'writer');
@@ -77,23 +77,28 @@ test('Chromium cleanup removes the profile when spawning fails', async () => {
   await assert.rejects(access(browser.scratch), { code: 'ENOENT' });
 });
 
-async function renderTicking(tick) {
-  let chrome, server;
+async function renderTicking(t, tick) {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let chrome, server, requested = 0, announced = 0, announce = () => {};
   const processes = [];
   const record = async () => { processes.push(...(await chrome.devtools.call('SystemInfo.getProcessInfo')).processInfo); };
   try {
     server = createServer(async (request, response) => {
       if (request.url !== '/tick') return response.end(`<!doctype html><script>addEventListener('load', () => setInterval(async () => { await fetch('/tick'); document.body.dataset.ticks = (Number(document.body.dataset.ticks) || 0) + 1; }, 1000));</script>`);
+      const index = ++requested;
+      while (announced < index) await new Promise(resolve => { announce = resolve; });
       await record().catch(() => {});
       tick(response, processes);
     });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     chrome = await launchChromium({ args: ['--headless=new', '--no-sandbox'] });
+    chrome.devtools.listen(({ method, params }) => {
+      if (method === 'Network.requestWillBeSent' && params.request.url.endsWith('/tick')) { announced++; announce(); }
+    });
     await record();
-    const started = Date.now();
-    const stdout = await renderDom(chrome, `http://127.0.0.1:${server.address().port}/`, { budget: 8000, stepLimit: 4000 });
+    const stdout = await renderDom(chrome, `http://127.0.0.1:${server.address().port}/`, { budget: 8000, stallLimit: 4000 });
     assert.ok((await readdir(chrome.scratch)).some(name => /^\.?(org\.chromium\.Chromium|com\.google\.Chrome)\./.test(name)), 'Chromium keeps its temporary files in its scratch directory');
-    return { stdout, elapsed: Date.now() - started };
+    return { stdout };
   } catch (error) {
     return { error };
   } finally {
@@ -108,20 +113,21 @@ async function renderTicking(tick) {
   }
 }
 
-test('a slow page that keeps making progress is not cut off', async () => {
-  const { stdout, error, elapsed } = await renderTicking(response => setTimeout(() => response.end(), 1000));
+test('a page whose fetches each answer within the stall limit is not cut off, however long it runs', async (t) => {
+  const { stdout, error } = await renderTicking(t, response => { t.mock.timers.tick(3000); response.end(); });
   assert.ifError(error);
-  assert.ok(elapsed > 4000, `${elapsed} ms`);
-  assert.match(stdout, /data-ticks="[78]"/);
+  assert.ok(Number(/data-ticks="(\d+)"/.exec(stdout)?.[1]) >= 7, stdout);
 });
 
-test('a page stalled on a fetch that never completes fails within the step limit', async () => {
-  const { error } = await renderTicking(() => {});
-  assert.match(error?.message, /did not advance virtual time past \d+ ms within 4 s/);
+test('a page stalled on a fetch that never completes fails at the stall limit', async (t) => {
+  let stalled = true;
+  const { error } = await renderTicking(t, () => { (function advance() { if (stalled) { t.mock.timers.tick(1000); setImmediate(advance); } })(); });
+  stalled = false;
+  assert.match(error?.message, /a fetch made no progress within 4 s/);
 });
 
-for (const victim of ['renderer', 'browser']) test(`a page run fails when its ${victim} process dies`, async () => {
-  const { error } = await renderTicking((response, processes) => {
+for (const victim of ['renderer', 'browser']) test(`a page run fails when its ${victim} process dies`, async (t) => {
+  const { error } = await renderTicking(t, (response, processes) => {
     for (const { type, id } of processes) if (type === victim) try { process.kill(id, 'SIGKILL'); } catch {}
     response.end();
   });

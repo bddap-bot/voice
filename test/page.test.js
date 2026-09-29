@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import test from 'node:test';
+import { gzipSync } from 'node:zlib';
 import { INACTIVITY_MS, NAME, SIGN_OFF, WAKE_PHRASE } from '../docs/identity.js';
 import { WIDTH, WINDOW } from '../docs/wake.js';
 import { MODEL } from '../docs/speaker.js';
@@ -33,7 +34,10 @@ test('private smoke poses the puppet directly instead of toggling a conversation
 
 const zeros = (length) => Buffer.from(new Float32Array(length).buffer).toString('base64');
 const testWakeModel = { phrase: WAKE_PHRASE, threshold: 0.5, b2: 0, mean: zeros(WINDOW * WIDTH), scale: zeros(WINDOW * WIDTH), w1: zeros(WINDOW * WIDTH), b1: zeros(1), w2: zeros(1) };
+const gzipped = (bytes) => [...gzipSync(Uint8Array.from(bytes))];
 const mockWasm = `
+const gzippedMotions = ${JSON.stringify(Object.fromEntries(['sit.fbx', 'idle.fbx'].map((id) => { const motion = Buffer.from(JSON.stringify({ clip: id })); return [id, { bytes: gzipped(motion), originalSize: motion.length }]; })))};
+const gzippedPuppets = ${JSON.stringify(Object.fromEntries(['42', '43', '44'].map((id) => [id, gzipped([1, 2, Number(id) - 39])])))};
 const testWakeModel = ${JSON.stringify(testWakeModel)};
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -96,9 +100,8 @@ export async function send_only(bytes) {
     const id = request.id;
     globalThis.transferOrder.push(id);
     const hash = request.clipHash;
-    const motion = enc.encode(JSON.stringify({ clip: id }));
-    const compressed = new Uint8Array(await new Response(new Blob([motion]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
-    deliver(enc.encode('motion-start\\n' + JSON.stringify({ id, size: compressed.length, originalSize: motion.length, contentHash: hash, encoding: 'gzip' })));
+    const compressed = Uint8Array.from(gzippedMotions[id].bytes);
+    deliver(enc.encode('motion-start\\n' + JSON.stringify({ id, size: compressed.length, originalSize: gzippedMotions[id].originalSize, contentHash: hash, encoding: 'gzip' })));
     const prefix = enc.encode('motion-chunk\\n' + id + '\\n');
     const chunk = new Uint8Array(prefix.length + compressed.length);
     chunk.set(prefix);
@@ -110,7 +113,7 @@ export async function send_only(bytes) {
     const id = JSON.parse(frame.slice(frame.indexOf('\\n') + 1)).id;
     globalThis.puppetRequests.push(id);
     globalThis.transferOrder.push(id);
-    const compressed = new Uint8Array(await new Response(new Blob([Uint8Array.from([1, 2, Number(id) - 39])]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+    const compressed = Uint8Array.from(gzippedPuppets[id]);
     deliver(enc.encode('puppet-start\\n' + JSON.stringify({ id, size: compressed.length, originalSize: 3, contentHash: 'hash-' + id, encoding: 'gzip' })));
     const prefix = enc.encode('puppet-chunk\\n' + id + '\\n');
     const chunk = new Uint8Array(prefix.length + compressed.length);
@@ -337,7 +340,9 @@ async function runPage(testSetup = '', { scale = 1, size = '390,844', budget = 3
 async function driveLifecycle(testSetup, drive) {
   const { server, url } = await pageServer(testSetup);
   const chrome = await launchChromium({ args: ['--headless=new', '--no-sandbox', '--disable-gpu'] });
-  const { call, listen } = chrome.devtools;
+  const { call, listen, closed } = chrome.devtools;
+  let ended = false;
+  closed.then(() => { ended = true; });
   const events = [];
   const stop = listen(({ method, params }) => {
     if (method === 'Page.lifecycleEvent') events.push(`lifecycle:${params.name}`);
@@ -356,14 +361,14 @@ async function driveLifecycle(testSetup, drive) {
       if (exceptionDetails) throw new Error(exceptionDetails.exception?.description ?? exceptionDetails.text);
       return result.value;
     };
-    const poll = async (label, check, limit = 10000) => {
-      for (const deadline = Date.now() + limit; !(await check());) {
-        if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}: ${chrome.stderr}`);
+    const poll = async (check) => {
+      while (!(await check())) {
+        if (ended) throw new Error(`Chromium's browser process ended: ${chrome.stderr}`);
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
     };
-    const until = (expression) => poll(expression, () => evaluate(expression).catch(() => false));
-    const event = (name) => poll(name, () => events.includes(name));
+    const until = (expression) => poll(() => evaluate(expression).catch(() => false));
+    const event = (name) => poll(() => events.includes(name));
     await page('Page.navigate', { url });
     return await drive({ call, page, evaluate, until, event, events, targetId });
   } finally {
@@ -2337,7 +2342,11 @@ test('leaving the app keeps the delegation log and whether Live was awake throug
     const state = () => evaluate(`({ log: document.querySelector('#log').innerText, pressed: document.querySelector('#puppet').getAttribute('aria-pressed') })`);
     const pressed = (value) => until(`document.querySelector('#puppet').getAttribute('aria-pressed') === '${value}'`);
     const tap = (value) => evaluate(`document.querySelector('#puppet').click(); 0`).then(() => pressed(value));
-    const hide = () => call('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+    const hide = async () => {
+      await call('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+      // The hidden page saves in its visibilitychange handler; seeing it hidden orders that save before any later kill.
+      await until(`document.visibilityState === 'hidden'`);
+    };
     const freeze = () => page('Page.setWebLifecycleState', { state: 'frozen' });
     const back = async () => {
       await page('Page.setWebLifecycleState', { state: 'active' });
@@ -2351,8 +2360,6 @@ test('leaving the app keeps the delegation log and whether Live was awake throug
       await until(`document.querySelector('#puppet').getAttribute('aria-disabled') === 'false'`);
     };
     const discardAndReturn = async () => {
-      // A discard follows time away; a renderer killed within milliseconds of a hide can lose its last storage write to the browser process.
-      await new Promise((resolve) => setTimeout(resolve, 1000));
       events.length = 0;
       for (const { id, type } of (await call('SystemInfo.getProcessInfo')).processInfo) if (type === 'renderer') process.kill(id, 'SIGKILL');
       await event('crashed');

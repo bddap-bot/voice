@@ -7,7 +7,7 @@ import { launchChromium } from '../scripts/chromium.mjs';
 // Exercise actual decoded audio. Inject the platform audio interruption and,
 // in mobile app mode, overlay lifecycle events: desktop Chromium cannot open an
 // Android embedded browser. Desktop coverage uses real tab visibility/focus.
-for (const mobile of [false, true]) test(`audio returns after ${mobile ? 'standalone Android app cover' : 'another tab'}`, { timeout: 30000 }, async (t) => {
+for (const mobile of [false, true]) test(`audio returns after ${mobile ? 'standalone Android app cover' : 'another tab'}`, async (t) => {
   const server = createServer(async (request, response) => {
     if (request.url === '/') return response.end('<!doctype html><title>Return</title><audio id="speaker" autoplay></audio><a href="/covered">Panel link</a>');
     if (request.url === '/probe.js') return response.writeHead(200, { 'content-type': 'text/javascript' }).end(`
@@ -33,7 +33,6 @@ for (const mobile of [false, true]) test(`audio returns after ${mobile ? 'standa
     catch { response.writeHead(404).end(); }
   });
   let chrome;
-  t.signal.addEventListener('abort', () => chrome?.close());
   try {
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     const origin = `http://127.0.0.1:${server.address().port}`;
@@ -119,6 +118,7 @@ for (const mobile of [false, true]) test(`audio returns after ${mobile ? 'standa
     await call('Target.activateTarget', { targetId });
     if (mobile) await evaluate(`delete document.visibilityState; delete document.hidden; document.dispatchEvent(new Event('visibilitychange')); dispatchEvent(new Event('focus'));`);
     await evaluate(`seen(['visible', 'focus'], ${returning})`);
+    assert.deepEqual(await evaluate('[playback.speaker.paused, playback.sink.paused]'), [false, false], 'returning did not resume playback');
     await evaluate('audible()');
     const state = await evaluate(`({ events, failures, state: playback.context.state, muted: document.querySelector('#speaker').muted, volume: document.querySelector('#speaker').volume, paused: document.querySelector('#speaker').paused, decoderPaused: playback.sink.paused, target: document.querySelector('a').target })`);
     for (const event of ['blur', 'hidden', 'visible', 'focus']) assert.ok(state.events.includes(event), JSON.stringify(state.events));
@@ -134,6 +134,7 @@ for (const mobile of [false, true]) test(`audio returns after ${mobile ? 'standa
         await playback.context.suspend(); playback.sink.pause(); playback.speaker.pause();
         await silent();
         ${event === 'visibilitychange' ? 'document' : 'window'}.dispatchEvent(new Event('${event}'));
+        if (playback.speaker.paused || playback.sink.paused) throw new Error('${event} did not resume playback');
         await audible();
       })()`);
       assert.equal(await evaluate('playback.speaker.paused'), false, event);
@@ -141,17 +142,17 @@ for (const mobile of [false, true]) test(`audio returns after ${mobile ? 'standa
     await evaluate(`(async () => {
       playback.speaker.pause();
       const play = playback.speaker.play.bind(playback.speaker);
-      const refused = new Promise(resolve => {
-        playback.speaker.play = () => { playback.speaker.play = play; resolve(); return Promise.reject(new DOMException('Gesture required', 'NotAllowedError')); };
-      });
+      let refused = false;
+      playback.speaker.play = () => { playback.speaker.play = play; refused = true; return Promise.reject(new DOMException('Gesture required', 'NotAllowedError')); };
       dispatchEvent(new Event('focus'));
-      await refused;
+      if (!refused) throw new Error('focus did not retry playback');
     })()`);
     assert.deepEqual(await evaluate('failures'), []);
     assert.equal(await evaluate('playback.speaker.paused'), true);
     await evaluate("dispatchEvent(new Event('pointerdown'))");
     assert.equal(await evaluate('playback.speaker.paused'), false);
-    await evaluate('playback.close()');
+    await evaluate('window.decoder = playback.sink; playback.close()');
+    assert.deepEqual(await evaluate('({ paused: decoder.paused, source: decoder.srcObject, muted: decoder.muted })'), { paused: true, source: null, muted: true });
     await call('Target.activateTarget', { targetId: cover.targetId });
     await call('Target.activateTarget', { targetId });
     assert.equal(await evaluate('playback.context.state'), 'closed');

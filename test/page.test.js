@@ -1481,31 +1481,12 @@ test('a sign-off with a delegation outstanding ends the session and its late hub
     signOff();
     await until(() => quiets.length === 1);
     replyFromHub('pending', 'late', ['The test beacon is amber.']);
-    await until(() => quiets.length === 2);
-    for (const resolve of quiets) resolve();
-    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && sessionEvents('close').length && globalThis.hubAcks?.length);
+    await until(() => globalThis.hubAcks?.length);
+    quiets[0]();
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && sessionEvents('close').length);
     return { delegates: count('delegate'), sleeps: sessionEvents('sleep').map((event) => event.detail), appended: sentLiveEvents.filter((event) => event.event_id?.includes('late')).length, acks: hubAcks };
   `);
   assert.deepEqual(result, { delegates: 1, sleeps: ['sign-off'], appended: 0, acks: ['late'] });
-});
-
-test('a sign-off while a hub reply waits for speech to go quiet drops that reply', async () => {
-  const result = await runWakePage(`
-    const { LivePlayback } = await import('/live-playback.js');
-    const quiets = [];
-    LivePlayback.prototype.quiet = () => new Promise((resolve) => quiets.push(resolve));
-    hear('Check the test beacon.');
-    delegateTurn('pending');
-    await until(() => count('delegate'));
-    replyFromHub('pending', 'late', ['The test beacon is amber.']);
-    await until(() => quiets.length === 1);
-    signOff();
-    await until(() => quiets.length === 2);
-    for (const resolve of quiets) resolve();
-    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && sessionEvents('close').length && globalThis.hubAcks?.length);
-    return { sleeps: sessionEvents('sleep').map((event) => event.detail), appended: sentLiveEvents.filter((event) => event.event_id?.includes('late')).length };
-  `);
-  assert.deepEqual(result, { sleeps: ['sign-off'], appended: 0 });
 });
 
 test('a sign-off split by user speech still ends the session, and more speech after it sleeps only once', async () => {
@@ -1893,50 +1874,26 @@ test('a woken session receives only the fresh hub reply', async () => {
   assert.doesNotMatch(result.reply.content, /amber/);
 });
 
-test('a reply waiting for quiet cannot become speech in the next woken session', async () => {
+test('hub replies reach the model as they arrive, in order, even mid-utterance', async () => {
   const result = await runWakePage(`
     const { LivePlayback } = await import('/live-playback.js');
-    let quiet;
-    LivePlayback.prototype.quiet = () => new Promise((resolve) => { quiet = resolve; });
+    let quiets = 0;
+    LivePlayback.prototype.quiet = () => { quiets++; return new Promise(() => {}); };
+    const replies = () => sentLiveEvents.filter(event => event.event_id?.startsWith('hub_ordered')).map(event => [event.delegation_id, event.content]);
     hear('Check the test beacon.');
-    delegateTurn('previous');
-    await until(() => count('delegate') > 0);
-    replyFromHub('previous', 'previous', ['The test beacon is amber.']);
-    await until(() => quiet);
-    const before = sentLiveEvents.filter((event) => event.event_id === 'hub_previous').length;
-    document.querySelector('#puppet').click();
-    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false');
-    quiet();
-    testSpotter.heard({ wake: 0.95 });
-    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
-    return { before, after: sentLiveEvents.filter((event) => event.event_id === 'hub_previous').length };
-  `);
-  assert.deepEqual(result, { before: 0, after: 0 });
-});
-
-test('relay frames keep moving while ordered hub replies wait for playback quiet', async () => {
-  const result = await runWakePage(`
-    const { LivePlayback } = await import('/live-playback.js');
-    const quiets = [];
-    LivePlayback.prototype.quiet = () => new Promise(resolve => quiets.push(resolve));
-    const replies = () => sentLiveEvents.filter(event => event.event_id?.startsWith('hub_ordered')).map(event => event.content);
+    delegateTurn('first');
+    await until(() => count('delegate'));
+    hear(' While that runs, let me tell you');
     replyFromHub('first', 'ordered_first', ['First part.', 'Second part.']);
-    await until(() => quiets.length === 1);
     replyFromHub('second', 'ordered_second', ['Next reply.']);
     deliverRelay(new TextEncoder().encode('display\\n' + JSON.stringify({ markdown: 'Relay frame handled.' }) + '\\n'));
-    await new Promise(resolve => setTimeout(resolve, 100));
-    const waiting = { frameHandled: document.querySelector('#display-items').textContent.includes('Relay frame handled.'), replies: replies(), quiets: quiets.length };
-    quiets[0]();
-    await until(() => quiets.length === 2);
-    const first = replies();
-    quiets[1]();
     await until(() => globalThis.hubAcks?.includes('ordered_second'));
-    return { waiting, first, all: replies(), acks: hubAcks };
+    return { frameHandled: document.querySelector('#display-items').textContent.includes('Relay frame handled.'), replies: replies(), quiets, acks: hubAcks };
   `);
   assert.deepEqual(result, {
-    waiting: { frameHandled: true, replies: [], quiets: 1 },
-    first: ['First part.', 'Second part.'],
-    all: ['First part.', 'Second part.', 'Next reply.'],
+    frameHandled: true,
+    replies: [['first', 'First part.'], ['first', 'Second part.'], [null, 'Next reply.']],
+    quiets: 0,
     acks: ['ordered_first', 'ordered_second'],
   });
 });

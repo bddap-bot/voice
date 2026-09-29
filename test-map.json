@@ -39,6 +39,8 @@
         "scripts/smoke.mjs",
         "scripts/chromium.mjs",
         "scripts/wake-reply-smoke.mjs",
+        "scripts/delegated-reply-smoke.mjs",
+        "scripts/live-rig.mjs",
         "scripts/wake.mjs",
         "scripts/wake-demo.json",
         "test/**",

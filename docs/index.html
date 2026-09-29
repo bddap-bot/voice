@@ -894,18 +894,10 @@ async function receiveHub(result) {
     finishHubWait(result.id);
     trace.hub(result.id, result.commentary, result.timing_ms);
     stageTrace?.hubReplied(result.id);
-    const current = conversation;
-    if (current) {
-      const delivery = (current.hubReplies ?? Promise.resolve()).then(async () => {
-        await current.audioOwner.playback.quiet();
-        if (conversation === current && !current.sleeping) {
-          const owner = current.audioOwner;
-          const delegation = owner.delegations.has(result.id) ? result.id : null;
-          result.commentary.forEach((content, index) => tell(owner, 'session.commentary.append', index ? `hub_${result.stamp}_${index}` : `hub_${result.stamp}`, delegation, content));
-        }
-      });
-      current.hubReplies = delivery.catch(() => {});
-      await delivery;
+    if (conversation && !conversation.sleeping) {
+      const owner = conversation.audioOwner;
+      const delegation = owner.delegations.has(result.id) ? result.id : null;
+      result.commentary.forEach((content, index) => tell(owner, 'session.commentary.append', index ? `hub_${result.stamp}_${index}` : `hub_${result.stamp}`, delegation, content));
     }
   }
   await sendFrame(`hub-ack\n${JSON.stringify({ id: result.id, stamp: result.stamp })}`);

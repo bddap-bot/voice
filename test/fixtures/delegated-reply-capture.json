@@ -1,0 +1,2789 @@
+{
+  "utterance": "While the hub checks that, let me tell you about the garden. The tomatoes came in early this year, the basil bolted in the heat, and the squash vines have climbed over the whole north fence and into the neighbor's yard.",
+  "replies": [
+    "The test beacon is amber.",
+    "The test beacon is violet.",
+    "The test beacon is silver."
+  ],
+  "capture": {
+    "marks": [
+      {
+        "at": 44629,
+        "kind": "utterance-start",
+        "ch": 0
+      },
+      {
+        "at": 58360,
+        "kind": "utterance-end",
+        "ch": 0
+      },
+      {
+        "at": 70371,
+        "kind": "reply-end",
+        "ch": 0
+      },
+      {
+        "at": 117511,
+        "kind": "utterance-start",
+        "ch": 1
+      },
+      {
+        "at": 132858,
+        "kind": "utterance-end",
+        "ch": 1
+      },
+      {
+        "at": 145790,
+        "kind": "reply-end",
+        "ch": 1
+      },
+      {
+        "at": 216146,
+        "kind": "utterance-start",
+        "ch": 2
+      },
+      {
+        "at": 228628,
+        "kind": "utterance-end",
+        "ch": 2
+      },
+      {
+        "at": 241703,
+        "kind": "reply-end",
+        "ch": 2
+      }
+    ],
+    "rt": [
+      {
+        "at": 34441,
+        "ch": 0,
+        "dir": "state",
+        "event": {
+          "raw": "open"
+        }
+      },
+      {
+        "at": 34442,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "event_id": "event_ETGlVRFc8AM54LaC38JiP",
+          "type": "session.started"
+        }
+      },
+      {
+        "at": 34444,
+        "ch": 0,
+        "dir": "out",
+        "event": {
+          "type": "session.commentary.append",
+          "event_id": "wake",
+          "content": "Context: Corvus was just woken."
+        }
+      },
+      {
+        "at": 35277,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.commentary.appended",
+          "start_ms": 800,
+          "end_ms": 1000,
+          "event_id": "event_ETGlX7GFCL9KkiDDK2llF",
+          "client_event_id": "wake"
+        }
+      },
+      {
+        "at": 37018,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 2800,
+          "end_ms": 3000,
+          "delta": " Ask the",
+          "event_id": "event_ETGlZpo6eoLFalPw2Q63j"
+        }
+      },
+      {
+        "at": 37247,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 3000,
+          "end_ms": 3200,
+          "delta": " hub",
+          "event_id": "event_ETGlZ9krfbVmDYLsAi09h"
+        }
+      },
+      {
+        "at": 37635,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 3200,
+          "end_ms": 3400,
+          "delta": " for",
+          "event_id": "event_ETGlZtov4xjVMVKvvzYER"
+        }
+      },
+      {
+        "at": 37696,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 3400,
+          "end_ms": 3600,
+          "delta": " the",
+          "event_id": "event_ETGlaZEgWft3b52xHLxIc"
+        }
+      },
+      {
+        "at": 37824,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 3600,
+          "end_ms": 3800,
+          "delta": " current",
+          "event_id": "event_ETGlaycDcSLr5d8a685q6"
+        }
+      },
+      {
+        "at": 38256,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 4000,
+          "end_ms": 4200,
+          "delta": " test",
+          "event_id": "event_ETGlafBcgJkSjMOsxJunJ"
+        }
+      },
+      {
+        "at": 38426,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 4200,
+          "end_ms": 4400,
+          "delta": " beacon",
+          "event_id": "event_ETGlaVZqY4E24n8mCdhpt"
+        }
+      },
+      {
+        "at": 39219,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 5000,
+          "end_ms": 5200,
+          "delta": " status",
+          "event_id": "event_ETGlbiRrAteSOv8zUDY7a"
+        }
+      },
+      {
+        "at": 39413,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.delegation.created",
+          "event_id": "event_ETGlbOI5DB1my0viZ7WUL"
+        }
+      },
+      {
+        "at": 39909,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 5600,
+          "end_ms": 5800,
+          "delta": "Okay,",
+          "event_id": "event_ETGlcSgF0A7GxwDQZ5vzy"
+        }
+      },
+      {
+        "at": 40160,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 5800,
+          "end_ms": 6000,
+          "delta": " checking",
+          "event_id": "event_ETGlcAQPy86smfc2k0VEH"
+        }
+      },
+      {
+        "at": 40688,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 6200,
+          "end_ms": 6400,
+          "delta": " with",
+          "event_id": "event_ETGlcTn9DctqhFbxTweml"
+        }
+      },
+      {
+        "at": 41114,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 6400,
+          "end_ms": 6600,
+          "delta": " the hub",
+          "event_id": "event_ETGld8UQCirva1LOXiWYk"
+        }
+      },
+      {
+        "at": 41218,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 6600,
+          "end_ms": 6800,
+          "delta": ".",
+          "event_id": "event_ETGldUsG45kL9kKVVCGjT"
+        }
+      },
+      {
+        "at": 48442,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 12800,
+          "end_ms": 13000,
+          "delta": " While the",
+          "event_id": "event_ETGljgIMWW9ah5zDOd8qM"
+        }
+      },
+      {
+        "at": 48503,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 13000,
+          "end_ms": 13200,
+          "delta": " hub",
+          "event_id": "event_ETGljHiu3ZmHb6hJlIkaD"
+        }
+      },
+      {
+        "at": 48556,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 13200,
+          "end_ms": 13400,
+          "delta": " checks",
+          "event_id": "event_ETGljZ8PIJh3eTbOhx4YM"
+        }
+      },
+      {
+        "at": 49152,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 13600,
+          "end_ms": 13800,
+          "delta": " that",
+          "event_id": "event_ETGlkdc1LWhshzDoP2HzM"
+        }
+      },
+      {
+        "at": 49347,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 14000,
+          "end_ms": 14200,
+          "delta": ", let me",
+          "event_id": "event_ETGlk0bT5KZmbkDaS8cAq"
+        }
+      },
+      {
+        "at": 49506,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 14200,
+          "end_ms": 14400,
+          "delta": " tell",
+          "event_id": "event_ETGlk1CFSZgufeW3LqBZ2"
+        }
+      },
+      {
+        "at": 49780,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 14400,
+          "end_ms": 14600,
+          "delta": " you",
+          "event_id": "event_ETGlkruppRUAYmWRJsy0C"
+        }
+      },
+      {
+        "at": 49961,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 14600,
+          "end_ms": 14800,
+          "delta": " about",
+          "event_id": "event_ETGll5C4GKtazl1FnMhST"
+        }
+      },
+      {
+        "at": 50046,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 14800,
+          "end_ms": 15000,
+          "delta": " the",
+          "event_id": "event_ETGlldTAAvebrzMpLZsgj"
+        }
+      },
+      {
+        "at": 50504,
+        "ch": 0,
+        "dir": "out",
+        "event": {
+          "type": "session.commentary.append",
+          "event_id": "hub_reply-0",
+          "content": "The test beacon is amber."
+        }
+      },
+      {
+        "at": 50679,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 15200,
+          "end_ms": 15400,
+          "delta": " garden",
+          "event_id": "event_ETGllGrxAazNbRbtYpB6w"
+        }
+      },
+      {
+        "at": 50700,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 15400,
+          "end_ms": 15600,
+          "delta": ". The",
+          "event_id": "event_ETGllwm5AobYbR3Z239u3"
+        }
+      },
+      {
+        "at": 50729,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 15800,
+          "end_ms": 16000,
+          "delta": " tomatoes",
+          "event_id": "event_ETGlmx1TcFUmX403x9g2m"
+        }
+      },
+      {
+        "at": 50958,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 16400,
+          "end_ms": 16600,
+          "delta": "... came",
+          "event_id": "event_ETGlmMdhfTxi1cuSuBQn3"
+        }
+      },
+      {
+        "at": 51014,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 16600,
+          "end_ms": 16800,
+          "delta": " in",
+          "event_id": "event_ETGlmOpbDyYmt58QgMcx3"
+        }
+      },
+      {
+        "at": 51115,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 16800,
+          "end_ms": 17000,
+          "delta": " early",
+          "event_id": "event_ETGlnQY10tP3VRiw5Nmbq"
+        }
+      },
+      {
+        "at": 51131,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 17000,
+          "end_ms": 17200,
+          "delta": " this",
+          "event_id": "event_ETGln1s1K3qZNoC6a0YaY"
+        }
+      },
+      {
+        "at": 51154,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.commentary.appended",
+          "start_ms": 17200,
+          "end_ms": 17400,
+          "event_id": "event_ETGlnfWPx2LXCLdPLSY5b",
+          "client_event_id": "hub_reply-0"
+        }
+      },
+      {
+        "at": 51292,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 17400,
+          "end_ms": 17600,
+          "delta": " year",
+          "event_id": "event_ETGlnyYdKxvs0Qp8TZHzP"
+        }
+      },
+      {
+        "at": 53146,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 17800,
+          "end_ms": 18000,
+          "delta": ". The",
+          "event_id": "event_ETGlnV5egTELtRE5rBXlU"
+        }
+      },
+      {
+        "at": 53239,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 18000,
+          "end_ms": 18200,
+          "delta": " basil",
+          "event_id": "event_ETGlo1z89rwL87UOS90gE"
+        }
+      },
+      {
+        "at": 53656,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 18600,
+          "end_ms": 18800,
+          "delta": " bolted in",
+          "event_id": "event_ETGloag5L6Y0WiW5b1HtS"
+        }
+      },
+      {
+        "at": 54888,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 18800,
+          "end_ms": 19000,
+          "delta": " the",
+          "event_id": "event_ETGlocUHeVJhqz7cnkMPv"
+        }
+      },
+      {
+        "at": 54933,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 19200,
+          "end_ms": 19400,
+          "delta": " heat",
+          "event_id": "event_ETGlpdT7LvhwCrZvMmIRP"
+        }
+      },
+      {
+        "at": 55010,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 19600,
+          "end_ms": 19800,
+          "delta": ", and the",
+          "event_id": "event_ETGlpqgzBTTYAr44LnLDS"
+        }
+      },
+      {
+        "at": 55085,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 20000,
+          "end_ms": 20200,
+          "delta": " squash",
+          "event_id": "event_ETGlqX9zbGUya5mx99H0B"
+        }
+      },
+      {
+        "at": 55422,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 20400,
+          "end_ms": 20600,
+          "delta": " vines",
+          "event_id": "event_ETGlqh3ojQ5nD7m9ssTqP"
+        }
+      },
+      {
+        "at": 56228,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 20600,
+          "end_ms": 20800,
+          "delta": " have",
+          "event_id": "event_ETGlq2H1zmUUZGLY3pgLT"
+        }
+      },
+      {
+        "at": 56630,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 21200,
+          "end_ms": 21400,
+          "delta": " climbed",
+          "event_id": "event_ETGlrYZQgbnPT3WSgPam2"
+        }
+      },
+      {
+        "at": 56728,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 21400,
+          "end_ms": 21600,
+          "delta": " over",
+          "event_id": "event_ETGlrxLj57gRcWy4Q7UTZ"
+        }
+      },
+      {
+        "at": 56848,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 21600,
+          "end_ms": 21800,
+          "delta": " the",
+          "event_id": "event_ETGlrzv5X7gOQP3PWhPzs"
+        }
+      },
+      {
+        "at": 57391,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 22200,
+          "end_ms": 22400,
+          "delta": " whole",
+          "event_id": "event_ETGlse9LSUyL04MtV49Rd"
+        }
+      },
+      {
+        "at": 57511,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 22400,
+          "end_ms": 22600,
+          "delta": " north",
+          "event_id": "event_ETGlsszU4EntDg8uWM5UG"
+        }
+      },
+      {
+        "at": 57619,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 22600,
+          "end_ms": 22800,
+          "delta": " fence",
+          "event_id": "event_ETGlsCMegDPOgAjx5EMDV"
+        }
+      },
+      {
+        "at": 57727,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 22600,
+          "end_ms": 22800,
+          "delta": "Mm.",
+          "event_id": "event_ETGlsl0pGXRyanRWF5mdq"
+        }
+      },
+      {
+        "at": 58253,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 22800,
+          "end_ms": 23000,
+          "delta": " and",
+          "event_id": "event_ETGls86xSF9nSJ7YiFVCf"
+        }
+      },
+      {
+        "at": 58350,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 23200,
+          "end_ms": 23400,
+          "delta": " into",
+          "event_id": "event_ETGltXXsakGN0xDmZyBVh"
+        }
+      },
+      {
+        "at": 58357,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 23400,
+          "end_ms": 23600,
+          "delta": " the",
+          "event_id": "event_ETGltRFOtu94ppzX2T1eB"
+        }
+      },
+      {
+        "at": 58364,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 23600,
+          "end_ms": 23800,
+          "delta": " neighbor's",
+          "event_id": "event_ETGlthPRFIckVsL3NBJ8Y"
+        }
+      },
+      {
+        "at": 58374,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 24200,
+          "end_ms": 24400,
+          "delta": " yard",
+          "event_id": "event_ETGluUs4ayzSRICu5RfDf"
+        }
+      },
+      {
+        "at": 58376,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 24200,
+          "end_ms": 24400,
+          "delta": " The test",
+          "event_id": "event_ETGluvBFyTOLqJ86XdzmC"
+        }
+      },
+      {
+        "at": 58377,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 24400,
+          "end_ms": 24600,
+          "delta": " beacon",
+          "event_id": "event_ETGluxgVsLfhGskNY1zEB"
+        }
+      },
+      {
+        "at": 58423,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 24800,
+          "end_ms": 25000,
+          "delta": " is",
+          "event_id": "event_ETGluCZ2FDUvdbhRgK3Qu"
+        }
+      },
+      {
+        "at": 58912,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 25200,
+          "end_ms": 25400,
+          "delta": " amber.",
+          "event_id": "event_ETGlv8UVBHtODVcR4TznU"
+        }
+      },
+      {
+        "at": 60636,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 26200,
+          "end_ms": 26400,
+          "delta": " That's a",
+          "event_id": "event_ETGlwPDJc8SeLmZ4N2MBA"
+        }
+      },
+      {
+        "at": 60656,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 26400,
+          "end_ms": 26600,
+          "delta": " bount",
+          "event_id": "event_ETGlwVTErH2MjMBDhqP3N"
+        }
+      },
+      {
+        "at": 60665,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 26600,
+          "end_ms": 26800,
+          "delta": "iful",
+          "event_id": "event_ETGlwDJZu4Hmt4uipfrt9"
+        }
+      },
+      {
+        "at": 60701,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 27000,
+          "end_ms": 27200,
+          "delta": " sort",
+          "event_id": "event_ETGlx0mOC1TTYTCXwYlNt"
+        }
+      },
+      {
+        "at": 61016,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 27400,
+          "end_ms": 27600,
+          "delta": " of t",
+          "event_id": "event_ETGlx1p3vd5Qx4CPfnvBW"
+        }
+      },
+      {
+        "at": 61271,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 27600,
+          "end_ms": 27800,
+          "delta": "angle.",
+          "event_id": "event_ETGlx8xEKydqUBdXELG4P"
+        }
+      },
+      {
+        "at": 62331,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 28200,
+          "end_ms": 28400,
+          "delta": " Are",
+          "event_id": "event_ETGlyBzJ4GU4pkx4w6V49"
+        }
+      },
+      {
+        "at": 62336,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 28400,
+          "end_ms": 28600,
+          "delta": " you",
+          "event_id": "event_ETGlyy9JSVuKbKiGlMgMr"
+        }
+      },
+      {
+        "at": 63289,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 28600,
+          "end_ms": 28800,
+          "delta": " okay",
+          "event_id": "event_ETGlybvmU53eva8HtIHO2"
+        }
+      },
+      {
+        "at": 63329,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 28800,
+          "end_ms": 29000,
+          "delta": " with",
+          "event_id": "event_ETGlym8UqYT1yDXkbJDDc"
+        }
+      },
+      {
+        "at": 63337,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 29000,
+          "end_ms": 29200,
+          "delta": " it",
+          "event_id": "event_ETGlzO2PCuJxB1SK6yzVC"
+        }
+      },
+      {
+        "at": 63355,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 29200,
+          "end_ms": 29400,
+          "delta": " spilling",
+          "event_id": "event_ETGlzvrOstTTFj55XG2ZG"
+        }
+      },
+      {
+        "at": 63533,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 29600,
+          "end_ms": 29800,
+          "delta": " over",
+          "event_id": "event_ETGlziK47DTps4erXQnpb"
+        }
+      },
+      {
+        "at": 63601,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 29800,
+          "end_ms": 30000,
+          "delta": " like",
+          "event_id": "event_ETGlz8UZhxbkDB5ACsL8Z"
+        }
+      },
+      {
+        "at": 63676,
+        "ch": 0,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 30000,
+          "end_ms": 30200,
+          "delta": " that?",
+          "event_id": "event_ETGm0wpT2AZN5dKZ41crx"
+        }
+      },
+      {
+        "at": 70429,
+        "ch": 0,
+        "dir": "state",
+        "event": {
+          "raw": "close"
+        }
+      },
+      {
+        "at": 102241,
+        "ch": 1,
+        "dir": "state",
+        "event": {
+          "raw": "open"
+        }
+      },
+      {
+        "at": 102241,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "event_id": "event_ETGmaKK66XNW8cZ0mC9lq",
+          "type": "session.started"
+        }
+      },
+      {
+        "at": 102241,
+        "ch": 1,
+        "dir": "out",
+        "event": {
+          "type": "session.commentary.append",
+          "event_id": "wake",
+          "content": "Context: Corvus was just woken."
+        }
+      },
+      {
+        "at": 103156,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 800,
+          "end_ms": 1000,
+          "delta": "Hi there",
+          "event_id": "event_ETGmdLrV4YHLnSG2JdIqs"
+        }
+      },
+      {
+        "at": 103188,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.commentary.appended",
+          "start_ms": 800,
+          "end_ms": 1000,
+          "event_id": "event_ETGmd5RRpgjG1nQmnr7hz",
+          "client_event_id": "wake"
+        }
+      },
+      {
+        "at": 103842,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 1000,
+          "end_ms": 1200,
+          "delta": ".",
+          "event_id": "event_ETGmd9q1XgOR3mgPXef1X"
+        }
+      },
+      {
+        "at": 104747,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 1200,
+          "end_ms": 1400,
+          "delta": " I'm",
+          "event_id": "event_ETGmdCFgyKOeTBps7Jaqf"
+        }
+      },
+      {
+        "at": 104774,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 1600,
+          "end_ms": 1800,
+          "delta": " here",
+          "event_id": "event_ETGmeHcSieou43hJX7TMQ"
+        }
+      },
+      {
+        "at": 104795,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 1800,
+          "end_ms": 2000,
+          "delta": " and listening",
+          "event_id": "event_ETGmeFsyyJsVigGefHSd1"
+        }
+      },
+      {
+        "at": 104820,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 2000,
+          "end_ms": 2200,
+          "delta": ".",
+          "event_id": "event_ETGmeOEGUv5KHqlN2jcvg"
+        }
+      },
+      {
+        "at": 104833,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 2200,
+          "end_ms": 2400,
+          "delta": " What's",
+          "event_id": "event_ETGmeOVJGwiby4jdir3Lf"
+        }
+      },
+      {
+        "at": 104842,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 2400,
+          "end_ms": 2600,
+          "delta": " up?",
+          "event_id": "event_ETGmeCNrBWIaHz44Hgu78"
+        }
+      },
+      {
+        "at": 109218,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 6400,
+          "end_ms": 6600,
+          "delta": "Ask",
+          "event_id": "event_ETGmiZ875KmfDwcQTGIZz"
+        }
+      },
+      {
+        "at": 109222,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 6600,
+          "end_ms": 6800,
+          "delta": " the",
+          "event_id": "event_ETGmjNuupnCDq2wEZua5m"
+        }
+      },
+      {
+        "at": 109224,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 6800,
+          "end_ms": 7000,
+          "delta": " hub",
+          "event_id": "event_ETGmjbGCVempFlDj8U8Pi"
+        }
+      },
+      {
+        "at": 109225,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 7000,
+          "end_ms": 7200,
+          "delta": " for the",
+          "event_id": "event_ETGmj3kPPFrbl3unCo4WH"
+        }
+      },
+      {
+        "at": 111145,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 7400,
+          "end_ms": 7600,
+          "delta": " current",
+          "event_id": "event_ETGmjYjTHNLyg8rcPQ0Qr"
+        }
+      },
+      {
+        "at": 111178,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 8000,
+          "end_ms": 8200,
+          "delta": " test",
+          "event_id": "event_ETGmkC36cUkzHwsRwx9Dy"
+        }
+      },
+      {
+        "at": 111181,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 8400,
+          "end_ms": 8600,
+          "delta": " beacon",
+          "event_id": "event_ETGmk2jyd3qIBnN67KqJS"
+        }
+      },
+      {
+        "at": 112339,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 9200,
+          "end_ms": 9400,
+          "delta": " status",
+          "event_id": "event_ETGmlsmWpqRrshWYgehvC"
+        }
+      },
+      {
+        "at": 112343,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.delegation.created",
+          "event_id": "event_ETGmlsiQzwD9GOhff8LiQ"
+        }
+      },
+      {
+        "at": 112363,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 9600,
+          "end_ms": 9800,
+          "delta": "Okay,",
+          "event_id": "event_ETGmmTVxo74BGPJLVKkhW"
+        }
+      },
+      {
+        "at": 112365,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 9800,
+          "end_ms": 10000,
+          "delta": " I'll",
+          "event_id": "event_ETGmmHWTWRcxP2j4VJd6X"
+        }
+      },
+      {
+        "at": 112944,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 10000,
+          "end_ms": 10200,
+          "delta": " check",
+          "event_id": "event_ETGmmVeb11dFPUuvKRTew"
+        }
+      },
+      {
+        "at": 112952,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 10200,
+          "end_ms": 10400,
+          "delta": " with the",
+          "event_id": "event_ETGmmxpfK4uTJNmvz35Fh"
+        }
+      },
+      {
+        "at": 112957,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 10400,
+          "end_ms": 10600,
+          "delta": " hub",
+          "event_id": "event_ETGmm2MAwnhZA0red3mJ6"
+        }
+      },
+      {
+        "at": 112962,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 10600,
+          "end_ms": 10800,
+          "delta": " again.",
+          "event_id": "event_ETGmmEJ9eWLyStypg035I"
+        }
+      },
+      {
+        "at": 119420,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 18200,
+          "end_ms": 18400,
+          "delta": "While the",
+          "event_id": "event_ETGmtkeDvoSyga8CykGvI"
+        }
+      },
+      {
+        "at": 119683,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 18400,
+          "end_ms": 18600,
+          "delta": " hub",
+          "event_id": "event_ETGmtcipLRgrrapyD1J98"
+        }
+      },
+      {
+        "at": 120275,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 18800,
+          "end_ms": 19000,
+          "delta": " checks",
+          "event_id": "event_ETGmufoPdPwp6IAD4O9gJ"
+        }
+      },
+      {
+        "at": 120712,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 19200,
+          "end_ms": 19400,
+          "delta": " that",
+          "event_id": "event_ETGmumyYt5yhW2gYExsqC"
+        }
+      },
+      {
+        "at": 120725,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 19400,
+          "end_ms": 19600,
+          "delta": ", let me",
+          "event_id": "event_ETGmuJxrEK0TR6bVrBygq"
+        }
+      },
+      {
+        "at": 120973,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 19600,
+          "end_ms": 19800,
+          "delta": " tell",
+          "event_id": "event_ETGmvbIopqxO7SYXYBIZJ"
+        }
+      },
+      {
+        "at": 120976,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 19800,
+          "end_ms": 20000,
+          "delta": " you",
+          "event_id": "event_ETGmvxlPRJxtt1m68itra"
+        }
+      },
+      {
+        "at": 121574,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 20200,
+          "end_ms": 20400,
+          "delta": " about the",
+          "event_id": "event_ETGmvdqiT7NadjOJQGb5d"
+        }
+      },
+      {
+        "at": 122562,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 20600,
+          "end_ms": 20800,
+          "delta": " garden",
+          "event_id": "event_ETGmwPoq3EFKDPOzUkOEk"
+        }
+      },
+      {
+        "at": 122565,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 20800,
+          "end_ms": 21000,
+          "delta": ". The",
+          "event_id": "event_ETGmw3qmuevcCR5hrc2X9"
+        }
+      },
+      {
+        "at": 122574,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 21200,
+          "end_ms": 21400,
+          "delta": " tomatoes",
+          "event_id": "event_ETGmwBm0B9z8kyey2ElLV"
+        }
+      },
+      {
+        "at": 123018,
+        "ch": 1,
+        "dir": "out",
+        "event": {
+          "type": "session.commentary.append",
+          "event_id": "hub_reply-1",
+          "content": "The test beacon is violet."
+        }
+      },
+      {
+        "at": 123025,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 21600,
+          "end_ms": 21800,
+          "delta": " came in",
+          "event_id": "event_ETGmx0kMuyFiCRsRCOIRK"
+        }
+      },
+      {
+        "at": 123033,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 21800,
+          "end_ms": 22000,
+          "delta": " early",
+          "event_id": "event_ETGmxHSIoFmw7fx8niLRG"
+        }
+      },
+      {
+        "at": 123785,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 22200,
+          "end_ms": 22400,
+          "delta": " this",
+          "event_id": "event_ETGmxZRGAU0NgejXd2Nug"
+        }
+      },
+      {
+        "at": 123794,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 22400,
+          "end_ms": 22600,
+          "delta": "Hmm.",
+          "event_id": "event_ETGmyX5PzAau5U1xK4Wh5"
+        }
+      },
+      {
+        "at": 123823,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.commentary.appended",
+          "start_ms": 22400,
+          "end_ms": 22600,
+          "event_id": "event_ETGmyvohpTZPanOzG9qDj",
+          "client_event_id": "hub_reply-1"
+        }
+      },
+      {
+        "at": 125385,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 22600,
+          "end_ms": 22800,
+          "delta": " year",
+          "event_id": "event_ETGmyXkOpXiZAzGaGHitm"
+        }
+      },
+      {
+        "at": 125392,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 22800,
+          "end_ms": 23000,
+          "delta": ". The",
+          "event_id": "event_ETGmygMw02TFMBjwcpGty"
+        }
+      },
+      {
+        "at": 125394,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 23000,
+          "end_ms": 23200,
+          "delta": " basil",
+          "event_id": "event_ETGmydISpGmHUPcg9Ex1E"
+        }
+      },
+      {
+        "at": 125397,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 23600,
+          "end_ms": 23800,
+          "delta": " bolted in",
+          "event_id": "event_ETGmz52BetbsAYdkx0Ec5"
+        }
+      },
+      {
+        "at": 125401,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 23800,
+          "end_ms": 24000,
+          "delta": " the",
+          "event_id": "event_ETGmzCu8hvEN2M1AV9vzw"
+        }
+      },
+      {
+        "at": 125407,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 24200,
+          "end_ms": 24400,
+          "delta": " heat",
+          "event_id": "event_ETGmz86gpatyyhdZy9E5X"
+        }
+      },
+      {
+        "at": 126250,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 24600,
+          "end_ms": 24800,
+          "delta": ", and the",
+          "event_id": "event_ETGn09qyPEsPa5HLN6XJi"
+        }
+      },
+      {
+        "at": 127898,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 25200,
+          "end_ms": 25400,
+          "delta": " squash",
+          "event_id": "event_ETGn0oVpcpAEN6uwqp9oF"
+        }
+      },
+      {
+        "at": 131797,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 25400,
+          "end_ms": 25600,
+          "delta": " vines",
+          "event_id": "event_ETGn0NvS1xhxmGX42Symh"
+        }
+      },
+      {
+        "at": 131834,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 25600,
+          "end_ms": 25800,
+          "delta": " have",
+          "event_id": "event_ETGn14LAeDODxf1uYU1ug"
+        }
+      },
+      {
+        "at": 131836,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 26000,
+          "end_ms": 26200,
+          "delta": " climbed",
+          "event_id": "event_ETGn1sos36bW478O3hcat"
+        }
+      },
+      {
+        "at": 131873,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 26400,
+          "end_ms": 26600,
+          "delta": " over the",
+          "event_id": "event_ETGn1ojXDls8nu7eucxB5"
+        }
+      },
+      {
+        "at": 132631,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 26800,
+          "end_ms": 27000,
+          "delta": " whole",
+          "event_id": "event_ETGn2dpgW7rdFe1OUWZ0L"
+        }
+      },
+      {
+        "at": 132665,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 27000,
+          "end_ms": 27200,
+          "delta": " north",
+          "event_id": "event_ETGn2icTX9lcD8bqcmFuu"
+        }
+      },
+      {
+        "at": 132670,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 27200,
+          "end_ms": 27400,
+          "delta": " fence",
+          "event_id": "event_ETGn2C6kIneZfNYkgtZRV"
+        }
+      },
+      {
+        "at": 132687,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 27400,
+          "end_ms": 27600,
+          "delta": " and",
+          "event_id": "event_ETGn2jkh5wXsoPZzL2Xte"
+        }
+      },
+      {
+        "at": 132690,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 27600,
+          "end_ms": 27800,
+          "delta": " into",
+          "event_id": "event_ETGn3ta1xQMGnkGEU2dhc"
+        }
+      },
+      {
+        "at": 132698,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 27800,
+          "end_ms": 28000,
+          "delta": " the",
+          "event_id": "event_ETGn3zGSIsHUwHWJUu56K"
+        }
+      },
+      {
+        "at": 132701,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 28000,
+          "end_ms": 28200,
+          "delta": " neighbor's",
+          "event_id": "event_ETGn3HqszXuLeCm6EvhR2"
+        }
+      },
+      {
+        "at": 132703,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 28400,
+          "end_ms": 28600,
+          "delta": " yard",
+          "event_id": "event_ETGn3Bkla34fnfo9YttlH"
+        }
+      },
+      {
+        "at": 132713,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 28400,
+          "end_ms": 28600,
+          "delta": "Yeah.",
+          "event_id": "event_ETGn3PO42IFrUkdn343kx"
+        }
+      },
+      {
+        "at": 132723,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 28800,
+          "end_ms": 29000,
+          "delta": " The",
+          "event_id": "event_ETGn4ieTxr5GGBoevmRNg"
+        }
+      },
+      {
+        "at": 134763,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 29000,
+          "end_ms": 29200,
+          "delta": " test",
+          "event_id": "event_ETGn47ps65L1XKeTWXc8J"
+        }
+      },
+      {
+        "at": 134774,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 29200,
+          "end_ms": 29400,
+          "delta": " beacon",
+          "event_id": "event_ETGn4s6x8hjnPUOg81BKX"
+        }
+      },
+      {
+        "at": 134789,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 29600,
+          "end_ms": 29800,
+          "delta": " is violet",
+          "event_id": "event_ETGn5B7qlRdZtcQLk670S"
+        }
+      },
+      {
+        "at": 134802,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 29800,
+          "end_ms": 30000,
+          "delta": ".",
+          "event_id": "event_ETGn58c4Gh5gXLbsq9D0H"
+        }
+      },
+      {
+        "at": 134812,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 31200,
+          "end_ms": 31400,
+          "delta": "That's a",
+          "event_id": "event_ETGn6hNt28FT14Z1lo3JI"
+        }
+      },
+      {
+        "at": 134821,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 31400,
+          "end_ms": 31600,
+          "delta": " real",
+          "event_id": "event_ETGn6MuAFJHJkHd4NzwQQ"
+        }
+      },
+      {
+        "at": 134831,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 31600,
+          "end_ms": 31800,
+          "delta": " jungle",
+          "event_id": "event_ETGn7k290xBaVQ0QWOUQ6"
+        }
+      },
+      {
+        "at": 134836,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 31800,
+          "end_ms": 32000,
+          "delta": " you've",
+          "event_id": "event_ETGn7RjJdocvLv9Vt4XEQ"
+        }
+      },
+      {
+        "at": 134840,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 32000,
+          "end_ms": 32200,
+          "delta": " got.",
+          "event_id": "event_ETGn7pPbVMbskvMulHQau"
+        }
+      },
+      {
+        "at": 134843,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 32600,
+          "end_ms": 32800,
+          "delta": " How",
+          "event_id": "event_ETGn8CWRQzG5ShJ9yrexM"
+        }
+      },
+      {
+        "at": 134846,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 32800,
+          "end_ms": 33000,
+          "delta": " are you",
+          "event_id": "event_ETGn81lO2vxAf0LfLUifI"
+        }
+      },
+      {
+        "at": 134851,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 33000,
+          "end_ms": 33200,
+          "delta": " feeling",
+          "event_id": "event_ETGn8JCLVcWN4gMLvmyxe"
+        }
+      },
+      {
+        "at": 134854,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 33200,
+          "end_ms": 33400,
+          "delta": " about",
+          "event_id": "event_ETGn8hsMJxRtGohzbPtBp"
+        }
+      },
+      {
+        "at": 136290,
+        "ch": 1,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 33600,
+          "end_ms": 33800,
+          "delta": " it?",
+          "event_id": "event_ETGn9hqzrYkSQZxW5DmjQ"
+        }
+      },
+      {
+        "at": 147080,
+        "ch": 1,
+        "dir": "state",
+        "event": {
+          "raw": "close"
+        }
+      },
+      {
+        "at": 203588,
+        "ch": 2,
+        "dir": "state",
+        "event": {
+          "raw": "open"
+        }
+      },
+      {
+        "at": 203588,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "event_id": "event_ETGoBpuDN9DxYz5MiAjnf",
+          "type": "session.started"
+        }
+      },
+      {
+        "at": 203588,
+        "ch": 2,
+        "dir": "out",
+        "event": {
+          "type": "session.commentary.append",
+          "event_id": "wake",
+          "content": "Context: Corvus was just woken."
+        }
+      },
+      {
+        "at": 205290,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 800,
+          "end_ms": 1000,
+          "delta": "Hey,",
+          "event_id": "event_ETGoGr8niXLa3pZQrq32I"
+        }
+      },
+      {
+        "at": 205309,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.commentary.appended",
+          "start_ms": 800,
+          "end_ms": 1000,
+          "event_id": "event_ETGoGdiq9xeylEkkX8dYo",
+          "client_event_id": "wake"
+        }
+      },
+      {
+        "at": 205309,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 1000,
+          "end_ms": 1200,
+          "delta": " I'm here",
+          "event_id": "event_ETGoHd03j885QJa9oMST6"
+        }
+      },
+      {
+        "at": 206122,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 1200,
+          "end_ms": 1400,
+          "delta": ".",
+          "event_id": "event_ETGoHfiVFnfhKWLlf8kKr"
+        }
+      },
+      {
+        "at": 206176,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 1600,
+          "end_ms": 1800,
+          "delta": " What",
+          "event_id": "event_ETGoHG1DTzJ6MDNPJqcKC"
+        }
+      },
+      {
+        "at": 206185,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 1800,
+          "end_ms": 2000,
+          "delta": " do you",
+          "event_id": "event_ETGoHNhsx2E1hucL1fJ3Y"
+        }
+      },
+      {
+        "at": 206212,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 2000,
+          "end_ms": 2200,
+          "delta": " need?",
+          "event_id": "event_ETGoIBOLP94L9YOclA4GP"
+        }
+      },
+      {
+        "at": 209950,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 6600,
+          "end_ms": 6800,
+          "delta": "Ask the",
+          "event_id": "event_ETGoMFrvZUJgxSpyX9Fhg"
+        }
+      },
+      {
+        "at": 210442,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 7000,
+          "end_ms": 7200,
+          "delta": " hub for",
+          "event_id": "event_ETGoMRZSUmI0aVxAP0ssK"
+        }
+      },
+      {
+        "at": 210449,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 7200,
+          "end_ms": 7400,
+          "delta": " the",
+          "event_id": "event_ETGoMH754AtSqgfqHzVwv"
+        }
+      },
+      {
+        "at": 210822,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 7400,
+          "end_ms": 7600,
+          "delta": " current",
+          "event_id": "event_ETGoMTBbMuD4stbOAsbT1"
+        }
+      },
+      {
+        "at": 211275,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 7800,
+          "end_ms": 8000,
+          "delta": " test",
+          "event_id": "event_ETGoN2Xbk34ROV2X4m9Dj"
+        }
+      },
+      {
+        "at": 211280,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 8000,
+          "end_ms": 8200,
+          "delta": " beacon",
+          "event_id": "event_ETGoNh6CpAywCEOww4kPv"
+        }
+      },
+      {
+        "at": 211832,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 8600,
+          "end_ms": 8800,
+          "delta": " status",
+          "event_id": "event_ETGoOcdi2xGcBfFBbiw3r"
+        }
+      },
+      {
+        "at": 211853,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.delegation.created",
+          "event_id": "event_ETGoOkEpbfOllKZWPS5m2"
+        }
+      },
+      {
+        "at": 212337,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 9000,
+          "end_ms": 9200,
+          "delta": "Checking.",
+          "event_id": "event_ETGoOQdpEMxHRm9zJvcuO"
+        }
+      },
+      {
+        "at": 220436,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 15200,
+          "end_ms": 15400,
+          "delta": "While the",
+          "event_id": "event_ETGoUdNjMXsVoyww6jSMT"
+        }
+      },
+      {
+        "at": 220456,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 15400,
+          "end_ms": 15600,
+          "delta": " hub",
+          "event_id": "event_ETGoUy17CrC5LxIV2giYJ"
+        }
+      },
+      {
+        "at": 221037,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 15800,
+          "end_ms": 16000,
+          "delta": " checks",
+          "event_id": "event_ETGoVQEXdd1gKoocztt1b"
+        }
+      },
+      {
+        "at": 221044,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 16400,
+          "end_ms": 16600,
+          "delta": " that",
+          "event_id": "event_ETGoWeGefxugCntbyb7Lc"
+        }
+      },
+      {
+        "at": 221051,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 16600,
+          "end_ms": 16800,
+          "delta": ", let",
+          "event_id": "event_ETGoWHxx4mitiwt3F8BXZ"
+        }
+      },
+      {
+        "at": 221074,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 16800,
+          "end_ms": 17000,
+          "delta": " me",
+          "event_id": "event_ETGoWbZfkL3oxEI7cnbBY"
+        }
+      },
+      {
+        "at": 221084,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 17000,
+          "end_ms": 17200,
+          "delta": " tell",
+          "event_id": "event_ETGoWJJtLlr19jdMUgcER"
+        }
+      },
+      {
+        "at": 221107,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 17200,
+          "end_ms": 17400,
+          "delta": " you",
+          "event_id": "event_ETGoWySbVLs3nYh0pxG3U"
+        }
+      },
+      {
+        "at": 221466,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 17400,
+          "end_ms": 17600,
+          "delta": " about",
+          "event_id": "event_ETGoXgMWsCtiVzWYOGPQC"
+        }
+      },
+      {
+        "at": 221470,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 17600,
+          "end_ms": 17800,
+          "delta": " the",
+          "event_id": "event_ETGoXlS4XoGlfwZ2vAWil"
+        }
+      },
+      {
+        "at": 221479,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 17800,
+          "end_ms": 18000,
+          "delta": " garden",
+          "event_id": "event_ETGoX0ZKWu3oHLwiCOEd3"
+        }
+      },
+      {
+        "at": 221507,
+        "ch": 2,
+        "dir": "out",
+        "event": {
+          "type": "session.commentary.append",
+          "event_id": "hub_reply-2",
+          "content": "The test beacon is silver."
+        }
+      },
+      {
+        "at": 221510,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 18000,
+          "end_ms": 18200,
+          "delta": ". The",
+          "event_id": "event_ETGoXWrT4rXBAhOz2Z6o8"
+        }
+      },
+      {
+        "at": 221823,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 18400,
+          "end_ms": 18600,
+          "delta": " tomatoes",
+          "event_id": "event_ETGoYUisIFPmIunQ5PUxi"
+        }
+      },
+      {
+        "at": 222110,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 18800,
+          "end_ms": 19000,
+          "delta": " came in",
+          "event_id": "event_ETGoYtU80Mdf0rJAGIMla"
+        }
+      },
+      {
+        "at": 222115,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 18800,
+          "end_ms": 19000,
+          "delta": "Mm.",
+          "event_id": "event_ETGoYjhURckjeNwPHuD0s"
+        }
+      },
+      {
+        "at": 222133,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.commentary.appended",
+          "start_ms": 18800,
+          "end_ms": 19000,
+          "event_id": "event_ETGoYoFdqQHRtBe8y7lO0",
+          "client_event_id": "hub_reply-2"
+        }
+      },
+      {
+        "at": 222516,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 19200,
+          "end_ms": 19400,
+          "delta": " early",
+          "event_id": "event_ETGoY2KdjppC88EAIZpnr"
+        }
+      },
+      {
+        "at": 223190,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 19400,
+          "end_ms": 19600,
+          "delta": " this",
+          "event_id": "event_ETGoYsLD6TZNQua1EkhGl"
+        }
+      },
+      {
+        "at": 223211,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 19800,
+          "end_ms": 20000,
+          "delta": " year",
+          "event_id": "event_ETGoZIxYnXrdayVBi5Wb4"
+        }
+      },
+      {
+        "at": 223235,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 20000,
+          "end_ms": 20200,
+          "delta": ", the",
+          "event_id": "event_ETGoZFrsyF9NeDAoFJiAu"
+        }
+      },
+      {
+        "at": 223945,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 20400,
+          "end_ms": 20600,
+          "delta": " basil",
+          "event_id": "event_ETGoZZqP7meTKZCnqhSO3"
+        }
+      },
+      {
+        "at": 224463,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 20800,
+          "end_ms": 21000,
+          "delta": " bolted",
+          "event_id": "event_ETGoah4n9wmOtdoyfZnpq"
+        }
+      },
+      {
+        "at": 224548,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 21000,
+          "end_ms": 21200,
+          "delta": " in",
+          "event_id": "event_ETGoaWC1SrWfurjYwwOKN"
+        }
+      },
+      {
+        "at": 224552,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 21200,
+          "end_ms": 21400,
+          "delta": " the",
+          "event_id": "event_ETGoaNvi8xCY44ZpbjLk9"
+        }
+      },
+      {
+        "at": 225007,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 21600,
+          "end_ms": 21800,
+          "delta": " heat",
+          "event_id": "event_ETGobzwhmqX6Xlad5JQ9t"
+        }
+      },
+      {
+        "at": 225349,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 21800,
+          "end_ms": 22000,
+          "delta": ", and",
+          "event_id": "event_ETGobkYl9WeiPbx5IzvHW"
+        }
+      },
+      {
+        "at": 225382,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 22000,
+          "end_ms": 22200,
+          "delta": " the",
+          "event_id": "event_ETGob2AYAe4wcfGPglExG"
+        }
+      },
+      {
+        "at": 225822,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 22400,
+          "end_ms": 22600,
+          "delta": " squash",
+          "event_id": "event_ETGobYVqEH63uU04hEtdm"
+        }
+      },
+      {
+        "at": 228334,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 22800,
+          "end_ms": 23000,
+          "delta": " vines have",
+          "event_id": "event_ETGocFoorM8D8KiEVkhjV"
+        }
+      },
+      {
+        "at": 228380,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 23400,
+          "end_ms": 23600,
+          "delta": " climbed",
+          "event_id": "event_ETGod9sdS431EGDiDqtrM"
+        }
+      },
+      {
+        "at": 228389,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 23600,
+          "end_ms": 23800,
+          "delta": " over the",
+          "event_id": "event_ETGodCqsMtywInYQ0fIFT"
+        }
+      },
+      {
+        "at": 228397,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 24000,
+          "end_ms": 24200,
+          "delta": " whole",
+          "event_id": "event_ETGod1bKHj9eCReR0hYRG"
+        }
+      },
+      {
+        "at": 228406,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 24200,
+          "end_ms": 24400,
+          "delta": " north",
+          "event_id": "event_ETGod05FjlwxiGOWJWSue"
+        }
+      },
+      {
+        "at": 228415,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 24600,
+          "end_ms": 24800,
+          "delta": " fence and",
+          "event_id": "event_ETGoe1kxUI4RZvLVapogS"
+        }
+      },
+      {
+        "at": 228627,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 24800,
+          "end_ms": 25000,
+          "delta": " into",
+          "event_id": "event_ETGoeB9lGKDNrfLQlTBE0"
+        }
+      },
+      {
+        "at": 228631,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 25000,
+          "end_ms": 25200,
+          "delta": " the",
+          "event_id": "event_ETGoedgbF7JrQGzBbD4IB"
+        }
+      },
+      {
+        "at": 229203,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 25400,
+          "end_ms": 25600,
+          "delta": " neighbor's",
+          "event_id": "event_ETGofJTwV4z8dnPknepDe"
+        }
+      },
+      {
+        "at": 229207,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 25600,
+          "end_ms": 25800,
+          "delta": "The test",
+          "event_id": "event_ETGofOjshM4TIvvl9b3Ut"
+        }
+      },
+      {
+        "at": 229212,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.input_transcript.delta",
+          "start_ms": 25800,
+          "end_ms": 26000,
+          "delta": " yard",
+          "event_id": "event_ETGofzsFkZj3QJTatTLV4"
+        }
+      },
+      {
+        "at": 229218,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 25800,
+          "end_ms": 26000,
+          "delta": " beacon",
+          "event_id": "event_ETGofROghIc6pm5OoqZ0c"
+        }
+      },
+      {
+        "at": 229711,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 26200,
+          "end_ms": 26400,
+          "delta": " is",
+          "event_id": "event_ETGofcMPqwQGJmIbPcMFq"
+        }
+      },
+      {
+        "at": 229714,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 26400,
+          "end_ms": 26600,
+          "delta": " silver.",
+          "event_id": "event_ETGogZs7ntCZbbmPVEwrC"
+        }
+      },
+      {
+        "at": 231161,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 27600,
+          "end_ms": 27800,
+          "delta": " Wow,",
+          "event_id": "event_ETGohTm5quqO3gwqswHsA"
+        }
+      },
+      {
+        "at": 231167,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 27800,
+          "end_ms": 28000,
+          "delta": " that's",
+          "event_id": "event_ETGohR6M6jtaWdRs7yDfY"
+        }
+      },
+      {
+        "at": 231494,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 28000,
+          "end_ms": 28200,
+          "delta": " quite",
+          "event_id": "event_ETGoh7dseDGm69jl5Jukj"
+        }
+      },
+      {
+        "at": 231744,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 28400,
+          "end_ms": 28600,
+          "delta": " the",
+          "event_id": "event_ETGoi59rXXkfO4Me2K31H"
+        }
+      },
+      {
+        "at": 232028,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 28600,
+          "end_ms": 28800,
+          "delta": " takeover.",
+          "event_id": "event_ETGoiMGvxioVyu42bIFSc"
+        }
+      },
+      {
+        "at": 232697,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 29200,
+          "end_ms": 29400,
+          "delta": " How",
+          "event_id": "event_ETGoifckPnf074Z1I91Ph"
+        }
+      },
+      {
+        "at": 232711,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 29400,
+          "end_ms": 29600,
+          "delta": " do you",
+          "event_id": "event_ETGoj80DADbaF5tI06jnX"
+        }
+      },
+      {
+        "at": 233041,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 29600,
+          "end_ms": 29800,
+          "delta": " feel",
+          "event_id": "event_ETGojU0Nyj4VWKawm2rti"
+        }
+      },
+      {
+        "at": 233322,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 29800,
+          "end_ms": 30000,
+          "delta": " about",
+          "event_id": "event_ETGoj6XcQu6tpVbJNMcWh"
+        }
+      },
+      {
+        "at": 233613,
+        "ch": 2,
+        "dir": "in",
+        "event": {
+          "type": "session.output_transcript.delta",
+          "start_ms": 30200,
+          "end_ms": 30400,
+          "delta": " it?",
+          "event_id": "event_ETGoj2Kz518rJ55meAQIB"
+        }
+      },
+      {
+        "at": 242993,
+        "ch": 2,
+        "dir": "state",
+        "event": {
+          "raw": "close"
+        }
+      }
+    ]
+  }
+}

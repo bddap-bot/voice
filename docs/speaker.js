@@ -321,14 +321,15 @@ const listeners = new Map();
 
 function speakerWorker() {
   if (worker) return worker;
-  worker = new Worker(new URL('./speaker-worker.js', import.meta.url), { type: 'module' });
-  worker.onmessage = ({ data }) => listeners.get(data.id)?.(data);
-  worker.onerror = (event) => {
-    worker.terminate();
+  const started = worker = new Worker(new URL('./speaker-worker.js', import.meta.url), { type: 'module' });
+  started.onmessage = ({ data }) => listeners.get(data.id)?.(data);
+  started.onerror = (event) => {
+    if (worker !== started) return;
+    started.terminate();
     worker = undefined;
     for (const [id, heard] of listeners) heard({ id, error: event.message || 'speaker worker failed' });
   };
-  return worker;
+  return started;
 }
 
 export function prepareSpeaker() {

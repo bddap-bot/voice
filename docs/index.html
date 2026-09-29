@@ -8,7 +8,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
 <style>
-  :root { color-scheme: dark; --feet: .892; --desk: 118px; --status: 34px; --pad: 18px; --grip: 16px; --ledger-w: 22vw; --display-w: 24vw; --display-h: 24svh; --ledger-h: 20svh; --ledger-col: clamp(120px, var(--ledger-w), 28vw); --display-col: clamp(120px, var(--display-w), 28vw); }
+  :root { color-scheme: dark; --feet: .892; --desk: 118px; --status: 34px; --pad: 18px; --grip: 16px; --ledger-w: 22vw; --display-w: 24vw; --display-h: 24svh; --ledger-h: 20svh; --ledger-col: clamp(120px, var(--ledger-w), 28vw); --display-col: clamp(120px, var(--display-w), 28vw); --wing: calc(min(var(--ledger-col), var(--display-col)) + var(--grip)); }
   * { box-sizing: border-box; }
   html { background: #08090d; }
   body { margin: 0; min-height: 100vh; background: #08090d; color: #f4eee5; font: 15px/1.45 system-ui, sans-serif; overflow: hidden; }
@@ -22,10 +22,10 @@
   main { --stage-height: 100vh; position: relative; height: var(--stage-height); min-height: 540px; overflow: hidden; isolation: isolate; display: grid; grid: "ledger ledger-grip stage display-grip display" minmax(0, 1fr) / var(--ledger-col) var(--grip) minmax(0, 1fr) var(--grip) var(--display-col); padding: var(--pad); background: radial-gradient(ellipse at 50% 34%, #51443d 0, #29252a 40%, #111219 72%); }
   .control { grid-area: stage; position: relative; min-width: 0; min-height: 0; --canvas-height: calc(100% - var(--status) - var(--desk)); }
   .control::before { content: ''; position: absolute; z-index: 1; left: 20%; top: calc(var(--status) + var(--feet) * var(--canvas-height)); bottom: 0; width: 60%; background: linear-gradient(#665746, #252127); clip-path: polygon(12% 0, 88% 0, 100% 100%, 0 100%); }
-  #puppet { position: absolute; z-index: 2; left: 0; top: var(--status); width: 100%; height: var(--canvas-height); touch-action: manipulation; cursor: pointer; }
+  #puppet { position: absolute; z-index: 2; left: calc(-1 * var(--wing)); top: var(--status); width: calc(100% + 2 * var(--wing)); height: var(--canvas-height); touch-action: manipulation; cursor: pointer; }
   #puppet-prompt { position: absolute; z-index: 3; top: 35%; left: 0; width: 100%; text-align: center; pointer-events: none; }
   #puppet-credit { position: absolute; z-index: 3; left: 0; right: 0; top: calc(var(--status) + var(--canvas-height) + 4px); min-height: 18px; color: #cfc4b6; text-align: center; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .display, .ledger { min-width: 0; min-height: 0; padding: 18px; overflow: hidden; display: flex; flex-direction: column; background: linear-gradient(145deg, #201e22ee, #111217ee); border: 1px solid #6d5c49; border-radius: 4px; box-shadow: 0 18px 42px #0008, inset 0 0 35px #8a684111; }
+  .display, .ledger { position: relative; z-index: 3; min-width: 0; min-height: 0; padding: 18px; overflow: hidden; display: flex; flex-direction: column; background: linear-gradient(145deg, #201e22ee, #111217ee); border: 1px solid #6d5c49; border-radius: 4px; box-shadow: 0 18px 42px #0008, inset 0 0 35px #8a684111; }
   .display { grid-area: display; }
   .ledger { grid-area: ledger; }
   .display h2, .ledger h2 { margin: 0 0 12px; font-size: 14px; text-transform: uppercase; letter-spacing: .08em; color: #a5a5aa; }
@@ -80,7 +80,7 @@
     #controls.open .card-body { max-height: calc(100svh - 90px); }
   }
   @media (max-width: 720px) and (orientation: portrait) {
-    :root { --pad: 8px; --grip: 22px; --desk: 30px; --status: 0px; }
+    :root { --pad: 8px; --grip: 22px; --desk: 30px; --status: 0px; --wing: var(--pad); }
     body { height: 100svh; min-height: 0; display: flex; flex-direction: column; }
     header { position: static; flex: none; height: 28px; padding: 6px 12px 0; font-size: 13px; }
     #elapsed { font-size: 15px; }

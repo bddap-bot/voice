@@ -46,7 +46,7 @@ export function evidenceRegion({ neutralSilhouette, canvas, viewport }) {
 }
 
 export function installSmokeMeasurements() {
-  const selectors = ['header', '#puppet', '#puppet-credit', '#controls', '.display', '.ledger'];
+  const selectors = ['header', '#puppet-credit', '#controls', '.display', '.ledger'];
   const state = { cls: 0, moves: [], overlaps: [], heights: [], aspects: [], stages: [], blankFrames: [], errors: [], telemetryRejections: [] };
   const canvas = document.querySelector('#puppet');
   const rect = (element) => {

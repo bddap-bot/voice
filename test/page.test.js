@@ -789,14 +789,15 @@ for (const viewport of layoutViewports) test(`stage UI stays outside the puppet 
   runtime.dispose();
   const rect = (element) => { const value = element.getBoundingClientRect(); return { left: value.left, right: value.right, top: value.top, bottom: value.bottom }; };
   const puppet = rect(document.querySelector('#puppet'));
-  const figure = { ...puppet, bottom: puppet.top + (1 - feet.y) / 2 * (puppet.bottom - puppet.top) };
+  const reach = [-0.9, 0.9].map((x) => (origin.clone().set(x, 0, 0).project(runtime.camera).x + 1) / 2 * (puppet.right - puppet.left) + puppet.left);
+  const figure = { left: reach[0], right: reach[1], top: puppet.top, bottom: puppet.top + (1 - feet.y) / 2 * (puppet.bottom - puppet.top) };
   const selectors = ['header', '#puppet-credit', '#controls', '.display', '.ledger', '.grip[data-pane="ledger"]', '.grip[data-pane="display"]'];
   const overlaps = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
   const result = selectors.map((selector) => ({ selector, rect: rect(document.querySelector(selector)) })).filter((item) => overlaps(item.rect, figure));
-  const regions = [...selectors, '#puppet'].map((selector) => ({ selector, rect: rect(document.querySelector(selector)) })).filter(({ rect }) => rect.right > rect.left && rect.bottom > rect.top);
+  const regions = selectors.map((selector) => ({ selector, rect: rect(document.querySelector(selector)) })).filter(({ rect }) => rect.right > rect.left && rect.bottom > rect.top);
   const collisions = regions.flatMap((left, index) => regions.slice(index + 1).filter((right) => overlaps(left.rect, right.rect)).map((right) => ({ left, right })));
   const shown = [...document.querySelectorAll('#controls button, #controls select, #controls textarea')].filter((element) => element.getClientRects().length).map((element) => element.id);
-  document.body.dataset.overlapTest = JSON.stringify({ puppet, figure, result, collisions, shown, display: rect(document.querySelector('#display')), ledger: rect(document.querySelector('.ledger')), controls: rect(document.querySelector('#controls')), stage: rect(document.querySelector('main')), pageHeight: document.documentElement.scrollHeight, viewportWidth: innerWidth, stageHeight });
+  document.body.dataset.overlapTest = JSON.stringify({ puppet, figure, result, collisions, shown, display: rect(document.querySelector('#display')), ledger: rect(document.querySelector('.ledger')), column: rect(document.querySelector('.control')), controls: rect(document.querySelector('#controls')), stage: rect(document.querySelector('main')), pageHeight: document.documentElement.scrollHeight, viewportWidth: innerWidth, stageHeight });
   </script></body></html>`, { scale: viewport.scale, size: `${viewport.width},${viewport.height}`, mobile: viewport.mobile });
   const encoded = /data-overlap-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   const result = JSON.parse(encoded ?? 'null');
@@ -809,7 +810,8 @@ for (const viewport of layoutViewports) test(`stage UI stays outside the puppet 
   for (const pane of [result.display, result.ledger]) assert.ok(pane.top >= result.stage.top && pane.bottom <= result.stage.bottom && pane.right - pane.left > 100 && pane.bottom - pane.top > 80, `${viewport.name} pane escapes the stage or collapses: ${JSON.stringify(pane)}`);
   if (!viewport.mobile) {
     assert.ok(result.controls.top >= result.puppet.bottom, `${viewport.name} card intersects the puppet canvas: ${JSON.stringify(result)}`);
-    for (const pane of [result.display, result.ledger]) assert.ok(pane.right - pane.left < result.puppet.right - result.puppet.left, `${viewport.name} pane wider than the puppet: ${JSON.stringify(pane)}`);
+    const wing = Math.min(result.ledger.right - result.ledger.left, result.display.right - result.display.left);
+    assert.ok(result.puppet.left <= result.column.left - wing && result.puppet.right >= result.column.right + wing && Math.abs(result.puppet.left + result.puppet.right - result.column.left - result.column.right) <= 1, `${viewport.name} canvas must centre on the stage and reach the outer edge of the narrower pane: ${JSON.stringify(result)}`);
   }
 });
 

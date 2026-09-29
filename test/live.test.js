@@ -203,6 +203,26 @@ test('an ended session keeps its last spoken turn apart from the next session gr
   assert.equal(trace.entries.at(-1).source, 'model alone');
 });
 
+test('a trace snapshot drops its oldest turns past the limit and restores with the same memory', () => {
+  const trace = new ConversationTrace();
+  trace.heard('first question');
+  trace.spoke('First answer.');
+  trace.slept(1000);
+  trace.heard('second question');
+  trace.spoke('Second answer.');
+  trace.slept(2000);
+  const restored = new ConversationTrace(() => {}, JSON.parse(JSON.stringify(trace.snapshot())));
+  assert.deepEqual(restored.entries, trace.entries);
+  assert.deepEqual(restored.wake(3000), trace.wake(3000));
+  const newest = trace.snapshot(trace.entries.slice(2).reduce((sum, entry) => sum + JSON.stringify(entry).length, 0));
+  assert.deepEqual(newest, { entries: trace.entries.slice(2), sleeps: [{ index: 0, at: 1000 }, { index: 2, at: 2000 }] });
+  const second = new ConversationTrace();
+  second.heard('second question');
+  second.spoke('Second answer.');
+  second.slept(2000);
+  assert.deepEqual(new ConversationTrace(() => {}, newest).wake(3000), second.wake(3000));
+});
+
 test('shared material and its hub reply remain in the conversation trace', () => {
   const trace = new ConversationTrace();
   trace.shared('share_1', 'https://example.test/a?q=one');

@@ -136,6 +136,7 @@ import { disposeRenderer, renderChart, renderMath, renderMermaid } from './lib/r
 import config, { configuredToken } from './config.js';
 
 const KEY = config.storageKey;
+const PAGE_KEY = `${KEY}.page`;
 const ALPN = 'voice-web/1';
 const DISPLAY_FRESH_MS = 45000;
 const $ = (id) => document.getElementById(id);
@@ -261,6 +262,7 @@ function syncPuppetUi() {
   $('puppet').setAttribute('aria-pressed', String(active));
   $('puppet').setAttribute('aria-label', active || starting ? 'stop conversation' : 'start conversation');
   syncScreenLock();
+  keepPage();
 }
 function syncScreenLock() {
   const awake = Boolean(conversation || starting);
@@ -286,14 +288,6 @@ function setMicrophoneMuted(muted) {
   $('mic-mute').textContent = microphoneMuted ? 'Unmute mic' : 'Mute mic';
   $('mic-mute').setAttribute('aria-pressed', String(microphoneMuted));
   syncSpotter();
-}
-try {
-  puppetRuntime = new PuppetRuntime($('puppet'), $('display'));
-  puppetRuntime.onAnimation = (state) => recordSession('animation', JSON.stringify(state));
-  puppetRuntime.pause();
-} catch (error) {
-  console.warn('puppet:', error);
-  syncPuppetUi();
 }
 function resetPuppetConnection(error = new Error('connection replaced'), clearAppearance = false) {
   puppetEpoch++;
@@ -369,8 +363,25 @@ function render(entries) {
     }));
   }
   if (following) $('log').scrollTop = $('log').scrollHeight;
+  keepPage();
 }
-let trace = new ConversationTrace(render);
+const restored = JSON.parse(sessionStorage.getItem(PAGE_KEY));
+let trace = new ConversationTrace(render, restored?.trace);
+if (restored?.awake) trace.slept(restored.at);
+render(trace.entries);
+try {
+  puppetRuntime = new PuppetRuntime($('puppet'), $('display'));
+  puppetRuntime.onAnimation = (state) => recordSession('animation', JSON.stringify(state));
+  puppetRuntime.pause();
+} catch (error) {
+  console.warn('puppet:', error);
+  syncPuppetUi();
+}
+function keepPage() {
+  const awake = Boolean(conversation || starting);
+  if (document.visibilityState === 'hidden' && (awake || trace.entries.length)) sessionStorage.setItem(PAGE_KEY, JSON.stringify({ trace: trace.snapshot(), awake, at: Date.now() }));
+  else sessionStorage.removeItem(PAGE_KEY);
+}
 
 async function listen(mine) {
   try {
@@ -1279,10 +1290,14 @@ try { if (storedVoiceprint()) speaker.prepareSpeaker(); } catch (error) { record
 $('reenter').addEventListener('click', async () => { listening = false; setMicrophoneMuted(microphoneMuted); stopConversation(); await recorderFlush; setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); savedState(false); $('token').focus(); });
 $('forget').addEventListener('click', async () => { listening = false; setMicrophoneMuted(microphoneMuted); stopConversation(); await recorderFlush; stopLearning(); localStorage.removeItem(KEY); localStorage.removeItem(VOICEPRINT); syncVoiceprint(); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); await sendFrame('bye').catch(() => {}); generation++; connected = false; resetPuppetConnection(new Error('connection replaced'), true); await puppetChannel.clearCache().catch(() => {}); savedState(false); setStatus('token forgotten'); });
 navigator.mediaDevices?.addEventListener('devicechange', syncSpotter);
-document.addEventListener('visibilitychange', () => { syncScreenLock(); if (document.hidden) puppetRuntime?.pause(); else if (!$('conversation').classList.contains('hidden')) puppetRuntime?.start(); });
+document.addEventListener('visibilitychange', () => { syncScreenLock(); keepPage(); if (document.hidden) puppetRuntime?.pause(); else if (!$('conversation').classList.contains('hidden')) puppetRuntime?.start(); });
 window.addEventListener('beforeunload', () => puppetRuntime?.dispose());
 const saved = configuredToken(config, localStorage.getItem(KEY));
-if (saved) { setTokenPanel(false); start(saved).catch((error) => { localStorage.removeItem(KEY); savedState(false); setStatus(error.message, 'err'); }); }
+if (saved) { setTokenPanel(false); start(saved).then(() => {
+  if (!restored) return;
+  recordSession('restore', JSON.stringify({ discarded: Boolean(document.wasDiscarded), awake: restored.awake, away_ms: Date.now() - restored.at }), null);
+  if (restored.awake && Date.now() - restored.at < INACTIVITY_MS) toggleConversation();
+}, (error) => { localStorage.removeItem(KEY); savedState(false); setStatus(error.message, 'err'); }); }
 if (config.serviceWorker && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 </script>
 </body>

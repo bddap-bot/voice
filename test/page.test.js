@@ -242,6 +242,7 @@ globalThis.__voiceStartSpotter = async (stream, heard, model) => {
 };
 globalThis.sentLiveEvents = [];
 window.addEventListener('load', () => {
+  if (localStorage.getItem('voice.token')) return;
   const poll = globalThis.setInterval.bind(globalThis);
   globalThis.statusTextWrites = [];
   new MutationObserver(() => statusTextWrites.push(document.querySelector('#status').textContent)).observe(document.querySelector('#status'), { childList: true, characterData: true, subtree: true });
@@ -279,7 +280,7 @@ async function dumpDom(url, args, budget) {
   }
 }
 
-async function runPage(testSetup = '', { scale = 1, size = '390,844', budget = 3000, mobile = false } = {}) {
+async function pageServer(testSetup) {
   const index = (await readFile(new URL('../docs/index.html', import.meta.url), 'utf8'))
     .replace('https://bddap-bot.github.io/botq/botq_dash_wasm.js', '/botq_dash_wasm.js')
     .replace('./puppet.js', '/fake-puppet.js')
@@ -299,9 +300,14 @@ async function runPage(testSetup = '', { scale = 1, size = '390,844', budget = 3
     response.writeHead(200, { 'content-type': path.endsWith('.js') ? 'text/javascript' : path.endsWith('.css') ? 'text/css' : path.endsWith('.woff2') ? 'font/woff2' : 'text/html' });
     response.end(served);
   });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return { server, requests, url: `http://127.0.0.1:${server.address().port}/` };
+}
+
+async function runPage(testSetup = '', { scale = 1, size = '390,844', budget = 3000, mobile = false } = {}) {
+  const { server, requests, url } = await pageServer(testSetup);
   try {
-    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const { stdout, stderr } = await dumpDom(`http://127.0.0.1:${server.address().port}/`, [
+    const { stdout, stderr } = await dumpDom(url, [
       '--disable-gpu',
       '--disable-popup-blocking',
       '--disable-background-timer-throttling',
@@ -313,6 +319,45 @@ async function runPage(testSetup = '', { scale = 1, size = '390,844', budget = 3
     return { stdout, stderr, requests };
   } finally {
     if (server.listening) await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+async function driveLifecycle(testSetup, drive) {
+  const { server, url } = await pageServer(testSetup);
+  const chrome = await launchChromium({ args: ['--headless=new', '--no-sandbox', '--disable-gpu'] });
+  const { call, listen } = chrome.devtools;
+  const events = [];
+  const stop = listen(({ method, params }) => {
+    if (method === 'Page.lifecycleEvent') events.push(`lifecycle:${params.name}`);
+    else if (method === 'Page.frameNavigated' && !params.frame.parentId) events.push(`navigated:${params.type ?? 'Navigation'}`);
+    else if (method === 'Inspector.targetCrashed') events.push('crashed');
+  });
+  try {
+    const { targetId } = await call('Target.createTarget', { url: 'about:blank' });
+    const { sessionId } = await call('Target.attachToTarget', { targetId, flatten: true });
+    const page = (method, params) => call(method, params, sessionId);
+    await page('Inspector.enable');
+    await page('Page.enable');
+    await page('Page.setLifecycleEventsEnabled', { enabled: true });
+    const evaluate = async (expression) => {
+      const { result, exceptionDetails } = await page('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+      if (exceptionDetails) throw new Error(exceptionDetails.exception?.description ?? exceptionDetails.text);
+      return result.value;
+    };
+    const poll = async (label, check, limit = 10000) => {
+      for (const deadline = Date.now() + limit; !(await check());) {
+        if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}: ${chrome.stderr}`);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    };
+    const until = (expression) => poll(expression, () => evaluate(expression).catch(() => false));
+    const event = (name) => poll(name, () => events.includes(name));
+    await page('Page.navigate', { url });
+    return await drive({ call, page, evaluate, until, event, events, targetId });
+  } finally {
+    stop();
+    await chrome.close();
+    await new Promise((resolve) => server.close(resolve));
   }
 }
 
@@ -2052,4 +2097,101 @@ test('hub replies reach the model as they arrive, in order, even mid-utterance',
     quiets: 0,
     acks: ['ordered_first', 'ordered_second'],
   });
+});
+
+test('leaving the app keeps the delegation log and whether Live was awake through a freeze, a discard-and-reload and a reload, but not a crash in view', async () => {
+  const lifecycle = `for (const name of ['visibilitychange', 'freeze', 'resume', 'pagehide', 'pageshow']) document.addEventListener(name, () => sessionStorage.setItem('lifecycle', JSON.stringify([...JSON.parse(sessionStorage.getItem('lifecycle') ?? '[]'), name === 'visibilitychange' ? document.visibilityState : name])), true);`;
+  const result = await driveLifecycle(untilAsleep + lifecycle, async ({ call, page, evaluate, until, event, events, targetId }) => {
+    const { windowId } = await call('Browser.getWindowForTarget', { targetId });
+    const state = () => evaluate(`({ log: document.querySelector('#log').innerText, pressed: document.querySelector('#puppet').getAttribute('aria-pressed') })`);
+    const pressed = (value) => until(`document.querySelector('#puppet').getAttribute('aria-pressed') === '${value}'`);
+    const tap = (value) => evaluate(`document.querySelector('#puppet').click(); 0`).then(() => pressed(value));
+    const hide = () => call('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+    const freeze = () => page('Page.setWebLifecycleState', { state: 'frozen' });
+    const back = async () => {
+      await page('Page.setWebLifecycleState', { state: 'active' });
+      await call('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } });
+      await until(`document.visibilityState === 'visible'`);
+    };
+    const reload = async () => {
+      events.length = 0;
+      await page('Page.reload');
+      await event('lifecycle:load');
+      await until(`document.querySelector('#puppet').getAttribute('aria-disabled') === 'false'`);
+    };
+    const discardAndReturn = async () => {
+      // A discard follows time away; a renderer killed within milliseconds of a hide can lose its last storage write to the browser process.
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      events.length = 0;
+      for (const { id, type } of (await call('SystemInfo.getProcessInfo')).processInfo) if (type === 'renderer') process.kill(id, 'SIGKILL');
+      await event('crashed');
+      await call('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } });
+      await reload();
+    };
+    const restores = () => evaluate(`sessionEvents('restore').map((event) => JSON.parse(event.detail).awake)`);
+    const offers = () => evaluate(`count('offer')`);
+    const memory = () => evaluate(`JSON.parse(lastOffer.context[0].text.split('\\n').slice(1).join('\\n')).flatMap((conversation) => conversation.turns.map((turn) => turn.text))`);
+    await until(`document.body.dataset.startTest === 'puppet'`);
+    await evaluate(`hear('Where is the beacon?'); emitLive({ type: 'session.output_transcript.delta', delta: 'The beacon is green.' }); 0`);
+    const awake = await state();
+    events.length = 0;
+    await hide();
+    await freeze();
+    await back();
+    const frozen = { ...(await state()), lifecycle: await evaluate(`JSON.parse(sessionStorage.getItem('lifecycle'))`), navigated: events.filter((name) => name.startsWith('navigated')) };
+    await hide();
+    await evaluate(`hear('And the tower?'); 0`);
+    await freeze();
+    await discardAndReturn();
+    await pressed('true');
+    await until(`sessionEvents('restore').length === 1`);
+    const reopened = { ...(await state()), memory: await memory(), restores: await restores() };
+    await tap('false');
+    const asleep = await state();
+    await hide();
+    await freeze();
+    await discardAndReturn();
+    await until(`sessionEvents('restore').length === 1`);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const slept = { ...(await state()), offers: await offers() };
+    await until(`globalThis.testSpotter?.closed === 0`);
+    await hide();
+    await evaluate(`testSpotter.heard({ wake: 0.9 }); 0`);
+    await pressed('true');
+    await freeze();
+    await discardAndReturn();
+    await pressed('true');
+    await until(`sessionEvents('restore').length === 1`);
+    const wokenHidden = await restores();
+    await hide();
+    await freeze();
+    await back();
+    await tap('false');
+    const sleptInView = await state();
+    await reload();
+    await until(`sessionEvents('restore').length === 1`);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const reloadedInView = { ...(await state()), restores: await restores(), offers: await offers() };
+    await tap('true');
+    await hide();
+    await freeze();
+    await back();
+    await tap('false');
+    await discardAndReturn();
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const killedInView = { ...(await state()), restores: await restores(), offers: await offers() };
+    return { awake, frozen, reopened, asleep, slept, wokenHidden, sleptInView, reloadedInView, killedInView };
+  });
+  const log = /^MODEL HEARD\nheard: Where is the beacon\?\nMODEL ALONE\nspoke: The beacon is green\.\nMODEL HEARD\nheard: And the tower\?/;
+  const withoutCost = (text) => text.replaceAll(/\nsession: [^\n]*/g, '');
+  assert.equal(result.awake.pressed, 'true');
+  assert.deepEqual(result.frozen, { ...result.awake, lifecycle: ['hidden', 'freeze', 'resume', 'visible'], navigated: [] });
+  assert.match(result.reopened.log, log);
+  assert.deepEqual(result.reopened.memory, ['Where is the beacon?', 'The beacon is green.', 'And the tower?']);
+  assert.deepEqual(result.reopened.restores, [true]);
+  assert.equal(result.asleep.pressed, 'false');
+  assert.deepEqual(result.slept, { log: withoutCost(result.asleep.log), pressed: 'false', offers: 0 });
+  assert.deepEqual(result.wokenHidden, [true]);
+  assert.deepEqual(result.reloadedInView, { log: withoutCost(result.sleptInView.log), pressed: 'false', restores: [false], offers: 0 });
+  assert.deepEqual(result.killedInView, { log: '', pressed: 'false', restores: [], offers: 0 });
 });

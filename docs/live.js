@@ -342,9 +342,9 @@ function elapsed(ms) {
 }
 
 export class ConversationTrace {
-  constructor(onChange = () => {}) {
+  constructor(onChange = () => {}, { entries = [], sleeps = [] } = {}) {
     this.onChange = onChange;
-    this.entries = [];
+    this.entries = entries;
     this.pendingTurns = [];
     this.pendingEntries = new Set();
     this.heardAt = 0;
@@ -352,7 +352,12 @@ export class ConversationTrace {
     this.activeSpeechSource = null;
     this.lastOutputEnd = null;
     this.forceNewSpeech = false;
-    this.sleeps = [];
+    this.sleeps = sleeps;
+  }
+  snapshot(limit = 1 << 18) {
+    let start = this.entries.length;
+    for (let size = 0; start && (size += JSON.stringify(this.entries[start - 1]).length) <= limit;) start--;
+    return { entries: this.entries.slice(start), sleeps: this.sleeps.filter(({ index }) => index >= start).map(({ index, at }) => ({ index: index - start, at })) };
   }
   heard(delta, now = Date.now(), startMs = null) {
     if (this.activeSpeechSource === 'model after hub reply' && Number.isFinite(startMs) && Number.isFinite(this.lastOutputEnd) && startMs >= this.lastOutputEnd) this.activeSpeechSource = null;

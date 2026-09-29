@@ -62,7 +62,10 @@ export async function connect() { lost = false; }
 export async function send_only(bytes) {
   const frame = dec.decode(bytes);
   (globalThis.sentVerbs ??= []).push(frame.split('\\n', 1)[0]);
-  if (frame.startsWith('hub-ack\\n')) (globalThis.hubAcks ??= []).push(JSON.parse(frame.slice(8)).stamp);
+  if (frame.startsWith('hub-ack\\n')) {
+    (globalThis.hubAcks ??= []).push(JSON.parse(frame.slice(8)).stamp);
+    (globalThis.hubAckFrames ??= []).push(JSON.parse(frame.slice(8)));
+  }
   if (frame.startsWith('spans\\n')) (globalThis.spanBatches ??= []).push(JSON.parse(frame.slice(6)).spans);
   if (frame.startsWith('delegate\\n')) (globalThis.delegateFrames ??= []).push(JSON.parse(frame.slice(9)));
   if (frame.startsWith('telemetry\\n')) {
@@ -162,7 +165,13 @@ const browserSetup = `
 globalThis.emitLive = (event) => testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(event) }));
 globalThis.hear = (delta) => emitLive({ type: 'session.input_transcript.delta', delta });
 globalThis.delegateTurn = (id) => emitLive({ type: 'session.delegation.created', event_id: 'event_' + id, offset_ms: 0, delegation: { id, type: 'delegation', target: 'client' } });
-globalThis.replyFromHub = (id, stamp, commentary = [], timing_ms = 5) => deliverRelay(new TextEncoder().encode('hub\\n' + JSON.stringify({ id, commentary, timing_ms, stamp })));
+globalThis.replyFromHub = (id, stamp, commentary = [], timing_ms = 5, extra = {}, image) => {
+  const text = new TextEncoder().encode('hub\\n' + JSON.stringify({ id, commentary, timing_ms, stamp, ...extra }) + (image ? '\\n' : ''));
+  const frame = new Uint8Array(text.length + (image?.length ?? 0));
+  frame.set(text);
+  if (image) frame.set(image, text.length);
+  deliverRelay(frame);
+};
 window.addEventListener('error', (event) => { document.body.dataset.browserError = event.message; });
 window.addEventListener('unhandledrejection', (event) => { document.body.dataset.browserError = String(event.reason?.stack || event.reason); });
 globalThis.__voiceLoadEmbedder = async () => async (texts) => texts.map((text) => {
@@ -1037,14 +1046,9 @@ test('a display payload appears newest first and points the puppet while a plain
   const freshMs = Number(/DISPLAY_FRESH_MS = (\d+)/.exec(await readFile(new URL('../docs/index.html', import.meta.url), 'utf8'))[1]);
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
-  const enc = new TextEncoder();
-  const metadata = enc.encode('display\\n' + JSON.stringify({ markdown: '**Result** details', link: 'https://example.test/result', image: { mime: 'image/png' } }) + '\\n');
-  const image = Uint8Array.from([137,80,78,71,13,10,26,10]);
-  const frame = new Uint8Array(metadata.length + image.length);
-  frame.set(metadata); frame.set(image, metadata.length);
+  replyFromHub('unknown', 'display_1', [], 1, { display: { markdown: '**Result** details', link: 'https://example.test/result', image: { mime: 'image/png' } } }, Uint8Array.from([137,80,78,71,13,10,26,10]));
+  replyFromHub('unknown', 'display_2', [], 1, { display: { markdown: 'Newest' } });
   replyFromHub('unknown', undefined, ['plain'], 1);
-  deliverRelay(frame);
-  deliverRelay(enc.encode('display\\n' + JSON.stringify({ markdown: 'Newest' }) + '\\n'));
   const fresh = () => document.querySelector('#display').classList.contains('fresh');
   setTimeout(() => {
     const arrived = fresh();
@@ -1204,6 +1208,8 @@ window.addEventListener('test-ready', async () => {
     replyFromHub(id, id, commentary);
     await pause();
     replies[id] = sentLiveEvents.slice(before).map(({ type, event_id, delegation_id, content }) => [type, event_id, delegation_id, content]);
+    emitLive({ type: 'session.output_transcript.delta', delta: commentary[0] });
+    await pause();
   }
   document.body.dataset.channelTest = JSON.stringify(replies);
 });
@@ -1296,7 +1302,7 @@ test('a display renders a mermaid diagram, math and a chart, fetching each rende
 window.addEventListener('test-ready', () => {
   const enc = new TextEncoder();
   const before = performance.getEntriesByType('resource').map((entry) => new URL(entry.name).pathname);
-  deliverRelay(enc.encode('display\\n' + JSON.stringify({ markdown: ${JSON.stringify(markdown)} }) + '\\n'));
+  replyFromHub('unknown', 'display', [], 1, { display: { markdown: ${JSON.stringify(markdown)} } });
   const painted = (canvas) => { const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data; let count = 0; for (let index = 3; index < pixels.length; index += 4) if (pixels[index]) count++; return count; };
   setTimeout(() => {
     const item = document.querySelector('.display-item');
@@ -1328,7 +1334,7 @@ const NativeImage = window.Image;
 window.Image = class extends NativeImage { set src(value) { window.mermaidImageRequests.push(value); super.src = value; } get src() { return super.src; } };
 window.addEventListener('test-ready', () => {
   const enc = new TextEncoder();
-  deliverRelay(enc.encode('display\\n' + JSON.stringify({ markdown: ${JSON.stringify(markdown)} }) + '\\n'));
+  replyFromHub('unknown', 'display', [], 1, { display: { markdown: ${JSON.stringify(markdown)} } });
   setTimeout(() => { document.body.dataset.renderTest = JSON.stringify({ code: document.querySelector('.display-item pre code')?.textContent, diagram: document.querySelector('.display-item .mermaid')?.textContent, images: window.mermaidImageRequests }); }, 1000);
 });`);
   const encoded = /data-render-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
@@ -1340,7 +1346,7 @@ test('a display without diagrams, math or charts fetches no renderer, and prose 
   const { stdout, stderr, requests } = await runPage(`
 window.addEventListener('test-ready', () => {
   const enc = new TextEncoder();
-  deliverRelay(enc.encode('display\\n' + JSON.stringify({ markdown: 'Spent $9 on the pizza and $3 more, see https://example.test/receipt?id=1). Ended.' }) + '\\n'));
+  replyFromHub('unknown', 'display', [], 1, { display: { markdown: 'Spent $9 on the pizza and $3 more, see https://example.test/receipt?id=1). Ended.' } });
   setTimeout(() => {
     const item = document.querySelector('.display-item');
     document.body.dataset.linkTest = JSON.stringify({ text: item.textContent, links: [...item.querySelectorAll('a')].map((a) => [a.href, a.rel, a.target]), math: item.querySelectorAll('.math').length });
@@ -1358,7 +1364,7 @@ const originalMatchMedia = window.matchMedia.bind(window);
 window.matchMedia = (query) => query === '(display-mode: standalone)' ? { matches: ${standalone} } : originalMatchMedia(query);
 window.addEventListener('test-ready', () => {
   const url = location.origin + '/panel-link-destination';
-  deliverRelay(new TextEncoder().encode('display\\n' + JSON.stringify({ markdown: '[label](' + url + '#markdown) ' + url + '#bare', link: url + '#payload' }) + '\\n'));
+  replyFromHub('unknown', 'display', [], 1, { display: { markdown: '[label](' + url + '#markdown) ' + url + '#bare', link: url + '#payload' } });
   setTimeout(async () => {
     const channel = testChannel;
     const links = [...document.querySelectorAll('.display-item a')];
@@ -1446,7 +1452,7 @@ test('display pipe tables preserve rows, inline links and pipes inside code', as
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   const enc = new TextEncoder();
-  deliverRelay(enc.encode('display\\n' + JSON.stringify({ markdown: ${JSON.stringify(markdown)} }) + '\\n'));
+  replyFromHub('unknown', 'display', [], 1, { display: { markdown: ${JSON.stringify(markdown)} } });
   setTimeout(() => {
     const item = document.querySelector('.display-item');
     document.body.dataset.tableTest = JSON.stringify({
@@ -2166,28 +2172,53 @@ test('a woken session receives only the fresh hub reply', async () => {
   assert.doesNotMatch(result.reply.content, /amber/);
 });
 
-test('hub replies reach the model as they arrive, in order, even mid-utterance', async () => {
+test('a first hub reply reaches the model as it arrives, even mid-utterance; each follow-up waits until the model has spoken the reply before it, and barge-in drops the follow-ups still waiting', async () => {
   const result = await runWakePage(`
     const { LivePlayback } = await import('/live-playback.js');
-    let quiets = 0;
-    LivePlayback.prototype.quiet = () => { quiets++; return new Promise(() => {}); };
+    const quiet = [];
+    LivePlayback.prototype.quiet = () => new Promise((resolve) => quiet.push(resolve));
     const replies = () => sentLiveEvents.filter(event => event.event_id?.startsWith('hub_ordered')).map(event => [event.delegation_id, event.content]);
+    const shown = () => document.querySelector('#display-items').textContent;
     hear('Check the test beacon.');
     delegateTurn('first');
     await until(() => count('delegate'));
     hear(' While that runs, let me tell you');
-    replyFromHub('first', 'ordered_first', ['First part.', 'Second part.']);
-    replyFromHub('second', 'ordered_second', ['Next reply.']);
-    deliverRelay(new TextEncoder().encode('display\\n' + JSON.stringify({ markdown: 'Relay frame handled.' }) + '\\n'));
-    await until(() => globalThis.hubAcks?.includes('ordered_second'));
-    return { frameHandled: document.querySelector('#display-items').textContent.includes('Relay frame handled.'), replies: replies(), quiets, acks: hubAcks };
+    replyFromHub('first', 'ordered_first', ['First part.', 'Second part.'], 5, { first: true });
+    replyFromHub('first', 'ordered_second', ['Slide two.'], 5, { display: { markdown: 'Slide two picture' } });
+    replyFromHub('first', 'ordered_third', ['Slide three.']);
+    replyFromHub('other', 'ordered_other', ['Other answer.'], 5, { first: true });
+    await until(() => globalThis.hubAcks?.includes('ordered_other'));
+    const held = { replies: replies(), shown: shown().includes('Slide two picture') };
+    hear(' about the garden.');
+    emitLive({ type: 'session.output_transcript.delta', delta: 'First part.' });
+    const quiets = quiet.length;
+    quiet.shift()();
+    await until(() => replies().length === 4);
+    const next = { replies: replies().slice(3), shown: shown().includes('Slide two picture') };
+    emitLive({ type: 'session.output_transcript.delta', delta: 'Slide two.' });
+    hear('Stop there.');
+    await until(() => sessionEvents('hub-reply-dropped').length);
+    return { held, quiets, next, final: replies().length, dropped: sessionEvents('hub-reply-dropped').map((event) => JSON.parse(event.detail)), acks: hubAcks, log: document.querySelector('#log').innerText.includes('hub reply: First part. Second part. Slide two.') };
   `);
   assert.deepEqual(result, {
-    frameHandled: true,
-    replies: [['first', 'First part.'], ['first', 'Second part.'], [null, 'Next reply.']],
-    quiets: 0,
-    acks: ['ordered_first', 'ordered_second'],
+    held: { replies: [['first', 'First part.'], ['first', 'Second part.'], [null, 'Other answer.']], shown: false },
+    quiets: 1,
+    next: { replies: [['first', 'Slide two.']], shown: true },
+    final: 4,
+    dropped: [{ id: 'first', stamp: 'ordered_third', reason: 'barge-in' }],
+    acks: ['ordered_first', 'ordered_second', 'ordered_third', 'ordered_other'],
+    log: true,
   });
+});
+
+test('a spoken hub reply that reaches an asleep page is acknowledged as unspoken', async () => {
+  const result = await runWakePage(`
+    await sleepNow();
+    replyFromHub('late', 'late_stamp', ['Too late.'], 5, { first: true });
+    await until(() => globalThis.hubAckFrames?.length);
+    return hubAckFrames;
+  `);
+  assert.deepEqual(result, [{ id: 'late', stamp: 'late_stamp', unspoken: 'Live is asleep' }]);
 });
 
 test('leaving the app keeps the delegation log and whether Live was awake through a freeze, a discard-and-reload and a reload, but not a crash in view', async () => {

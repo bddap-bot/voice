@@ -414,8 +414,8 @@ export class ConversationTrace {
   hub(id, commentary, timing) {
     const entry = this.entries.find((item) => item.kind === 'delegation' && item.id === id);
     if (!entry) return false;
-    entry.reply = commentary.join(' ');
-    entry.timing = timing;
+    entry.reply = [entry.timing === null ? '' : entry.reply, ...commentary].filter(Boolean).join(' ');
+    entry.timing ??= timing;
     this.nextSpeechSource = 'model after hub reply';
     this.activeSpeechSource = null;
     this.forceNewSpeech = true;

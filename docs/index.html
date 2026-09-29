@@ -142,6 +142,8 @@ const KEY = config.storageKey;
 const PAGE_KEY = `${KEY}.page`;
 const ALPN = 'voice-web/1';
 const DISPLAY_FRESH_MS = 45000;
+const HUB_TURN_START_MS = 20000;
+const HUB_TURN_QUIET_MS = 1500;
 const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -202,6 +204,8 @@ function applyTranscriptAction(action, timing) {
 const actionDriver = new TranscriptActionDriver(applyTranscriptAction);
 const listeningDriver = new ListeningReactionDriver((motion) => puppetRuntime?.listening(motion));
 const hubWaiting = new Set();
+const hubReplies = [];
+let hubTurn = null;
 let stageTrace;
 const traces = new EventBatcher((spans) => sendFrame(`spans\n${JSON.stringify({ spans })}`));
 const telemetryWaiters = new Map();
@@ -396,7 +400,7 @@ async function listen(mine) {
       const at = value.indexOf('\n');
       const verb = at < 0 ? value : value.slice(0, at);
       const body = at < 0 ? '' : value.slice(at + 1);
-      if (verb === 'display') receiveDisplay(raw);
+      if (verb === 'hub') receiveHub(raw).catch(recordPageError);
       else if (verb === 'answer') {
         const answer = JSON.parse(body);
         if (isOfferFor(answerWaiter, answer)) answerWaiter.resolve(answer);
@@ -407,7 +411,6 @@ async function listen(mine) {
       }
       else if (verb === 'wake-model') wakeModelWaiter?.resolve(JSON.parse(body));
       else if (verb === 'wake-model-none') wakeModelWaiter?.resolve(null);
-      else if (verb === 'hub') receiveHub(JSON.parse(body)).catch(recordPageError);
       else if (verb === 'hub-error') {
         const failure = JSON.parse(body);
         hubFailed(failure.id, failure.message);
@@ -533,20 +536,14 @@ function appendMarkdown(parent, markdown) {
     appendInline(block, heading ? heading[2] : line); parent.append(block); index++;
   }
 }
-function receiveDisplay(raw) {
-  const prefix = enc.encode('display\n');
-  let boundary = prefix.length;
-  while (boundary < raw.length && raw[boundary] !== 10) boundary++;
-  if (boundary === raw.length) return;
-  let payload;
-  try { payload = JSON.parse(dec.decode(raw.slice(prefix.length, boundary))); } catch { return; }
+function showDisplay(payload, bytes) {
   if (!payload || typeof payload !== 'object') return;
   const item = document.createElement('article');
   item.className = 'display-item';
   if (typeof payload.markdown === 'string') appendMarkdown(item, payload.markdown);
   if (typeof payload.link === 'string' && /^https?:\/\//i.test(payload.link)) appendUrl(item, payload.link);
-  if (['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(payload.image?.mime) && boundary + 1 < raw.length && raw.length - boundary - 1 <= 8 * 1024 * 1024) {
-    const url = URL.createObjectURL(new Blob([raw.slice(boundary + 1)], { type: payload.image.mime }));
+  if (['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(payload.image?.mime) && bytes?.length && bytes.length <= 8 * 1024 * 1024) {
+    const url = URL.createObjectURL(new Blob([bytes], { type: payload.image.mime }));
     const image = document.createElement('img');
     image.src = url; image.alt = typeof payload.markdown === 'string' ? payload.markdown.slice(0, 160) : 'Hub image';
     item.append(image);
@@ -969,6 +966,7 @@ function onLiveEvent(message, source) {
   if (event.type === 'session.delegation.created') delegate(event.delegation?.id, owner);
   else if (event.type === 'session.input_transcript.delta') {
     owner?.playback?.interrupt();
+    if (hubTurn?.started) interruptHubReplies('barge-in');
     recordSession('input_utterance', event.delta ?? '');
     stageTrace?.inputTranscript();
     stayAwake();
@@ -990,6 +988,7 @@ function onLiveEvent(message, source) {
 }
 function presentTranscript(event) {
     stayAwake();
+    hubTurn?.spoke();
     trace.spoke(event.delta ?? '', event.start_ms, event.end_ms);
     const audioNow = $('speaker').currentTime * 1000;
     const delay = Math.max(0, (event.start_ms ?? audioNow) - audioNow);
@@ -1038,22 +1037,66 @@ function finishHubWait(id) {
   hubWaiting.delete(id);
   if (!hubWaiting.size) puppetRuntime?.waiting(false);
 }
-async function receiveHub(result) {
-  if (result.commentary.length) {
-    finishHubWait(result.id);
-    trace.hub(result.id, result.commentary, result.timing_ms);
-    stageTrace?.hubReplied(result.id);
-    if (conversation && !conversation.sleeping) {
-      const owner = conversation.audioOwner;
-      const delegation = owner.delegations.has(result.id) ? result.id : null;
-      result.commentary.forEach((content, index) => tell(owner, 'session.commentary.append', index ? `hub_${result.stamp}_${index}` : `hub_${result.stamp}`, delegation, content));
-    }
+async function receiveHub(raw) {
+  const start = 'hub\n'.length;
+  let boundary = start;
+  while (boundary < raw.length && raw[boundary] !== 10) boundary++;
+  const result = JSON.parse(dec.decode(raw.slice(start, boundary)));
+  const reply = { result, image: boundary < raw.length ? raw.slice(boundary + 1) : null };
+  const unspoken = result.commentary.length && (!conversation || conversation.sleeping) ? 'Live is asleep' : undefined;
+  if (result.first && hubTurn) presentHubReply(reply);
+  else {
+    hubReplies.push(reply);
+    playHubReplies().catch(recordPageError);
   }
-  await sendFrame(`hub-ack\n${JSON.stringify({ id: result.id, stamp: result.stamp })}`);
+  await sendFrame(`hub-ack\n${JSON.stringify({ id: result.id, stamp: result.stamp, unspoken })}`);
+}
+function presentHubReply({ result, image }) {
+  if (result.display) showDisplay(result.display, image);
+  if (!result.commentary.length) return null;
+  finishHubWait(result.id);
+  trace.hub(result.id, result.commentary, result.timing_ms);
+  stageTrace?.hubReplied(result.id);
+  const current = conversation;
+  if (!current || current.sleeping) return null;
+  const owner = current.audioOwner;
+  const delegation = owner.delegations.has(result.id) ? result.id : null;
+  result.commentary.forEach((content, index) => tell(owner, 'session.commentary.append', index ? `hub_${result.stamp}_${index}` : `hub_${result.stamp}`, delegation, content));
+  return owner;
+}
+async function playHubReplies() {
+  if (hubTurn) return;
+  try {
+    while (hubReplies.length) {
+      let owner;
+      const turn = new Promise((resolve) => {
+        const timer = setTimeout(resolve, HUB_TURN_START_MS);
+        hubTurn = {
+          started: false,
+          spoke() {
+            if (this.started) return;
+            this.started = true;
+            clearTimeout(timer);
+            owner.playback.quiet(HUB_TURN_QUIET_MS).then(resolve);
+          },
+          end() { clearTimeout(timer); resolve(); },
+        };
+      });
+      try { owner = presentHubReply(hubReplies.shift()); }
+      catch (error) { recordPageError(error); }
+      if (owner) await turn;
+      else hubTurn.end();
+    }
+  } finally { hubTurn = null; }
+}
+function interruptHubReplies(reason) {
+  for (const { result } of hubReplies.splice(0)) recordSession('hub-reply-dropped', JSON.stringify({ id: result.id, stamp: result.stamp, reason }));
+  hubTurn?.end();
 }
 function paintOff() {
   syncSpotter();
   hubWaiting.clear();
+  interruptHubReplies('conversation ended');
   actionDriver.reset();
   listeningDriver.reset();
   clearTimeout(inactivity);

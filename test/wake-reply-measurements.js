@@ -37,7 +37,7 @@ export function recordedFixture({ replies, capture }) {
   };
 }
 
-export function assessWakeReplies({ replies, capture }, minimumWakes = 10) {
+export function assessWakeReplies({ replies, capture }, minimumWakes = 10, signOff = SIGN_OFF) {
   assert.ok(replies.length > minimumWakes, 'not enough sleep/wake cycles');
   assert.equal(new Set(replies.map(subject)).size, replies.length, 'stub replies must distinguish sessions');
   assert.equal(capture.marks.filter((mark) => mark.kind === 'page-ready').length, 1, 'sessions must share one page');
@@ -53,7 +53,7 @@ export function assessWakeReplies({ replies, capture }, minimumWakes = 10) {
     assert.ok(closed, `session ${ch}: session never closed`);
     assert.ok(slept, `session ${ch}: never asked to sleep`);
     assert.ok(closed.at > slept.at, `session ${ch}: ended before the sleep request`);
-    assert.ok(includesPhrase(spokenBetween(capture, ch, slept.at, closed.at), SIGN_OFF), `session ${ch}: did not sign off when asked to sleep`);
+    assert.ok(includesPhrase(spokenBetween(capture, ch, slept.at, closed.at), signOff), `session ${ch}: did not sign off when asked to sleep`);
     assert.ok(begin && end && end.at > begin.at && slept.at >= end.at, `session ${ch}: missing reply window`);
     const greeting = spokenBetween(capture, ch, started.at, (recall ?? begin).at);
     assert.ok(greeting, `session ${ch}: did not greet`);
@@ -64,7 +64,7 @@ export function assessWakeReplies({ replies, capture }, minimumWakes = 10) {
       const archived = offers[ch].context?.find((turn) => turn.speaker === 'user' && turn.text.startsWith(MEMORY));
       const turns = archived ? JSON.parse(archived.text.slice(archived.text.indexOf('\n') + 1)).at(-1).turns : [];
       assert.ok(turns.some((turn) => turn.speaker === 'live' && turn.text.includes(replies[ch - 1])), `session ${ch}: previous answer was not carried`);
-      assert.ok(includesPhrase(turns.filter((turn) => turn.speaker === 'live').map((turn) => turn.text).join(' '), SIGN_OFF), `session ${ch}: the carried conversation did not end on the sign-off`);
+      assert.ok(includesPhrase(turns.filter((turn) => turn.speaker === 'live').map((turn) => turn.text).join(' '), signOff), `session ${ch}: the carried conversation did not end on the sign-off`);
       assert.ok(recall && recalled && recalled.at > recall.at && begin.at >= recalled.at, `session ${ch}: missing recall window`);
       assert.ok(!incoming.some(({ at, event }) => at >= recall.at && at <= recalled.at && event.type === 'session.delegation.created'), `session ${ch}: delegated the recall question`);
       answer = spokenBetween(capture, ch, recall.at, recalled.at);

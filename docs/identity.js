@@ -1,4 +1,4 @@
 export const NAME = 'Corvus';
 export const WAKE_PHRASE = `Hey ${NAME}, wake up.`;
-export const SIGN_OFF = 'The raven returns to Odin.';
+export const SIGN_OFF = 'My labor here is ended.';
 export const INACTIVITY_MS = 10 * 60 * 1000;

@@ -1811,8 +1811,8 @@ test('the model speaking the sign-off ends the session once speech goes quiet an
     let quiet;
     LivePlayback.prototype.quiet = () => new Promise((resolve) => { quiet = resolve; });
     hear('That will be all.');
-    signOff('Goodnight. THE RAVEN RETURNS');
-    signOff(' to Odin!');
+    signOff('Goodnight. ' + ${JSON.stringify(SIGN_OFF.slice(0, 8).toUpperCase())});
+    signOff(${JSON.stringify(SIGN_OFF.slice(8).replace(/\.$/, '!'))});
     await new Promise((resolve) => setTimeout(resolve, 200));
     const speaking = document.querySelector('#puppet').getAttribute('aria-pressed');
     quiet?.();
@@ -1833,7 +1833,7 @@ test('the model speaking the sign-off ends the session once speech goes quiet an
 test('a goodbye from the user or a partial sign-off keeps the session open', async () => {
   const result = await runWakePage(`
     hear('Goodnight, Corvus. Go to sleep.');
-    signOff('The raven returns.');
+    signOff(${JSON.stringify(SIGN_OFF.split(' ').slice(0, -1).join(' ') + '.')});
     hear(' ${SIGN_OFF}');
     await new Promise((resolve) => setTimeout(resolve, 300));
     return { pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), sleeps: sessionEvents('sleep').length };
@@ -1865,9 +1865,9 @@ test('a sign-off with a delegation outstanding ends the session and its late hub
 
 test('a sign-off split by user speech still ends the session, and more speech after it sleeps only once', async () => {
   const result = await runWakePage(`
-    signOff('The raven returns');
+    signOff(${JSON.stringify(SIGN_OFF.slice(0, 8))});
     hear('Mm.');
-    signOff(' to Odin.');
+    signOff(${JSON.stringify(SIGN_OFF.slice(8))});
     signOff(' Sleep well.');
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && sessionEvents('close').length);
     return { sleeps: sessionEvents('sleep').map((event) => event.detail) };

@@ -167,8 +167,8 @@ test('a hub reply records its spoken text on its delegation', () => {
 });
 
 test('the sign-off is found in a transcript regardless of case, spacing and punctuation', () => {
-  for (const text of ['The raven returns to Odin.', 'the raven returns to odin', 'Goodnight. The raven returns to Odin!', 'The raven\nreturns to Odin —']) assert.equal(includesPhrase(text, SIGN_OFF), true, text);
-  for (const text of ['Goodnight, Corvus.', 'The raven returns.', 'The raven flies back to Odin.', 'The raven returns to Od']) assert.equal(includesPhrase(text, SIGN_OFF), false, text);
+  for (const text of [SIGN_OFF, SIGN_OFF.toLowerCase().replace(/\.$/, ''), `Goodnight. ${SIGN_OFF.replace(/\.$/, '!')}`, SIGN_OFF.replace(' ', '\n').replace(/\.$/, ' —')]) assert.equal(includesPhrase(text, SIGN_OFF), true, text);
+  for (const text of ['Goodnight, Corvus.', SIGN_OFF.split(' ').slice(0, -1).join(' '), SIGN_OFF.replace(' ', ' never '), SIGN_OFF.slice(0, -3)]) assert.equal(includesPhrase(text, SIGN_OFF), false, text);
 });
 
 test('an ended session closes its undelegated turn, so the next session hands the hub only its own words', () => {

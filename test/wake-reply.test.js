@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
-import { assessWakeReplies } from './wake-reply-measurements.js';
+import { assessWakeReplies as assessCurrentWakeReplies } from './wake-reply-measurements.js';
 
 const recorded = () => JSON.parse(fs.readFileSync(process.env.VOICE_WAKE_REPLY_CAPTURE ?? new URL('./fixtures/wake-reply-capture.json', import.meta.url), 'utf8'));
+const recordedSignOff = /end your reply with "([^"]+)"/.exec(recorded().capture.rt.find((row) => row.event.event_id === 'identity').event.content)[1];
+const assessWakeReplies = (data) => assessCurrentWakeReplies(data, 10, recordedSignOff);
 const mark = (data, kind, session) => data.capture.marks.find((item) => item.kind === kind && item.ch === session);
 const outputDeltas = (data, session, from, to) => data.capture.rt.filter((row) => row.ch === session && row.dir === 'in' && row.at >= from && row.at <= to && row.event.type === 'session.output_transcript.delta');
 const overwrite = (deltas, text) => { assert.ok(deltas.length); deltas.forEach((row, index) => { row.event.delta = index === 0 ? text : ''; }); };
@@ -28,7 +30,7 @@ test('recorded woken sessions greet, recall the answer from before their sleep, 
 
 test('a carried sign-off split around a late input transcript still counts', () => {
   const data = recorded();
-  offer(data, 2, (value) => memory(value, (turns) => turns.flatMap((turn) => turn.speaker === 'live' && turn.text.includes('returns to Odin') ? [{ speaker: 'live', text: turn.text.replace('returns to Odin.', '') }, { speaker: 'user', text: ' sleep' }, { speaker: 'live', text: ' returns to Odin.' }] : [turn])));
+  offer(data, 2, (value) => memory(value, (turns) => turns.flatMap((turn) => turn.speaker === 'live' && turn.text.includes(recordedSignOff) ? [{ speaker: 'live', text: turn.text.replace(recordedSignOff, recordedSignOff.slice(0, recordedSignOff.indexOf(' '))) }, { speaker: 'user', text: ' sleep' }, { speaker: 'live', text: recordedSignOff.slice(recordedSignOff.indexOf(' ')) }] : [turn])));
   assert.equal(assessWakeReplies(data).length, 11);
 });
 
@@ -56,7 +58,7 @@ for (let session = 1; session <= 10; session++) {
 for (const [label, mutate, error] of [
   ['missing carried answer', (data) => offer(data, 1, (value) => { value.context = []; }), /previous answer was not carried/],
   ['wake marker without the gap', (data) => offer(data, 1, (value) => { value.wake = value.wake.replace(/about \d+ \w+ ago/, 'a while ago'); }), /session 1: missing wake marker/],
-  ['conversation not ended by the sign-off', (data) => offer(data, 2, (value) => memory(value, (turns) => turns.map((turn) => ({ ...turn, text: turn.text.replaceAll('Odin', 'Oslo') })))), /session 2: the carried conversation did not end on the sign-off/],
+  ['conversation not ended by the sign-off', (data) => offer(data, 2, (value) => memory(value, (turns) => turns.map((turn) => ({ ...turn, text: turn.text.replaceAll(recordedSignOff, 'Still listening.') })))), /session 2: the carried conversation did not end on the sign-off/],
   ['page reload', (data) => data.capture.marks.push({ kind: 'page-ready' }), /sessions must share one page/],
   ['missing sleep', (data) => { data.capture.rt = data.capture.rt.filter((row) => row.ch !== 1 || row.dir !== 'state' || row.event.raw !== 'close'); }, /session never closed/],
   ['session ending itself', (data) => { data.capture.rt.find((row) => row.ch === 1 && row.dir === 'state' && row.event.raw === 'close').at = mark(data, 'recall-start', 1).at; }, /session 1: ended before the sleep request/],

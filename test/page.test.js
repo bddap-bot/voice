@@ -573,29 +573,31 @@ test('a run that did not load the neutral silhouette refuses a full-bleed stage'
   assert.deepEqual(evidenceRegion({ neutralSilhouette: true, canvas, viewport }), viewport);
 });
 
-test('token entry is controlled by one compact settings button and the page has no heading', async () => {
+test('one card holds every control: minimized it shows only Mute mic, expanded the rest, and the page has no heading', async () => {
   const index = await readFile(new URL('../docs/index.html', import.meta.url), 'utf8');
   assert.doesNotMatch(index, /<h1\b/i);
-  assert.match(index, /<button id="token-toggle"[^>]+aria-controls="token-panel"[^>]+aria-expanded="true">⚙<\/button>/);
-  assert.match(index, /<section id="token-panel"[\s\S]*?<div id="entry"[\s\S]*?<div id="saved"/);
+  assert.doesNotMatch(index, /token-toggle/);
+  const card = /<section id="controls"[\s\S]*?<\/section>\n<\/div>/.exec(index)[0];
+  for (const id of ['mic-mute', 'card-toggle', 'voice-filter', 'voice-print', 'puppet-choice', 'share-text', 'share-target', 'share-file', 'share-remove', 'share-send', 'token', 'connect', 'reenter', 'forget']) assert.match(card, new RegExp(`id="${id}"`), id);
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
-  const toggle = document.querySelector('#token-toggle');
-  const panel = document.querySelector('#token-panel');
-  const states = [{ expanded: toggle.getAttribute('aria-expanded'), hidden: panel.classList.contains('hidden') }];
+  const toggle = document.querySelector('#card-toggle');
+  const shown = (selector) => document.querySelector(selector).getClientRects().length > 0;
+  const state = () => ({ expanded: toggle.getAttribute('aria-expanded'), mute: shown('#mic-mute'), rest: ['#voice-print', '#puppet-choice', '#share-send', '#forget'].filter(shown).length });
+  const states = [state()];
   toggle.click();
-  states.push({ expanded: toggle.getAttribute('aria-expanded'), hidden: panel.classList.contains('hidden') });
+  states.push(state());
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+  states.push(state());
   toggle.click();
-  states.push({ expanded: toggle.getAttribute('aria-expanded'), hidden: panel.classList.contains('hidden') });
-  document.body.dataset.tokenPanelTest = JSON.stringify(states);
+  toggle.click();
+  states.push(state());
+  document.body.dataset.cardTest = JSON.stringify(states);
 });
 `);
-  const encoded = /data-token-panel-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), [
-    { expanded: 'false', hidden: true },
-    { expanded: 'true', hidden: false },
-    { expanded: 'false', hidden: true },
-  ], stderr);
+  const encoded = /data-card-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  const closed = { expanded: 'false', mute: true, rest: 0 };
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), [closed, { expanded: 'true', mute: true, rest: 4 }, closed, closed], stderr);
 });
 
 test('the live microphone can mute and resume without ending its session', async () => {
@@ -772,9 +774,10 @@ test('the stage has no decorative wall occluders', async () => {
 for (const viewport of layoutViewports) test(`stage UI stays outside the puppet projection at ${viewport.name} size`, async () => {
   const index = await readFile(new URL('../docs/index.html', import.meta.url), 'utf8');
   const style = /<style>[\s\S]*?<\/style>/.exec(index)[0];
+  const header = /<header>[\s\S]*?<\/header>/.exec(index)[0];
   const main = /<main[\s\S]*?<\/main>/.exec(index)[0].replace('class="hidden"', '');
-  const chrome = '<header><span id="status"></span><button id="token-toggle">⚙</button></header><section class="token-panel hidden"><div id="saved" class="saved"><span>device authenticated</span><button>Forget token</button></div></section>';
-  const { stdout, stderr } = await runPuppetPage(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">${style}</head><body>${chrome}${main}<script type="module">
+  const dock = /<div class="dock">[\s\S]*?\n<\/div>/.exec(index)[0];
+  const { stdout, stderr } = await runPuppetPage(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">${style}</head><body>${header}${main}${dock}<script type="module">
   import { PuppetRuntime } from '/puppet.js';
   const stageHeight = Math.round(visualViewport?.height ?? innerHeight);
   document.querySelector('main').style.setProperty('--stage-height', stageHeight + 'px');
@@ -787,45 +790,30 @@ for (const viewport of layoutViewports) test(`stage UI stays outside the puppet 
   const rect = (element) => { const value = element.getBoundingClientRect(); return { left: value.left, right: value.right, top: value.top, bottom: value.bottom }; };
   const puppet = rect(document.querySelector('#puppet'));
   const figure = { ...puppet, bottom: puppet.top + (1 - feet.y) / 2 * (puppet.bottom - puppet.top) };
-  const selectors = ['header', '#saved', '.puppet-picker', '#puppet-credit', '#elapsed', '#voice-filter', '#mic-mute', '.share', '.display', '.ledger'];
+  const selectors = ['header', '#puppet-credit', '#controls', '.display', '.ledger', '.grip[data-pane="ledger"]', '.grip[data-pane="display"]'];
   const overlaps = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
-  const intrusions = () => selectors.map((selector) => ({ selector, rect: rect(document.querySelector(selector)) })).filter((item) => overlaps(item.rect, figure));
-  const regions = ['header', '#saved', '#puppet', '.puppet-picker', '#puppet-credit', '#elapsed', '#voice-filter', '#mic-mute', '.share', '.display', '.ledger'].map((selector) => ({ selector, rect: rect(document.querySelector(selector)) })).filter(({ rect }) => rect.right > rect.left && rect.bottom > rect.top);
+  const result = selectors.map((selector) => ({ selector, rect: rect(document.querySelector(selector)) })).filter((item) => overlaps(item.rect, figure));
+  const regions = [...selectors, '#puppet'].map((selector) => ({ selector, rect: rect(document.querySelector(selector)) })).filter(({ rect }) => rect.right > rect.left && rect.bottom > rect.top);
   const collisions = regions.flatMap((left, index) => regions.slice(index + 1).filter((right) => overlaps(left.rect, right.rect)).map((right) => ({ left, right })));
-  const result = intrusions();
-  const display = rect(document.querySelector('#display'));
-  const ledger = rect(document.querySelector('.ledger'));
-  const share = rect(document.querySelector('.share'));
-  const shareControls = [...document.querySelectorAll('.share textarea, .share-actions label, .share-actions button, #share-image')].filter((element) => !element.classList.contains('hidden')).map(rect);
-  document.querySelector('#display').classList.add('fresh');
-  const fresh = { result: intrusions(), display: rect(document.querySelector('#display')) };
-  const stage = rect(document.querySelector('main'));
-  document.body.dataset.overlapTest = JSON.stringify({ puppet, figure, result, fresh, collisions, display, ledger, share, shareControls, pageHeight: document.documentElement.scrollHeight, viewportHeight: innerHeight, stageHeight, stage });
+  const shown = [...document.querySelectorAll('#controls button, #controls select, #controls textarea')].filter((element) => element.getClientRects().length).map((element) => element.id);
+  document.body.dataset.overlapTest = JSON.stringify({ puppet, figure, result, collisions, shown, display: rect(document.querySelector('#display')), ledger: rect(document.querySelector('.ledger')), controls: rect(document.querySelector('#controls')), stage: rect(document.querySelector('main')), pageHeight: document.documentElement.scrollHeight, viewportWidth: innerWidth, stageHeight });
   </script></body></html>`, { scale: viewport.scale, size: `${viewport.width},${viewport.height}`, mobile: viewport.mobile });
   const encoded = /data-overlap-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   const result = JSON.parse(encoded ?? 'null');
   assert.deepEqual(result?.result, [], `${viewport.name}: ${JSON.stringify(result)}\n${stderr}`);
-  assert.deepEqual(result.fresh.result, [], `${viewport.name} with a fresh display: ${JSON.stringify(result)}`);
   assert.deepEqual(result.collisions, [], `${viewport.name}: ${JSON.stringify(result.collisions)}`);
-  assert.equal(stdout.includes('tap to stand and start voice'), false, `${viewport.name} retains the old button copy`);
-  assert.equal(/<button[^>]+id="toggle"/.test(stdout), false, `${viewport.name} retains the old button`);
-  const puppetWidth = result.puppet.right - result.puppet.left;
+  assert.deepEqual(result.shown, ['mic-mute', 'card-toggle'], `${viewport.name} minimized card`);
+  assert.ok(result.pageHeight <= viewport.height, `${viewport.name} must remain one screen: ${result.pageHeight}`);
+  assert.ok(result.controls.left >= 0 && result.controls.right <= result.viewportWidth && result.controls.bottom <= result.stageHeight, `${viewport.name} card leaves the screen: ${JSON.stringify(result.controls)}`);
   assert.ok(result.figure.bottom > result.puppet.top + 0.8 * (result.puppet.bottom - result.puppet.top), `${viewport.name} projected feet must sit near the canvas bottom: ${JSON.stringify(result.figure)}`);
+  for (const pane of [result.display, result.ledger]) assert.ok(pane.top >= result.stage.top && pane.bottom <= result.stage.bottom && pane.right - pane.left > 100 && pane.bottom - pane.top > 80, `${viewport.name} pane escapes the stage or collapses: ${JSON.stringify(pane)}`);
   if (!viewport.mobile) {
-    for (const wing of [result.display, result.ledger]) assert.ok(wing.top >= 200 && wing.bottom <= result.stageHeight - 160, `${viewport.name} panel escapes its shared layout bounds: ${JSON.stringify(wing)}`);
-    assert.ok(result.pageHeight <= viewport.height, `${viewport.name} must remain one screen: ${result.pageHeight}`);
-    assert.equal(result.puppet.top, 0, `${viewport.name} puppet must start at the top of the stage`);
-    assert.equal(result.puppet.bottom, result.stageHeight - 90, `${viewport.name} puppet must end above the desk: ${result.puppet.bottom} of ${result.stageHeight}`);
-    assert.ok(result.share.top >= result.puppet.bottom, `${viewport.name} share control intersects the puppet canvas: ${JSON.stringify(result)}`);
-    for (const wing of [result.display, result.ledger]) assert.ok(wing.right - wing.left < puppetWidth, `${viewport.name} wing wider than the puppet: ${JSON.stringify(wing)}`);
-    assert.ok(result.fresh.display.right - result.fresh.display.left > result.display.right - result.display.left, `${viewport.name} fresh display must grow: ${JSON.stringify(result.fresh.display)}`);
-  } else {
-    for (const control of result.shareControls) assert.ok(control.left >= result.share.left && control.right <= result.share.right && control.top >= result.share.top && control.bottom <= result.share.bottom, `${viewport.name} share control is clipped: ${JSON.stringify({ control, share: result.share })}`);
-    assert.deepEqual(result.fresh.display, result.display, 'phone display must not move when fresh');
+    assert.ok(result.controls.top >= result.puppet.bottom, `${viewport.name} card intersects the puppet canvas: ${JSON.stringify(result)}`);
+    for (const pane of [result.display, result.ledger]) assert.ok(pane.right - pane.left < result.puppet.right - result.puppet.left, `${viewport.name} pane wider than the puppet: ${JSON.stringify(pane)}`);
   }
 });
 
-for (const viewport of layoutViewports) test(`the token control stays within its stage column and stationary across status changes at ${viewport.name} size`, async () => {
+for (const viewport of layoutViewports) test(`the status line stays stationary across status changes at ${viewport.name} size`, async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   const status = document.querySelector('#status');
@@ -838,9 +826,51 @@ window.addEventListener('test-ready', () => {
   const encoded = /data-header-box-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   const result = JSON.parse(encoded ?? 'null');
   assert.ok(result, stderr);
-  assert.ok(result.boxes.empty[2] <= Math.min(result.viewportWidth * .32 - 44, 430), `${viewport.name} token control exceeds its stage column: ${JSON.stringify(result.boxes.empty)}`);
-  for (const [name, box] of Object.entries(result.boxes)) assert.ok(box[2] < result.viewportWidth, `${viewport.name} header overflows with ${name} status text: ${JSON.stringify(box)}`);
-  for (const [name, box] of Object.entries(result.boxes)) assert.deepEqual(box, result.boxes.empty, `${viewport.name} token control moved with ${name} status text: ${JSON.stringify(result.boxes)}`);
+  for (const [name, box] of Object.entries(result.boxes)) assert.ok(box[0] >= 0 && box[0] + box[2] <= result.viewportWidth, `${viewport.name} header overflows with ${name} status text: ${JSON.stringify(box)}`);
+  for (const [name, box] of Object.entries(result.boxes)) assert.deepEqual(box, result.boxes.empty, `${viewport.name} status line moved with ${name} status text: ${JSON.stringify(result.boxes)}`);
+});
+
+for (const [size, axis, grows] of [['1440,900', 'width', { ledger: 'ArrowRight', display: 'ArrowLeft' }], ['390,844', 'height', { ledger: 'ArrowUp', display: 'ArrowUp' }]]) test(`each pane grip resizes its pane by ${axis}, saves the size, restores it on load and resets on double-click at ${size}`, async () => {
+  const suffix = axis === 'width' ? 'w' : 'h';
+  const { stdout, stderr } = await runPage(`
+localStorage.setItem('voice.token.panes', JSON.stringify({ 'ledger-${suffix}': 130, 'display-${suffix}': 140 }));
+window.addEventListener('test-ready', () => {
+  const result = {};
+  for (const [pane, key] of Object.entries(${JSON.stringify(grows)})) {
+    const element = document.querySelector('#' + pane);
+    const grip = document.querySelector('.grip[data-pane="' + pane + '"]');
+    const size = () => Math.round(element.getBoundingClientRect().${axis});
+    const restored = size();
+    grip.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+    result[pane] = { restored, grown: size(), saved: JSON.parse(localStorage.getItem('voice.token.panes'))[pane + '-${suffix}'] };
+  }
+  for (const grip of document.querySelectorAll('.grip')) grip.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+  result.stored = localStorage.getItem('voice.token.panes');
+  result.orientation = document.querySelector('.grip').getAttribute('aria-orientation');
+  document.body.dataset.gripTest = JSON.stringify(result);
+});
+`, { size });
+  const encoded = /data-grip-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { ledger: { restored: 130, grown: 154, saved: 154 }, display: { restored: 140, grown: 164, saved: 164 }, stored: '{}', orientation: axis === 'width' ? 'vertical' : 'horizontal' }, stderr);
+});
+
+for (const stored of ['{', 'null', '{"ledger-w":"wide","display-w":99999}']) test(`stored pane sizes ${stored} neither break the page nor escape the pane limits`, async () => {
+  const { stdout, stderr } = await runPage(`
+localStorage.setItem('voice.token.panes', ${JSON.stringify(stored)});
+window.addEventListener('test-ready', () => {
+  const width = (selector) => Math.round(document.querySelector(selector).getBoundingClientRect().width);
+  const measured = { ledger: width('#ledger'), display: width('#display'), limit: Math.round(innerWidth * .28) };
+  document.querySelector('.grip[data-pane="display"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+  measured.saved = JSON.parse(localStorage.getItem('voice.token.panes'))['display-w'];
+  document.body.dataset.storedTest = JSON.stringify(measured);
+});
+`, { size: '1440,900' });
+  const encoded = /data-stored-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  const result = JSON.parse(encoded ?? 'null');
+  assert.ok(result, stderr);
+  assert.equal(result.ledger, Math.round(1440 * .22));
+  assert.equal(result.display, stored.includes('99999') ? result.limit : Math.round(1440 * .24));
+  assert.equal(result.saved, stored.includes('99999') ? result.limit : Math.min(result.limit, Math.round(1440 * .24) + 24));
 });
 
 test('Android DPR 3 keeps the visual stage height stable and renders after sixty seconds', async () => {
@@ -1103,21 +1133,16 @@ window.addEventListener('test-ready', () => {
 });
 
 test('a display payload appears newest first and points the puppet while a plain hub reply adds nothing', async () => {
-  const freshMs = Number(/DISPLAY_FRESH_MS = (\d+)/.exec(await readFile(new URL('../docs/index.html', import.meta.url), 'utf8'))[1]);
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   replyFromHub('unknown', 'display_1', [], 1, { display: { markdown: '**Result** details', link: 'https://example.test/result', image: { mime: 'image/png' } } }, Uint8Array.from([137,80,78,71,13,10,26,10]));
   replyFromHub('unknown', 'display_2', [], 1, { display: { markdown: 'Newest' } });
   replyFromHub('unknown', undefined, ['plain'], 1);
-  const fresh = () => document.querySelector('#display').classList.contains('fresh');
-  setTimeout(() => {
-    const arrived = fresh();
-    setTimeout(() => { document.body.dataset.displayTest = JSON.stringify({ count: document.querySelectorAll('.display-item').length, first: document.querySelector('.display-item')?.textContent, link: document.querySelector('.display-item:last-child a')?.href, image: Boolean(document.querySelector('.display-item:last-child img')), pointed: testPuppet.calls.some((call) => call[0] === 'gesture' && call[1] === 'point' && call[2] === 'panel'), arrived, settled: !fresh() }); }, ${freshMs + 1000});
-  }, 40);
+  setTimeout(() => { document.body.dataset.displayTest = JSON.stringify({ count: document.querySelectorAll('.display-item').length, first: document.querySelector('.display-item')?.textContent, link: document.querySelector('.display-item:last-child a')?.href, image: Boolean(document.querySelector('.display-item:last-child img')), pointed: testPuppet.calls.some((call) => call[0] === 'gesture' && call[1] === 'point' && call[2] === 'panel') }); }, 40);
 });
-`, { budget: freshMs + 5000 });
+`);
   const encoded = /data-display-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { count: 2, first: 'Newest', link: 'https://example.test/result', image: true, pointed: true, arrived: true, settled: true }, stderr);
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { count: 2, first: 'Newest', link: 'https://example.test/result', image: true, pointed: true }, stderr);
 });
 
 for (const size of ['720,1280', '1440,900']) test(`the delegation log keeps its newest entry in view at ${size}`, async () => {

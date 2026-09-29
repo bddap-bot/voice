@@ -8,46 +8,32 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
 <style>
-  :root { color-scheme: dark; --stage-column: 32%; --feet: .892; --desk: 90px; }
+  :root { color-scheme: dark; --feet: .892; --desk: 118px; --status: 34px; --pad: 18px; --grip: 16px; --ledger-w: 22vw; --display-w: 24vw; --display-h: 24svh; --ledger-h: 20svh; --ledger-col: clamp(120px, var(--ledger-w), 28vw); --display-col: clamp(120px, var(--display-w), 28vw); }
   * { box-sizing: border-box; }
   html { background: #08090d; }
   body { margin: 0; min-height: 100vh; background: #08090d; color: #f4eee5; font: 15px/1.45 system-ui, sans-serif; overflow: hidden; }
-  header, .token-panel { position: fixed; z-index: 8; left: 22px; width: min(var(--stage-column) - 2 * 22px, 430px); background: #171619e6; border: 1px solid #51493f; border-radius: 4px; box-shadow: 0 12px 34px #0008; }
-  header { top: 18px; display: flex; gap: 8px; align-items: center; padding: 5px; }
-  #status { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #a5a5aa; } #status.err { color: #ff8585; } #status.ok { color: #75dc8b; }
   .hidden { display: none !important; }
-  #token-toggle { flex: 0 0 auto; width: 34px; height: 34px; padding: 0; font-size: 17px; line-height: 1; }
-  .token-panel { z-index: 9; top: 66px; padding: 12px; }
-  .entry, .saved { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-  textarea { flex: 1 1 440px; min-height: 72px; background: #151517; color: inherit; border: 1px solid #39393f; border-radius: 8px; padding: 10px; }
-  button { background: #1d1d20; color: inherit; border: 1px solid #414148; border-radius: 8px; padding: 9px 14px; font: inherit; }
+  header { position: fixed; z-index: 8; top: calc(var(--pad) + 4px); left: calc(var(--pad) + var(--ledger-col) + var(--grip)); right: calc(var(--pad) + var(--display-col) + var(--grip)); height: 26px; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 0 12px; pointer-events: none; }
+  #status { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #a5a5aa; } #status.err { color: #ff8585; } #status.ok { color: #75dc8b; }
+  #elapsed { font: 20px/1 ui-monospace, monospace; color: #ded0bd; }
+  textarea { width: 100%; min-height: 72px; background: #151517; color: inherit; border: 1px solid #39393f; border-radius: 8px; padding: 10px; font: inherit; resize: vertical; }
+  button, select, .file-button { min-height: 44px; background: #1d1d20; color: inherit; border: 1px solid #414148; border-radius: 8px; padding: 9px 14px; font: inherit; }
   button.primary { background: #315ee8; border-color: #315ee8; }
-  main { --stage-height: 100vh; --canvas-height: calc(100% - var(--desk)); position: relative; height: var(--stage-height); min-height: 540px; overflow: hidden; isolation: isolate; background: radial-gradient(ellipse at 50% 34%, #51443d 0, #29252a 40%, #111219 72%); }
-  .display, .ledger { background: linear-gradient(145deg, #201e22ee, #111217ee); border: 1px solid #6d5c49; border-radius: 4px; box-shadow: 0 18px 42px #0008, inset 0 0 35px #8a684111; }
-  .control::before { content: ''; position: absolute; z-index: 1; left: 30%; top: calc(var(--feet) * var(--canvas-height)); bottom: 0; width: 40%; background: linear-gradient(#665746, #252127); clip-path: polygon(12% 0, 88% 0, 100% 100%, 0 100%); }
-  #puppet { position: absolute; z-index: 2; left: var(--stage-column); top: 0; width: calc(100% - 2 * var(--stage-column)); height: var(--canvas-height); touch-action: manipulation; cursor: pointer; }
-  #puppet-prompt { position: absolute; z-index: 3; top: 35%; left: 30%; width: 40%; text-align: center; pointer-events: none; }
-  .puppet-picker { position: absolute; z-index: 4; left: 3%; top: calc(100% - 150px); width: 20%; display: flex; gap: 10px; align-items: center; justify-content: center; }
-  #puppet-choice { min-width: 150px; background: #1d1d20; color: inherit; border: 1px solid #414148; border-radius: 8px; padding: 8px; }
-  #puppet-credit { position: absolute; z-index: 4; left: 3%; top: calc(100% - 106px); width: 20%; min-height: 21px; color: #cfc4b6; text-align: center; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #elapsed { position: absolute; z-index: 4; right: 3%; top: calc(100% - 124px); width: 20%; text-align: center; font: 24px/1 ui-monospace, monospace; color: #ded0bd; min-height: 28px; }
-  #mic { position: absolute; z-index: 4; right: 23%; bottom: 110px; width: 9%; display: flex; flex-direction: column; gap: 6px; }
-  #mic button { min-height: 40px; }
-  #voice-filter[aria-pressed="false"] { color: #a5a5aa; border-style: dashed; }
-  #mic-mute[aria-pressed="true"] { background: #8c2f39; border-color: #d7626e; }
-  .share { position: absolute; z-index: 3; left: 20%; right: 20%; bottom: 10px; display: grid; grid-template-columns: 1fr auto auto; gap: 8px; padding: 8px; background: #171619ee; border: 1px solid #594d40; box-shadow: 0 12px 30px #0009; }
-  .share textarea { min-height: 52px; max-height: 72px; min-width: 0; resize: none; }
-  .share-actions { display: flex; gap: 8px; align-items: center; flex-wrap: nowrap; }
-  .share-actions label { background: #1d1d20; border: 1px solid #414148; border-radius: 8px; padding: 9px 14px; cursor: pointer; }
-  #share-file { position: absolute; width: 1px; height: 1px; opacity: 0; }
-  #share-image { color: #bdbdc3; width: 140px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #share-target { border: 1px dashed #414148; border-radius: 8px; padding: 8px; text-align: center; color: #a5a5aa; }
-  #share-target.over { border-color: #8eabff; color: #ececed; }
-  .display, .ledger { position: absolute; z-index: 3; top: 200px; bottom: 160px; --wing-width: 20%; width: var(--wing-width); padding: 18px; overflow: hidden; display: flex; flex-direction: column; }
-  .display { right: 3%; }
-  .display.fresh { --wing-width: 28%; }
-  .ledger { left: 3%; }
+  main { --stage-height: 100vh; position: relative; height: var(--stage-height); min-height: 540px; overflow: hidden; isolation: isolate; display: grid; grid: "ledger ledger-grip stage display-grip display" minmax(0, 1fr) / var(--ledger-col) var(--grip) minmax(0, 1fr) var(--grip) var(--display-col); padding: var(--pad); background: radial-gradient(ellipse at 50% 34%, #51443d 0, #29252a 40%, #111219 72%); }
+  .control { grid-area: stage; position: relative; min-width: 0; min-height: 0; --canvas-height: calc(100% - var(--status) - var(--desk)); }
+  .control::before { content: ''; position: absolute; z-index: 1; left: 20%; top: calc(var(--status) + var(--feet) * var(--canvas-height)); bottom: 0; width: 60%; background: linear-gradient(#665746, #252127); clip-path: polygon(12% 0, 88% 0, 100% 100%, 0 100%); }
+  #puppet { position: absolute; z-index: 2; left: 0; top: var(--status); width: 100%; height: var(--canvas-height); touch-action: manipulation; cursor: pointer; }
+  #puppet-prompt { position: absolute; z-index: 3; top: 35%; left: 0; width: 100%; text-align: center; pointer-events: none; }
+  #puppet-credit { position: absolute; z-index: 3; left: 0; right: 0; top: calc(var(--status) + var(--canvas-height) + 4px); min-height: 18px; color: #cfc4b6; text-align: center; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .display, .ledger { min-width: 0; min-height: 0; padding: 18px; overflow: hidden; display: flex; flex-direction: column; background: linear-gradient(145deg, #201e22ee, #111217ee); border: 1px solid #6d5c49; border-radius: 4px; box-shadow: 0 18px 42px #0008, inset 0 0 35px #8a684111; }
+  .display { grid-area: display; }
+  .ledger { grid-area: ledger; }
   .display h2, .ledger h2 { margin: 0 0 12px; font-size: 14px; text-transform: uppercase; letter-spacing: .08em; color: #a5a5aa; }
+  .grip { position: relative; z-index: 5; display: flex; align-items: center; justify-content: center; cursor: col-resize; touch-action: none; user-select: none; outline: none; }
+  .grip[data-pane="ledger"] { grid-area: ledger-grip; } .grip[data-pane="display"] { grid-area: display-grip; }
+  .grip::before { content: ''; position: absolute; top: 12%; bottom: 12%; left: 50%; width: 1px; background: linear-gradient(transparent, #6d5c4999, transparent); }
+  .grip::after { content: ''; position: relative; width: 8px; height: 52px; border-radius: 4px; background: #2a2622 radial-gradient(circle, #cdb89c 1.4px, transparent 1.8px) center / 8px 9px repeat-y; border: 1px solid #6d5c49; transition: height .15s, background-color .15s; }
+  .grip:hover::after, .grip:focus-visible::after, .grip.dragging::after { height: 84px; background-color: #4a3f33; border-color: #cdb89c; }
   #display-items, #log { display: flex; flex-direction: column; gap: 10px; flex: 1; overflow: auto; }
   .display-item { padding: 13px; background: #1b1b1e; border-radius: 8px; overflow-wrap: anywhere; }
   .display-item > :first-child { margin-top: 0; } .display-item > :last-child { margin-bottom: 0; }
@@ -61,67 +47,88 @@
   .tag { color: #8eabff; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
   .tag.alone { color: #d4ae68; }
   .line { margin-top: 5px; } .key { color: #8f8f96; }
-  @media (max-width: 720px), (max-height: 540px) {
-    body { height: 100svh; min-height: 0; display: flex; flex-direction: column; }
-    header { position: static; align-self: flex-start; margin: 6px 8px 0; padding: 2px; font-size: 12px; box-shadow: none; }
-    .token-panel { left: 8px; top: 44px; width: calc(100% - 16px); }
-    main { min-height: 0; flex: 1; display: grid; grid: "puppet display ledger" minmax(44px, 1fr) "picker display ledger" "credit display ledger" "elapsed display ledger" "mute share share" clamp(36px, 12svh, 100px) / minmax(0, 2fr) minmax(0, 3fr) minmax(0, 3fr); gap: 5px 8px; padding: 8px; }
-    .control { display: contents; }
-    #puppet { grid-area: puppet; left: 0; width: 100%; height: 100%; }
-    .control::before { display: none; }
-    .puppet-picker, #puppet-credit, #elapsed, #mic, .share, .display, .ledger { position: static; width: auto; }
-    .puppet-picker { grid-area: picker; justify-content: flex-start; gap: 5px; font-size: 11px; }
-    #puppet-choice { min-width: 0; width: 100%; padding: 5px; }
-    #puppet-credit { grid-area: credit; min-height: 12px; text-align: left; font-size: 10px; line-height: 12px; }
-    #elapsed { grid-area: elapsed; min-height: 0; text-align: left; font-size: 15px; line-height: 18px; }
-    #mic { grid-area: mute; flex-direction: row; gap: 5px; }
-    #mic button { flex: 1 1 0; min-width: 0; min-height: 36px; padding: 4px 8px; font-size: 12px; }
-    .share { grid-area: share; grid-template-columns: minmax(0, 1fr) auto; padding: 6px; gap: 5px; overflow: auto; }
-    .share textarea { min-height: 0; height: 100%; }
-    #share-target { display: none; }
-    #share-image { width: 64px; font-size: 10px; }
-    .share-actions { gap: 4px; }
-    .share-actions label, .share-actions button { padding: 4px 6px; font-size: 11px; }
-    .display, .ledger { padding: 8px; font-size: 16px; }
-    .display { grid-area: display; }
-    .ledger { grid-area: ledger; }
+  .dock { position: fixed; z-index: 10; bottom: calc(var(--pad) + 14px); left: calc(var(--pad) + var(--ledger-col) + var(--grip)); right: calc(var(--pad) + var(--display-col) + var(--grip)); display: flex; justify-content: center; pointer-events: none; }
+  #controls { pointer-events: auto; display: flex; flex-direction: column; background: #171619; border: 1px solid #51493f; border-radius: 16px; box-shadow: 0 12px 34px #000a; }
+  .card-bar { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 8px; }
+  #mic-mute { min-width: 120px; min-height: 52px; border-radius: 26px; font-size: 16px; }
+  #mic-mute[aria-pressed="true"] { background: #8c2f39; border-color: #d7626e; }
+  #card-toggle { width: 52px; min-height: 52px; padding: 0; border-radius: 26px; display: grid; place-items: center; }
+  #card-toggle::before { content: ''; width: 11px; height: 11px; border: solid #f4eee5; border-width: 2px 0 0 2px; transform: translateY(3px) rotate(45deg); }
+  #controls.open #card-toggle::before { transform: translateY(-3px) rotate(225deg); }
+  .card-body { display: none; }
+  #controls.open .card-body { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; width: min(660px, 100vw - 32px); max-height: calc(100svh - 130px); overflow: auto; padding: 16px 16px 4px; }
+  .group { display: flex; flex-direction: column; gap: 10px; margin: 0; padding: 14px; border: 1px solid #39393f; border-radius: 12px; min-width: 0; }
+  .group.wide { grid-column: 1 / -1; }
+  .group h3 { margin: 0; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: #a5a5aa; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .row > * { flex: 1 1 auto; }
+  #voice-filter[aria-pressed="false"] { color: #a5a5aa; border-style: dashed; }
+  #puppet-choice { width: 100%; }
+  #share-file { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  .file-button { display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+  #share-image { color: #bdbdc3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1 1 120px; }
+  #share-target { border: 1px dashed #414148; border-radius: 8px; padding: 10px; text-align: center; color: #a5a5aa; }
+  #share-target.over { border-color: #8eabff; color: #ececed; }
+  .saved-note { color: #a5a5aa; }
+  @media (max-height: 540px) {
+    :root { --pad: 8px; --desk: 96px; --status: 24px; }
+    main { min-height: 0; }
+    header { top: calc(var(--pad) + 2px); height: 20px; font-size: 13px; }
+    #elapsed { font-size: 15px; }
+    .display, .ledger { padding: 10px; }
+    .dock { bottom: calc(var(--pad) + 4px); }
+    #controls.open .card-body { max-height: calc(100svh - 90px); }
   }
   @media (max-width: 720px) and (orientation: portrait) {
-    main { grid: "puppet picker" "puppet credit" "puppet elapsed" "puppet mute" "puppet share" clamp(36px, 12svh, 100px) "display display" minmax(0, 1fr) "ledger ledger" minmax(0, 1fr) / minmax(0, 2fr) minmax(0, 3fr); }
-    .share { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
-    .share-actions { justify-content: space-between; }
-    .share-actions label, .share-actions button { padding: 2px 4px; font-size: 10px; }
+    :root { --pad: 8px; --grip: 22px; --desk: 30px; --status: 0px; }
+    body { height: 100svh; min-height: 0; display: flex; flex-direction: column; }
+    header { position: static; flex: none; height: 28px; padding: 6px 12px 0; font-size: 13px; }
+    #elapsed { font-size: 15px; }
+    main { min-height: 0; flex: 1; grid: "stage" minmax(120px, 1fr) "display-grip" var(--grip) "display" clamp(80px, var(--display-h), 24svh) "ledger-grip" var(--grip) "ledger" clamp(80px, var(--ledger-h), 24svh) "dock" 76px / minmax(0, 1fr); }
+    .control::before { display: none; }
+    #puppet-credit { top: auto; bottom: 0; font-size: 10px; }
+    .grip { cursor: row-resize; }
+    .grip::before { top: 50%; bottom: auto; left: 10%; right: 10%; width: auto; height: 1px; background: linear-gradient(90deg, transparent, #6d5c4999, transparent); }
+    .grip::after { width: 64px; height: 10px; background-size: 9px 10px; background-repeat: repeat-x; }
+    .grip:hover::after, .grip:focus-visible::after, .grip.dragging::after { width: 96px; height: 10px; }
+    .display, .ledger { padding: 10px; }
+    .dock { left: 0; right: 0; bottom: 10px; padding: 0 8px; }
+    #controls.open { width: 100%; }
+    #controls.open .card-body { grid-template-columns: minmax(0, 1fr); width: 100%; max-height: calc(100svh - 110px); padding: 12px 10px 4px; }
   }
 </style>
 </head>
 <body>
-<header><span id="status">paste token to connect</span><button id="token-toggle" aria-label="token settings" aria-controls="token-panel" aria-expanded="true">⚙</button></header>
-<section id="token-panel" class="token-panel">
-  <div id="entry" class="entry">
-    <textarea id="token" placeholder="paste your `voice-web token` here" autocomplete="off" spellcheck="false"></textarea>
-    <button id="connect" class="primary">Connect</button>
-  </div>
-  <div id="saved" class="saved hidden">
-    <span>🔒 device authenticated</span><button id="voice-print" type="button">Learn my voice</button><button id="reenter">Use another token</button><button id="forget">Forget token</button>
-  </div>
-</section>
+<header><span id="status">paste token to connect</span><span id="elapsed" aria-live="polite">00:00</span></header>
 <main id="conversation" class="hidden">
   <section class="control">
     <canvas id="puppet" role="button" tabindex="0" aria-pressed="false" aria-label="start conversation" aria-disabled="true"></canvas>
     <div id="puppet-prompt" aria-hidden="true">Tap to talk</div>
-    <label class="puppet-picker">appearance <select id="puppet-choice" aria-label="puppet appearance"></select></label>
     <div id="puppet-credit"></div>
-    <div id="elapsed" aria-live="polite">00:00</div>
-    <div id="mic"><button id="voice-filter" type="button" aria-pressed="true">Voice ID on</button><button id="mic-mute" type="button" aria-pressed="false" disabled>Mute mic</button></div>
-    <section class="share" aria-label="send text or image">
-      <textarea id="share-text" maxlength="8192" placeholder="Paste text, a URL, or an image"></textarea>
-      <div id="share-target">Drop or paste an image here</div>
-      <div class="share-actions"><label for="share-file"><span class="button">Choose image</span></label><input id="share-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" capture="environment"><button id="share-remove" class="hidden">Remove image</button><span id="share-image">No image selected</span><button id="share-send" class="primary">Send</button></div>
-    </section>
   </section>
+  <section id="ledger" class="ledger"><h2>delegation log</h2><div id="log" aria-live="polite"></div></section>
+  <div class="grip" data-pane="ledger" role="separator" aria-orientation="vertical" aria-label="resize delegation log" tabindex="0"></div>
+  <div class="grip" data-pane="display" role="separator" aria-orientation="vertical" aria-label="resize hub display" tabindex="0"></div>
   <section id="display" class="display" aria-label="hub display"><h2>from the hub</h2><div id="display-items" aria-live="polite"></div></section>
-  <section class="ledger"><h2>delegation log</h2><div id="log" aria-live="polite"></div></section>
 </main>
+<div class="dock">
+  <section id="controls" aria-label="controls">
+    <div class="card-body" id="card-body">
+      <section class="group" aria-label="microphone"><h3>Microphone</h3><button id="voice-filter" type="button" aria-pressed="true">Voice ID on</button><button id="voice-print" type="button">Learn my voice</button></section>
+      <section class="group" aria-label="appearance"><h3>Appearance</h3><select id="puppet-choice" aria-label="puppet appearance"></select></section>
+      <section class="group wide" aria-label="send text or image"><h3>Send to the hub</h3>
+        <textarea id="share-text" maxlength="8192" placeholder="Paste text, a URL, or an image"></textarea>
+        <div id="share-target">Drop or paste an image here</div>
+        <div class="row"><label class="file-button" for="share-file">Choose image</label><input id="share-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" capture="environment"><button id="share-remove" class="hidden">Remove image</button><span id="share-image">No image selected</span><button id="share-send" class="primary">Send</button></div>
+      </section>
+      <section id="token-panel" class="group wide" aria-label="device"><h3>Device</h3>
+        <div id="entry" class="row"><textarea id="token" placeholder="paste your `voice-web token` here" autocomplete="off" spellcheck="false"></textarea><button id="connect" class="primary">Connect</button></div>
+        <div id="saved" class="row hidden"><span class="saved-note">🔒 device authenticated</span><button id="reenter">Use another token</button><button id="forget">Forget token</button></div>
+      </section>
+    </div>
+    <div class="card-bar"><button id="mic-mute" type="button" aria-pressed="false" disabled>Mute mic</button><button id="card-toggle" type="button" aria-label="all controls" aria-controls="card-body" aria-expanded="false"></button></div>
+  </section>
+</div>
 <audio id="speaker" autoplay></audio>
 <script type="module">
 import wbgInit, { init as wasmInit, connect, send_only, recv } from './relay/botq_dash_wasm.js';
@@ -141,7 +148,6 @@ import config, { configuredToken } from './config.js';
 const KEY = config.storageKey;
 const PAGE_KEY = `${KEY}.page`;
 const ALPN = 'voice-web/1';
-const DISPLAY_FRESH_MS = 45000;
 const UNANSWERED_MS = 3000;
 const HUB_TURN_START_MS = 20000;
 const HUB_TURN_QUIET_MS = 1500;
@@ -173,7 +179,6 @@ let puppetEpoch = 0;
 let puppetRequest;
 let puppetLoading = false;
 let puppetMotions;
-let displayFreshTimer;
 let puppetActive;
 let puppetScope;
 let puppetRuntime;
@@ -248,15 +253,75 @@ async function sendTelemetry(events) {
 }
 
 function setStatus(text = '', kind = '') { $('status').textContent = text; $('status').title = text; $('status').className = kind; }
-function setTokenPanel(open) {
-  $('token-panel').classList.toggle('hidden', !open);
-  $('token-toggle').setAttribute('aria-expanded', String(open));
+function setCard(open) {
+  $('controls').classList.toggle('open', open);
+  $('card-toggle').setAttribute('aria-expanded', String(open));
+}
+const PANES_KEY = `${KEY}.panes`;
+const PANE_SIZES = ['ledger-w', 'display-w', 'ledger-h', 'display-h'];
+const stacked = matchMedia('(max-width: 720px) and (orientation: portrait)');
+const grips = document.querySelectorAll('.grip');
+const paneSizes = storedPaneSizes();
+function storedPaneSizes() {
+  try {
+    return Object.fromEntries(Object.entries(JSON.parse(localStorage.getItem(PANES_KEY)) ?? {}).filter(([name, size]) => PANE_SIZES.includes(name) && Number.isFinite(size)));
+  } catch { return {}; }
+}
+function applyPanes() {
+  for (const name of PANE_SIZES) {
+    if (name in paneSizes) document.documentElement.style.setProperty(`--${name}`, `${paneSizes[name]}px`);
+    else document.documentElement.style.removeProperty(`--${name}`);
+  }
+  for (const grip of grips) grip.setAttribute('aria-orientation', stacked.matches ? 'horizontal' : 'vertical');
+}
+const paneKey = (grip) => `${grip.dataset.pane}-${stacked.matches ? 'h' : 'w'}`;
+const paneSize = (grip) => { const rect = $(grip.dataset.pane).getBoundingClientRect(); return stacked.matches ? rect.height : rect.width; };
+const growth = (grip) => stacked.matches || grip.dataset.pane === 'display' ? -1 : 1;
+function sizePane(grip, size) {
+  paneSizes[paneKey(grip)] = Math.round(size);
+  applyPanes();
+}
+function savePanes(grip) {
+  if (grip) sizePane(grip, paneSize(grip));
+  localStorage.setItem(PANES_KEY, JSON.stringify(paneSizes));
+}
+applyPanes();
+stacked.addEventListener('change', applyPanes);
+for (const grip of grips) {
+  grip.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    const axis = stacked.matches ? 'clientY' : 'clientX';
+    const start = paneSize(grip), from = event[axis], sign = growth(grip);
+    const drag = new AbortController();
+    grip.setPointerCapture(event.pointerId);
+    grip.classList.add('dragging');
+    let moved = false;
+    grip.addEventListener('pointermove', (step) => {
+      if (step.pointerId !== event.pointerId || step[axis] === from) return;
+      moved = true;
+      sizePane(grip, start + sign * (step[axis] - from));
+    }, { signal: drag.signal });
+    grip.addEventListener('lostpointercapture', (end) => {
+      if (end.pointerId !== event.pointerId) return;
+      drag.abort();
+      grip.classList.remove('dragging');
+      if (moved) savePanes(grip);
+    }, { signal: drag.signal });
+  });
+  grip.addEventListener('keydown', (event) => {
+    const delta = { ArrowLeft: -24, ArrowUp: -24, ArrowRight: 24, ArrowDown: 24 }[event.key];
+    if (!delta) return;
+    event.preventDefault();
+    sizePane(grip, paneSize(grip) + growth(grip) * delta);
+    savePanes(grip);
+  });
+  grip.addEventListener('dblclick', () => { delete paneSizes[paneKey(grip)]; applyPanes(); savePanes(); });
 }
 function savedState(saved) {
   $('entry').classList.toggle('hidden', saved);
   $('saved').classList.toggle('hidden', !saved);
   $('conversation').classList.toggle('hidden', !saved);
-  setTokenPanel(!saved);
+  setCard(!saved);
   if (saved && !document.hidden) puppetRuntime?.start();
   else puppetRuntime?.pause();
   listening = saved;
@@ -555,9 +620,6 @@ function showDisplay(payload, bytes) {
   if (!item.childNodes.length) return;
   $('display-items').prepend(item);
   while ($('display-items').childNodes.length > 20) { const removed = $('display-items').lastChild; if (removed.imageUrl) URL.revokeObjectURL(removed.imageUrl); for (const renderer of removed.querySelectorAll('.chart')) disposeRenderer(renderer); removed.remove(); }
-  $('display').classList.add('fresh');
-  clearTimeout(displayFreshTimer);
-  displayFreshTimer = setTimeout(() => $('display').classList.remove('fresh'), DISPLAY_FRESH_MS);
   puppetRuntime?.gesture('point', 'panel');
 }
 function receiveShare(result) {
@@ -1388,7 +1450,8 @@ $('puppet-choice').addEventListener('change', () => showPuppet($('puppet-choice'
   reportPuppetError(error);
 }));
 $('connect').addEventListener('click', () => start($('token').value).catch((error) => setStatus(error.message, 'err')));
-$('token-toggle').addEventListener('click', () => setTokenPanel($('token-toggle').getAttribute('aria-expanded') !== 'true'));
+$('card-toggle').addEventListener('click', () => setCard(!$('controls').classList.contains('open')));
+document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && $('entry').classList.contains('hidden')) setCard(false); });
 $('mic-mute').addEventListener('click', () => setMicrophoneMuted(!microphoneMuted));
 $('voice-print').addEventListener('click', toggleVoiceprint);
 $('voice-filter').addEventListener('click', toggleVoiceFilter);
@@ -1400,7 +1463,7 @@ navigator.mediaDevices?.addEventListener('devicechange', syncSpotter);
 document.addEventListener('visibilitychange', () => { syncScreenLock(); keepPage(); if (document.hidden) puppetRuntime?.pause(); else if (!$('conversation').classList.contains('hidden')) puppetRuntime?.start(); });
 window.addEventListener('beforeunload', () => puppetRuntime?.dispose());
 const saved = configuredToken(config, localStorage.getItem(KEY));
-if (saved) { setTokenPanel(false); start(saved).then(() => {
+if (saved) { setCard(false); start(saved).then(() => {
   if (!restored) return;
   recordSession('restore', JSON.stringify({ discarded: Boolean(document.wasDiscarded), awake: restored.awake, away_ms: Date.now() - restored.at }), null);
   if (restored.awake && Date.now() - restored.at < INACTIVITY_MS) toggleConversation();

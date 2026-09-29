@@ -16,11 +16,11 @@ async function modelBytes() {
     await cache.delete(MODEL.url);
     throw new Error('speaker model failed its integrity check');
   }
-  await cache.put(MODEL.url, response);
+  await cache.put(MODEL.url, response).catch(() => {});
   return bytes;
 }
 
-async function start(voiceprint) {
+async function start({ voiceprint, enroll }) {
   const session = await ort.InferenceSession.create(await modelBytes());
   let spent = 0;
   const embed = async (features, frames) => {
@@ -29,24 +29,25 @@ async function start(voiceprint) {
     spent = Math.round(performance.now() - started);
     return output[session.outputNames[0]].data;
   };
-  if (!voiceprint) {
+  if (enroll) {
     const enrollment = new SpeakerEnrollment({ embed });
     let reported = 0;
     listener = async (chunk) => {
+      if (reported === 1) return;
       const { progress, voiceprint: learned } = await enrollment.push(chunk);
       if (learned) postMessage({ voiceprint: learned });
-      else if (progress > reported) postMessage({ progress: reported = progress });
+      else if (progress > reported) postMessage({ progress });
+      reported = progress;
     };
   } else {
     const gate = new SpeakerGate({ voiceprint, embed, send: (event) => postMessage('score' in event ? { ...event, ms: spent } : event) });
     listener = (chunk) => gate.push(chunk);
   }
-  postMessage({ ready: true });
 }
 
 onmessage = ({ data }) => {
   if (!(data instanceof Float32Array)) {
-    queue = queue.then(() => start(data.voiceprint)).catch(fail);
+    queue = queue.then(() => start(data)).catch(fail);
     return;
   }
   queue = queue.then(() => listener?.(data)).catch(fail);

@@ -224,11 +224,15 @@ class FakePeerConnection {
 }
 globalThis.RTCPeerConnection = FakePeerConnection;
 globalThis.gateStarts = [];
-globalThis.__voiceStartGate = async (stream, voiceprint, heard) => {
+const fakeSpeaker = (stream, voiceprint, heard) => {
   const track = Object.assign(new EventTarget(), { gated: true, enabled: true, readyState: 'live', stop() {} });
   const gate = { input: stream, voiceprint: voiceprint && [...voiceprint], heard, closed: 0, stream: { getTracks: () => [track], getAudioTracks: () => [track] }, close() { this.closed++; } };
   gateStarts.push(gate);
   return gate;
+};
+globalThis.__voiceSpeaker = {
+  startSpeakerGate: async (stream, voiceprint, heard) => fakeSpeaker(stream, voiceprint, heard),
+  learnVoice: async (stream, heard) => { const gate = fakeSpeaker(stream, null, heard); return { close: () => gate.close() }; },
 };
 globalThis.__voiceStartSpotter = async (stream, heard, model) => {
   globalThis.testSpotter = { stream, heard, model, closed: 0 };
@@ -541,7 +545,7 @@ window.addEventListener('test-ready', () => {
   ], stderr);
 });
 
-const voiceprintSetup = (model = MODEL.url) => `localStorage.setItem('voice.token.voiceprint', JSON.stringify({ model: ${JSON.stringify(model)}, print: [0.5, 0.75] }));`;
+const voiceprintSetup = (model = MODEL.sha256) => `localStorage.setItem('voice.token.voiceprint', JSON.stringify({ model: ${JSON.stringify(model)}, print: [0.5, 0.75] }));`;
 
 test('without a voiceprint for the current model a conversation sends the microphone itself', async () => {
   const result = await runWakePage(`
@@ -567,7 +571,7 @@ test('learning a voice happens between conversations, pauses wake listening and 
     await until(() => testSpotter !== spotter);
     return { refused, input: learning.input.getAudioTracks()[0] === testMicrophoneTrack, learnedFrom: learning.voiceprint, paused, halfway, label: document.querySelector('#voice-print').textContent, closed: learning.closed, stored: JSON.parse(localStorage.getItem('voice.token.voiceprint')), status: document.querySelector('#status').textContent, keys: Object.keys(localStorage).sort() };
   `);
-  assert.deepEqual(result, { refused: 'learn your voice between conversations', input: true, learnedFrom: null, paused: 1, halfway: 'Stop learning (50%)', label: 'Forget my voice', closed: 1, stored: { model: MODEL.url, print: [0.5, 0.75] }, status: 'voice learned: conversations now ignore other voices', keys: ['voice.token', 'voice.token.voiceprint'] });
+  assert.deepEqual(result, { refused: 'learn your voice between conversations', input: true, learnedFrom: null, paused: 1, halfway: 'Stop learning (50%)', label: 'Forget my voice', closed: 1, stored: { model: MODEL.sha256, print: [0.5, 0.75] }, status: 'voice learned: other voices are filtered out', keys: ['voice.token', 'voice.token.voiceprint'] });
 });
 
 test('a voiceprint filters each conversation, mute still silences the microphone, and a filter failure falls back to it', async () => {

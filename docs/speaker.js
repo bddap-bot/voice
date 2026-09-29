@@ -9,15 +9,12 @@ export const GATE = {
   threshold: 0.5,
   preroll: 25,
   tail: 15,
-  onset: 4,
-  offset: 60,
-  first: 100,
   shortest: 40,
-  retry: 100,
-  check: 100,
+  every: 100,
   window: 150,
-  longest: 200,
 };
+export const OFFSET = 60;
+const ONSET = 4;
 export const ENROLL_WINDOWS = 12;
 const FRAME = 400;
 const FFT = 512;
@@ -162,10 +159,9 @@ export class SpeakerFrames {
 }
 
 export class SpeechDetector {
-  constructor({ onset = GATE.onset, offset = GATE.offset } = {}) {
-    this.onset = onset;
-    this.offset = offset;
+  constructor() {
     this.heard = [];
+    this.seen = 0;
     this.floor = -Infinity;
     this.recent = [];
     this.silent = 0;
@@ -175,17 +171,17 @@ export class SpeechDetector {
     if (energy > -100) {
       this.heard.push(energy);
       if (this.heard.length > 1000) this.heard.shift();
-      if (this.heard.length % 10 === 1) this.floor = [...this.heard].sort((x, y) => x - y)[Math.floor(this.heard.length / 10)];
+      if (this.seen++ % 10 === 0) this.floor = [...this.heard].sort((x, y) => x - y)[Math.floor(this.heard.length / 10)];
     }
     const speech = energy > Math.max(this.floor + 18, -70);
     this.recent.push(speech);
     if (this.recent.length > 6) this.recent.shift();
     this.silent = speech ? 0 : this.silent + 1;
-    if (!this.speaking && this.recent.filter(Boolean).length >= this.onset) {
+    if (!this.speaking && this.recent.filter(Boolean).length >= ONSET) {
       this.speaking = true;
       return { speech, start: this.recent.length - this.recent.indexOf(true) };
     }
-    if (this.speaking && this.silent >= this.offset) {
+    if (this.speaking && this.silent >= OFFSET) {
       this.speaking = false;
       return { speech, end: this.silent };
     }
@@ -193,93 +189,91 @@ export class SpeechDetector {
   }
 }
 
+function framesOf(frames, samples) {
+  const energies = frames.push(samples);
+  return energies.map((energy, index) => [energy, frames.count - energies.length + index + 1]);
+}
+
 export class SpeakerEnrollment {
-  constructor({ embed, windows = ENROLL_WINDOWS, options = GATE }) {
+  constructor({ embed, windows = ENROLL_WINDOWS }) {
     this.embed = embed;
     this.windows = windows;
-    this.options = options;
     this.frames = new SpeakerFrames();
-    this.detector = new SpeechDetector(options);
+    this.detector = new SpeechDetector();
     this.speech = [];
     this.embeddings = [];
-    this.next = options.window;
+    this.next = GATE.window;
   }
   async push(samples) {
-    for (const energy of this.frames.push(samples)) {
+    for (const [energy, now] of framesOf(this.frames, samples)) {
       this.speech.push(this.detector.frame(energy).speech);
-      if (this.speech.length > this.options.window) this.speech.shift();
-      const now = this.frames.count;
+      if (this.speech.length > GATE.window) this.speech.shift();
       if (now < this.next || this.embeddings.length >= this.windows) continue;
-      if (this.speech.filter(Boolean).length < 0.6 * this.options.window) continue;
-      const { features, frames } = this.frames.features(now - this.options.window, now);
+      if (this.speech.filter(Boolean).length < 0.6 * GATE.window) continue;
+      const { features, frames } = this.frames.features(now - GATE.window, now);
       this.embeddings.push(normalized(await this.embed(features, frames)));
-      this.next = now + this.options.window / 2;
+      this.next = now + GATE.window / 2;
     }
     return { progress: this.embeddings.length / this.windows, voiceprint: this.embeddings.length >= this.windows ? voiceprint(this.embeddings) : null };
   }
 }
 
 export class SpeakerGate {
-  constructor({ voiceprint: print, embed, send, options = GATE }) {
+  constructor({ voiceprint: print, embed, send }) {
     this.print = print;
     this.embed = embed;
     this.send = send;
-    this.options = options;
     this.frames = new SpeakerFrames();
-    this.detector = new SpeechDetector(options);
+    this.detector = new SpeechDetector();
     this.segments = [];
     this.pending = null;
   }
   push(samples) {
-    for (const energy of this.frames.push(samples)) this.step(this.detector.frame(energy));
+    for (const [energy, now] of framesOf(this.frames, samples)) this.step(this.detector.frame(energy), now);
     this.decide();
   }
   idle() {
     return this.pending ?? Promise.resolve();
   }
-  step(event) {
-    const { options } = this;
-    const now = this.frames.count;
+  step(event, now) {
     if (event.start !== undefined) {
-      const start = now - event.start - options.preroll;
-      this.segments.push({ start, due: start + options.first, open: false, scored: false, end: null });
+      const start = Math.max(0, now - event.start - GATE.preroll);
+      this.segments.push({ start, state: 'waiting', due: start + GATE.every, end: null });
     }
     const segment = this.segments.at(-1);
     if (event.end === undefined || !segment || segment.end !== null) return;
-    segment.end = now - event.end + options.tail;
-    if (segment.open) this.send({ close: segment.end * HOP });
-    segment.due = segment.open || segment.scored || segment.end - segment.start < options.shortest ? Infinity : now;
+    segment.end = now - event.end + GATE.tail;
+    if (segment.state === 'open') this.send({ close: segment.end * HOP });
+    segment.due = segment.state === 'waiting' && segment.end - segment.start >= GATE.shortest ? now : null;
   }
   decide() {
     if (this.pending) return;
-    this.segments = this.segments.filter((segment) => segment.end === null || segment.due !== Infinity);
+    this.segments = this.segments.filter((segment) => segment.due !== null);
     const now = this.frames.count;
     const segment = this.segments.find((item) => item.due <= now);
     if (!segment) return;
     const to = segment.end ?? now;
-    const from = Math.max(segment.start, to - (segment.open ? this.options.window : this.options.longest));
+    const from = Math.max(segment.start, segment.state === 'waiting' ? now - RING : to - GATE.window);
     const { features, frames } = this.frames.features(from, to);
     this.pending = this.embed(features, frames).then((embedding) => {
       const score = similarity(this.print, normalized(embedding));
       this.send({ score: +score.toFixed(3), from: from * HOP, to: to * HOP });
       this.pending = null;
-      this.verdict(segment, score >= this.options.threshold, from, to);
+      this.verdict(segment, score >= GATE.threshold, from, to);
       this.decide();
     }, (error) => this.send({ error: String(error?.stack ?? error) }));
   }
   verdict(segment, match, from, to) {
-    const { options } = this;
-    const now = this.frames.count;
-    segment.scored = true;
-    if (segment.open && !match) {
+    const next = segment.end === null ? this.frames.count + GATE.every : null;
+    if (segment.state === 'open' && !match) {
       this.send({ close: Math.round((from + to) / 2) * HOP });
-      Object.assign(segment, { open: false, scored: false, start: to, due: segment.end === null ? now + options.first : Infinity });
-    } else if (!segment.open && match) {
-      segment.open = true;
+      Object.assign(segment, { state: 'waiting', start: to });
+    } else if (segment.state !== 'open' && match) {
       this.send({ open: from * HOP });
       if (segment.end !== null) this.send({ close: segment.end * HOP });
-      segment.due = segment.end === null ? now + options.check : Infinity;
-    } else segment.due = segment.end !== null ? Infinity : now + (segment.open ? options.check : options.retry);
+      segment.state = 'open';
+    } else if (!match) segment.state = 'rejected';
+    segment.due = next;
   }
 }
 
@@ -319,28 +313,44 @@ export class GrantedAudio {
   }
 }
 
-export async function startSpeakerGate(stream, voiceprint, heard) {
+async function speakerGraph(stream, message, heard) {
   const context = new AudioContext({ sampleRate: RATE });
-  await context.audioWorklet.addModule(new URL('./speaker-worklet.js', import.meta.url));
-  const worker = new Worker(new URL('./speaker-worker.js', import.meta.url), { type: 'module' });
-  const node = new AudioWorkletNode(context, 'speaker-gate', { outputChannelCount: [1], channelCount: 1, channelCountMode: 'explicit' });
-  const source = context.createMediaStreamSource(stream);
-  const destination = context.createMediaStreamDestination();
-  source.connect(node).connect(destination);
-  node.port.onmessage = ({ data }) => worker.postMessage(data, [data.buffer]);
-  worker.onmessage = ({ data }) => {
-    if ('open' in data || 'close' in data) node.port.postMessage(data);
-    heard(data);
-  };
-  worker.onerror = (event) => heard({ error: event.message || 'speaker worker failed' });
-  worker.postMessage({ voiceprint });
-  if (context.state === 'suspended') for (const type of ['pointerdown', 'keydown']) addEventListener(type, () => { if (context.state === 'suspended') context.resume(); }, { once: true });
-  return {
-    stream: destination.stream,
-    close() {
-      source.disconnect();
-      worker.terminate();
-      return context.close();
-    },
-  };
+  let worker;
+  try {
+    await context.audioWorklet.addModule(new URL('./speaker-worklet.js', import.meta.url));
+    worker = new Worker(new URL('./speaker-worker.js', import.meta.url), { type: 'module' });
+    const node = new AudioWorkletNode(context, 'speaker-gate', { outputChannelCount: [1], channelCount: 1, channelCountMode: 'explicit' });
+    const source = context.createMediaStreamSource(stream);
+    const destination = context.createMediaStreamDestination();
+    source.connect(node).connect(destination);
+    node.port.onmessage = ({ data }) => worker.postMessage(data, [data.buffer]);
+    worker.onmessage = ({ data }) => {
+      if ('open' in data || 'close' in data) node.port.postMessage(data);
+      heard(data);
+    };
+    worker.onerror = (event) => heard({ error: event.message || 'speaker worker failed' });
+    worker.postMessage(message);
+    if (context.state === 'suspended') for (const type of ['pointerdown', 'keydown']) addEventListener(type, () => { if (context.state === 'suspended') context.resume(); }, { once: true });
+    return {
+      stream: destination.stream,
+      close() {
+        source.disconnect();
+        worker.terminate();
+        return context.close();
+      },
+    };
+  } catch (error) {
+    worker?.terminate();
+    context.close();
+    throw error;
+  }
+}
+
+export async function startSpeakerGate(stream, voiceprint, heard) {
+  return speakerGraph(stream, { voiceprint }, heard);
+}
+
+export async function learnVoice(stream, heard) {
+  const { close } = await speakerGraph(stream, { enroll: true }, heard);
+  return { close };
 }

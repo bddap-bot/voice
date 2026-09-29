@@ -1,13 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { WeSpeakerFeatureExtractor } from '@huggingface/transformers';
-import { CHUNK, GATE, GrantedAudio, HOP, RATE, SpeakerEnrollment, SpeakerFrames, SpeakerGate, SpeechDetector, fbank } from '../docs/speaker.js';
+import { CHUNK, GATE, GrantedAudio, HOP, OFFSET, RATE, SpeakerEnrollment, SpeakerFrames, SpeakerGate, SpeechDetector, fbank } from '../docs/speaker.js';
 
 const OWNER_HZ = 300;
 const OTHER_HZ = 2500;
 
 function tone(hz, seconds, level = 0.3) {
   return Float32Array.from({ length: Math.round(seconds * RATE) }, (_, index) => level * Math.sin((2 * Math.PI * hz * index) / RATE));
+}
+
+function softly(samples) {
+  return Float32Array.from(samples, (value, index) => value * Math.min(1, 10 ** ((index / (0.2 * RATE) - 1) * 3.5)));
 }
 
 function silence(seconds) {
@@ -115,12 +119,24 @@ test('speech onset reports how far back it began, and silence ends it after the 
   const start = events.findIndex((event) => event.start !== undefined);
   const end = events.findIndex((event) => event.end !== undefined);
   assert.ok(Math.abs(start - events[start].start - 100) <= 3, `onset frame ${start - events[start].start}`);
-  assert.equal(events[end].end, GATE.offset);
+  assert.equal(events[end].end, OFFSET);
   assert.equal(events.filter((event) => event.start !== undefined).length, 1);
 });
 
+test('a steady new noise stops counting as speech once it becomes the background', () => {
+  const detector = new SpeechDetector();
+  const frames = new SpeakerFrames();
+  const hum = (seconds) => Float32Array.from(tone(120, seconds, 0.02), (value, index) => value + 0.01 * Math.sin(index * 0.37));
+  const events = [];
+  for (const part of [silence(12), hum(20)]) for (let at = 0; at < part.length; at += CHUNK) for (const energy of frames.push(part.subarray(at, at + CHUNK))) events.push(detector.frame(energy));
+  const started = events.findIndex((event) => event.start !== undefined);
+  const ended = events.findIndex((event) => event.end !== undefined);
+  assert.ok(started >= 1200, 'the hum begins as speech');
+  assert.ok(ended > started && ended < 3200, `the hum is background ${((ended - 1200) / 100).toFixed(1)} s after it began`);
+});
+
 test('the enrolled voice passes whole and delayed, while another voice never passes', async () => {
-  const owner = tone(OWNER_HZ, 1.6);
+  const owner = softly(tone(OWNER_HZ, 1.6));
   const other = tone(OTHER_HZ, 1.6);
   const audio = join(silence(1), other, silence(1), owner, silence(1.5));
   const spokenAt = RATE + other.length + RATE;
@@ -131,6 +147,13 @@ test('the enrolled voice passes whole and delayed, while another voice never pas
   assert.ok(at > 0, 'the whole enrolled utterance, from its first sample, is forwarded');
   const lag = (at - spokenAt) / RATE;
   assert.ok(lag > 0.5 && lag < 1.2, `forwarded ${lag.toFixed(2)} s after it was spoken`);
+  const detector = new SpeechDetector();
+  const onsets = [];
+  new SpeakerFrames().push(audio).forEach((energy, index) => {
+    const event = detector.frame(energy);
+    if (event.start !== undefined) onsets.push(index + 1 - event.start);
+  });
+  assert.equal(events.find((event) => 'open' in event).open, (onsets[1] - GATE.preroll) * HOP, 'forwarding starts a full preroll before the detected onset');
   const forwarded = out.reduce((count, value) => count + (value !== 0), 0);
   assert.ok(forwarded < owner.length + (GATE.preroll + GATE.tail + 4) * HOP, 'nothing beyond the utterance and its margins is forwarded');
 });
@@ -149,6 +172,14 @@ test('a model slower than real time delays decisions without queueing them or cl
   assert.deepEqual(events.filter((event) => 'open' in event || 'close' in event).map((event) => Object.keys(event)[0]), ['open', 'close']);
 });
 
+test('a voice that starts while the model is still busy is scored and forwarded from its start', async () => {
+  const other = tone(OTHER_HZ, 1.5);
+  const owner = tone(OWNER_HZ, 3);
+  const spokenAt = RATE + other.length + Math.round(0.7 * RATE);
+  const { out } = await runGate(join(silence(1), other, silence(0.7), owner, silence(8)), [spokenAt, spokenAt + owner.length], 40);
+  assert.ok(located(out, owner) > 0);
+});
+
 test('another voice taking over without a pause is cut off at the next check', async () => {
   const owner = tone(OWNER_HZ, 2);
   const other = tone(OTHER_HZ, 3);
@@ -156,7 +187,7 @@ test('another voice taking over without a pause is cut off at the next check', a
   assert.ok(located(out, owner) > 0);
   const close = events.find((event) => 'close' in event).close;
   const leaked = (close - (RATE + owner.length)) / RATE;
-  assert.ok(leaked >= 0 && leaked <= (GATE.check + GATE.window) / 100, `other voice forwarded for ${leaked.toFixed(2)} s`);
+  assert.ok(leaked >= 0 && leaked <= (GATE.every + GATE.window) / 100, `other voice forwarded for ${leaked.toFixed(2)} s`);
   assert.equal(located(out, other.subarray(Math.round(1.6 * RATE), Math.round(2.4 * RATE))), -1);
 });
 
@@ -170,6 +201,7 @@ test('granted audio is replayed in order, skipping what was never granted', () =
   granted.read(out);
   assert.deepEqual([...out.subarray(0, 50)], Array.from({ length: 50 }, (_, index) => index + 101));
   assert.deepEqual([...out.subarray(50)], Array.from({ length: 30 }, (_, index) => index + 401));
+  granted.close(460);
   granted.close(440);
   granted.read(out);
   assert.deepEqual([...out.subarray(0, 10)], Array.from({ length: 10 }, (_, index) => index + 431));

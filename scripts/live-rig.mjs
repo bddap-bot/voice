@@ -42,7 +42,8 @@ export async function runRig({ outDir, speech, page, extra = {} }, scenario) {
   let drain = async () => {};
 
   async function run() {
-    const pageFiles = execFileSync('git', ['ls-files', 'docs/*.html', 'docs/*.js'], { cwd: root }).toString().split('\n').filter((file) => /^docs\/[^/]+$/.test(file) && !['docs/config.js', 'docs/sw.js'].includes(file));
+    const relayUrl = new URL(relayModule, pageUrl).href;
+    const pageFiles = execFileSync('git', ['ls-files', 'docs/*.html', 'docs/*.js', 'docs/relay/*'], { cwd: root }).toString().split('\n').filter((file) => /^docs\/(relay\/)?[^/]+$/.test(file) && !['docs/config.js', 'docs/sw.js'].includes(file));
     for (const file of pageFiles) {
       const response = await fetch(new URL(file.slice(5), pageUrl), { cache: 'no-store' });
       sourceHashes[file] = sha256(await readFile(path.join(root, file)));
@@ -63,7 +64,7 @@ export async function runRig({ outDir, speech, page, extra = {} }, scenario) {
       if (pending.has(m.id)) { const { resolve, reject } = pending.get(m.id); pending.delete(m.id); m.error ? reject(new Error(m.error.message)) : resolve(m); }
       else if (m.method === 'Fetch.requestPaused') {
         const { requestId, request } = m.params;
-        const relay = request.url === relayModule;
+        const relay = request.url === relayUrl;
         call(relay ? 'Fetch.fulfillRequest' : 'Fetch.continueRequest', relay ? { requestId, responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'text/javascript' }, { name: 'Access-Control-Allow-Origin', value: '*' }], body: relayFixture.toString('base64') } : { requestId }, m.sessionId).catch(() => {});
       }
       else if (m.method === 'Runtime.exceptionThrown') consoleErrors.push({ at: now(), text: m.params.exceptionDetails.exception?.description ?? m.params.exceptionDetails.text });
@@ -72,10 +73,10 @@ export async function runRig({ outDir, speech, page, extra = {} }, scenario) {
     const evaluate = async (expression) => { const m = await call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }); if (m.result.exceptionDetails) throw new Error(m.result.exceptionDetails.exception?.description ?? m.result.exceptionDetails.text); return m.result.result.value; };
     session = (await call('Target.attachToTarget', { targetId: target.id, flatten: true })).result.sessionId;
     await call('Page.enable'); await call('Runtime.enable');
-    await call('Fetch.enable', { patterns: [{ urlPattern: `${relayModule}*` }] });
+    await call('Fetch.enable', { patterns: [{ urlPattern: `${relayUrl}*` }] });
     await call('Page.addScriptToEvaluateOnNewDocument', { source: `
   localStorage.setItem('voice.token', ${JSON.stringify(config.token)});
-  globalThis.__wakeReplyRelayModule = ${JSON.stringify(`${relayModule}?relay`)};
+  globalThis.__wakeReplyRelayModule = ${JSON.stringify(`${relayUrl}?relay`)};
   globalThis.__rt = [];
   globalThis.__frames ??= [];
   globalThis.__heard = [];

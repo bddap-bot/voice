@@ -65,7 +65,7 @@ export async function runRig({ outDir, speech, page, extra = {} }, scenario) {
       else if (m.method === 'Fetch.requestPaused') {
         const { requestId, request } = m.params;
         const relay = request.url === relayUrl;
-        call(relay ? 'Fetch.fulfillRequest' : 'Fetch.continueRequest', relay ? { requestId, responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'text/javascript' }, { name: 'Access-Control-Allow-Origin', value: '*' }], body: relayFixture.toString('base64') } : { requestId }, m.sessionId).catch(() => {});
+        call(relay ? 'Fetch.fulfillRequest' : 'Fetch.continueRequest', relay ? { requestId, responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'text/javascript' }], body: relayFixture.toString('base64') } : { requestId }, m.sessionId).catch(() => {});
       }
       else if (m.method === 'Runtime.exceptionThrown') consoleErrors.push({ at: now(), text: m.params.exceptionDetails.exception?.description ?? m.params.exceptionDetails.text });
       else if (m.method === 'Runtime.consoleAPICalled' && ['error', 'warning'].includes(m.params.type)) consoleErrors.push({ at: now(), text: m.params.args.map((v) => v.value ?? v.description).join(' ') });

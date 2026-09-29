@@ -99,7 +99,7 @@
     <button id="connect" class="primary">Connect</button>
   </div>
   <div id="saved" class="saved hidden">
-    <span>🔒 device authenticated</span><button id="reenter">Use another token</button><button id="forget">Forget token</button>
+    <span>🔒 device authenticated</span><button id="voice-print" type="button">Learn my voice</button><button id="reenter">Use another token</button><button id="forget">Forget token</button>
   </div>
 </section>
 <main id="conversation" class="hidden">
@@ -130,6 +130,7 @@ import { LivePlayback } from './live-playback.js';
 import { PuppetRuntime } from './puppet.js';
 import { INACTIVITY_MS, NAME, SIGN_OFF, WAKE_PHRASE } from './identity.js';
 import { loadHead, startWakeSpotter } from './wake.js';
+import { MODEL, learnVoice, prepareSpeaker, startSpeakerGate } from './speaker.js';
 import { disposeRenderer, renderChart, renderMath, renderMermaid } from './lib/render.js';
 
 import config, { configuredToken } from './config.js';
@@ -180,6 +181,9 @@ let wakeModelWaiter;
 let listeningModel;
 let inactivity;
 const startSpotter = globalThis.__voiceStartSpotter ?? startWakeSpotter;
+const speaker = globalThis.__voiceSpeaker ?? { learnVoice, prepareSpeaker, startSpeakerGate };
+const VOICEPRINT = `${config.storageKey}.voiceprint`;
+let learning;
 const shareWaiters = new Map();
 function applyTranscriptAction(action, timing) {
   if (action.kind === 'none') return;
@@ -698,13 +702,91 @@ function microphoneEnded(stream) {
   microphone = undefined;
   microphoneStream = undefined;
   recordSession('microphone-ended');
+  stopLearning('voice learning stopped: microphone lost', 'err');
   closeSpotter();
   if (conversation?.audioOwner.stream === stream) stopConversation('microphone lost');
   else if (starting?.stream === stream) cancelStarting('microphone lost');
   syncSpotter();
 }
 function wakeable() {
-  return listening && !microphoneMuted && !conversation && !starting;
+  return listening && !microphoneMuted && !conversation && !starting && !learning;
+}
+function storedVoiceprint() {
+  try {
+    const { model, print } = JSON.parse(localStorage.getItem(VOICEPRINT));
+    return model === MODEL.sha256 ? Float32Array.from(print) : null;
+  } catch {
+    return null;
+  }
+}
+function syncVoiceprint() {
+  $('voice-print').textContent = learning ? `Stop learning (${Math.round(learning.progress * 100)}%)` : storedVoiceprint() ? 'Forget my voice' : 'Learn my voice';
+}
+async function toggleVoiceprint() {
+  if (learning) return stopLearning('voice learning stopped');
+  if (storedVoiceprint()) {
+    localStorage.removeItem(VOICEPRINT);
+    syncVoiceprint();
+    return setStatus('voice forgotten: conversations hear everyone', 'ok');
+  }
+  if (conversation || starting) return setStatus('learn your voice between conversations', 'err');
+  if (microphoneMuted) return setStatus('unmute the microphone to learn your voice', 'err');
+  const current = learning = { progress: 0 };
+  syncSpotter();
+  syncVoiceprint();
+  setStatus('learning your voice: talk normally for about ten seconds');
+  try {
+    const gate = await speaker.learnVoice(await acquireMicrophone(), (event) => learned(current, event));
+    if (learning === current) current.gate = gate;
+    else gate.close();
+  } catch (error) {
+    if (learning === current) learned(current, { error: error.message });
+  }
+}
+function learned(current, { progress, voiceprint, error }) {
+  if (learning !== current) return;
+  if (error) {
+    recordPageError(new Error(error));
+    return stopLearning(`could not learn your voice: ${error.split('\n')[0]}`, 'err');
+  }
+  if (progress) {
+    current.progress = progress;
+    syncVoiceprint();
+  }
+  if (!voiceprint) return;
+  localStorage.setItem(VOICEPRINT, JSON.stringify({ model: MODEL.sha256, print: [...voiceprint] }));
+  stopLearning('voice learned: other voices are filtered out', 'ok');
+}
+function stopLearning(message = '', kind = '') {
+  const current = learning;
+  learning = undefined;
+  current?.gate?.close();
+  syncVoiceprint();
+  syncSpotter();
+  if (current && message) setStatus(message, kind);
+}
+async function speakerFiltered(attempt) {
+  const voiceprint = storedVoiceprint();
+  if (!voiceprint) return attempt.stream;
+  try {
+    attempt.gate = await speaker.startSpeakerGate(attempt.stream, voiceprint, (event) => {
+      if (event.error) speakerFilterFailed(attempt, new Error(event.error));
+      else if ('score' in event) recordSession('speaker-score', JSON.stringify(event), attempt.offerId ?? null);
+    });
+    return attempt.gate.stream;
+  } catch (error) {
+    speakerFilterFailed(attempt, error);
+    return attempt.stream;
+  }
+}
+function speakerFilterFailed(attempt, error) {
+  if (attempt.cancelled || attempt.notice) return;
+  recordPageError(error, attempt.offerId ?? null);
+  attempt.gate?.close();
+  attempt.gate = null;
+  Promise.resolve(attempt.sender?.replaceTrack(attempt.stream.getAudioTracks()[0])).catch(recordPageError);
+  attempt.notice = `speaker filter off, hearing everyone: ${error.message.split('\n')[0]}`;
+  setStatus(attempt.notice, 'err');
 }
 async function wakeModel() {
   const model = await new Promise((resolve, reject) => {
@@ -730,6 +812,7 @@ function closeSpotter() {
   spotter = undefined;
 }
 function stopListening() {
+  stopLearning();
   listening = false;
   listeningModel = undefined;
   syncSpotter();
@@ -969,7 +1052,8 @@ function cancelStarting(reason = '') {
   setStatus(reason, reason ? 'err' : '');
 }
 async function startConversation() {
-  const attempt = { cancelled: false, offered: false, cancelSent: false, cancelMic: null, cancelIce: null, cancelData: null, stream: null, outputStream: null, recorders: [], pc: null, channel: null, delegations: new Set() };
+  stopLearning();
+  const attempt = { cancelled: false, offered: false, cancelSent: false, cancelMic: null, cancelIce: null, cancelData: null, stream: null, gate: null, sender: null, notice: '', outputStream: null, recorders: [], pc: null, channel: null, delegations: new Set() };
   attempt.playback = new LivePlayback((error) => {
     if (attempt.cancelled || (starting !== attempt && conversation?.audioOwner !== attempt)) return;
     recordPageError(error);
@@ -1012,7 +1096,9 @@ async function startConversation() {
         stopConversation('Live playback failed');
       }
     };
-    for (const track of attempt.stream.getTracks()) attempt.pc.addTrack(track, attempt.stream);
+    const sent = await speakerFiltered(attempt);
+    if (attempt.cancelled) return;
+    for (const track of sent.getTracks()) attempt.sender = attempt.pc.addTrack(track, sent);
     await attempt.pc.setLocalDescription(await attempt.pc.createOffer());
     await waitIce(attempt.pc, attempt);
     if (attempt.cancelled) return;
@@ -1039,7 +1125,7 @@ async function startConversation() {
     puppetRuntime?.pose('listen');
     stayAwake();
     syncPuppetUi();
-    setStatus();
+    setStatus(attempt.notice, attempt.notice ? 'err' : '');
     recordSession('open', '', attempt.offerId);
     if (puppetCatalog && !puppetActive && !puppetLoading) showPuppet(puppetCatalog.active).catch(reportPuppetError);
   } catch (error) {
@@ -1056,6 +1142,7 @@ async function startConversation() {
 }
 function release(attempt) {
   const flushed = stopRecorders(attempt);
+  attempt.gate?.close();
   attempt.channel?.close();
   attempt.pc?.close();
   puppetRuntime?.detachAudio(attempt).catch(recordPageError);
@@ -1197,8 +1284,11 @@ $('puppet-choice').addEventListener('change', () => showPuppet($('puppet-choice'
 $('connect').addEventListener('click', () => start($('token').value).catch((error) => setStatus(error.message, 'err')));
 $('token-toggle').addEventListener('click', () => setTokenPanel($('token-toggle').getAttribute('aria-expanded') !== 'true'));
 $('mic-mute').addEventListener('click', () => setMicrophoneMuted(!microphoneMuted));
+$('voice-print').addEventListener('click', toggleVoiceprint);
+syncVoiceprint();
+try { if (storedVoiceprint()) speaker.prepareSpeaker(); } catch (error) { recordPageError(error); }
 $('reenter').addEventListener('click', async () => { listening = false; setMicrophoneMuted(microphoneMuted); stopConversation(); await recorderFlush; setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); savedState(false); $('token').focus(); });
-$('forget').addEventListener('click', async () => { listening = false; setMicrophoneMuted(microphoneMuted); stopConversation(); await recorderFlush; localStorage.removeItem(KEY); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); await sendFrame('bye').catch(() => {}); generation++; connected = false; resetPuppetConnection(new Error('connection replaced'), true); await puppetChannel.clearCache().catch(() => {}); savedState(false); setStatus('token forgotten'); });
+$('forget').addEventListener('click', async () => { listening = false; setMicrophoneMuted(microphoneMuted); stopConversation(); await recorderFlush; stopLearning(); localStorage.removeItem(KEY); localStorage.removeItem(VOICEPRINT); syncVoiceprint(); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); await sendFrame('bye').catch(() => {}); generation++; connected = false; resetPuppetConnection(new Error('connection replaced'), true); await puppetChannel.clearCache().catch(() => {}); savedState(false); setStatus('token forgotten'); });
 navigator.mediaDevices?.addEventListener('devicechange', syncSpotter);
 document.addEventListener('visibilitychange', () => { syncScreenLock(); keepPage(); if (document.hidden) puppetRuntime?.pause(); else if (!$('conversation').classList.contains('hidden')) puppetRuntime?.start(); });
 window.addEventListener('beforeunload', () => puppetRuntime?.dispose());

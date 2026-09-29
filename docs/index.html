@@ -130,7 +130,7 @@ import { LivePlayback } from './live-playback.js';
 import { PuppetRuntime } from './puppet.js';
 import { INACTIVITY_MS, NAME, SIGN_OFF, WAKE_PHRASE } from './identity.js';
 import { loadHead, startWakeSpotter } from './wake.js';
-import { MODEL, learnVoice, startSpeakerGate } from './speaker.js';
+import { MODEL, learnVoice, prepareSpeaker, startSpeakerGate } from './speaker.js';
 import { disposeRenderer, renderChart, renderMath, renderMermaid } from './lib/render.js';
 
 import config, { configuredToken } from './config.js';
@@ -180,7 +180,7 @@ let wakeModelWaiter;
 let listeningModel;
 let inactivity;
 const startSpotter = globalThis.__voiceStartSpotter ?? startWakeSpotter;
-const speaker = globalThis.__voiceSpeaker ?? { learnVoice, startSpeakerGate };
+const speaker = globalThis.__voiceSpeaker ?? { learnVoice, prepareSpeaker, startSpeakerGate };
 const VOICEPRINT = `${config.storageKey}.voiceprint`;
 let learning;
 const shareWaiters = new Map();
@@ -1275,6 +1275,7 @@ $('token-toggle').addEventListener('click', () => setTokenPanel($('token-toggle'
 $('mic-mute').addEventListener('click', () => setMicrophoneMuted(!microphoneMuted));
 $('voice-print').addEventListener('click', toggleVoiceprint);
 syncVoiceprint();
+if (storedVoiceprint()) speaker.prepareSpeaker();
 $('reenter').addEventListener('click', async () => { listening = false; setMicrophoneMuted(microphoneMuted); stopConversation(); await recorderFlush; setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); savedState(false); $('token').focus(); });
 $('forget').addEventListener('click', async () => { listening = false; setMicrophoneMuted(microphoneMuted); stopConversation(); await recorderFlush; stopLearning(); localStorage.removeItem(KEY); localStorage.removeItem(VOICEPRINT); syncVoiceprint(); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); await sendFrame('bye').catch(() => {}); generation++; connected = false; resetPuppetConnection(new Error('connection replaced'), true); await puppetChannel.clearCache().catch(() => {}); savedState(false); setStatus('token forgotten'); });
 navigator.mediaDevices?.addEventListener('devicechange', syncSpotter);

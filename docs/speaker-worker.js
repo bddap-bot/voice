@@ -2,9 +2,10 @@ import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/o
 import { MODEL, SpeakerEnrollment, SpeakerGate } from './speaker.js';
 
 ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
+let loading;
+let current;
 let listener;
 let queue = Promise.resolve();
-const fail = (error) => postMessage({ error: String(error?.stack ?? error) });
 
 async function modelBytes() {
   const cache = await caches.open('voice-speaker-model');
@@ -20,35 +21,42 @@ async function modelBytes() {
   return bytes;
 }
 
-async function start({ voiceprint, enroll }) {
-  const session = await ort.InferenceSession.create(await modelBytes());
+function session() {
+  loading ??= modelBytes().then((bytes) => ort.InferenceSession.create(bytes));
+  loading.catch(() => { loading = undefined; });
+  return loading;
+}
+
+async function start({ id, voiceprint, enroll }) {
+  const model = await session();
   let spent = 0;
   const embed = async (features, frames) => {
     const started = performance.now();
-    const output = await session.run({ [session.inputNames[0]]: new ort.Tensor('float32', features, [1, frames, 80]) });
+    const output = await model.run({ [model.inputNames[0]]: new ort.Tensor('float32', features, [1, frames, 80]) });
     spent = Math.round(performance.now() - started);
-    return output[session.outputNames[0]].data;
+    return output[model.outputNames[0]].data;
   };
+  const post = (event) => postMessage({ id, ...event });
+  current = id;
   if (enroll) {
     const enrollment = new SpeakerEnrollment({ embed });
     let reported = 0;
     listener = async (chunk) => {
       if (reported === 1) return;
       const { progress, voiceprint: learned } = await enrollment.push(chunk);
-      if (learned) postMessage({ voiceprint: learned });
-      else if (progress > reported) postMessage({ progress });
+      if (learned) post({ voiceprint: learned });
+      else if (progress > reported) post({ progress });
       reported = progress;
     };
   } else {
-    const gate = new SpeakerGate({ voiceprint, embed, send: (event) => postMessage('score' in event ? { ...event, ms: spent } : event) });
+    const gate = new SpeakerGate({ voiceprint, embed, send: (event) => post('score' in event ? { ...event, ms: spent } : event) });
     listener = (chunk) => gate.push(chunk);
   }
 }
 
 onmessage = ({ data }) => {
-  if (!(data instanceof Float32Array)) {
-    queue = queue.then(() => start(data)).catch(fail);
-    return;
-  }
-  queue = queue.then(() => listener?.(data)).catch(fail);
+  if (data.load) session().catch(() => {});
+  else if (data.stop) queue = queue.then(() => { if (current === data.id) current = listener = undefined; });
+  else if (data.chunk) queue = queue.then(() => current === data.id && listener(data.chunk)).catch((error) => postMessage({ id: data.id, error: String(error?.stack ?? error) }));
+  else queue = queue.then(() => start(data)).catch((error) => postMessage({ id: data.id, error: String(error?.stack ?? error) }));
 };

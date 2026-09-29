@@ -172,7 +172,7 @@ export class SpeechDetector {
     if (energy > -100) {
       this.heard.push(energy);
       if (this.heard.length > 1000) this.heard.shift();
-      if (this.seen++ % 10 === 0) this.floor = [...this.heard].sort((x, y) => x - y)[Math.floor(this.heard.length / 10)];
+      if (this.seen++ % 10 === 0) this.floor = [...this.heard].sort((x, y) => x - y)[Math.floor(this.heard.length / 50)];
     }
     const speech = energy > Math.max(this.floor + 18, -70);
     this.recent.push(speech);
@@ -315,34 +315,53 @@ export class GrantedAudio {
   }
 }
 
+let worker;
+let graphs = 0;
+const listeners = new Map();
+
+function speakerWorker() {
+  if (worker) return worker;
+  worker = new Worker(new URL('./speaker-worker.js', import.meta.url), { type: 'module' });
+  worker.onmessage = ({ data }) => listeners.get(data.id)?.(data);
+  worker.onerror = (event) => {
+    worker.terminate();
+    worker = undefined;
+    for (const [id, heard] of listeners) heard({ id, error: event.message || 'speaker worker failed' });
+  };
+  return worker;
+}
+
+export function prepareSpeaker() {
+  speakerWorker().postMessage({ load: true });
+}
+
 async function speakerGraph(stream, message, heard) {
+  const id = ++graphs;
   const context = new AudioContext({ sampleRate: RATE });
-  let worker;
   try {
     await context.audioWorklet.addModule(new URL('./speaker-worklet.js', import.meta.url));
-    worker = new Worker(new URL('./speaker-worker.js', import.meta.url), { type: 'module' });
     const node = new AudioWorkletNode(context, 'speaker-gate', { outputChannelCount: [1], channelCount: 1, channelCountMode: 'explicit' });
     const source = context.createMediaStreamSource(stream);
     const destination = context.createMediaStreamDestination();
-    source.connect(node).connect(destination);
-    node.port.onmessage = ({ data }) => worker.postMessage(data, [data.buffer]);
-    worker.onmessage = ({ data }) => {
+    listeners.set(id, (data) => {
       if ('open' in data || 'close' in data) node.port.postMessage(data);
       heard(data);
-    };
-    worker.onerror = (event) => heard({ error: event.message || 'speaker worker failed' });
-    worker.postMessage(message);
+    });
+    speakerWorker().postMessage({ id, ...message });
+    node.port.onmessage = ({ data }) => worker?.postMessage({ id, chunk: data }, [data.buffer]);
+    source.connect(node).connect(destination);
     if (context.state === 'suspended') for (const type of ['pointerdown', 'keydown']) addEventListener(type, () => { if (context.state === 'suspended') context.resume(); }, { once: true });
     return {
       stream: destination.stream,
       close() {
+        listeners.delete(id);
+        worker?.postMessage({ id, stop: true });
         source.disconnect();
-        worker.terminate();
         return context.close();
       },
     };
   } catch (error) {
-    worker?.terminate();
+    listeners.delete(id);
     context.close();
     throw error;
   }

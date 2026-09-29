@@ -230,7 +230,9 @@ const fakeSpeaker = (stream, voiceprint, heard) => {
   gateStarts.push(gate);
   return gate;
 };
+globalThis.speakerPrepared = 0;
 globalThis.__voiceSpeaker = {
+  prepareSpeaker: () => { speakerPrepared++; },
   startSpeakerGate: async (stream, voiceprint, heard) => fakeSpeaker(stream, voiceprint, heard),
   learnVoice: async (stream, heard) => { const gate = fakeSpeaker(stream, null, heard); return { close: () => gate.close() }; },
 };
@@ -549,9 +551,9 @@ const voiceprintSetup = (model = MODEL.sha256) => `localStorage.setItem('voice.t
 
 test('without a voiceprint for the current model a conversation sends the microphone itself', async () => {
   const result = await runWakePage(`
-    return { sent: sentTracks.at(-1) === testMicrophoneTrack, gates: gateStarts.length, label: document.querySelector('#voice-print').textContent };
+    return { sent: sentTracks.at(-1) === testMicrophoneTrack, gates: gateStarts.length, prepared: speakerPrepared, label: document.querySelector('#voice-print').textContent };
   `, { setup: voiceprintSetup('an earlier model') });
-  assert.deepEqual(result, { sent: true, gates: 0, label: 'Learn my voice' });
+  assert.deepEqual(result, { sent: true, gates: 0, prepared: 0, label: 'Learn my voice' });
 });
 
 test('learning a voice happens between conversations, pauses wake listening and stores only the voiceprint', async () => {
@@ -577,7 +579,7 @@ test('learning a voice happens between conversations, pauses wake listening and 
 test('a voiceprint filters each conversation, mute still silences the microphone, and a filter failure falls back to it', async () => {
   const result = await runWakePage(`
     const gate = gateStarts[0];
-    const filtered = { input: gate.input.getAudioTracks()[0] === testMicrophoneTrack, voiceprint: gate.voiceprint, sent: sentTracks.at(-1).gated === true };
+    const filtered = { prepared: speakerPrepared, input: gate.input.getAudioTracks()[0] === testMicrophoneTrack, voiceprint: gate.voiceprint, sent: sentTracks.at(-1).gated === true };
     document.querySelector('#mic-mute').click();
     const muted = testMicrophoneTrack.enabled;
     document.querySelector('#mic-mute').click();
@@ -591,7 +593,7 @@ test('a voiceprint filters each conversation, mute still silences the microphone
     return { filtered, muted, failed, scores: sessionEvents('speaker-score').map((event) => JSON.parse(event.detail)), next: gateStarts[1].voiceprint };
   `, { setup: voiceprintSetup() });
   assert.deepEqual(result, {
-    filtered: { input: true, voiceprint: [0.5, 0.75], sent: true },
+    filtered: { prepared: 1, input: true, voiceprint: [0.5, 0.75], sent: true },
     muted: false,
     failed: { replaced: true, closed: 1, status: 'speaker filter off, hearing everyone: Error: speaker model download failed: 404', live: 'true' },
     scores: [{ score: 0.75, from: 0, to: 16000, ms: 90 }],

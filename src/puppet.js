@@ -271,6 +271,8 @@ export class PuppetRuntime {
       VRMUtils.deepDispose(vrm.scene);
       return false;
     }
+    VRMUtils.removeUnnecessaryVertices(vrm.scene);
+    VRMUtils.combineSkeletons(vrm.scene);
     const box = new THREE.Box3().setFromObject(vrm.scene);
     const size = box.getSize(new THREE.Vector3());
     const scale = size.y ? 2.7 / size.y : 1;
@@ -281,7 +283,6 @@ export class PuppetRuntime {
     vrm.scene.position.y -= fitted.min.y;
     vrm.scene.position.z -= center.z;
     vrm.scene.traverse((object) => { object.frustumCulled = false; });
-    VRMUtils.removeUnnecessaryVertices(vrm.scene);
     vrm.humanoid.setNormalizedPose(standingPose(vrm));
     vrm.update(0);
     if (this.vrm) {

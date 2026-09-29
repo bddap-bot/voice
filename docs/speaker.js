@@ -12,6 +12,7 @@ export const GATE = {
   shortest: 40,
   every: 100,
   window: 150,
+  longest: 300,
 };
 export const OFFSET = 60;
 const ONSET = 4;
@@ -238,13 +239,13 @@ export class SpeakerGate {
   step(event, now) {
     if (event.start !== undefined) {
       const start = Math.max(0, now - event.start - GATE.preroll);
-      this.segments.push({ start, state: 'waiting', due: start + GATE.every, end: null });
+      this.segments.push({ start, state: 'waiting', scored: false, due: start + GATE.every, end: null });
     }
     const segment = this.segments.at(-1);
     if (event.end === undefined || !segment || segment.end !== null) return;
     segment.end = now - event.end + GATE.tail;
     if (segment.state === 'open') this.send({ close: segment.end * HOP });
-    segment.due = segment.state === 'waiting' && segment.end - segment.start >= GATE.shortest ? now : null;
+    segment.due = segment.state === 'waiting' && !segment.scored && segment.end - segment.start >= GATE.shortest ? now : null;
   }
   decide() {
     if (this.pending) return;
@@ -253,7 +254,7 @@ export class SpeakerGate {
     const segment = this.segments.find((item) => item.due <= now);
     if (!segment) return;
     const to = segment.end ?? now;
-    const from = Math.max(segment.start, segment.state === 'waiting' ? now - RING : to - GATE.window);
+    const from = Math.max(segment.start, to - (segment.state === 'open' ? GATE.window : GATE.longest));
     const { features, frames } = this.frames.features(from, to);
     this.pending = this.embed(features, frames).then((embedding) => {
       const score = similarity(this.print, normalized(embedding));
@@ -265,14 +266,15 @@ export class SpeakerGate {
   }
   verdict(segment, match, from, to) {
     const next = segment.end === null ? this.frames.count + GATE.every : null;
+    segment.scored = true;
     if (segment.state === 'open' && !match) {
       this.send({ close: Math.round((from + to) / 2) * HOP });
       Object.assign(segment, { state: 'waiting', start: to });
-    } else if (segment.state !== 'open' && match) {
+    } else if (segment.state === 'waiting' && match) {
       this.send({ open: from * HOP });
       if (segment.end !== null) this.send({ close: segment.end * HOP });
       segment.state = 'open';
-    } else if (!match) segment.state = 'rejected';
+    }
     segment.due = next;
   }
 }

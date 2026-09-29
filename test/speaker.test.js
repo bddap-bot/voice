@@ -28,7 +28,7 @@ function join(...parts) {
   return out;
 }
 
-async function runGate(audio, owner, runChunks = 0) {
+async function runGate(audio, owner, runChunks = 0, evidence = 0) {
   const events = [];
   const running = [];
   let span;
@@ -36,7 +36,7 @@ async function runGate(audio, owner, runChunks = 0) {
   const embed = () => {
     const [from, to] = span;
     const own = Math.max(0, Math.min(to, owner[1]) - Math.max(from, owner[0]));
-    const embedding = own * 2 > to - from ? [1, 0.1] : [0.1, 1];
+    const embedding = own * 2 > to - from && to - from >= evidence * HOP ? [1, 0.1] : [0.1, 1];
     if (!runChunks) return Promise.resolve(embedding);
     return new Promise((resolve) => {
       running.push({ left: runChunks, finish: () => resolve(embedding) });
@@ -143,6 +143,7 @@ test('the enrolled voice passes whole and delayed, while another voice never pas
   const { events, out } = await runGate(audio, [spokenAt, spokenAt + owner.length]);
   assert.deepEqual(events.filter((event) => 'open' in event || 'close' in event).map((event) => Object.keys(event)[0]), ['open', 'close']);
   assert.equal(located(out, other.subarray(4000, 12000)), -1);
+  assert.equal(events.filter((event) => 'score' in event && event.to <= spokenAt).length, 2, 'the other voice is scored each second while it lasts, not again when it ends');
   const at = located(out, owner);
   assert.ok(at > 0, 'the whole enrolled utterance, from its first sample, is forwarded');
   const lag = (at - spokenAt) / RATE;
@@ -170,6 +171,13 @@ test('a model slower than real time delays decisions without queueing them or cl
   assert.ok(lag > 1.5 && lag < 2.2, `forwarded ${lag.toFixed(2)} s after it was spoken`);
   assert.equal(located(out, other.subarray(4000, 12000)), -1);
   assert.deepEqual(events.filter((event) => 'open' in event || 'close' in event).map((event) => Object.keys(event)[0]), ['open', 'close']);
+});
+
+test('a voice rejected on its first second is released from its start once a longer span matches', async () => {
+  const owner = tone(OWNER_HZ, 3);
+  const { events, out } = await runGate(join(silence(1), owner, silence(2)), [RATE, RATE + owner.length], 0, 150);
+  assert.deepEqual(events.filter((event) => 'score' in event).slice(0, 2).map((event) => event.score >= GATE.threshold), [false, true]);
+  assert.ok(located(out, owner) > 0);
 });
 
 test('a voice that starts while the model is still busy is scored and forwarded from its start', async () => {

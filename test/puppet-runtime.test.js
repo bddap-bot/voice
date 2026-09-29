@@ -473,12 +473,26 @@ test('sit and stand transitions keep model-root and head velocity bounded', () =
   assert.ok(runtime.handovers.get('stand:idle').duration > runtime.handovers.get('sit:sit-idle').duration);
 });
 
-test('ready-to-play tracks decode without FBX parsing', async () => {
-  const payload = new TextEncoder().encode(JSON.stringify({ name: 'Idle', duration: 1, tracks: [{ name: 'Hips.quaternion', times: [0, 1], values: [0, 0, 0, 1, 0, 0, 0, 1] }] }));
-  const clip = await animationClip(payload, 'tracks', {});
-  assert.equal(clip.name, 'Idle');
-  assert.equal(clip.tracks[0].name, 'Hips.quaternion');
-  assert.equal(clip.userData.poseTracks[0].valueSize, 4);
+test('motions bind to each puppet by bone, mirroring VRM 0 and scaling hips to its height', async () => {
+  const motion = { name: 'Idle', duration: 1, hipsHeight: 100, tracks: [
+    { name: 'hips.quaternion', times: [0, 1], values: [0.1, 0.2, 0.3, 0.9, 0, 0, 0, 1] },
+    { name: 'hips.position', times: [0], values: [10, 100, 20] },
+    { name: 'leftToes.quaternion', times: [0], values: [0, 0, 0, 1] },
+  ] };
+  const hips = new THREE.Bone();
+  hips.name = 'Normalized_Hips';
+  const puppet = (metaVersion, height) => ({ meta: { metaVersion }, humanoid: { getNormalizedBoneNode: (name) => name === 'hips' ? hips : null, normalizedRestPose: { hips: { position: [0.5, height, 0.25] } } } });
+  const modern = await animationClip(motion, 'motion', puppet('1', 0.9));
+  assert.deepEqual(modern.tracks.map((track) => track.name), ['Normalized_Hips.quaternion', 'Normalized_Hips.position']);
+  assert.deepEqual(Array.from(modern.tracks[0].values), [0.1, 0.2, 0.3, 0.9, 0, 0, 0, 1].map(Math.fround));
+  assert.deepEqual(Array.from(modern.tracks[1].values), [10 * 0.009, 0.9, 20 * 0.009].map(Math.fround));
+  assert.equal(modern.userData.poseTracks[0].valueSize, 4);
+  const legacy = await animationClip(motion, 'motion', puppet('0', 1.2));
+  assert.deepEqual(Array.from(legacy.tracks[0].values), [-0.1, 0.2, -0.3, 0.9, -0, 0, -0, 1].map(Math.fround));
+  assert.deepEqual(Array.from(legacy.tracks[1].values), [-10 * 0.012, 1.2, -20 * 0.012].map(Math.fround));
+  const stray = { ...motion, tracks: [...motion.tracks, { name: 'rightHand.position', times: [0], values: [1, 2, 3] }] };
+  await assert.rejects(animationClip(stray, 'motion', puppet('1', 0.9)), /invalid motion track/);
+  await assert.rejects(animationClip({ ...motion, hipsHeight: 0 }, 'motion', puppet('1', 0.9)), /no source hips height/);
 });
 
 test('every loaded puppet shows its first clip at full weight on its first frame, and telemetry records only changed weights and hip height', () => {
@@ -705,25 +719,25 @@ test('the feet anchor the puppet through sitting, gestures and standing while th
   });
   const nodes = { hips, leftFoot: legs[0].foot, rightFoot: legs[1].foot, leftUpperLeg: legs[0].upper, rightUpperLeg: legs[1].upper, leftLowerLeg: legs[0].lower, rightLowerLeg: legs[1].lower };
   const node = (name) => nodes[name] ?? null;
-  const vrm = { scene, meta: { metaVersion: '1' }, humanoid: { update() {}, getRawBoneNode: node, getNormalizedBoneNode: node } };
+  const vrm = { scene, meta: { metaVersion: '1' }, humanoid: { update() {}, getRawBoneNode: node, getNormalizedBoneNode: node, normalizedRestPose: { hips: { position: hips.position.toArray() } } } };
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
     vrm, ankleHeight: 0.1, mixer: new THREE.AnimationMixer(scene), clips: new Map(), handovers: new Map(),
     bones: new Map(), poseName: 'stand', idleClip: 'idle', nextIdleAt: Infinity,
   });
   const bend = (angle, sign) => new THREE.Quaternion().setFromEuler(new THREE.Euler(sign * angle, 0, 0)).toArray();
-  const payload = (name, heights, offset, angles) => new TextEncoder().encode(JSON.stringify({
-    name, duration: 1, tracks: [
-      { name: `${hips.name}.position`, times: [0, 0.5, 1], values: heights.flatMap((height, i) => [offset + i * 0.2, height, offset - i * 0.3]) },
-      ...legs.flatMap(({ upper, lower }) => [
-        { name: `${upper.name}.quaternion`, times: [0, 1], values: angles.flatMap((angle) => bend(angle, -1)) },
-        { name: `${lower.name}.quaternion`, times: [0, 1], values: angles.flatMap((angle) => bend(angle, 1)) },
+  const payload = (name, heights, offset, angles) => ({
+    name, duration: 1, hipsHeight: 1, tracks: [
+      { name: 'hips.position', times: [0, 0.5, 1], values: heights.flatMap((height, i) => [offset + i * 0.2, height, offset - i * 0.3]) },
+      ...['left', 'right'].flatMap((side) => [
+        { name: `${side}UpperLeg.quaternion`, times: [0, 1], values: angles.flatMap((angle) => bend(angle, -1)) },
+        { name: `${side}LowerLeg.quaternion`, times: [0, 1], values: angles.flatMap((angle) => bend(angle, 1)) },
       ]),
     ],
-  }));
+  });
   const entries = [
     ['idle', [1, 1.02, 1], 0.1, [0, 0.05]], ['sit', [1, 0.7, 0.5], 0.4, [0, 1.5]],
     ['sit-idle', [0.5, 0.52, 0.5], -0.2, [1.5, 1.45]], ['stand', [0.5, 0.8, 1], -0.5, [1.5, 0]],
-  ].map(([action, heights, offset, angles]) => ({ action, format: 'tracks', bytes: payload(action, heights, offset, angles) }));
+  ].map(([action, heights, offset, angles]) => ({ action, format: 'motion', data: payload(action, heights, offset, angles) }));
   await runtime.loadClips(entries);
   const left = new THREE.Vector3();
   const right = new THREE.Vector3();
@@ -748,7 +762,7 @@ test('the feet anchor the puppet through sitting, gestures and standing while th
   advance(1);
   runtime.pose('sit');
   advance(7);
-  await runtime.loadClips([{ action: 'clap', format: 'tracks', bytes: payload('clap', [0.5, 0.55, 0.5], 0.8, [1.5, 1.5]) }]);
+  await runtime.loadClips([{ action: 'clap', format: 'motion', data: payload('clap', [0.5, 0.55, 0.5], 0.8, [1.5, 1.5]) }]);
   assert.equal(runtime.clipStance('clap'), 'sit');
   runtime.gesture('clap');
   assert.equal(runtime.poseName, 'sit');

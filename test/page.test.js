@@ -60,6 +60,7 @@ export default async function initWasm() {}
 export async function init() {}
 export async function connect() { lost = false; }
 export async function send_only(bytes) {
+  if (globalThis.relayLatency) await new Promise((resolve) => setTimeout(resolve, relayLatency));
   const frame = dec.decode(bytes);
   (globalThis.sentVerbs ??= []).push(frame.split('\\n', 1)[0]);
   if (frame.startsWith('hub-ack\\n')) {
@@ -90,19 +91,20 @@ export async function send_only(bytes) {
     else sendCatalog();
   }
   else if (frame === 'clips') deliver(enc.encode('clips\\n' + JSON.stringify({ clips: [{ action: 'sit', name: 'sit.fbx', format: 'fbx', contentHash: 'sit-hash' }, { action: 'idle', name: 'idle.fbx', format: 'fbx', contentHash: 'idle-hash' }] })));
-  else if (frame.startsWith('track\\n')) {
+  else if (frame.startsWith('motion\\n')) {
     const request = JSON.parse(frame.slice(frame.indexOf('\\n') + 1));
     const id = request.id;
     globalThis.transferOrder.push(id);
-    const hash = request.modelHash + '-' + request.clipHash;
-    const compressed = new Uint8Array(await new Response(new Blob([Uint8Array.from([7, 8, 9])]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
-    deliver(enc.encode('track-start\\n' + JSON.stringify({ id, size: compressed.length, originalSize: 3, contentHash: hash, encoding: 'gzip' })));
-    const prefix = enc.encode('track-chunk\\n' + id + '\\n');
+    const hash = request.clipHash;
+    const motion = enc.encode(JSON.stringify({ clip: id }));
+    const compressed = new Uint8Array(await new Response(new Blob([motion]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+    deliver(enc.encode('motion-start\\n' + JSON.stringify({ id, size: compressed.length, originalSize: motion.length, contentHash: hash, encoding: 'gzip' })));
+    const prefix = enc.encode('motion-chunk\\n' + id + '\\n');
     const chunk = new Uint8Array(prefix.length + compressed.length);
     chunk.set(prefix);
     chunk.set(compressed, prefix.length);
     deliver(chunk);
-    deliver(enc.encode('track-end\\n' + id));
+    deliver(enc.encode('motion-end\\n' + id));
   }
   else if (frame.startsWith('puppet\\n')) {
     const id = JSON.parse(frame.slice(frame.indexOf('\\n') + 1)).id;
@@ -143,8 +145,8 @@ export async function recv() {
 const fakePuppet = `
 export class PuppetRuntime {
   constructor(canvas) { this.canvas = canvas; this.calls = []; this.humanoidBone = 0; globalThis.testPuppet = this; }
-  async load(bytes, initialClip, valid, beforeCommit) { await beforeCommit(); globalThis.firstVisible = { playable: initialClip?.action ?? 'Standing', order: [...transferOrder] }; this.humanoidBone += initialClip?.bytes.byteLength ?? 0; const context = this.canvas.getContext('2d'); context.fillStyle = '#50c878'; context.fillRect(0, 0, this.canvas.width, this.canvas.height); return valid(); }
-  async loadClips(entries) { const before = this.humanoidBone; this.humanoidBone += entries.reduce((sum, entry) => sum + entry.bytes.byteLength, 0); globalThis.clipMovement = { before, after: this.humanoidBone, loaded: entries.map((entry) => [entry.action, entry.format]) }; }
+  async load(bytes, initialClip, valid, beforeCommit) { await beforeCommit(); globalThis.firstVisible = { playable: initialClip?.action ?? 'Standing', order: [...transferOrder] }; this.humanoidBone += initialClip?.bytes.byteLength ?? 0; const context = this.canvas.getContext('2d'); context.fillStyle = '#50c878'; context.fillRect(0, 0, this.canvas.width, this.canvas.height); return true; }
+  async loadClips(entries) { const before = this.humanoidBone; this.humanoidBone += entries.length; globalThis.clipMovement = { before, after: this.humanoidBone, loaded: entries.map((entry) => [entry.action, entry.format, entry.data]) }; }
   pose(...args) { this.calls.push(['pose', ...args]); }
   gesture(...args) { this.calls.push(['gesture', ...args]); }
   mood(...args) { this.calls.push(['mood', ...args]); }
@@ -998,11 +1000,64 @@ window.addEventListener('test-ready', () => {
 test('the page loads the active puppet and its clips without fetching inactive puppets', async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => setTimeout(() => {
-  document.body.dataset.initialPuppetTest = JSON.stringify({ requests: puppetRequests, cacheKeys: [...puppetCache.keys()].map((url) => new URL(url).pathname.split('/').at(-1)), clipMovement, firstVisible });
+  document.body.dataset.initialPuppetTest = JSON.stringify({ requests: puppetRequests, cacheKeys: [...puppetCache.keys()].map((url) => new URL(url).pathname.split('/').at(-1)), clipMovement, firstVisible: { ...firstVisible, order: firstVisible.order.slice(0, 1) } });
 }, 100));
 `);
   const encoded = /data-initial-puppet-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { requests: ['42'], cacheKeys: ['hash-42.vrm', 'hash-42-sit-hash.json', 'hash-42-idle-hash.json'], clipMovement: { before: 0, after: 6, loaded: [['sit', 'tracks'], ['idle', 'tracks']] }, firstVisible: { playable: 'Standing', order: ['42'] } }, stderr);
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { requests: ['42'], cacheKeys: ['hash-42.vrm', 'sit-hash.motion', 'idle-hash.motion'], clipMovement: { before: 0, after: 2, loaded: [['sit', 'motion', { clip: 'sit.fbx' }], ['idle', 'motion', { clip: 'idle.fbx' }]] }, firstVisible: { playable: 'Standing', order: ['42'] } }, stderr);
+});
+
+test('a first switch to an unseen puppet sits right after its first render, with no relay traffic between, and the selector stays live', async () => {
+  const { stdout, stderr } = await runPage(`
+globalThis.relayLatency = 500;
+window.addEventListener('test-ready', function switchOnceSeated() {
+  if (!globalThis.clipMovement) return setTimeout(switchOnceSeated, 10);
+  const choice = document.querySelector('#puppet-choice');
+  let disabled = false;
+  new MutationObserver(() => { disabled ||= choice.disabled; }).observe(choice, { attributes: true });
+  const booted = firstVisible;
+  const seated = clipMovement;
+  choice.value = '43';
+  choice.dispatchEvent(new Event('change'));
+  let rendered;
+  const poll = setInterval(() => {
+    if (!rendered && firstVisible !== booted) rendered = { at: performance.now(), sent: sentVerbs.length };
+    if (!rendered || clipMovement === seated) return;
+    clearInterval(poll);
+    document.body.dataset.firstSwitchTest = JSON.stringify({ renderToSitMs: Math.round(performance.now() - rendered.at), sentBetween: sentVerbs.slice(rendered.sent), disabled, selected: choice.value });
+  }, 4);
+});
+`, { budget: 12000 });
+  const encoded = /data-first-switch-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  const result = JSON.parse(encoded ?? 'null');
+  assert.ok(result, stderr);
+  assert.deepEqual(result.sentBetween, [], stderr);
+  assert.ok(result.renderToSitMs <= 100, `render to sitting took ${result.renderToSitMs} ms`);
+  assert.equal(result.disabled, false);
+  assert.equal(result.selected, '43');
+});
+
+test('choosing again mid-load supersedes the pending puppet without an error', async () => {
+  const { stdout, stderr } = await runPage(`
+globalThis.relayLatency = 200;
+window.addEventListener('test-ready', function switchOnceSeated() {
+  if (!globalThis.clipMovement) return setTimeout(switchOnceSeated, 10);
+  const choice = document.querySelector('#puppet-choice');
+  choice.value = '43';
+  choice.dispatchEvent(new Event('change'));
+  setTimeout(() => {
+    choice.value = '44';
+    choice.dispatchEvent(new Event('change'));
+  }, 50);
+  const poll = setInterval(() => {
+    if (clipMovement.after < 4) return;
+    clearInterval(poll);
+    setTimeout(() => { document.body.dataset.supersedeTest = JSON.stringify({ selected: choice.value, status: document.querySelector('#status').textContent, requests: puppetRequests, seated: clipMovement.after }); }, 1000);
+  }, 10);
+});
+`, { budget: 12000 });
+  const encoded = /data-supersede-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { selected: '44', status: '', requests: ['42', '43', '44'], seated: 4 }, stderr);
 });
 
 test('choosing an inactive puppet fetches only that puppet on demand', async () => {

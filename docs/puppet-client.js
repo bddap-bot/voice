@@ -65,8 +65,8 @@ export class PuppetChannel {
   clipBytes(entry) {
     return this.transferBytes('clip', entry.name, entry.contentHash, entry.format);
   }
-  trackBytes(modelHash, entry) {
-    return this.transferBytes('track', entry.name, `${modelHash}-${entry.contentHash}`, 'json', { modelHash, clipHash: entry.contentHash });
+  motionBytes(entry) {
+    return this.transferBytes('motion', entry.name, entry.contentHash, 'motion', { clipHash: entry.contentHash });
   }
   async bytes(id, contentHash = '') {
     return this.transferBytes('puppet', id, contentHash, 'vrm');
@@ -115,7 +115,7 @@ export class PuppetChannel {
   async receive(raw) {
     const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
     const [verb, offset] = line(bytes);
-    if (!verb.startsWith('puppet') && !verb.startsWith('clip') && !verb.startsWith('track')) return false;
+    if (!verb.startsWith('puppet') && !verb.startsWith('clip') && !verb.startsWith('motion')) return false;
     if (verb === 'clips') {
       const waiter = this.clipCatalogWaiter;
       this.clipCatalogWaiter = null;
@@ -147,7 +147,7 @@ export class PuppetChannel {
       else this.selectionWaiter?.reject(new Error(value.message));
       return true;
     }
-    if (verb === 'puppet-start' || verb === 'clip-start' || verb === 'track-start') {
+    if (verb === 'puppet-start' || verb === 'clip-start' || verb === 'motion-start') {
       const value = JSON.parse(decoder.decode(bytes.subarray(offset)));
       const transfer = this.current(verb, 'start', value.id);
       if (!transfer) return true;
@@ -158,7 +158,7 @@ export class PuppetChannel {
       transfer.progress();
       return true;
     }
-    if (verb === 'puppet-chunk' || verb === 'clip-chunk' || verb === 'track-chunk') {
+    if (verb === 'puppet-chunk' || verb === 'clip-chunk' || verb === 'motion-chunk') {
       const [id, body] = line(bytes, offset);
       const transfer = this.current(verb, 'chunk', id);
       if (!transfer) return true;
@@ -170,7 +170,7 @@ export class PuppetChannel {
       transfer.progress();
       return true;
     }
-    if (verb === 'puppet-end' || verb === 'clip-end' || verb === 'track-end') {
+    if (verb === 'puppet-end' || verb === 'clip-end' || verb === 'motion-end') {
       const transfer = this.current(verb, 'end', decoder.decode(bytes.subarray(offset)));
       if (!transfer) return true;
       if (transfer.total !== transfer.size) return this.abandon(transfer, 'incomplete puppet transfer');
@@ -189,7 +189,7 @@ export class PuppetChannel {
       transfer.cache.put(transfer.request, new Response(decoded, { headers: { 'content-type': 'model/gltf-binary' } })).catch(() => {});
       return true;
     }
-    if (verb === 'puppet-error' || verb === 'clip-error' || verb === 'track-error') {
+    if (verb === 'puppet-error' || verb === 'clip-error' || verb === 'motion-error') {
       const value = JSON.parse(decoder.decode(bytes.subarray(offset)));
       const transfer = this.transfer;
       if (transfer && value.code !== 'busy' && verb === `${transfer.kind}-error` && (!value.id || value.id === transfer.id)) this.abandon(transfer, value.message);

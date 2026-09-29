@@ -171,6 +171,7 @@ let puppetLoadTail = Promise.resolve();
 let puppetEpoch = 0;
 let puppetRequest;
 let puppetLoading = false;
+let puppetMotions;
 let displayFreshTimer;
 let puppetActive;
 let puppetScope;
@@ -301,6 +302,7 @@ function resetPuppetConnection(error = new Error('connection replaced'), clearAp
   puppetRequest = Symbol('cancelled puppet request');
   puppetLoadTail = Promise.resolve();
   puppetLoading = false;
+  puppetMotions = undefined;
   puppetCatalog = undefined;
   if (clearAppearance) {
     puppetActive = undefined;
@@ -309,7 +311,6 @@ function resetPuppetConnection(error = new Error('connection replaced'), clearAp
     $('puppet-choice').replaceChildren();
     $('puppet-credit').textContent = '';
   }
-  $('puppet-choice').disabled = false;
   puppetChannel.fail(error);
   syncPuppetUi();
 }
@@ -1286,14 +1287,14 @@ function showPuppet(id) {
   const request = Symbol('puppet request');
   puppetRequest = request;
   puppetLoading = true;
-  $('puppet-choice').disabled = true;
   syncPuppetUi();
-  const operation = puppetLoadTail.then(() => loadPuppet(id, epoch, request));
+  const operation = puppetLoadTail.then(() => loadPuppet(id, epoch, request)).catch((error) => {
+    throw puppetRequest === request ? error : new Error('puppet load replaced');
+  });
   puppetLoadTail = operation.catch(() => {});
   return operation.finally(() => {
     if (puppetRequest !== request) return;
     puppetLoading = false;
-    $('puppet-choice').disabled = false;
     syncPuppetUi();
   });
 }
@@ -1303,26 +1304,40 @@ async function loadPuppet(id, epoch, request) {
   if (!current()) throw new Error('puppet load replaced');
   const avatar = puppetCatalog.avatars.find((item) => item.id === id);
   if (!avatar) throw new Error('puppet is unavailable');
-  const bytes = await puppetChannel.bytes(id, avatar.contentHash);
+  const puppetBytes = puppetChannel.bytes(id, avatar.contentHash);
+  const motions = clipMotions();
+  const bytes = await puppetBytes;
   if (!current()) throw new Error('puppet load replaced');
   if (!puppetRuntime) throw new Error('puppet renderer unavailable');
   const loaded = await puppetRuntime.load(bytes, null, current, () => puppetChannel.select(id));
   if (!loaded) throw new Error('puppet load replaced');
-  const clipCatalog = await puppetChannel.clips();
-  const clips = [];
-  for (const entry of clipCatalog.clips) clips.push(entry.format === 'fbx' ? { ...entry, format: 'tracks', bytes: await puppetChannel.trackBytes(avatar.contentHash, entry) } : { ...entry, bytes: await puppetChannel.clipBytes(entry) });
-  if (!current()) throw new Error('puppet load replaced');
-  await puppetRuntime.loadClips(clips);
-  if (!current()) throw new Error('puppet load replaced');
   $('puppet-credit').textContent = avatar.licenseFlags.creditRequired ? avatar.creditLine : '';
-  $('puppet-choice').value = id;
+  if (current()) $('puppet-choice').value = id;
   puppetActive = id;
   puppetScope = token.endpoint_id;
   syncPuppetUi();
+  try {
+    const clips = await motions;
+    if (epoch !== puppetEpoch) throw new Error('puppet load replaced');
+    await puppetRuntime.loadClips(clips);
+  } catch (error) {
+    if (puppetActive === id) puppetActive = undefined;
+    throw error;
+  }
+}
+
+function clipMotions() {
+  const motions = puppetMotions ??= puppetChannel.clips().then(async (catalog) => {
+    const clips = [];
+    for (const entry of catalog.clips) clips.push(entry.format === 'fbx' ? { ...entry, format: 'motion', data: JSON.parse(dec.decode(await puppetChannel.motionBytes(entry))) } : { ...entry, data: await puppetChannel.clipBytes(entry) });
+    return clips;
+  });
+  motions.catch(() => { if (puppetMotions === motions) puppetMotions = undefined; });
+  return motions;
 }
 
 function reportPuppetError(error) {
-  if (connected) setStatus(`puppet unavailable: ${error.message}`, 'err');
+  if (connected && error.message !== 'puppet load replaced') setStatus(`puppet unavailable: ${error.message}`, 'err');
 }
 
 async function loadPrivatePuppets() {
@@ -1336,7 +1351,7 @@ async function loadPrivatePuppets() {
     return option;
   }));
   $('puppet-choice').value = puppetActive ?? puppetCatalog.active;
-  if (!puppetActive && !puppetLoading) await showPuppet(puppetCatalog.active);
+  if (puppetActive !== puppetCatalog.active && !puppetLoading) await showPuppet(puppetCatalog.active);
 }
 
 $('puppet').addEventListener('click', toggleConversation);
@@ -1356,6 +1371,7 @@ for (const name of ['dragleave', 'drop']) $('share-target').addEventListener(nam
 $('share-target').addEventListener('drop', (event) => { try { chooseImage([...event.dataTransfer.files].find((file) => file.type.startsWith('image/'))); } catch (error) { setStatus(error.message, 'err'); } });
 $('share-send').addEventListener('click', () => submitShare().catch((error) => setStatus(error.message, 'err')));
 $('puppet-choice').addEventListener('change', () => showPuppet($('puppet-choice').value).catch((error) => {
+  if (error.message === 'puppet load replaced') return;
   if (puppetActive) $('puppet-choice').value = puppetActive;
   reportPuppetError(error);
 }));

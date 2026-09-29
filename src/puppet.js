@@ -77,11 +77,11 @@ function handoverFor(from, to) {
   return { offset: best.offset, duration: THREE.MathUtils.clamp(1.5 + best.distance * 4, 1.5, 2.5) };
 }
 
-export async function animationClip(bytes, format, vrm) {
+export async function animationClip(data, format, vrm) {
   if (format === 'vrma') {
     const loader = new GLTFLoader();
     loader.register((parser) => new VRMAnimationLoaderPlugin(parser));
-    const url = URL.createObjectURL(new Blob([bytes], { type: 'model/gltf-binary' }));
+    const url = URL.createObjectURL(new Blob([data], { type: 'model/gltf-binary' }));
     try {
       const gltf = await loader.loadAsync(url);
       const animation = gltf.userData.vrmAnimations?.[0];
@@ -89,17 +89,22 @@ export async function animationClip(bytes, format, vrm) {
       return createVRMAnimationClip(animation, vrm);
     } finally { URL.revokeObjectURL(url); }
   }
-  if (format === 'tracks') {
-    const value = JSON.parse(new TextDecoder().decode(bytes));
-    if (!value || typeof value.name !== 'string' || !Number.isFinite(value.duration) || !Array.isArray(value.tracks)) throw new Error('invalid animation tracks');
-    const tracks = value.tracks.map((track) => {
-      if (typeof track?.name !== 'string' || !Array.isArray(track.times) || !Array.isArray(track.values)) throw new Error('invalid animation track');
-      return track.name.endsWith('.quaternion')
-        ? new THREE.QuaternionKeyframeTrack(track.name, track.times, track.values)
-        : new THREE.VectorKeyframeTrack(track.name, track.times, track.values);
+  if (format === 'motion') {
+    if (!data || typeof data.name !== 'string' || !Number.isFinite(data.duration) || !Array.isArray(data.tracks)) throw new Error('invalid motion');
+    const mirrored = vrm.meta?.metaVersion === '0';
+    const tracks = data.tracks.flatMap((track) => {
+      if (typeof track?.name !== 'string' || !Array.isArray(track.times) || !Array.isArray(track.values)) throw new Error('invalid motion track');
+      const [bone, property] = track.name.split('.');
+      if (property !== 'quaternion' && track.name !== 'hips.position') throw new Error('invalid motion track');
+      const node = vrm.humanoid?.getNormalizedBoneNode(bone);
+      if (!node) return [];
+      if (property === 'quaternion') return [new THREE.QuaternionKeyframeTrack(`${node.name}.quaternion`, track.times, mirrored ? track.values.map((v, index) => index % 2 ? v : -v) : track.values)];
+      if (!(data.hipsHeight > 0)) throw new Error('motion has no source hips height');
+      const scale = Math.abs(vrm.humanoid.normalizedRestPose.hips.position[1]) / data.hipsHeight;
+      return [new THREE.VectorKeyframeTrack(`${node.name}.position`, track.times, track.values.map((v, index) => v * scale * (mirrored && index % 3 !== 1 ? -1 : 1)))];
     });
     if (!tracks.some((track) => track.name.endsWith('.quaternion'))) throw new Error('animation has no rotation tracks');
-    const clip = new THREE.AnimationClip(value.name, value.duration, tracks);
+    const clip = new THREE.AnimationClip(data.name, data.duration, tracks);
     clip.userData.poseTracks = tracks.map((track) => ({ name: track.name, valueSize: track.getValueSize(), interpolant: track.createInterpolant() }));
     return clip;
   }
@@ -255,10 +260,6 @@ export class PuppetRuntime {
       VRMUtils.deepDispose(vrm.scene);
       throw error;
     }
-    if (!valid()) {
-      VRMUtils.deepDispose(vrm.scene);
-      return false;
-    }
     VRMUtils.removeUnnecessaryVertices(vrm.scene);
     VRMUtils.combineSkeletons(vrm.scene);
     const box = new THREE.Box3().setFromObject(vrm.scene);
@@ -305,7 +306,7 @@ export class PuppetRuntime {
   async loadClips(entries) {
     const vrm = this.vrm;
     for (const entry of entries) {
-      const clip = await animationClip(entry.bytes, entry.format, vrm);
+      const clip = await animationClip(entry.data, entry.format, vrm);
       if (this.vrm !== vrm) return;
       if (IDLE_CLIPS.stand.includes(entry.action)) anchorStandingIdle(clip, vrm);
       clip.userData.action = entry.action;

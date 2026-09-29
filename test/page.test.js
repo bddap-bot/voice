@@ -592,13 +592,90 @@ window.addEventListener('test-ready', () => {
   ], stderr);
 });
 
-const voiceprintSetup = (model = MODEL.sha256) => `localStorage.setItem('voice.token.voiceprint', JSON.stringify({ model: ${JSON.stringify(model)}, print: [0.5, 0.75] }));`;
+const voiceprintSetup = (model = MODEL.sha256, off = false) => `localStorage.setItem('voice.token.voiceprint', JSON.stringify({ model: ${JSON.stringify(model)}, print: [0.5, 0.75]${off ? ', off: true' : ''} }));`;
 
 test('without a voiceprint for the current model a conversation sends the microphone itself', async () => {
   const result = await runWakePage(`
-    return { sent: sentTracks.at(-1) === testMicrophoneTrack, gates: gateStarts.length, prepared: speakerPrepared, label: document.querySelector('#voice-print').textContent };
+    return { sent: sentTracks.at(-1) === testMicrophoneTrack, gates: gateStarts.length, prepared: speakerPrepared, label: document.querySelector('#voice-print').textContent, toggle: document.querySelector('#voice-filter').classList.contains('hidden') };
   `, { setup: voiceprintSetup('an earlier model') });
-  assert.deepEqual(result, { sent: true, gates: 0, prepared: 0, label: 'Learn my voice' });
+  assert.deepEqual(result, { sent: true, gates: 0, prepared: 0, label: 'Learn my voice', toggle: true });
+});
+
+test('voice ID switches a live session both ways, keeps the voiceprint, and off sends the microphone itself', async () => {
+  const result = await runWakePage(`
+    const toggle = document.querySelector('#voice-filter');
+    const state = () => ({ label: toggle.textContent, pressed: toggle.getAttribute('aria-pressed'), hidden: toggle.classList.contains('hidden'), gates: gateStarts.length, closed: gateStarts.map((gate) => gate.closed), sent: (globalThis.replacedTracks ?? []).at(-1)?.gated ?? null, print: localStorage.getItem('voice.token.voiceprint') !== null, live: document.querySelector('#puppet').getAttribute('aria-pressed') });
+    const on = { ...state(), sent: sentTracks.at(-1).gated === true };
+    toggle.click();
+    await until(() => (globalThis.replacedTracks ?? []).length === 1);
+    const off = { ...state(), sent: replacedTracks.at(-1) === testMicrophoneTrack };
+    toggle.click();
+    await until(() => replacedTracks.length === 2);
+    const back = state();
+    toggle.click();
+    await until(() => replacedTracks.length === 3);
+    await sleepNow();
+    document.querySelector('#puppet').click();
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+    const next = { gates: gateStarts.length, sent: sentTracks.at(-1) === testMicrophoneTrack, stored: JSON.parse(localStorage.getItem('voice.token.voiceprint')) };
+    return { on, off, back, next };
+  `, { setup: voiceprintSetup() });
+  assert.deepEqual(result, {
+    on: { label: 'Voice ID on', pressed: 'true', hidden: false, gates: 1, closed: [0], sent: true, print: true, live: 'true' },
+    off: { label: 'Voice ID off', pressed: 'false', hidden: false, gates: 1, closed: [1], sent: true, print: true, live: 'true' },
+    back: { label: 'Voice ID on', pressed: 'true', hidden: false, gates: 2, closed: [1, 0], sent: true, print: true, live: 'true' },
+    next: { gates: 2, sent: true, stored: { model: MODEL.sha256, print: [0.5, 0.75], off: true } },
+  });
+});
+
+test('a voice ID gate that starts late is closed unless it is still wanted, and never outlives its conversation', async () => {
+  const result = await runWakePage(`
+    const toggle = document.querySelector('#voice-filter');
+    const start = __voiceSpeaker.startSpeakerGate;
+    const pending = [];
+    __voiceSpeaker.startSpeakerGate = (...args) => new Promise((resolve) => pending.push(() => resolve(start(...args))));
+    const settle = async () => { pending.shift()(); await new Promise((resolve) => setTimeout(resolve, 50)); };
+    toggle.click();
+    await until(() => (globalThis.replacedTracks ?? []).length === 1);
+    toggle.click();
+    toggle.click();
+    toggle.click();
+    await settle();
+    await settle();
+    const settled = { closed: gateStarts.map((gate) => gate.closed), sent: replacedTracks.map((track) => track === testMicrophoneTrack ? 'mic' : gateStarts.findIndex((gate) => gate.stream.getAudioTracks()[0] === track)) };
+    toggle.click();
+    toggle.click();
+    await sleepNow();
+    await settle();
+    return { settled, released: { closed: gateStarts.map((gate) => gate.closed), replaced: replacedTracks.length } };
+  `, { setup: voiceprintSetup() });
+  assert.deepEqual(result, {
+    settled: { closed: [1, 0, 1], sent: ['mic', 'mic', 1] },
+    released: { closed: [1, 1, 1, 1], replaced: 4 },
+  });
+});
+
+test('forgetting the voice during a conversation stops filtering it at once', async () => {
+  const result = await runWakePage(`
+    document.querySelector('#voice-print').click();
+    await until(() => (globalThis.replacedTracks ?? []).length === 1);
+    return { closed: gateStarts[0].closed, sent: replacedTracks[0] === testMicrophoneTrack, hidden: document.querySelector('#voice-filter').classList.contains('hidden'), live: document.querySelector('#puppet').getAttribute('aria-pressed') };
+  `, { setup: voiceprintSetup() });
+  assert.deepEqual(result, { closed: 1, sent: true, hidden: true, live: 'true' });
+});
+
+test('voice ID off persists across reloads with no model loaded, and forgetting the voice clears it', async () => {
+  const result = await runWakePage(`
+    const toggle = document.querySelector('#voice-filter');
+    const loaded = { label: toggle.textContent, gates: gateStarts.length, prepared: speakerPrepared, sent: sentTracks.at(-1) === testMicrophoneTrack };
+    await sleepNow();
+    document.querySelector('#voice-print').click();
+    return { loaded, forgotten: { stored: localStorage.getItem('voice.token.voiceprint'), hidden: toggle.classList.contains('hidden'), label: toggle.textContent } };
+  `, { setup: voiceprintSetup(MODEL.sha256, true) });
+  assert.deepEqual(result, {
+    loaded: { label: 'Voice ID off', gates: 0, prepared: 0, sent: true },
+    forgotten: { stored: null, hidden: true, label: 'Voice ID on' },
+  });
 });
 
 test('learning a voice happens between conversations, pauses wake listening and stores only the voiceprint', async () => {
@@ -617,7 +694,7 @@ test('learning a voice happens between conversations, pauses wake listening and 
     learning.heard({ voiceprint: Float32Array.from([0.5, 0.75]) });
     await until(() => testSpotter !== spotter);
     return { refused, input: learning.input.getAudioTracks()[0] === testMicrophoneTrack, learnedFrom: learning.voiceprint, paused, halfway, label: document.querySelector('#voice-print').textContent, closed: learning.closed, stored: JSON.parse(localStorage.getItem('voice.token.voiceprint')), status: document.querySelector('#status').textContent, keys: Object.keys(localStorage).sort() };
-  `);
+  `, { setup: voiceprintSetup('an earlier model', true) });
   assert.deepEqual(result, { refused: 'learn your voice between conversations', input: true, learnedFrom: null, paused: 1, halfway: 'Stop learning (50%)', label: 'Forget my voice', closed: 1, stored: { model: MODEL.sha256, print: [0.5, 0.75] }, status: 'voice learned: other voices are filtered out', keys: ['voice.token', 'voice.token.voiceprint'] });
 });
 
@@ -681,10 +758,10 @@ for (const viewport of layoutViewports) test(`stage UI stays outside the puppet 
   const rect = (element) => { const value = element.getBoundingClientRect(); return { left: value.left, right: value.right, top: value.top, bottom: value.bottom }; };
   const puppet = rect(document.querySelector('#puppet'));
   const figure = { ...puppet, bottom: puppet.top + (1 - feet.y) / 2 * (puppet.bottom - puppet.top) };
-  const selectors = ['header', '#saved', '.puppet-picker', '#puppet-credit', '#elapsed', '#mic-mute', '.share', '.display', '.ledger'];
+  const selectors = ['header', '#saved', '.puppet-picker', '#puppet-credit', '#elapsed', '#voice-filter', '#mic-mute', '.share', '.display', '.ledger'];
   const overlaps = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
   const intrusions = () => selectors.map((selector) => ({ selector, rect: rect(document.querySelector(selector)) })).filter((item) => overlaps(item.rect, figure));
-  const regions = ['header', '#saved', '#puppet', '.puppet-picker', '#puppet-credit', '#elapsed', '#mic-mute', '.share', '.display', '.ledger'].map((selector) => ({ selector, rect: rect(document.querySelector(selector)) })).filter(({ rect }) => rect.right > rect.left && rect.bottom > rect.top);
+  const regions = ['header', '#saved', '#puppet', '.puppet-picker', '#puppet-credit', '#elapsed', '#voice-filter', '#mic-mute', '.share', '.display', '.ledger'].map((selector) => ({ selector, rect: rect(document.querySelector(selector)) })).filter(({ rect }) => rect.right > rect.left && rect.bottom > rect.top);
   const collisions = regions.flatMap((left, index) => regions.slice(index + 1).filter((right) => overlaps(left.rect, right.rect)).map((right) => ({ left, right })));
   const result = intrusions();
   const display = rect(document.querySelector('#display'));

@@ -31,7 +31,9 @@
   #puppet-choice { min-width: 150px; background: #1d1d20; color: inherit; border: 1px solid #414148; border-radius: 8px; padding: 8px; }
   #puppet-credit { position: absolute; z-index: 4; left: 3%; top: calc(100% - 106px); width: 20%; min-height: 21px; color: #cfc4b6; text-align: center; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #elapsed { position: absolute; z-index: 4; right: 3%; top: calc(100% - 124px); width: 20%; text-align: center; font: 24px/1 ui-monospace, monospace; color: #ded0bd; min-height: 28px; }
-  #mic-mute { position: absolute; z-index: 4; right: 23%; bottom: 110px; width: 9%; min-height: 40px; }
+  #mic { position: absolute; z-index: 4; right: 23%; bottom: 110px; width: 9%; display: flex; flex-direction: column; gap: 6px; }
+  #mic button { min-height: 40px; }
+  #voice-filter[aria-pressed="false"] { color: #a5a5aa; border-style: dashed; }
   #mic-mute[aria-pressed="true"] { background: #8c2f39; border-color: #d7626e; }
   .share { position: absolute; z-index: 3; left: 20%; right: 20%; bottom: 10px; display: grid; grid-template-columns: 1fr auto auto; gap: 8px; padding: 8px; background: #171619ee; border: 1px solid #594d40; box-shadow: 0 12px 30px #0009; }
   .share textarea { min-height: 52px; max-height: 72px; min-width: 0; resize: none; }
@@ -67,12 +69,13 @@
     .control { display: contents; }
     #puppet { grid-area: puppet; left: 0; width: 100%; height: 100%; }
     .control::before { display: none; }
-    .puppet-picker, #puppet-credit, #elapsed, #mic-mute, .share, .display, .ledger { position: static; width: auto; }
+    .puppet-picker, #puppet-credit, #elapsed, #mic, .share, .display, .ledger { position: static; width: auto; }
     .puppet-picker { grid-area: picker; justify-content: flex-start; gap: 5px; font-size: 11px; }
     #puppet-choice { min-width: 0; width: 100%; padding: 5px; }
     #puppet-credit { grid-area: credit; min-height: 12px; text-align: left; font-size: 10px; line-height: 12px; }
     #elapsed { grid-area: elapsed; min-height: 0; text-align: left; font-size: 15px; line-height: 18px; }
-    #mic-mute { grid-area: mute; min-height: 36px; padding: 4px 8px; font-size: 12px; }
+    #mic { grid-area: mute; flex-direction: row; gap: 5px; }
+    #mic button { flex: 1 1 0; min-width: 0; min-height: 36px; padding: 4px 8px; font-size: 12px; }
     .share { grid-area: share; grid-template-columns: minmax(0, 1fr) auto; padding: 6px; gap: 5px; overflow: auto; }
     .share textarea { min-height: 0; height: 100%; }
     #share-target { display: none; }
@@ -109,7 +112,7 @@
     <label class="puppet-picker">appearance <select id="puppet-choice" aria-label="puppet appearance"></select></label>
     <div id="puppet-credit"></div>
     <div id="elapsed" aria-live="polite">00:00</div>
-    <button id="mic-mute" type="button" aria-pressed="false" disabled>Mute mic</button>
+    <div id="mic"><button id="voice-filter" type="button" aria-pressed="true">Voice ID on</button><button id="mic-mute" type="button" aria-pressed="false" disabled>Mute mic</button></div>
     <section class="share" aria-label="send text or image">
       <textarea id="share-text" maxlength="8192" placeholder="Paste text, a URL, or an image"></textarea>
       <div id="share-target">Drop or paste an image here</div>
@@ -711,22 +714,48 @@ function microphoneEnded(stream) {
 function wakeable() {
   return listening && !microphoneMuted && !conversation && !starting && !learning;
 }
-function storedVoiceprint() {
+function storedVoice() {
   try {
-    const { model, print } = JSON.parse(localStorage.getItem(VOICEPRINT));
-    return model === MODEL.sha256 ? Float32Array.from(print) : null;
+    const { model, print, off = false } = JSON.parse(localStorage.getItem(VOICEPRINT));
+    return model === MODEL.sha256 ? { print: Float32Array.from(print), off } : null;
   } catch {
     return null;
   }
 }
+function activeVoiceprint() {
+  const voice = storedVoice();
+  return voice && !voice.off ? voice.print : null;
+}
+function prepareVoice() {
+  try { if (activeVoiceprint()) speaker.prepareSpeaker(); } catch (error) { recordPageError(error); }
+}
 function syncVoiceprint() {
-  $('voice-print').textContent = learning ? `Stop learning (${Math.round(learning.progress * 100)}%)` : storedVoiceprint() ? 'Forget my voice' : 'Learn my voice';
+  const voice = storedVoice();
+  $('voice-print').textContent = learning ? `Stop learning (${Math.round(learning.progress * 100)}%)` : voice ? 'Forget my voice' : 'Learn my voice';
+  $('voice-filter').classList.toggle('hidden', !voice);
+  $('voice-filter').textContent = voice?.off ? 'Voice ID off' : 'Voice ID on';
+  $('voice-filter').setAttribute('aria-pressed', String(!voice?.off));
+}
+function toggleVoiceFilter() {
+  const voice = storedVoice();
+  if (!voice) return;
+  localStorage.setItem(VOICEPRINT, JSON.stringify({ model: MODEL.sha256, print: [...voice.print], off: !voice.off }));
+  prepareVoice();
+  syncVoiceprint();
+  const attempt = refilter();
+  setStatus(attempt?.notice || (voice.off ? 'voice ID on: other voices are filtered out' : 'voice ID off: conversations hear everyone'), attempt?.notice ? 'err' : 'ok');
+}
+function refilter() {
+  const attempt = conversation?.audioOwner ?? starting;
+  if (attempt?.stream) applyVoiceFilter(attempt).catch(recordPageError);
+  return attempt;
 }
 async function toggleVoiceprint() {
   if (learning) return stopLearning('voice learning stopped');
-  if (storedVoiceprint()) {
+  if (storedVoice()) {
     localStorage.removeItem(VOICEPRINT);
     syncVoiceprint();
+    refilter();
     return setStatus('voice forgotten: conversations hear everyone', 'ok');
   }
   if (conversation || starting) return setStatus('learn your voice between conversations', 'err');
@@ -765,28 +794,33 @@ function stopLearning(message = '', kind = '') {
   syncSpotter();
   if (current && message) setStatus(message, kind);
 }
-async function speakerFiltered(attempt) {
-  const voiceprint = storedVoiceprint();
-  if (!voiceprint) return attempt.stream;
-  try {
-    attempt.gate = await speaker.startSpeakerGate(attempt.stream, voiceprint, (event) => {
-      if (event.error) speakerFilterFailed(attempt, new Error(event.error));
-      else if ('score' in event) recordSession('speaker-score', JSON.stringify(event), attempt.offerId ?? null);
-    });
-    return attempt.gate.stream;
-  } catch (error) {
-    speakerFilterFailed(attempt, error);
-    return attempt.stream;
+async function applyVoiceFilter(attempt) {
+  const voiceprint = attempt.notice || attempt.released ? null : activeVoiceprint();
+  if (!voiceprint) {
+    attempt.gate?.close();
+    attempt.gate = null;
+  } else if (!attempt.gate) {
+    let gate;
+    try {
+      gate = await speaker.startSpeakerGate(attempt.stream, voiceprint, (event) => {
+        if (event.error) speakerFilterFailed(attempt, new Error(event.error));
+        else if ('score' in event) recordSession('speaker-score', JSON.stringify(event), attempt.offerId ?? null);
+      });
+    } catch (error) {
+      if (!attempt.gate && activeVoiceprint()) speakerFilterFailed(attempt, error);
+      return;
+    }
+    if (attempt.gate || attempt.cancelled || attempt.released || attempt.notice || !activeVoiceprint()) return gate.close();
+    attempt.gate = gate;
   }
+  if (!attempt.released) await attempt.sender?.replaceTrack((attempt.gate?.stream ?? attempt.stream).getAudioTracks()[0]);
 }
 function speakerFilterFailed(attempt, error) {
-  if (attempt.cancelled || attempt.notice) return;
+  if (attempt.cancelled || attempt.released || attempt.notice) return;
   recordPageError(error, attempt.offerId ?? null);
-  attempt.gate?.close();
-  attempt.gate = null;
-  Promise.resolve(attempt.sender?.replaceTrack(attempt.stream.getAudioTracks()[0])).catch(recordPageError);
   attempt.notice = `speaker filter off, hearing everyone: ${error.message.split('\n')[0]}`;
   setStatus(attempt.notice, 'err');
+  applyVoiceFilter(attempt).catch(recordPageError);
 }
 async function wakeModel() {
   const model = await new Promise((resolve, reject) => {
@@ -1096,8 +1130,9 @@ async function startConversation() {
         stopConversation('Live playback failed');
       }
     };
-    const sent = await speakerFiltered(attempt);
+    await applyVoiceFilter(attempt);
     if (attempt.cancelled) return;
+    const sent = attempt.gate?.stream ?? attempt.stream;
     for (const track of sent.getTracks()) attempt.sender = attempt.pc.addTrack(track, sent);
     await attempt.pc.setLocalDescription(await attempt.pc.createOffer());
     await waitIce(attempt.pc, attempt);
@@ -1141,6 +1176,7 @@ async function startConversation() {
   }
 }
 function release(attempt) {
+  attempt.released = true;
   const flushed = stopRecorders(attempt);
   attempt.gate?.close();
   attempt.channel?.close();
@@ -1285,8 +1321,9 @@ $('connect').addEventListener('click', () => start($('token').value).catch((erro
 $('token-toggle').addEventListener('click', () => setTokenPanel($('token-toggle').getAttribute('aria-expanded') !== 'true'));
 $('mic-mute').addEventListener('click', () => setMicrophoneMuted(!microphoneMuted));
 $('voice-print').addEventListener('click', toggleVoiceprint);
+$('voice-filter').addEventListener('click', toggleVoiceFilter);
 syncVoiceprint();
-try { if (storedVoiceprint()) speaker.prepareSpeaker(); } catch (error) { recordPageError(error); }
+prepareVoice();
 $('reenter').addEventListener('click', async () => { listening = false; setMicrophoneMuted(microphoneMuted); stopConversation(); await recorderFlush; setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); savedState(false); $('token').focus(); });
 $('forget').addEventListener('click', async () => { listening = false; setMicrophoneMuted(microphoneMuted); stopConversation(); await recorderFlush; stopLearning(); localStorage.removeItem(KEY); localStorage.removeItem(VOICEPRINT); syncVoiceprint(); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); await sendFrame('bye').catch(() => {}); generation++; connected = false; resetPuppetConnection(new Error('connection replaced'), true); await puppetChannel.clearCache().catch(() => {}); savedState(false); setStatus('token forgotten'); });
 navigator.mediaDevices?.addEventListener('devicechange', syncSpotter);

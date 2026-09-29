@@ -86,11 +86,22 @@ test('an avatar loads and renders Standing before any clip exists', async () => 
   bytes.set(encoded, 20);
   const progress = globalThis.ProgressEvent;
   globalThis.ProgressEvent ??= class { constructor(type, values) { Object.assign(this, { type }, values); } };
+  let renders = 0;
+  let finishes = 0;
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
     bones: new Map(), clips: new Map(), idleRoot: new THREE.Group(), gazeTarget: new THREE.Object3D(),
+    renderer: { render: () => renders++, getContext: () => ({ finish: () => finishes++ }) },
   });
+  const stages = [];
+  const stage = async (name, work) => {
+    const before = renders + finishes;
+    const result = await work();
+    stages.push([name, renders + finishes - before]);
+    return result;
+  };
   try {
-    assert.equal(await runtime.load(bytes.buffer), true);
+    assert.equal(await runtime.load(bytes.buffer, undefined, undefined, stage), true);
+    assert.deepEqual(stages, [['parse', 0], ['select', 0], ['fit', 0], ['render', 2]]);
     assert.equal(runtime.clips.size, 0);
     assert.equal(runtime.clipAction, null);
     const expected = standingPose(runtime.vrm);
@@ -100,7 +111,7 @@ test('an avatar loads and renders Standing before any clip exists', async () => 
       assert.ok(normalized.quaternion.angleTo(new THREE.Quaternion().fromArray(expected[name].rotation)) < 1e-6, name);
       assert.ok(raw.quaternion.angleTo(normalized.quaternion) < 1e-6, `raw ${name}`);
     }
-    let renders = 0;
+    renders = 0;
     Object.assign(runtime, { clock: { getDelta: () => 0 }, renderer: { render: () => renders++ } });
     for (const method of ['updateBasePose', 'updatePose', 'updateSeatedClearance', 'updateGesture', 'updateListening', 'updateFace', 'recordAnimation']) runtime[method] = () => {};
     const frame = globalThis.requestAnimationFrame;

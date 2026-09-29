@@ -64,6 +64,7 @@
         "scripts/live-rig.mjs",
         "scripts/wake.mjs",
         "scripts/wake-demo.json",
+        "scripts/avatar-load.jq",
         "test/**",
         "package.json",
         "package-lock.json",

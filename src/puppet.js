@@ -165,6 +165,21 @@ function feetOf(vrm) {
   return ['leftFoot', 'rightFoot'].map((name) => vrm.humanoid.getRawBoneNode(name).getWorldPosition(new THREE.Vector3()));
 }
 
+function fitScene(vrm) {
+  VRMUtils.removeUnnecessaryVertices(vrm.scene);
+  VRMUtils.combineSkeletons(vrm.scene);
+  const box = new THREE.Box3().setFromObject(vrm.scene);
+  const size = box.getSize(new THREE.Vector3());
+  const scale = size.y ? 2.7 / size.y : 1;
+  vrm.scene.scale.setScalar(scale);
+  const ground = new THREE.Box3().setFromObject(vrm.scene).min.y;
+  const ankleHeight = Math.min(...feetOf(vrm).map((foot) => foot.y)) - ground;
+  vrm.scene.traverse((object) => { object.frustumCulled = false; });
+  vrm.humanoid.setNormalizedPose(standingPose(vrm));
+  vrm.update(0);
+  return ankleHeight;
+}
+
 export class PuppetRuntime {
   constructor(canvas, panel, renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true })) {
     this.canvas = canvas;
@@ -241,12 +256,12 @@ export class PuppetRuntime {
     cancelAnimationFrame(this.frame);
     this.frame = 0;
   }
-  async load(bytes, initialClip = null, valid = () => true, beforeCommit = async () => {}) {
+  async load(bytes, valid = () => true, beforeCommit = async () => {}, stage = (name, work) => work()) {
     const loader = new GLTFLoader();
     loader.register((parser) => new VRMLoaderPlugin(parser));
     const url = URL.createObjectURL(new Blob([bytes], { type: 'model/gltf-binary' }));
     let gltf;
-    try { gltf = await loader.loadAsync(url); }
+    try { gltf = await stage('parse', () => loader.loadAsync(url)); }
     finally { URL.revokeObjectURL(url); }
     const vrm = gltf.userData.vrm;
     if (!vrm) throw new Error('file is not a VRM puppet');
@@ -255,22 +270,12 @@ export class PuppetRuntime {
       VRMUtils.deepDispose(vrm.scene);
       return false;
     }
-    try { await beforeCommit(); }
+    try { await stage('select', beforeCommit); }
     catch (error) {
       VRMUtils.deepDispose(vrm.scene);
       throw error;
     }
-    VRMUtils.removeUnnecessaryVertices(vrm.scene);
-    VRMUtils.combineSkeletons(vrm.scene);
-    const box = new THREE.Box3().setFromObject(vrm.scene);
-    const size = box.getSize(new THREE.Vector3());
-    const scale = size.y ? 2.7 / size.y : 1;
-    vrm.scene.scale.setScalar(scale);
-    const ground = new THREE.Box3().setFromObject(vrm.scene).min.y;
-    const ankleHeight = Math.min(...feetOf(vrm).map((foot) => foot.y)) - ground;
-    vrm.scene.traverse((object) => { object.frustumCulled = false; });
-    vrm.humanoid.setNormalizedPose(standingPose(vrm));
-    vrm.update(0);
+    const ankleHeight = await stage('fit', () => fitScene(vrm));
     if (this.vrm) {
       this.idleRoot.remove(this.vrm.scene);
       VRMUtils.deepDispose(this.vrm.scene);
@@ -300,7 +305,10 @@ export class PuppetRuntime {
     this.gestureState = null;
     this.gestureOffsets = {};
     this.idleRoot.add(vrm.scene);
-    if (initialClip) await this.loadClips([initialClip]);
+    await stage('render', () => {
+      this.renderer.render(this.scene, this.camera);
+      this.renderer.getContext().finish();
+    });
     return true;
   }
   async loadClips(entries) {

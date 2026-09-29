@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { StageTrace } from '../docs/stage-trace.js';
+import { StageTrace, traceStages } from '../docs/stage-trace.js';
 
 function recorder() {
   let clock = 1000;
@@ -54,21 +54,23 @@ test('a reply to an unknown delegation traces nothing', () => {
 test('a model reply, a pause, or the listener speaking again each close the turn before it', () => {
   const { at, view } = recorder();
   at(500).inputTranscript();
-  at(1000).outputTranscript();
+  at(1000).outputTranscript(30);
+  at(1100).outputTranscript();
   at(1500).inputTranscript();
+  assert.deepEqual(view(), [['hear', 500, 500], ['reply', 500, 1030], ['turn', 500, 1030]]);
   at(1550).outputTranscript();
   at(1600).delegationCreated('d0');
-  assert.deepEqual(view(), [['hear', 1500, 1500], ['decide', 1500, 1600]]);
+  assert.deepEqual(view().slice(3), [['hear', 1500, 1500], ['decide', 1500, 1600]]);
   at(1700).hubReplied('d0');
   at(1800).outputTranscript(Number.NaN);
-  assert.deepEqual(view().slice(2), [['delegate', 1600, 1700], ['await-speech', 1700, 1800], ['turn', 1500, 1800]]);
+  assert.deepEqual(view().slice(5), [['delegate', 1600, 1700], ['await-speech', 1700, 1800], ['turn', 1500, 1800]]);
   at(3000).inputTranscript();
   at(9000).inputTranscript();
   at(9500).delegationCreated('d1');
   at(10000).hubReplied('d1');
   at(12000).inputTranscript();
   at(12500).outputTranscript();
-  assert.deepEqual(view().slice(5), [['hear', 9000, 9000], ['decide', 9000, 9500], ['delegate', 9500, 10000], ['turn', 9000, 10000]]);
+  assert.deepEqual(view().slice(8), [['hear', 9000, 9000], ['decide', 9000, 9500], ['delegate', 9500, 10000], ['turn', 9000, 10000]]);
 });
 
 test('ending the session flushes open turns and cancels their delegations', () => {
@@ -80,4 +82,40 @@ test('ending the session flushes open turns and cancels their delegations', () =
   stages.hubReplied('d1');
   at(9600).sessionEnded();
   assert.equal(sent.length, 2);
+});
+
+test('an answered turn closes when the session ends', () => {
+  const { at, view } = recorder();
+  at(1000).inputTranscript();
+  at(1400).inputTranscript();
+  at(2000).outputTranscript(250);
+  at(5000).sessionEnded();
+  assert.deepEqual(view(), [['hear', 1000, 1400], ['reply', 1400, 2250], ['turn', 1000, 2250]]);
+});
+
+test('staged work becomes one trace with a child span per stage and its described attributes', async () => {
+  let clock = 100;
+  const sent = [];
+  const result = await traceStages((span) => sent.push(span), 'avatar-load', { 'avatar.file': 'a.vrm' }, async (stage) => {
+    const bytes = await stage('bytes', async () => { clock = 350; return new ArrayBuffer(7); }, (loaded) => ({ 'puppet.bytes': loaded.byteLength }));
+    await stage('parse', () => { clock = 900; });
+    return bytes.byteLength;
+  }, () => clock);
+  assert.equal(result, 7);
+  const view = sent.map((span) => [span.name, Number(BigInt(span.startTimeUnixNano) / 1000000n), Number(BigInt(span.endTimeUnixNano) / 1000000n), Object.fromEntries(span.attributes.map(({ key, value }) => [key, value.stringValue]))]);
+  assert.deepEqual(view, [['bytes', 100, 350, { 'puppet.bytes': '7' }], ['parse', 350, 900, {}], ['avatar-load', 100, 900, { 'avatar.file': 'a.vrm' }]]);
+  const root = sent.at(-1);
+  assert.equal(root.parentSpanId, undefined);
+  assert.ok(sent.slice(0, -1).every((span) => span.traceId === root.traceId && span.parentSpanId === root.spanId && span.status === undefined));
+});
+
+test('a failing stage marks itself and its trace with the error and rethrows it', async () => {
+  const sent = [];
+  await assert.rejects(traceStages((span) => sent.push(span), 'avatar-load', {}, async (stage) => {
+    await stage('bytes', () => 'ok');
+    await stage('parse', () => { throw new Error(`file is not a VRM puppet${' '.repeat(300)}`); });
+    await stage('fit', () => {});
+  }), /file is not a VRM puppet/);
+  const message = `file is not a VRM puppet${' '.repeat(232)}`;
+  assert.deepEqual(sent.map((span) => [span.name, span.status]), [['bytes', undefined], ['parse', { code: 2, message }], ['avatar-load', { code: 2, message }]]);
 });

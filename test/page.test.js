@@ -148,7 +148,7 @@ export async function recv() {
 const fakePuppet = `
 export class PuppetRuntime {
   constructor(canvas) { this.canvas = canvas; this.calls = []; this.humanoidBone = 0; globalThis.testPuppet = this; }
-  async load(bytes, initialClip, valid, beforeCommit) { await beforeCommit(); globalThis.firstVisible = { playable: initialClip?.action ?? 'Standing', order: [...transferOrder] }; this.humanoidBone += initialClip?.bytes.byteLength ?? 0; const context = this.canvas.getContext('2d'); context.fillStyle = '#50c878'; context.fillRect(0, 0, this.canvas.width, this.canvas.height); return true; }
+  async load(bytes, valid, beforeCommit, stage) { await stage('select', beforeCommit); globalThis.firstVisible = { playable: 'Standing', order: [...transferOrder] }; const context = this.canvas.getContext('2d'); context.fillStyle = '#50c878'; context.fillRect(0, 0, this.canvas.width, this.canvas.height); return true; }
   async loadClips(entries) { const before = this.humanoidBone; this.humanoidBone += entries.length; globalThis.clipMovement = { before, after: this.humanoidBone, loaded: entries.map((entry) => [entry.action, entry.format, entry.data]) }; }
   pose(...args) { this.calls.push(['pose', ...args]); }
   gesture(...args) { this.calls.push(['gesture', ...args]); }
@@ -1141,6 +1141,25 @@ window.addEventListener('test-ready', function switchOnceSeated() {
   assert.deepEqual(JSON.parse(encoded ?? 'null'), { selected: '44', status: '', requests: ['42', '43', '44'], seated: 4 }, stderr);
 });
 
+test('each avatar load reaches the relay as one trace with a span per stage', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => setTimeout(() => {
+  document.body.dataset.avatarTraceTest = JSON.stringify((globalThis.spanBatches ?? []).flat());
+}, 300));
+`);
+  const encoded = /data-avatar-trace-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  const spans = JSON.parse(encoded ?? 'null') ?? [];
+  const root = spans.find((span) => span.name === 'avatar-load');
+  assert.ok(root, stderr);
+  const attributes = (span) => Object.fromEntries(span.attributes.map(({ key, value }) => [key, value.stringValue]));
+  assert.equal(attributes(root)['avatar.file'], 'model-42.vrm');
+  assert.match(attributes(root)['user_agent.original'], /Chrome/);
+  const stages = spans.filter((span) => span.parentSpanId === root.spanId);
+  assert.deepEqual(stages.map((span) => span.name), ['bytes', 'select', 'clips', 'animate']);
+  assert.deepEqual(stages.map(attributes), [{ 'puppet.bytes': '3' }, {}, { 'puppet.clips': '2' }, {}]);
+  assert.ok(spans.every((span) => span.traceId === root.traceId && span.status === undefined && BigInt(span.endTimeUnixNano) >= BigInt(span.startTimeUnixNano)));
+});
+
 test('choosing an inactive puppet fetches only that puppet on demand', async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
@@ -1255,7 +1274,8 @@ window.addEventListener('test-ready', async () => {
 `);
   const encoded = /data-stage-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   const { batches, delegates } = JSON.parse(encoded ?? 'null') ?? {};
-  const spans = batches?.flat() ?? [];
+  const traced = batches?.flat() ?? [];
+  const spans = traced.filter((span) => span.traceId === traced.find((turn) => turn.name === 'turn')?.traceId);
   assert.deepEqual(spans.map((span) => span.name).sort(), ['await-speech', 'decide', 'delegate', 'hear', 'turn'], stderr);
   assert.ok(spans.every((span) => span.traceId === spans[0].traceId && span.status === undefined));
   const delegated = spans.find((span) => span.name === 'delegate');

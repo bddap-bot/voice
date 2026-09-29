@@ -137,7 +137,7 @@ import wbgInit, { init as wasmInit, connect, send_only, recv } from './relay/bot
 import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, SessionClock, TranscriptBatcher, errorEvent, includesPhrase, modelToolFields, formatElapsed, formatStartError, isOfferFor, shareFrame } from './live.js';
 import { PuppetChannel } from './puppet-client.js';
 import { ListeningReactionDriver, TranscriptActionDriver, webGpuAdapter } from './puppet-drivers.js';
-import { StageTrace } from './stage-trace.js';
+import { StageTrace, traceStages } from './stage-trace.js';
 import { LivePlayback } from './live-playback.js';
 import { audioDiagnostics } from './audio-diagnostics.js';
 audioDiagnostics();
@@ -1435,7 +1435,7 @@ function showPuppet(id) {
   puppetRequest = request;
   puppetLoading = true;
   syncPuppetUi();
-  const operation = puppetLoadTail.then(() => loadPuppet(id, epoch, request)).catch((error) => {
+  const operation = puppetLoadTail.then(() => traceStages((span) => traces.add(span), 'avatar-load', { 'avatar.file': puppetCatalog?.avatars.find((item) => item.id === id)?.file ?? '', 'user_agent.original': navigator.userAgent }, (stage) => loadPuppet(id, epoch, request, stage))).catch((error) => {
     throw puppetRequest === request ? error : new Error('puppet load replaced');
   });
   puppetLoadTail = operation.catch(() => {});
@@ -1446,17 +1446,17 @@ function showPuppet(id) {
   });
 }
 
-async function loadPuppet(id, epoch, request) {
+async function loadPuppet(id, epoch, request, stage) {
   const current = () => epoch === puppetEpoch && request === puppetRequest;
   if (!current()) throw new Error('puppet load replaced');
   const avatar = puppetCatalog.avatars.find((item) => item.id === id);
   if (!avatar) throw new Error('puppet is unavailable');
-  const puppetBytes = puppetChannel.bytes(id, avatar.contentHash);
+  const puppetBytes = stage('bytes', () => puppetChannel.bytes(id, avatar.contentHash), (loaded) => ({ 'puppet.bytes': loaded.byteLength }));
   const motions = clipMotions();
   const bytes = await puppetBytes;
   if (!current()) throw new Error('puppet load replaced');
   if (!puppetRuntime) throw new Error('puppet renderer unavailable');
-  const loaded = await puppetRuntime.load(bytes, null, current, () => puppetChannel.select(id));
+  const loaded = await puppetRuntime.load(bytes, current, () => puppetChannel.select(id), stage);
   if (!loaded) throw new Error('puppet load replaced');
   $('puppet-credit').textContent = avatar.licenseFlags.creditRequired ? avatar.creditLine : '';
   if (current()) $('puppet-choice').value = id;
@@ -1464,9 +1464,9 @@ async function loadPuppet(id, epoch, request) {
   puppetScope = token.endpoint_id;
   syncPuppetUi();
   try {
-    const clips = await motions;
+    const clips = await stage('clips', () => motions, (loaded) => ({ 'puppet.clips': loaded.length }));
     if (epoch !== puppetEpoch) throw new Error('puppet load replaced');
-    await puppetRuntime.loadClips(clips);
+    await stage('animate', () => puppetRuntime.loadClips(clips));
   } catch (error) {
     if (puppetActive === id) puppetActive = undefined;
     throw error;

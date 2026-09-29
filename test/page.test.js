@@ -282,7 +282,7 @@ async function dumpDom(url, args, budget) {
 
 async function pageServer(testSetup) {
   const index = (await readFile(new URL('../docs/index.html', import.meta.url), 'utf8'))
-    .replace('https://bddap-bot.github.io/botq/botq_dash_wasm.js', '/botq_dash_wasm.js')
+    .replace('./relay/botq_dash_wasm.js', '/botq_dash_wasm.js')
     .replace('./puppet.js', '/fake-puppet.js')
     .replace('</head>', () => `<script>${browserSetup}${testSetup}</script></head>`);
   const live = await readFile(new URL('../docs/live.js', import.meta.url));

@@ -39,7 +39,6 @@ const selectedViewports = viewportFlag >= 0 ? smokeViewports.filter((viewport) =
 const baselineFlag = process.argv.indexOf('--baseline');
 const baseline = baselineFlag >= 0 ? JSON.parse(await readFile(process.argv[baselineFlag + 1], 'utf8')) : {};
 const root = path.resolve(new URL('..', import.meta.url).pathname);
-const wasmRoot = process.env.VOICE_WASM_DIR ? path.resolve(process.env.VOICE_WASM_DIR) : null;
 await mkdir(output, { recursive: true });
 
 const mockWasm = `
@@ -80,12 +79,11 @@ const cache=new Map();Object.defineProperty(globalThis,'caches',{value:{open:asy
 `;
 
 async function makeServer() {
-  if (development) return serveDevelopment({ port: 0, wasmRoot });
+  if (development) return serveDevelopment({ port: 0 });
   let index = await readFile(path.join(root, 'docs/index.html'), 'utf8');
-  if (wasmRoot) index = index.replace('https://bddap-bot.github.io/botq/botq_dash_wasm.js', '/botq_dash_wasm.js');
   let token;
   if (mode === 'public') {
-    index = index.replace('https://bddap-bot.github.io/botq/botq_dash_wasm.js', '/smoke-wasm.js').replace('./puppet.js', '/smoke-puppet.js').replace('</head>', `<script>${browserMocks}</script></head>`);
+    index = index.replace('./relay/botq_dash_wasm.js', '/smoke-wasm.js').replace('./puppet.js', '/smoke-puppet.js').replace('</head>', `<script>${browserMocks}</script></head>`);
     token = Buffer.from(JSON.stringify({ endpoint_id: 'smoke', secret: 'smoke' })).toString('base64url');
   } else {
     const { stdout } = await execute('voice-web', ['token']);
@@ -96,14 +94,10 @@ async function makeServer() {
   index = index.replace('</head>', `<script>localStorage.setItem('voice.token', ${JSON.stringify(token)});</script></head>`);
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, 'http://localhost');
-    if (wasmRoot && (url.pathname === '/botq_dash_wasm.js' || url.pathname === '/botq_dash_wasm_bg.wasm')) {
-      const body = await readFile(path.join(wasmRoot, url.pathname.slice(1)));
-      return response.writeHead(200, { 'content-type': url.pathname.endsWith('.wasm') ? 'application/wasm' : 'text/javascript' }).end(body);
-    }
     if (url.pathname === '/smoke-wasm.js') return response.writeHead(200, { 'content-type': 'text/javascript' }).end(mockWasm);
     if (url.pathname === '/smoke-puppet.js') return response.writeHead(200, { 'content-type': 'text/javascript' }).end(neutralSilhouettePuppet);
     const relative = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
-    try { const body = relative === 'index.html' ? index : await readFile(path.join(root, 'docs', relative)); response.writeHead(200, { 'content-type': relative.endsWith('.js') ? 'text/javascript' : relative.endsWith('.html') ? 'text/html' : 'application/octet-stream' }).end(body); } catch { response.writeHead(404).end(); }
+    try { const body = relative === 'index.html' ? index : await readFile(path.join(root, 'docs', relative)); response.writeHead(200, { 'content-type': relative.endsWith('.js') ? 'text/javascript' : relative.endsWith('.html') ? 'text/html' : relative.endsWith('.wasm') ? 'application/wasm' : 'application/octet-stream' }).end(body); } catch { response.writeHead(404).end(); }
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   return { server, url: `http://127.0.0.1:${server.address().port}/`, token, close: () => server.close() };

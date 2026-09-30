@@ -10,6 +10,16 @@
     },
     {
       "paths": [
+        "scripts/pack-puppets.py",
+        "test/pack-puppets.py"
+      ],
+      "tests": [
+        "nix-shell -p python3 imagemagick libwebp oxipng --run 'python3 test/pack-puppets.py'"
+      ],
+      "why": "Exercise exact transparent texels, required WebP extension, sparse morph decoding, and unchanged untextured models."
+    },
+    {
+      "paths": [
         "test/action-evaluation.js"
       ],
       "tests": [

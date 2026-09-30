@@ -27,6 +27,29 @@ def pack(data, scratch):
     meta = doc.get('extensions', {}).get('VRM', {}).get('meta', {})
     texture = meta.get('texture', -1)
     thumbnail = doc['textures'][texture].get('source') if texture >= 0 else doc.get('extensions', {}).get('VRMC_vrm', {}).get('meta', {}).get('thumbnailImage')
+    image_views = [image['bufferView'] for image in doc['images']]
+    if len(set(image_views)) != len(image_views):
+        raise ValueError('images sharing a bufferView must be separated before packing')
+    def material_textures(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key == 'index' and isinstance(child, int):
+                    yield child
+                else:
+                    yield from material_textures(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from material_textures(child)
+    rendered = set(material_textures(doc.get('materials', [])))
+    for material in doc.get('extensions', {}).get('VRM', {}).get('materialProperties', []):
+        rendered.update(material.get('textureProperties', {}).values())
+    for index in rendered:
+        if index < 0:
+            continue
+        texture = doc['textures'][index]
+        source = texture.get('source', texture.get('extensions', {}).get('EXT_texture_webp', {}).get('source'))
+        if source is not None and source == thumbnail:
+            raise ValueError('thumbnail is also rendered; export a separate thumbnail first')
     for index, entry in enumerate(doc['images']):
         payload = views[entry['bufferView']]
         thumb = index == thumbnail
@@ -47,8 +70,9 @@ def pack(data, scratch):
         if source is not None and doc['images'][source]['mimeType'] == 'image/webp':
             texture.pop('source', None)
             texture.setdefault('extensions', {})['EXT_texture_webp'] = {'source': source}
-    for key in ('extensionsUsed', 'extensionsRequired'):
-        doc[key] = sorted(set(doc.get(key, [])) | {'EXT_texture_webp'})
+    if any(image['mimeType'] == 'image/webp' for image in doc['images']):
+        for key in ('extensionsUsed', 'extensionsRequired'):
+            doc[key] = sorted(set(doc.get(key, [])) | {'EXT_texture_webp'})
     removed = set()
     targets = {a for mesh in doc.get('meshes', []) for p in mesh['primitives'] for t in p.get('targets', []) for a in t.values()}
     for index in sorted(targets):

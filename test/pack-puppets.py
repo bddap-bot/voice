@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import copy
 from pathlib import Path
 import struct
 import subprocess
@@ -24,6 +25,23 @@ class Packing(unittest.TestCase):
         source = glb({'asset': {'version': '2.0'}}, b'')
         self.assertEqual(packer.pack(source, Path('.')), source)
 
+    def test_thumbnail_dimensions_and_metadata(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            directory = Path(directory)
+            source = directory / 'thumbnail.png'
+            subprocess.run(['magick', '-size', '512x512', 'xc:red', 'PNG32:' + str(source)], check=True)
+            image = source.read_bytes()
+            doc = {'asset': {'version': '2.0'}, 'bufferViews': [{'buffer': 0, 'byteLength': len(image)}], 'images': [{'bufferView': 0, 'mimeType': 'image/png'}], 'textures': [{'source': 0}], 'extensions': {'VRM': {'meta': {'texture': 0}}}}
+            packed = packer.pack(glb(doc, image), directory)
+            size = struct.unpack_from('<I', packed, 12)[0]
+            result = json.loads(packed[20:20 + size])
+            view = result['bufferViews'][result['images'][0]['bufferView']]
+            thumbnail = packed[28 + size + view['byteOffset']:28 + size + view['byteOffset'] + view['byteLength']]
+            self.assertEqual(struct.unpack_from('>II', thumbnail, 16), (256, 256))
+            self.assertEqual(result['textures'], [{'source': 0}])
+            self.assertEqual(result['extensions']['VRM']['meta']['texture'], 0)
+            self.assertNotIn('EXT_texture_webp', result.get('extensionsRequired', []))
+
     def test_exact_pixels_sparse_morphs_and_extension(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             directory = Path(directory)
@@ -32,6 +50,15 @@ class Packing(unittest.TestCase):
             image = png.read_bytes()
             morph = struct.pack('<9f', 0, 0, 0, 1, -2, 3, -0.0, 0, 0)
             doc = {'asset': {'version': '2.0'}, 'bufferViews': [{'buffer': 0, 'byteOffset': 0, 'byteLength': len(image)}, {'buffer': 0, 'byteOffset': len(image), 'byteLength': len(morph)}], 'images': [{'bufferView': 0, 'mimeType': 'image/png'}], 'textures': [{'source': 0}], 'accessors': [{'bufferView': 1, 'componentType': 5126, 'count': 3, 'type': 'VEC3'}], 'meshes': [{'primitives': [{'targets': [{'POSITION': 0}]}]}]}
+            shared = copy.deepcopy(doc)
+            shared['images'].append(dict(shared['images'][0]))
+            with self.assertRaisesRegex(ValueError, 'sharing a bufferView'):
+                packer.pack(glb(shared, image + morph), directory)
+            shared = copy.deepcopy(doc)
+            shared['extensions'] = {'VRM': {'meta': {'texture': 0}}}
+            shared['materials'] = [{'pbrMetallicRoughness': {'baseColorTexture': {'index': 0}}}]
+            with self.assertRaisesRegex(ValueError, 'thumbnail is also rendered'):
+                packer.pack(glb(shared, image + morph), directory)
             packed = packer.pack(glb(doc, image + morph), directory)
             size = struct.unpack_from('<I', packed, 12)[0]
             result = json.loads(packed[20:20 + size])

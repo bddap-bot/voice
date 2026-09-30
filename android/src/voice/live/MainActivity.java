@@ -60,7 +60,7 @@ public final class MainActivity extends Activity {
         content.setFitsSystemWindows(true);
         setContentView(content);
         TextView description = new TextView(this);
-        description.setText("Live Voice continues listening while you use other apps or lock the screen. Stop and close ends the session. Your connection token stays on this device.");
+        description.setText("Live Voice continues listening while you use other apps or lock the screen. Stop and close ends the session. Your connection token is saved on this device.");
         content.addView(description);
         Button start = new Button(this);
         start.setText("Open Live Voice");

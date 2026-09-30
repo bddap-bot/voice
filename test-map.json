@@ -6,7 +6,9 @@
         "android/**"
       ],
       "tests": [
-        "bash android/build.sh"
+        "bash -n android/build.sh",
+        "node --check android/test/background.mjs",
+        "bash android/build.sh --probe"
       ],
       "why": "Compile, package, align and verify the signed Android host with SDK 35 and a private signing key."
     },

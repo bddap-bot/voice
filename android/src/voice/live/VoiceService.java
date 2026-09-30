@@ -69,9 +69,10 @@ public final class VoiceService extends Service {
                 return !request.isForMainFrame() || !allowed(request.getUrl());
             }
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap icon) {
-                if (!allowed(Uri.parse(url))) { view.stopLoading(); stopSelf(); }
+                if (!allowed(Uri.parse(url))) { view.stopLoading(); close(); stopSelf(); }
             }
             public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                close();
                 stopSelf();
                 return true;
             }

@@ -47,3 +47,28 @@ test('unavailable diagnostic storage and failed statistics never interrupt a cal
   await recorder.stats({ getStats: async () => { throw Error(); } });
   assert.equal(recorder.rows.length, 1);
 });
+
+test('peer monitoring records transitions, samples every five seconds, and stops on closure', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const recorder = new AudioDiagnostics(memory());
+  let calls = 0;
+  const peer = Object.assign(new EventTarget(), {
+    connectionState: 'new',
+    getStats: async () => { calls++; return new Map(); },
+  });
+  recorder.peer(peer);
+  peer.connectionState = 'connected';
+  peer.dispatchEvent(new Event('connectionstatechange'));
+  assert.deepEqual(recorder.rows.map(row => row.state), ['new', 'connected']);
+  t.mock.timers.tick(4999);
+  assert.equal(calls, 0);
+  t.mock.timers.tick(1);
+  assert.equal(calls, 1);
+  peer.connectionState = 'closed';
+  peer.dispatchEvent(new Event('connectionstatechange'));
+  t.mock.timers.tick(5000);
+  peer.connectionState = 'connected';
+  t.mock.timers.tick(5000);
+  assert.equal(calls, 1);
+  assert.equal(recorder.rows.at(-1).state, 'closed');
+});

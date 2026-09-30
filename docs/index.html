@@ -556,6 +556,7 @@ async function listen(mine) {
     wakeModelWaiter?.reject(error);
     puppetChannel.fail(error);
     connected = false;
+    audioDiagnostics()?.record('relay', { state: 'disconnected' });
     if (conversation) stopConversation('connection lost');
     else setStatus('connection lost', 'err');
   }
@@ -723,11 +724,13 @@ async function submitShare() {
 async function dial() {
   const reconnecting = everConnected;
   connected = false;
+  audioDiagnostics()?.record('relay', { state: 'connecting' });
   resetPuppetConnection(new Error('connection replaced'), Boolean(puppetScope && puppetScope !== token.endpoint_id));
   const mine = ++generation;
   try {
     await connect(token.relay_url ? `${token.endpoint_id}@${token.relay_url}` : token.endpoint_id, ALPN);
   } catch (error) {
+    audioDiagnostics()?.record('relay', { state: 'transport-failed' });
     throw new Error(`relay transport failed: ${error.message}`);
   }
   let reply;
@@ -735,10 +738,15 @@ async function dial() {
     await sendFrame(JSON.stringify({ auth: token.secret }));
     reply = JSON.parse(dec.decode(await recv()));
   } catch (error) {
+    audioDiagnostics()?.record('relay', { state: 'authentication-transport-failed' });
     throw new Error(`authentication transport failed: ${error.message}`);
   }
-  if (!reply.ok) throw new Error('token rejected');
+  if (!reply.ok) {
+    audioDiagnostics()?.record('relay', { state: 'rejected' });
+    throw new Error('token rejected');
+  }
   connected = true;
+  audioDiagnostics()?.record('relay', { state: 'connected' });
   everConnected = true;
   listener = listen(generation);
   wakeModel().then((model) => {

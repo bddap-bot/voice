@@ -62,53 +62,39 @@ function devtools(input, output) {
 
 const DOCUMENT_HTML = "(document.doctype ? new XMLSerializer().serializeToString(document.doctype) + '\\n' : '') + document.documentElement.outerHTML";
 
-export async function renderDom(chrome, url, { budget, stallLimit = 60000 }) {
+export async function renderDom(chrome, url, { budget }) {
   const { call, listen, closed } = chrome.devtools;
-  const loads = new Set(), fetches = new Set();
-  let expired = false, wake = () => {}, fail, action, stall;
+  const loads = new Set();
+  let expired = false, wake = () => {}, fail;
   const failure = new Promise((_, reject) => {
     fail = reject;
     closed.then(() => reject(new Error(`Chromium's browser process ended: ${chrome.stderr}`)));
   });
-  const watchFetches = () => {
-    clearTimeout(stall);
-    if (fetches.size) stall = setTimeout(() => fail(new Error(`Chromium did not ${action}: a fetch made no progress within ${stallLimit / 1000} s: ${chrome.stderr}`)), stallLimit);
-  };
   const stop = listen(({ method, params }) => {
     if (method === 'Inspector.targetCrashed') fail(new Error(`Chromium renderer crashed: ${chrome.stderr}`));
     if (method === 'Page.lifecycleEvent' && params.name === 'load') loads.add(params.loaderId);
     if (method === 'Emulation.virtualTimeBudgetExpired') expired = true;
-    if (method === 'Network.requestWillBeSent') fetches.add(params.requestId);
-    if (fetches.has(params?.requestId)) {
-      if (method === 'Network.loadingFinished' || method === 'Network.loadingFailed') fetches.delete(params.requestId);
-      watchFetches();
-    }
     wake();
   });
   const until = condition => new Promise(resolve => {
     wake = () => { if (condition()) resolve(); };
     wake();
   });
-  const step = (name, work) => {
-    action = name;
-    return Promise.race([work, failure]);
-  };
+  const step = work => Promise.race([work, failure]);
   try {
-    const { targetId } = await step('start', call('Target.createTarget', { url: 'about:blank' }));
-    const { sessionId } = await step('attach to its page', call('Target.attachToTarget', { targetId, flatten: true }));
-    const page = (method, params) => step(`answer ${method}`, call(method, params, sessionId));
+    const { targetId } = await step(call('Target.createTarget', { url: 'about:blank' }));
+    const { sessionId } = await step(call('Target.attachToTarget', { targetId, flatten: true }));
+    const page = (method, params) => step(call(method, params, sessionId));
     await page('Inspector.enable');
-    await page('Network.enable');
     await page('Page.enable');
     await page('Page.setLifecycleEventsEnabled', { enabled: true });
     const { loaderId, errorText } = await page('Page.navigate', { url });
     if (errorText) throw new Error(`Chromium could not load ${url}: ${errorText}`);
-    await step(`load ${url}`, until(() => loads.has(loaderId)));
+    await step(until(() => loads.has(loaderId)));
     await page('Emulation.setVirtualTimePolicy', { policy: 'pauseIfNetworkFetchesPending', budget, maxVirtualTimeTaskStarvationCount: 9999 });
-    await step(`spend its ${budget} ms virtual time budget`, until(() => expired));
+    await step(until(() => expired));
     return (await page('Runtime.evaluate', { expression: DOCUMENT_HTML, returnByValue: true })).result.value;
   } finally {
     stop();
-    clearTimeout(stall);
   }
 }

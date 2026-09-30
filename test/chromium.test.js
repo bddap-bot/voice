@@ -79,24 +79,19 @@ test('Chromium cleanup removes the profile when spawning fails', async () => {
 
 async function renderTicking(t, tick) {
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  let chrome, server, requested = 0, announced = 0, announce = () => {};
+  let chrome, server;
   const processes = [];
   const record = async () => { processes.push(...(await chrome.devtools.call('SystemInfo.getProcessInfo')).processInfo); };
   try {
     server = createServer(async (request, response) => {
       if (request.url !== '/tick') return response.end(`<!doctype html><script>addEventListener('load', async () => { for (let ticks = 1; ; ticks++) { await new Promise(resolve => setTimeout(resolve, 1000)); await fetch('/tick'); document.body.dataset.ticks = ticks; } });</script>`);
-      const index = ++requested;
-      while (announced < index) await new Promise(resolve => { announce = resolve; });
       await record().catch(() => {});
       tick(response, processes);
     });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     chrome = await launchChromium({ args: ['--headless=new', '--no-sandbox'] });
-    chrome.devtools.listen(({ method, params }) => {
-      if (method === 'Network.requestWillBeSent' && params.request.url.endsWith('/tick')) { announced++; announce(); }
-    });
     await record();
-    const stdout = await renderDom(chrome, `http://127.0.0.1:${server.address().port}/`, { budget: 8000, stallLimit: 4000 });
+    const stdout = await renderDom(chrome, `http://127.0.0.1:${server.address().port}/`, { budget: 8000 });
     assert.ok((await readdir(chrome.scratch)).some(name => /^\.?(org\.chromium\.Chromium|com\.google\.Chrome)\./.test(name)), 'Chromium keeps its temporary files in its scratch directory');
     return { stdout };
   } catch (error) {
@@ -113,17 +108,10 @@ async function renderTicking(t, tick) {
   }
 }
 
-test('a page whose fetches each answer within the stall limit is not cut off, however long it runs', async (t) => {
-  const { stdout, error } = await renderTicking(t, response => { t.mock.timers.tick(3000); response.end(); });
+test('a page completes its virtual work regardless of elapsed host time between fetches', async (t) => {
+  const { stdout, error } = await renderTicking(t, response => { t.mock.timers.tick(600000); response.end(); });
   assert.ifError(error);
   assert.ok(Number(/data-ticks="(\d+)"/.exec(stdout)?.[1]) >= 7, stdout);
-});
-
-test('a page stalled on a fetch that never completes fails at the stall limit', async (t) => {
-  let stalled = true;
-  const { error } = await renderTicking(t, () => { (function advance() { if (stalled) { t.mock.timers.tick(1000); setImmediate(advance); } })(); });
-  stalled = false;
-  assert.match(error?.message, /a fetch made no progress within 4 s/);
 });
 
 for (const victim of ['renderer', 'browser']) test(`a page run fails when its ${victim} process dies`, async (t) => {

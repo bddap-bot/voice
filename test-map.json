@@ -3,6 +3,15 @@
   "rules": [
     {
       "paths": [
+        "android/**"
+      ],
+      "tests": [
+        "bash android/build.sh"
+      ],
+      "why": "Compile, package, align and verify the signed Android host with SDK 35 and a private signing key."
+    },
+    {
+      "paths": [
         "AGENTS.md"
       ],
       "tests": [],

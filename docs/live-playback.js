@@ -1,3 +1,4 @@
+import { audioDiagnostics } from './audio-diagnostics.js';
 export class LivePlayback {
   constructor(onError, speaker = null) {
     this.onError = onError;
@@ -7,6 +8,7 @@ export class LivePlayback {
   }
   async attach(stream) {
     const context = this.context = new AudioContext();
+  audioDiagnostics()?.context(context, 'playback-context');
     await context.audioWorklet.addModule(new URL('./playback-worklet.js', import.meta.url));
     if (this.closed) return null;
     this.node = new AudioWorkletNode(context, 'live-playback', { outputChannelCount: [1], channelCount: 1, channelCountMode: 'explicit' });

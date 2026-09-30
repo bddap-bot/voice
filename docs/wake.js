@@ -1,3 +1,4 @@
+import { audioDiagnostics } from './audio-diagnostics.js';
 export const RATE = 16000;
 export const CHUNK = 1280;
 export const WINDOW = 16;
@@ -133,6 +134,7 @@ export class WakeDecision {
 
 export async function startWakeSpotter(stream, heard, model) {
   const context = new AudioContext({ sampleRate: RATE });
+  audioDiagnostics()?.context(context, 'wake-context');
   await context.audioWorklet.addModule(new URL('./wake-worklet.js', import.meta.url));
   const worker = new Worker(new URL('./wake-worker.js', import.meta.url), { type: 'module' });
   worker.postMessage({ model });

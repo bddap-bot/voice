@@ -1,3 +1,4 @@
+import { audioDiagnostics } from './audio-diagnostics.js';
 export const RATE = 16000;
 export const HOP = 160;
 export const CHUNK = 1280;
@@ -339,6 +340,7 @@ export function prepareSpeaker() {
 async function speakerGraph(stream, message, heard) {
   const id = ++graphs;
   const context = new AudioContext({ sampleRate: RATE });
+  audioDiagnostics()?.context(context, 'speaker-context');
   try {
     await context.audioWorklet.addModule(new URL('./speaker-worklet.js', import.meta.url));
     const node = new AudioWorkletNode(context, 'speaker-gate', { outputChannelCount: [1], channelCount: 1, channelCountMode: 'explicit' });

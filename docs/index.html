@@ -141,6 +141,8 @@ import { PuppetChannel } from './puppet-client.js';
 import { ListeningReactionDriver, TranscriptActionDriver, webGpuAdapter } from './puppet-drivers.js';
 import { StageTrace } from './stage-trace.js';
 import { LivePlayback } from './live-playback.js';
+import { audioDiagnostics } from './audio-diagnostics.js';
+audioDiagnostics();
 import { PuppetRuntime } from './puppet.js';
 import { INACTIVITY_MS, NAME, SIGN_OFF, WAKE_PHRASE } from './identity.js';
 import { loadHead, startWakeSpotter } from './wake.js';
@@ -781,6 +783,7 @@ function acquireMicrophone() {
       throw new Error('microphone released while opening');
     }
     microphoneStream = stream;
+    for (const track of stream.getAudioTracks()) audioDiagnostics()?.track(track);
     for (const track of stream.getTracks()) track.addEventListener('ended', () => microphoneEnded(stream));
     setMicrophoneMuted(microphoneMuted);
     if ($('status').textContent === microphoneRefusal.message) setStatus();
@@ -1261,6 +1264,7 @@ async function startConversation() {
     attempt.stream = await openMicrophone(attempt);
     if (attempt.cancelled) return;
     attempt.pc = new RTCPeerConnection();
+    audioDiagnostics()?.peer(attempt.pc);
     attempt.channel = attempt.pc.createDataChannel('oai-events');
     stageTrace = new StageTrace((span) => traces.add(span));
     const started = waitData(attempt.channel, (event) => event.type === 'session.started', 30000, attempt);

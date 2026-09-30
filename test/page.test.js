@@ -1753,7 +1753,11 @@ test('the wake phrase carries earlier turns and a completed-sleep marker into on
   assert.deepEqual(result.wakes, ['0.930']);
   assert.deepEqual(result.puppet, [['asleep', false], ['pose', 'stand'], ['pose', 'listen']]);
   assert.deepEqual(result.live, [
-    { type: 'session.instructions.append', delegation_id: null, content: `Your name is ${NAME}. Earlier turns are memory of completed conversations, not results for this conversation. If the user asks the hub or requests a fresh or current check, always delegate again, even if an earlier turn seems to answer it. Never speak an earlier hub answer as a new result; wait for the new application reply. If a hub reply asks the user a question, delegate the user's answer; if the user changes the subject instead, handle that turn as a new request. When the user asks you to sleep or signals that the conversation is over, for example with a goodbye, "that'll be all", or a hint that it is bedtime, end your reply with "${SIGN_OFF}" and do not delegate, even while a hub request is pending. Never say "${SIGN_OFF}" at any other time; it ends the conversation.` },
+    { type: 'session.instructions.append', delegation_id: null, content: `You are ${NAME}, the voice conversation partner. Prefer concise, natural replies, with detail when it helps.
+
+Earlier turns are memory, not fresh results. Delegate requests for the hub or a current check again and wait for the new application reply. Relay the user's answer to a hub question; handle a changed subject as a new request.
+
+When the user asks you to sleep or ends the conversation (a goodbye, "that'll be all", or a bedtime hint), finish with "${SIGN_OFF}" without delegating, even if a hub request is pending. Reserve that sentence for signing off: the page detects it in your speech and goes to sleep.` },
     { type: 'session.commentary.append', delegation_id: null, content: `Context: ${NAME} was just woken.` },
   ]);
 });

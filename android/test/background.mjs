@@ -15,7 +15,8 @@ let socket;
 try {
   let pages;
   for (let attempt = 0; attempt < 90; attempt++) {
-    const pid = run('shell', 'sh', '-c', 'pidof voice.live || true').trim();
+    let pid = '';
+    try { pid = run('shell', 'pidof', 'voice.live').trim(); } catch {}
     if (pid) {
       run('forward', 'tcp:15646', `localabstract:webview_devtools_remote_${pid}`);
       try { pages = await (await fetch('http://127.0.0.1:15646/json')).json(); } catch {}
@@ -134,6 +135,6 @@ try {
 } finally {
   socket?.close();
   run('shell', 'am', 'force-stop', 'voice.live');
-  run('forward', '--remove', 'tcp:15646');
+  try { run('forward', '--remove', 'tcp:15646'); } catch {}
   instrument.kill();
 }

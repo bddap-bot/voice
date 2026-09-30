@@ -145,7 +145,6 @@ try {
     assert.ok(row.contextTime > previous.contextTime + 10, 'playback processing keeps advancing');
     assert.ok(row.outputTime > previous.outputTime + 10, 'speaker playback keeps advancing');
   }
-  await writeFile(process.env.VOICE_ANDROID_EVIDENCE || 'android/build/background-evidence.json', JSON.stringify({ scope: 'Android emulator duplex WebRTC: real microphone capture and synthetic reply tone through deployed LivePlayback; no model or physical acoustic verification', screenOff: /mScreenState=OFF|state OFF|state=OFF/.test(display), wakefulness: power.match(/mWakefulness=(\w+)/)?.[1], rows }, null, 2));
   run('shell', 'input', 'keyevent', 'KEYCODE_WAKEUP');
   run('shell', 'wm', 'dismiss-keyguard');
   run('shell', 'am', 'start', '-n', 'voice.live/.MainActivity');
@@ -155,9 +154,14 @@ try {
   const button = ui.match(/<node[^>]*text="(?:Stop and close|STOP AND CLOSE)"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/);
   assert.ok(button, 'Stop and close control is reachable');
   run('shell', 'input', 'tap', String((+button[1] + +button[3]) / 2), String((+button[2] + +button[4]) / 2));
-  await pause(1000);
-  const services = run('shell', 'dumpsys', 'activity', 'services', 'voice.live');
+  let services = '';
+  for (let attempt = 0; attempt < 20; attempt++) {
+    await pause(1000);
+    services = run('shell', 'dumpsys', 'activity', 'services', 'voice.live');
+    if (!services.includes('isForeground=true')) break;
+  }
   assert.ok(!services.includes('isForeground=true'), 'Stop releases foreground service');
+  await writeFile(process.env.VOICE_ANDROID_EVIDENCE || 'android/build/background-evidence.json', JSON.stringify({ scope: 'Android emulator duplex WebRTC: real microphone capture and synthetic reply tone through deployed LivePlayback; no model or physical acoustic verification', stopped: true, screenOff: /mScreenState=OFF|state OFF|state=OFF/.test(display), wakefulness: power.match(/mWakefulness=(\w+)/)?.[1], rows }, null, 2));
   console.log('PASS: microphone, RTP and playback advance while backgrounded and screen off; Stop releases service');
 } finally {
   socket?.close();

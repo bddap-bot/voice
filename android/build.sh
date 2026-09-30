@@ -16,7 +16,7 @@ if [[ "${1:-}" == --test ]]; then
     VOICE_STORE_PASSWORD=$(head -c 24 /dev/urandom | base64)
     VOICE_KEYSTORE="$work/throwaway.p12"
     export VOICE_STORE_PASSWORD
-    keytool -genkeypair -keystore "$VOICE_KEYSTORE" -storetype PKCS12 -storepass:env VOICE_STORE_PASSWORD -alias test -keyalg RSA -keysize 2048 -validity 1 -dname CN=test >/dev/null 2>&1
+    keytool -genkeypair -keystore "$VOICE_KEYSTORE" -storetype PKCS12 -storepass:env VOICE_STORE_PASSWORD -alias test -keyalg RSA -keysize 2048 -validity 1 -dname CN=test >/dev/null
 else
     : "${VOICE_KEYSTORE:?Set VOICE_KEYSTORE to a private signing keystore}"
     : "${VOICE_STORE_PASSWORD:?Set VOICE_STORE_PASSWORD}"

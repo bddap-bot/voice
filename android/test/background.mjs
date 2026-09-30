@@ -11,6 +11,7 @@ run('shell', 'wm', 'dismiss-keyguard');
 run('shell', 'settings', 'put', 'system', 'screen_off_timeout', '600000');
 run('shell', 'settings', 'put', 'global', 'stay_on_while_plugged_in', '0');
 run('shell', 'settings', 'put', 'global', 'always_finish_activities', '1');
+run('shell', 'dumpsys', 'deviceidle', 'enable', 'deep');
 run('shell', 'dumpsys', 'battery', 'unplug');
 try { run('uninstall', 'voice.live'); } catch {}
 run('install', 'android/build/live-voice-test.apk');
@@ -157,6 +158,7 @@ try {
   assert.match(power, /mWakefulness=(Asleep|Dozing)/, 'Android confirms the device is sleeping or dozing');
   assert.match(display, /mScreenState=OFF|state OFF|state=OFF/, 'Android confirms the display is off');
   run('shell', 'dumpsys', 'deviceidle', 'force-idle');
+  assert.equal(run('shell', 'dumpsys', 'deviceidle', 'get', 'deep').trim(), 'IDLE', 'Android is in deep Doze');
   await interval('screen-off-30s');
   const rate = (row, key) => (row[key] - rows[rows.indexOf(row) - 1][key]) / (row.wall - rows[rows.indexOf(row) - 1].wall);
   const rates = rows.slice(1).map(row => ({ label: row.label, ...Object.fromEntries(['samples', 'contextTime', 'outputTime', 'sent', 'received', 'replyReceived'].map(key => [key, +rate(row, key).toFixed(3)])) }));
@@ -193,6 +195,8 @@ try {
   console.log('PASS: microphone, RTP and playback advance while backgrounded and screen off; Stop releases service');
 } finally {
   socket?.close();
-  try { run('shell', 'dumpsys', 'deviceidle', 'unforce'); run('shell', 'am', 'force-stop', 'voice.live'); } catch {}
+  for (const command of [['dumpsys', 'deviceidle', 'unforce'], ['settings', 'put', 'global', 'always_finish_activities', '0'], ['am', 'force-stop', 'voice.live']]) {
+    try { run('shell', ...command); } catch {}
+  }
   try { run('forward', '--remove', 'tcp:15646'); } catch {}
 }

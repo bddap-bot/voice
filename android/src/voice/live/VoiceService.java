@@ -54,8 +54,7 @@ public final class VoiceService extends Service {
         PendingIntent stop = PendingIntent.getService(this, 1, new Intent(this, VoiceService.class).setAction("stop"), PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         PendingIntent mute = PendingIntent.getService(this, 2, new Intent(this, VoiceService.class).setAction("mute"), PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         Notification notice = new Notification.Builder(this, "conversation")
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now).setContentTitle("Live Voice is open")
-            .setContentText("Mute toggles the page microphone · Close ends the session")
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(open).setOngoing(true)
             .addAction(new Notification.Action.Builder(null, "Mute", mute).build())
             .addAction(new Notification.Action.Builder(null, "Close", stop).build()).build();

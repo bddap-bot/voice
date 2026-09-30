@@ -103,7 +103,7 @@ async function makeServer() {
   return { server, url: `http://127.0.0.1:${server.address().port}/`, token, close: () => server.close() };
 }
 
-async function connectCdp(port) {
+async function connectCdp(port, exit) {
   const seconds = 120;
   const deadline = Date.now() + seconds * 1000;
   let page;
@@ -126,6 +126,8 @@ async function connectCdp(port) {
       const { resolve, reject } = pending.get(message.id);
       pending.delete(message.id);
       if (message.error) reject(new Error(message.error.message)); else resolve(message);
+    } else if (message.method === 'Inspector.targetCrashed' && message.sessionId === pageSession) {
+      exit(new Error('Chromium renderer crashed'));
     } else if (message.method === 'Target.attachedToTarget' && message.params.targetInfo.type === 'service_worker') {
       workerSession = message.params.sessionId;
     } else if (message.method === 'ServiceWorker.workerErrorReported') {
@@ -156,8 +158,10 @@ async function runViewport(viewport, executable, server) {
   const devPort = await new Promise((resolve) => { const listener=net.createServer().listen(0,'127.0.0.1',()=>{const value=listener.address().port;listener.close(()=>resolve(value))}); });
   const args=['--headless=new','--no-sandbox','--disable-background-timer-throttling','--disable-renderer-backgrounding','--hide-scrollbars','--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream','--autoplay-policy=no-user-gesture-required',`--window-size=${viewport.width},${viewport.height}`,`--remote-debugging-port=${devPort}`,'--remote-debugging-address=127.0.0.1',...(viewport.mobile?['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36']:[]),'about:blank'];
   const chrome = await launchChromium({ executable, args, prefix: '.smoke-' });
+  const { promise: exited, resolve: exit } = Promise.withResolvers();
+  chrome.exited.then(exit);
   const run = async () => {
-    const cdp=await connectCdp(devPort);
+    const cdp=await connectCdp(devPort, exit);
     if (development) await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `
       globalThis.__smokeLiveChannels = [];
       globalThis.__smokeSpeech = ${JSON.stringify(speech)};
@@ -287,7 +291,7 @@ async function runViewport(viewport, executable, server) {
     return report;
   };
   try {
-    return await Promise.race([chrome.exited.then((error) => { throw error; }), run()]);
+    return await Promise.race([exited.then((error) => { throw error; }), run()]);
   } finally {
     await chrome.close();
   }

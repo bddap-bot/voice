@@ -28,10 +28,7 @@ export async function launchChromium({ executable, args = [], prefix = '.chromiu
   const close = () => closing ??= (async () => {
     if (chrome.pid) chrome.kill('SIGKILL');
     await exited;
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try { await rm(scratch, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); break; }
-      catch (error) { if (attempt === 4) throw error; await new Promise((resolve) => setTimeout(resolve, 250)); }
-    }
+    await rm(scratch, { recursive: true, force: true });
   })();
   return { scratch, exited, close, devtools: devtools(chrome.stdio[3], chrome.stdio[4]), get stderr() { return stderr; } };
 }

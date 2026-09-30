@@ -89,7 +89,7 @@ test('an avatar loads and renders Standing before any clip exists', async () => 
   let renders = 0;
   let finishes = 0;
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
-    bones: new Map(), clips: new Map(), idleRoot: new THREE.Group(), gazeTarget: new THREE.Object3D(),
+    poseName: 'sit', bones: new Map(), clips: new Map(), idleRoot: new THREE.Group(), gazeTarget: new THREE.Object3D(),
     renderer: { render: () => renders++, getContext: () => ({ finish: () => finishes++ }) },
   });
   const stages = [];

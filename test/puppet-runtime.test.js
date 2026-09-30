@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { MOOD_TABLE, PuppetRuntime, animationClip, audioEnergy, loudnessViseme, pointAtOffsets, screenTarget, shouldBeat, transcriptVisemes } from '../src/puppet.js';
 
 function waveform(amplitude) {
@@ -772,4 +773,79 @@ test('the feet anchor the puppet through sitting, gestures and standing while th
   const spread = (axis) => Math.max(...hipsSeen.map((point) => point[axis])) - Math.min(...hipsSeen.map((point) => point[axis]));
   assert.ok(spread('y') > 0.6, `hips height spread ${spread('y')}`);
   assert.ok(spread('z') > 0.8, `hips depth spread ${spread('z')}`);
+});
+
+function gestureRuntime() {
+  const scene = new THREE.Group();
+  scene.add(new THREE.Mesh(new THREE.BoxGeometry(1, 2, 1)));
+  const vrm = {
+    scene, meta: { metaVersion: '1' }, update() {},
+    humanoid: { setNormalizedPose() {}, getNormalizedBoneNode: () => null, getRawBoneNode: () => scene },
+  };
+  const clips = new Map(['idle', 'idle-2', 'sit-idle', 'sit', 'stand', 'wave', 'nod'].map((name) => {
+    const clip = new THREE.AnimationClip(name, 1, [new THREE.VectorKeyframeTrack('.position', [0, 1], [0, 0, 0, 0, 0, 0])]);
+    clip.userData.action = name;
+    return [name, clip];
+  }));
+  return Object.assign(Object.create(PuppetRuntime.prototype), {
+    vrm, clips, mixer: new THREE.AnimationMixer(new THREE.Group()), idleRoot: new THREE.Group(),
+    bones: new Map(), handovers: new Map(), poseName: 'stand', idleClip: null,
+    renderer: { render() {}, getContext: () => ({ finish() {} }) },
+    nextIdleAt: Infinity, clipGesture: null, pendingGesture: null, gestureState: null, gestureOffsets: {},
+  });
+}
+
+function advanceGesture(runtime, seconds) {
+  for (let frame = 0; frame < seconds * 60; frame++) {
+    runtime.mixer.update(1 / 60);
+    runtime.updatePose(runtime.mixer.time * 1000);
+  }
+}
+
+test('the paintOff pose cancels a queued standing gesture before the stand completes', () => {
+  for (const cancel of [false, true]) {
+    const runtime = gestureRuntime();
+    runtime.poseName = 'sit';
+    runtime.playIdle(0);
+    const fired = [];
+    const playClip = runtime.playClip.bind(runtime);
+    runtime.playClip = (name, fallback) => { fired.push(name); playClip(name, fallback); };
+    runtime.gesture('wave');
+    assert.equal(runtime.clipAction.getClip().name, 'stand');
+    advanceGesture(runtime, 0.2);
+    if (cancel) runtime.pose('sit');
+    advanceGesture(runtime, 3);
+    assert.equal(fired.includes('wave'), !cancel);
+    assert.equal(runtime.pendingGesture, null);
+    assert.equal(runtime.poseName, cancel ? 'sit' : 'stand');
+  }
+});
+
+test('model reload drops clip and queued gestures and resumes idle rotation', async (t) => {
+  const runtime = gestureRuntime();
+  const replacement = gestureRuntime();
+  t.mock.method(GLTFLoader.prototype, 'loadAsync', async () => ({ userData: { vrm: replacement.vrm } }));
+  for (const queued of [false, true]) {
+    runtime.poseName = queued ? 'sit' : 'stand';
+    runtime.playIdle(0);
+    runtime.gesture(queued ? 'wave' : 'nod');
+    advanceGesture(runtime, 0.2);
+    assert.ok(queued ? runtime.pendingGesture : runtime.clipGesture);
+    await runtime.load(new Uint8Array());
+    runtime.clips = new Map(replacement.clips);
+    await runtime.loadClips([]);
+    const fired = [];
+    const playClip = runtime.playClip.bind(runtime);
+    runtime.playClip = (name, fallback) => { fired.push(name); playClip(name, fallback); };
+    advanceGesture(runtime, 3);
+    assert.equal(runtime.clipGesture, null);
+    assert.equal(runtime.pendingGesture, null);
+    assert.ok(!fired.includes('nod') && !fired.includes('wave'));
+    const idle = runtime.clipAction.getClip().name;
+    runtime.updatePose(runtime.nextIdleAt + 1);
+    assert.notEqual(runtime.clipAction.getClip().name, idle);
+    assert.ok(Number.isFinite(runtime.nextIdleAt));
+    runtime.gesture('beat');
+    assert.equal(runtime.gestureState.name, 'beat');
+  }
 });

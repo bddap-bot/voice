@@ -299,11 +299,8 @@ export class PuppetRuntime {
     this.clips.clear();
     this.clipAction = null;
     this.clipFallback = null;
-    this.clipGesture = null;
     this.idleClip = null;
-    this.pendingGesture = null;
-    this.gestureState = null;
-    this.gestureOffsets = {};
+    this.pose(this.poseName);
     this.idleRoot.add(vrm.scene);
     await stage('render', () => {
       this.renderer.render(this.scene, this.camera);
@@ -410,6 +407,10 @@ export class PuppetRuntime {
   }
   pose(name) {
     if (!['sit', 'stand', 'listen'].includes(name)) throw new Error(`unknown pose ${name}`);
+    this.clipGesture = null;
+    this.pendingGesture = null;
+    this.gestureState = null;
+    this.gestureOffsets = {};
     const seated = name === 'sit';
     const transition = seated !== (this.poseName === 'sit');
     this.poseName = name;
@@ -423,8 +424,8 @@ export class PuppetRuntime {
     if (resolved === 'think') this.setGaze('away', 1800);
     if (CLIP_GESTURES.has(resolved)) {
       if (this.poseName === 'sit' && this.clipStance(resolved) === 'stand') {
-        this.pendingGesture = { name, target };
         this.pose('stand');
+        this.pendingGesture = { name, target };
         return true;
       }
       this.gestureState = null;

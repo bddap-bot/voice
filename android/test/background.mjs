@@ -1,11 +1,24 @@
 import { execFileSync } from 'node:child_process';
-import { writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import assert from 'node:assert/strict';
 
 const adb = `${process.env.ANDROID_HOME}/platform-tools/adb`;
 const serial = process.env.ANDROID_SERIAL || 'emulator-5646';
 const run = (...args) => execFileSync(adb, ['-s', serial, ...args], { encoding: 'utf8', timeout: 60000, maxBuffer: 64 * 1024 * 1024 });
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+const evidence = process.env.VOICE_ANDROID_EVIDENCE || 'android/build/background-evidence.json';
+const artifacts = path.dirname(evidence);
+const stopAction = process.env.VOICE_ANDROID_STOP_ACTION || 'swipe';
+assert.ok(['swipe', 'notification'].includes(stopAction));
+await mkdir(artifacts, { recursive: true });
+const saveDump = async (label, ...command) => {
+  const text = run('shell', ...command);
+  await writeFile(path.join(artifacts, `${stopAction}-${label}.txt`), text);
+  return text;
+};
+const screenshot = async label => writeFile(path.join(artifacts, `${stopAction}-${label}.png`),
+  execFileSync(adb, ['-s', serial, 'exec-out', 'screencap', '-p'], { timeout: 60000 }));
 run('shell', 'input', 'keyevent', 'KEYCODE_WAKEUP');
 run('shell', 'wm', 'dismiss-keyguard');
 run('shell', 'settings', 'put', 'system', 'screen_off_timeout', '600000');
@@ -31,7 +44,6 @@ const tap = async text => {
 let socket;
 try {
   run('shell', 'am', 'start', '-W', '-n', 'voice.live/.MainActivity');
-  await tap('Open Live Voice');
   let pages;
   for (let attempt = 0; attempt < 90; attempt++) {
     let pid = '';
@@ -46,12 +58,14 @@ try {
   const page = pages?.find(page => page.url.startsWith('https://bddap-bot.github.io/voice/'));
   assert.ok(page, 'Live WebView was loaded');
   let next = 0;
+  let onEvent = () => {};
   const pending = new Map();
   const connect = async () => {
     socket = new WebSocket(page.webSocketDebuggerUrl.replace(/localhost:\d+|127\.0\.0\.1:\d+/, '127.0.0.1:15646'));
     await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject; setTimeout(() => reject(Error('DevTools connection timed out')), 30000); });
     socket.onmessage = ({ data }) => {
     const message = JSON.parse(data);
+    if (message.method) onEvent(message);
     if (pending.has(message.id)) {
       const { resolve, reject, timer } = pending.get(message.id);
       pending.delete(message.id);
@@ -62,12 +76,17 @@ try {
   };
   };
   await connect();
-  const evaluate = expression => new Promise((resolve, reject) => {
+  const call = (method, params = {}) => new Promise((resolve, reject) => {
     const id = ++next;
-    const timer = setTimeout(() => { pending.delete(id); reject(Error('WebView evaluation timed out')); }, 60000);
-    pending.set(id, { resolve: result => result.exceptionDetails ? reject(Error(JSON.stringify(result.exceptionDetails))) : resolve(result.result.value), reject, timer });
-    socket.send(JSON.stringify({ id, method: 'Runtime.evaluate', params: { expression, awaitPromise: true, returnByValue: true, userGesture: true } }));
+    const timer = setTimeout(() => { pending.delete(id); reject(Error(`${method} timed out`)); }, 60000);
+    pending.set(id, { resolve, reject, timer });
+    socket.send(JSON.stringify({ id, method, params }));
   });
+  const evaluate = async expression => {
+    const result = await call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true, userGesture: true });
+    if (result.exceptionDetails) throw Error(JSON.stringify(result.exceptionDetails));
+    return result.result.value;
+  };
   for (let attempt = 0; attempt < 60; attempt++) {
     let ready = false;
     try { ready = await evaluate("location.origin === 'https://bddap-bot.github.io' && document.readyState === 'complete'"); } catch {}
@@ -180,22 +199,114 @@ try {
     assert.ok(rate(control, 'samples') > 0.25, 'visible capture runs at least a quarter of real time');
     assert.ok(rate(row, key) >= rate(control, key) / 4, `${row.label} ${key} keeps at least a quarter of the visible control rate`);
   }
+  run('shell', 'dumpsys', 'deviceidle', 'unforce');
+  run('shell', 'settings', 'put', 'global', 'always_finish_activities', '0');
   run('shell', 'input', 'keyevent', 'KEYCODE_WAKEUP');
   run('shell', 'wm', 'dismiss-keyguard');
-  run('shell', 'am', 'start', '-n', 'voice.live/.MainActivity');
-  await tap('Stop and close');
-  let services = '';
+  run('shell', 'am', 'start', '-W', '-n', 'voice.live/.MainActivity');
+
+  let fixtureError;
+  onEvent = message => {
+    if (message.method !== 'Fetch.requestPaused') return;
+    (async () => {
+      const { requestId } = message.params;
+      const response = await call('Fetch.getResponseBody', { requestId });
+      const html = response.base64Encoded ? Buffer.from(response.body, 'base64').toString() : response.body;
+      assert.ok(html.includes('function acquireMicrophone()'), 'fixture uses the deployed page capture implementation');
+      const fixture = html.replace('</script>', `
+        globalThis.androidTestStart = async () => {
+          savedState(true);
+          globalThis.androidTestMic = await acquireMicrophone();
+        };
+      </script>`);
+      await call('Fetch.fulfillRequest', { requestId, responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'text/html' }], body: Buffer.from(fixture).toString('base64') });
+    })().catch(error => { fixtureError = error; });
+  };
+  await call('Fetch.enable', { patterns: [{ urlPattern: page.url, requestStage: 'Response', resourceType: 'Document' }] });
+  await call('Page.reload', { ignoreCache: true });
+  for (let attempt = 0; attempt < 60; attempt++) {
+    if (fixtureError) throw fixtureError;
+    if (await evaluate("typeof androidTestStart === 'function'")) break;
+    if (attempt === 59) throw Error('page session fixture did not load');
+    await pause(1000);
+  }
+  await call('Fetch.disable');
+  await evaluate('androidTestStart()');
+  const muteState = () => evaluate(`({ pressed: document.getElementById('mic-mute').getAttribute('aria-pressed'), label: document.getElementById('mic-mute').textContent, disabled: document.getElementById('mic-mute').disabled, enabled: androidTestMic.getAudioTracks()[0].enabled })`);
+  const expectMute = async muted => {
+    let state;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      state = await muteState();
+      if (state.pressed === String(muted) && state.enabled === !muted) break;
+      await pause(250);
+    }
+    assert.deepEqual(state, { pressed: String(muted), label: muted ? 'Unmute mic' : 'Mute mic', disabled: false, enabled: !muted });
+    console.log('page mute state', JSON.stringify(state));
+  };
+  await expectMute(false);
+  await screenshot('page-unmuted');
+  for (const muted of [true, false]) {
+    run('shell', 'cmd', 'statusbar', 'expand-notifications');
+    await pause(1000);
+    await screenshot(`notification-before-${muted ? 'mute' : 'unmute'}`);
+    await tap('Mute');
+    await expectMute(muted);
+    run('shell', 'cmd', 'statusbar', 'collapse');
+    await pause(1000);
+    await screenshot(`page-${muted ? 'muted' : 'unmuted-again'}`);
+  }
+  await tap('Mute mic');
+  await expectMute(true);
+  run('shell', 'cmd', 'statusbar', 'expand-notifications');
+  await tap('Mute');
+  await expectMute(false);
+  run('shell', 'cmd', 'statusbar', 'collapse');
+  await saveDump('before-audio', 'dumpsys', 'audio');
+  await saveDump('before-services', 'dumpsys', 'activity', 'services', 'voice.live');
+  await saveDump('before-appops', 'cmd', 'appops', 'get', 'voice.live', 'RECORD_AUDIO');
+  const privacyItem = /PrivacyItem\(privacyType=TYPE_MICROPHONE, application=PrivacyApplication\(packageName=voice\.live[^\n]*paused=false/;
+  assert.match(await saveDump('before-systemui', 'dumpsys', 'activity', 'service', 'com.android.systemui/.SystemUIService'), privacyItem, 'System UI reports the active microphone indicator');
+  assert.match(run('shell', 'dumpsys', 'audio'), /active\? true\n[^\n]*pack:voice\.live[^\n]*silenced:false/, 'capture is active before closing');
+  if (stopAction === 'swipe') {
+    run('shell', 'input', 'keyevent', 'KEYCODE_APP_SWITCH');
+    await pause(2000);
+    await screenshot('recents-before-swipe');
+    const size = run('shell', 'wm', 'size').match(/(\d+)x(\d+)/);
+    assert.ok(size);
+    run('shell', 'input', 'swipe', String(+size[1] / 2), String(+size[2] / 2), String(+size[1] / 2), String(Math.round(+size[2] * 0.1)), '150');
+  } else {
+    run('shell', 'cmd', 'statusbar', 'expand-notifications');
+    await tap('Close');
+  }
+  let services = '', audio = '', recents = '', appops = '';
   for (let attempt = 0; attempt < 20; attempt++) {
     await pause(1000);
     services = run('shell', 'dumpsys', 'activity', 'services', 'voice.live');
-    if (!services.includes('isForeground=true')) break;
+    audio = run('shell', 'dumpsys', 'audio');
+    recents = run('shell', 'dumpsys', 'activity', 'recents');
+    appops = run('shell', 'cmd', 'appops', 'get', 'voice.live', 'RECORD_AUDIO');
+    if (!/ServiceRecord\{[^\n]*voice\.live\/\.VoiceService/.test(services) && !/active\? true\n[^\n]*pack:voice\.live/.test(audio) && !appops.includes('(running)')) break;
   }
-  assert.ok(!services.includes('isForeground=true'), 'Stop releases foreground service');
-  await writeFile(process.env.VOICE_ANDROID_EVIDENCE || 'android/build/background-evidence.json', JSON.stringify({ scope: 'Android emulator duplex WebRTC: real microphone capture and synthetic reply tone through deployed LivePlayback; no model or physical acoustic verification', stopped: true, screenOff: /mScreenState=OFF|state OFF|state=OFF/.test(display), wakefulness: power.match(/mWakefulness=(\w+)/)?.[1], rows }, null, 2));
-  console.log('PASS: microphone, RTP and playback advance while backgrounded and screen off; Stop releases service');
+  for (const [label, text] of Object.entries({ services, audio, recents, appops }))
+    await writeFile(path.join(artifacts, `${stopAction}-after-${label}.txt`), text);
+  let systemui = '';
+  for (let attempt = 0; attempt < 20; attempt++) {
+    systemui = run('shell', 'dumpsys', 'activity', 'service', 'com.android.systemui/.SystemUIService');
+    if (!privacyItem.test(systemui)) break;
+    await pause(1000);
+  }
+  await writeFile(path.join(artifacts, `${stopAction}-after-systemui.txt`), systemui);
+  await screenshot('after-close');
+  assert.ok(!/baseIntent=.*voice\.live/.test(recents), `${stopAction} removes the app task`);
+  assert.ok(!privacyItem.test(systemui), `${stopAction} clears the system microphone indicator`);
+  assert.ok(!/ServiceRecord\{[^\n]*voice\.live\/\.VoiceService/.test(services), `${stopAction} removes the service`);
+  assert.ok(!/active\? true\n[^\n]*pack:voice\.live/.test(audio), `${stopAction} releases microphone capture`);
+  assert.ok(!appops.includes('(running)'), `${stopAction} ends the microphone app-op`);
+  await writeFile(evidence, JSON.stringify({ scope: 'Android emulator duplex WebRTC: real microphone and synthetic reply through deployed LivePlayback; mute fixture starts the deployed page session and capture without a relay, leaving its mute handler unchanged; no model or physical acoustic verification', stopAction, stopped: true, screenOff: /mScreenState=OFF|state OFF|state=OFF/.test(display), wakefulness: power.match(/mWakefulness=(\w+)/)?.[1], rows }, null, 2));
+  console.log(`PASS: microphone, RTP and playback advance while backgrounded and screen off; notification Mute and page button share capture state; ${stopAction} releases service, microphone and task`);
 } finally {
   socket?.close();
-  for (const command of [['dumpsys', 'deviceidle', 'unforce'], ['settings', 'put', 'global', 'always_finish_activities', '0'], ['am', 'force-stop', 'voice.live']]) {
+  for (const command of [['dumpsys', 'deviceidle', 'unforce'], ['dumpsys', 'battery', 'reset'], ['settings', 'put', 'global', 'always_finish_activities', '0'], ['am', 'force-stop', 'voice.live']]) {
     try { run('shell', ...command); } catch {}
   }
   try { run('forward', '--remove', 'tcp:15646'); } catch {}

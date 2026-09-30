@@ -1,6 +1,7 @@
 package voice.live;
 
 import android.Manifest;
+import android.app.ActivityManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -24,9 +25,7 @@ import android.webkit.WebViewClient;
 
 public final class VoiceService extends Service {
     static final String PAGE = "https://bddap-bot.github.io/voice/";
-    static boolean running;
     WebView web;
-    Runnable onClosed;
     private PowerManager.WakeLock wake;
     public final class LocalBinder extends Binder {
         VoiceService service() { return VoiceService.this; }
@@ -40,7 +39,12 @@ public final class VoiceService extends Service {
     public int onStartCommand(Intent intent, int flags, int id) {
         if (intent != null && "stop".equals(intent.getAction())) {
             close();
-            stopSelf();
+            return START_NOT_STICKY;
+        }
+        if (intent != null && "mute".equals(intent.getAction())) {
+            if (web != null && allowed(Uri.parse(web.getUrl() == null ? "" : web.getUrl())))
+                web.evaluateJavascript("document.getElementById('mic-mute')?.click()", null);
+            else if (web == null) stopSelf();
             return START_NOT_STICKY;
         }
         if (web != null) return START_NOT_STICKY;
@@ -48,11 +52,13 @@ public final class VoiceService extends Service {
             new NotificationChannel("conversation", "Voice conversation", NotificationManager.IMPORTANCE_LOW));
         PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         PendingIntent stop = PendingIntent.getService(this, 1, new Intent(this, VoiceService.class).setAction("stop"), PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        PendingIntent mute = PendingIntent.getService(this, 2, new Intent(this, VoiceService.class).setAction("mute"), PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         Notification notice = new Notification.Builder(this, "conversation")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now).setContentTitle("Live Voice is open")
-            .setContentText("Microphone available in the background · Tap Stop to close")
+            .setContentText("Mute toggles the page microphone · Close ends the session")
             .setContentIntent(open).setOngoing(true)
-            .addAction(new Notification.Action.Builder(null, "Stop", stop).build()).build();
+            .addAction(new Notification.Action.Builder(null, "Mute", mute).build())
+            .addAction(new Notification.Action.Builder(null, "Close", stop).build()).build();
         if (Build.VERSION.SDK_INT >= 30) startForeground(1, notice, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE | ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
         else startForeground(1, notice);
         wake = getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LiveVoice:conversation");
@@ -70,11 +76,10 @@ public final class VoiceService extends Service {
                 return !request.isForMainFrame() || !allowed(request.getUrl());
             }
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap icon) {
-                if (!allowed(Uri.parse(url))) { view.stopLoading(); close(); stopSelf(); }
+                if (!allowed(Uri.parse(url))) { view.stopLoading(); close(); }
             }
             public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
                 close();
-                stopSelf();
                 return true;
             }
         });
@@ -95,12 +100,11 @@ public final class VoiceService extends Service {
                 request.deny();
             }
         });
-        running = true;
         web.loadUrl(PAGE);
         return START_NOT_STICKY;
     }
+    public void onTaskRemoved(Intent rootIntent) { close(); }
     private void close() {
-        running = false;
         if (web != null) {
             ViewGroup parent = (ViewGroup) web.getParent();
             if (parent != null) parent.removeView(web);
@@ -109,11 +113,8 @@ public final class VoiceService extends Service {
         }
         if (wake != null && wake.isHeld()) wake.release();
         stopForeground(STOP_FOREGROUND_REMOVE);
-        if (onClosed != null) {
-            Runnable callback = onClosed;
-            onClosed = null;
-            callback.run();
-        }
+        stopSelf();
+        for (ActivityManager.AppTask task : getSystemService(ActivityManager.class).getAppTasks()) task.finishAndRemoveTask();
     }
     public void onDestroy() {
         close();

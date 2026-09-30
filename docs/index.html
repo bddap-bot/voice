@@ -8,7 +8,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
 <style>
-  :root { color-scheme: dark; --feet: .892; --desk: 118px; --status: 34px; --pad: 18px; --grip: 16px; --ledger-w: 22vw; --display-w: 24vw; --display-h: 24svh; --ledger-h: 20svh; --ledger-col: clamp(120px, var(--ledger-w), 28vw); --display-col: clamp(120px, var(--display-w), 28vw); --wing: calc(min(var(--ledger-col), var(--display-col)) + var(--grip)); }
+  :root { color-scheme: dark; --feet: .892; --desk: 118px; --status: 34px; --pad: 18px; --grip: 16px; --ledger-w: 22vw; --display-w: 24vw; --display-h: 24svh; --ledger-h: 20svh; --ledger-col: clamp(120px, var(--ledger-w), calc(100vw - 2 * var(--pad) - 2 * var(--grip) - 320px)); --display-col: clamp(120px, var(--display-w), calc(100vw - 2 * var(--pad) - 2 * var(--grip) - 200px - var(--ledger-col))); --wing: calc(min(var(--ledger-col), var(--display-col)) + var(--grip)); }
   * { box-sizing: border-box; }
   html { background: #08090d; }
   body { margin: 0; min-height: 100vh; background: #08090d; color: #f4eee5; font: 15px/1.45 system-ui, sans-serif; overflow: hidden; }
@@ -28,7 +28,11 @@
   .display, .ledger { position: relative; z-index: 3; min-width: 0; min-height: 0; padding: 18px; overflow: hidden; display: flex; flex-direction: column; background: linear-gradient(145deg, #201e22ee, #111217ee); border: 1px solid #6d5c49; border-radius: 4px; box-shadow: 0 18px 42px #0008, inset 0 0 35px #8a684111; }
   .display { grid-area: display; }
   .ledger { grid-area: ledger; }
-  .display h2, .ledger h2 { margin: 0 0 12px; font-size: 14px; text-transform: uppercase; letter-spacing: .08em; color: #a5a5aa; }
+  .pane-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 0 0 12px; }
+  .pane-full { min-height: 32px; padding: 4px 10px; font-size: 12px; color: #cfc4b6; }
+  .display.full, .ledger.full { position: fixed; inset: var(--pad); z-index: 20; }
+  body:has(.full) header { visibility: hidden; }
+  .display h2, .ledger h2 { margin: 0; font-size: 14px; text-transform: uppercase; letter-spacing: .08em; color: #a5a5aa; }
   .grip { position: relative; z-index: 5; display: flex; align-items: center; justify-content: center; cursor: col-resize; touch-action: none; user-select: none; outline: none; }
   .grip[data-pane="ledger"] { grid-area: ledger-grip; } .grip[data-pane="display"] { grid-area: display-grip; }
   .grip::before { content: ''; position: absolute; top: 12%; bottom: 12%; left: 50%; width: 1px; background: linear-gradient(transparent, #6d5c4999, transparent); }
@@ -80,11 +84,11 @@
     #controls.open .card-body { max-height: calc(100svh - 90px); }
   }
   @media (max-width: 720px) and (orientation: portrait) {
-    :root { --pad: 8px; --grip: 22px; --desk: 30px; --status: 0px; --wing: var(--pad); }
+    :root { --pad: 8px; --grip: 22px; --desk: 30px; --status: 0px; --wing: var(--pad); --display-row: clamp(80px, var(--display-h), calc(100svh - 364px)); --ledger-row: clamp(80px, var(--ledger-h), calc(100svh - 284px - var(--display-row))); }
     body { height: 100svh; min-height: 0; display: flex; flex-direction: column; }
     header { position: static; flex: none; height: 28px; padding: 6px 12px 0; font-size: 13px; }
     #elapsed { font-size: 15px; }
-    main { min-height: 0; flex: 1; grid: "stage" minmax(120px, 1fr) "display-grip" var(--grip) "display" clamp(80px, var(--display-h), 24svh) "ledger-grip" var(--grip) "ledger" clamp(80px, var(--ledger-h), 24svh) "dock" 76px / minmax(0, 1fr); }
+    main { min-height: 0; flex: 1; grid: "stage" minmax(120px, 1fr) "display-grip" var(--grip) "display" var(--display-row) "ledger-grip" var(--grip) "ledger" var(--ledger-row) "dock" 76px / minmax(0, 1fr); }
     .control::before { display: none; }
     #puppet-credit { top: auto; bottom: 0; font-size: 10px; }
     .grip { cursor: row-resize; }
@@ -106,10 +110,10 @@
     <div id="puppet-prompt" aria-hidden="true">Tap to talk</div>
     <div id="puppet-credit"></div>
   </section>
-  <section id="ledger" class="ledger"><h2>delegation log</h2><div id="log" aria-live="polite"></div></section>
+  <section id="ledger" class="ledger"><div class="pane-head"><h2>delegation log</h2><button class="pane-full" type="button" data-pane="ledger" aria-pressed="false">Full screen</button></div><div id="log" aria-live="polite"></div></section>
   <div class="grip" data-pane="ledger" role="separator" aria-orientation="vertical" aria-label="resize delegation log" tabindex="0"></div>
   <div class="grip" data-pane="display" role="separator" aria-orientation="vertical" aria-label="resize hub display" tabindex="0"></div>
-  <section id="display" class="display" aria-label="hub display"><h2>from the hub</h2><div id="display-items" aria-live="polite"></div></section>
+  <section id="display" class="display" aria-label="hub display"><div class="pane-head"><h2>from the hub</h2><button class="pane-full" type="button" data-pane="display" aria-pressed="false">Full screen</button></div><div id="display-items" aria-live="polite"></div></section>
 </main>
 <div class="dock">
   <section id="controls" aria-label="controls">
@@ -275,18 +279,41 @@ function applyPanes() {
   for (const grip of grips) grip.setAttribute('aria-orientation', stacked.matches ? 'horizontal' : 'vertical');
 }
 const paneKey = (grip) => `${grip.dataset.pane}-${stacked.matches ? 'h' : 'w'}`;
-const paneSize = (grip) => { const rect = $(grip.dataset.pane).getBoundingClientRect(); return stacked.matches ? rect.height : rect.width; };
+function paneSize(grip) {
+  const pane = $(grip.dataset.pane);
+  const full = pane.classList.contains('full');
+  pane.classList.remove('full');
+  const rect = pane.getBoundingClientRect();
+  pane.classList.toggle('full', full);
+  return stacked.matches ? rect.height : rect.width;
+}
 const growth = (grip) => stacked.matches || grip.dataset.pane === 'display' ? -1 : 1;
+const FULL_PULL = 64;
+let fullPane;
+function setFull(pane) {
+  fullPane = pane;
+  for (const button of document.querySelectorAll('.pane-full')) {
+    const full = button.dataset.pane === pane;
+    $(button.dataset.pane).classList.toggle('full', full);
+    button.setAttribute('aria-pressed', String(full));
+    button.textContent = full ? 'Exit full screen' : 'Full screen';
+  }
+}
 function sizePane(grip, size) {
   paneSizes[paneKey(grip)] = Math.round(size);
   applyPanes();
+  setFull(size - paneSize(grip) > FULL_PULL ? grip.dataset.pane : undefined);
 }
 function savePanes(grip) {
-  if (grip) sizePane(grip, paneSize(grip));
+  if (grip) {
+    paneSizes[paneKey(grip)] = Math.round(paneSize(grip));
+    applyPanes();
+  }
   localStorage.setItem(PANES_KEY, JSON.stringify(paneSizes));
 }
 applyPanes();
 stacked.addEventListener('change', applyPanes);
+for (const button of document.querySelectorAll('.pane-full')) button.addEventListener('click', () => setFull(fullPane === button.dataset.pane ? undefined : button.dataset.pane));
 for (const grip of grips) {
   grip.addEventListener('pointerdown', (event) => {
     if (event.button !== 0) return;
@@ -310,12 +337,17 @@ for (const grip of grips) {
   });
   grip.addEventListener('keydown', (event) => {
     const delta = { ArrowLeft: -24, ArrowUp: -24, ArrowRight: 24, ArrowDown: 24 }[event.key];
-    if (!delta) return;
+    if (!delta || (fullPane && fullPane !== grip.dataset.pane)) return;
     event.preventDefault();
-    sizePane(grip, paneSize(grip) + growth(grip) * delta);
+    const step = growth(grip) * delta, before = paneSize(grip), pane = grip.dataset.pane;
+    if (step < 0 && fullPane === pane) setFull();
+    else {
+      sizePane(grip, before + step);
+      if (step > 0 && paneSize(grip) - before < 1) setFull(pane);
+    }
     savePanes(grip);
   });
-  grip.addEventListener('dblclick', () => { delete paneSizes[paneKey(grip)]; applyPanes(); savePanes(); });
+  grip.addEventListener('dblclick', () => { delete paneSizes[paneKey(grip)]; setFull(); applyPanes(); savePanes(); });
 }
 function savedState(saved) {
   $('entry').classList.toggle('hidden', saved);
@@ -1451,7 +1483,11 @@ $('puppet-choice').addEventListener('change', () => showPuppet($('puppet-choice'
 }));
 $('connect').addEventListener('click', () => start($('token').value).catch((error) => setStatus(error.message, 'err')));
 $('card-toggle').addEventListener('click', () => setCard(!$('controls').classList.contains('open')));
-document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && $('entry').classList.contains('hidden')) setCard(false); });
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  if ($('controls').classList.contains('open') && $('entry').classList.contains('hidden')) setCard(false);
+  else if (fullPane) setFull();
+});
 $('mic-mute').addEventListener('click', () => setMicrophoneMuted(!microphoneMuted));
 $('voice-print').addEventListener('click', toggleVoiceprint);
 $('voice-filter').addEventListener('click', toggleVoiceFilter);

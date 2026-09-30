@@ -4,14 +4,16 @@ import assert from 'node:assert/strict';
 
 const adb = `${process.env.ANDROID_HOME}/platform-tools/adb`;
 const serial = process.env.ANDROID_SERIAL || 'emulator-5646';
-const run = (...args) => execFileSync(adb, ['-s', serial, ...args], { encoding: 'utf8', timeout: 60000 });
+const run = (...args) => execFileSync(adb, ['-s', serial, ...args], { encoding: 'utf8', timeout: 60000, maxBuffer: 64 * 1024 * 1024 });
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 run('shell', 'input', 'keyevent', 'KEYCODE_WAKEUP');
 run('shell', 'wm', 'dismiss-keyguard');
 run('shell', 'settings', 'put', 'system', 'screen_off_timeout', '600000');
 run('shell', 'settings', 'put', 'global', 'stay_on_while_plugged_in', '0');
+run('shell', 'settings', 'put', 'global', 'always_finish_activities', '1');
 run('shell', 'dumpsys', 'battery', 'unplug');
-run('install', '-r', 'android/build/live-voice-test.apk');
+try { run('uninstall', 'voice.live'); } catch {}
+run('install', 'android/build/live-voice-test.apk');
 run('shell', 'pm', 'grant', 'voice.live', 'android.permission.RECORD_AUDIO');
 run('shell', 'pm', 'grant', 'voice.live', 'android.permission.POST_NOTIFICATIONS');
 const tap = async text => {
@@ -46,7 +48,7 @@ try {
   const pending = new Map();
   const connect = async () => {
     socket = new WebSocket(page.webSocketDebuggerUrl.replace(/localhost:\d+|127\.0\.0\.1:\d+/, '127.0.0.1:15646'));
-    await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject; });
+    await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject; setTimeout(() => reject(Error('DevTools connection timed out')), 30000); });
     socket.onmessage = ({ data }) => {
     const message = JSON.parse(data);
     if (pending.has(message.id)) {
@@ -108,6 +110,7 @@ try {
     return true;
   })()`);
   const sample = async label => {
+    const wall = Date.now() / 1000;
     const data = await evaluate(`(async () => {
       const { mic, a, b, playback, speaker, analyser } = probe;
       const outbound = [...(await a.getStats()).values()].find(s => s.type === 'outbound-rtp' && s.kind === 'audio');
@@ -117,10 +120,10 @@ try {
       const state = { replyReceived: reply?.packetsReceived || 0, visibility: document.visibilityState, mic: mic.getAudioTracks()[0].readyState, muted: mic.getAudioTracks()[0].muted,
         peer: a.connectionState, context: playback.context.state, contextTime: playback.context.currentTime,
         outputTime: speaker.currentTime, paused: speaker.paused, sent: outbound?.packetsSent || 0,
-        received: inbound?.packetsReceived || 0, samples: source?.totalSamplesDuration || 0, error: window.probeError || null, wall: performance.now() / 1000 };
+        received: inbound?.packetsReceived || 0, samples: source?.totalSamplesDuration || 0, error: window.probeError || null };
       const wave = new Float32Array(analyser.fftSize);
       let peak = 0;
-      for (let read = 0; read < 20 && !peak; read++) {
+      for (let read = 0; read < 20 && peak <= 0.01; read++) {
         analyser.getFloatTimeDomainData(wave);
         peak = wave.reduce((value, sample) => Math.max(value, Math.abs(sample)), peak);
         await new Promise(resolve => setTimeout(resolve, 100));
@@ -128,6 +131,7 @@ try {
       return { ...state, peak };
     })()`);
     data.recording = /active\? true\n[^\n]*pack:voice\.live[^\n]*silenced:false/.test(run('shell', 'dumpsys', 'audio'));
+    data.wall = wall;
     console.log(label, JSON.stringify(data));
     return { label, ...data };
   };
@@ -152,6 +156,7 @@ try {
   }
   assert.match(power, /mWakefulness=(Asleep|Dozing)/, 'Android confirms the device is sleeping or dozing');
   assert.match(display, /mScreenState=OFF|state OFF|state=OFF/, 'Android confirms the display is off');
+  run('shell', 'dumpsys', 'deviceidle', 'force-idle');
   await interval('screen-off-30s');
   const rate = (row, key) => (row[key] - rows[rows.indexOf(row) - 1][key]) / (row.wall - rows[rows.indexOf(row) - 1].wall);
   const rates = rows.slice(1).map(row => ({ label: row.label, ...Object.fromEntries(['samples', 'contextTime', 'outputTime', 'sent', 'received', 'replyReceived'].map(key => [key, +rate(row, key).toFixed(3)])) }));
@@ -170,6 +175,7 @@ try {
   }
   for (const row of hidden) for (const key of ['samples', 'contextTime', 'outputTime', 'sent', 'received', 'replyReceived']) {
     assert.ok(rate(control, key) > 0, `${key} advances in the visible control interval`);
+    assert.ok(rate(control, 'samples') > 0.25, 'visible capture runs at least a quarter of real time');
     assert.ok(rate(row, key) >= rate(control, key) / 4, `${row.label} ${key} keeps at least a quarter of the visible control rate`);
   }
   run('shell', 'input', 'keyevent', 'KEYCODE_WAKEUP');
@@ -187,6 +193,6 @@ try {
   console.log('PASS: microphone, RTP and playback advance while backgrounded and screen off; Stop releases service');
 } finally {
   socket?.close();
-  run('shell', 'am', 'force-stop', 'voice.live');
+  try { run('shell', 'dumpsys', 'deviceidle', 'unforce'); run('shell', 'am', 'force-stop', 'voice.live'); } catch {}
   try { run('forward', '--remove', 'tcp:15646'); } catch {}
 }

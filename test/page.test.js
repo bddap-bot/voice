@@ -171,7 +171,7 @@ globalThis.emitLive = (event) => testChannel.dispatchEvent(new MessageEvent('mes
 globalThis.hear = (delta) => emitLive({ type: 'session.input_transcript.delta', delta });
 globalThis.delegateTurn = (id) => emitLive({ type: 'session.delegation.created', event_id: 'event_' + id, offset_ms: 0, delegation: { id, type: 'delegation', target: 'client' } });
 globalThis.replyFromHub = (id, stamp, commentary = [], timing_ms = 5, extra = {}, image) => {
-  const text = new TextEncoder().encode('hub\\n' + JSON.stringify({ id, commentary, timing_ms, stamp, ...extra }) + (image ? '\\n' : ''));
+  const text = new TextEncoder().encode('hub\\n' + JSON.stringify({ id, commentary, instructions: [], timing_ms, stamp, ...extra }) + (image ? '\\n' : ''));
   const frame = new Uint8Array(text.length + (image?.length ?? 0));
   frame.set(text);
   if (image) frame.set(image, text.length);
@@ -2393,6 +2393,98 @@ test('a first hub reply reaches the model as it arrives, even mid-utterance; eac
     dropped: [{ id: 'first', stamp: 'ordered_third', reason: 'barge-in' }],
     acks: ['ordered_first', 'ordered_second', 'ordered_third', 'ordered_other'],
     log: true,
+  });
+});
+
+test('a hub instruction reaches Live as its own null-id instructions append only after the reply beside it has been spoken, an instructions-only reply ends the wait silently, and a context rollover re-appends it', async () => {
+  const result = await runWakePage(`
+    const { LivePlayback } = await import('/live-playback.js');
+    const quiet = [];
+    LivePlayback.prototype.quiet = () => new Promise((resolve) => quiet.push(resolve));
+    const told = () => sentLiveEvents.filter((event) => /^(hub|standing)_/.test(event.event_id ?? '')).map(({ type, delegation_id, content }) => [type, delegation_id, content]);
+    const waiting = () => testPuppet.calls.filter(([name]) => name === 'waiting').map(([, value]) => value).at(-1);
+    hear('Check the test beacon.');
+    delegateTurn('styled');
+    await until(() => count('delegate'));
+    replyFromHub('styled', 'styled_reply', ['The beacon is violet.'], 5, { first: true, instructions: ['While a hub request is pending, hum softly instead of speaking.', 'Keep everything else unchanged.'] });
+    await until(() => globalThis.hubAcks?.includes('styled_reply'));
+    const beside = told();
+    emitLive({ type: 'session.output_transcript.delta', delta: 'The beacon is violet.' });
+    await until(() => quiet.length === 2);
+    while (quiet.length) quiet.shift()();
+    await until(() => told().length === 3);
+    const spoken = told().slice(1);
+    hear('Check the printer.');
+    delegateTurn('silent');
+    await until(() => count('delegate') === 2);
+    const pending = waiting();
+    replyFromHub('silent', 'silent_reply', [], 5, { first: true, instructions: ['Answer in one short sentence; keep everything else unchanged.'] });
+    await until(() => told().length === 4);
+    const alone = { told: told().slice(3), pending, waiting: waiting(), speak: testPuppet.calls.filter(([name]) => name === 'speak').length };
+    for (const [seconds, usage_ratio] of [[60, 0.5], [61, 0.95], [62, 0.96]]) emitLive({ type: 'session.usage.updated', usage: { seconds }, context_window: { usage_ratio } });
+    await until(() => told().length === 5);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    return { beside, spoken, alone, rolled: told().slice(4), acks: hubAckFrames };
+  `);
+  const instructions = (content) => ['session.instructions.append', null, content];
+  assert.deepEqual(result, {
+    beside: [['session.commentary.append', 'styled', 'The beacon is violet.']],
+    spoken: [instructions('While a hub request is pending, hum softly instead of speaking.'), instructions('Keep everything else unchanged.')],
+    alone: { told: [instructions('Answer in one short sentence; keep everything else unchanged.')], pending: true, waiting: false, speak: 1 },
+    rolled: [instructions('Answer in one short sentence; keep everything else unchanged.')],
+    acks: [{ id: 'styled', stamp: 'styled_reply' }, { id: 'silent', stamp: 'silent_reply' }],
+  });
+});
+
+test('pending hub instructions wait for every hub reply appended before them to be spoken, hold back a first reply that would otherwise jump the queue, and are not overwritten by a rollover re-append', async () => {
+  const result = await runWakePage(`
+    const { LivePlayback } = await import('/live-playback.js');
+    const quiet = [];
+    LivePlayback.prototype.quiet = () => new Promise((resolve) => quiet.push(resolve));
+    const told = () => sentLiveEvents.filter((event) => /^(hub|standing)_/.test(event.event_id ?? '')).map(({ type, content }) => [type.split('.')[1], content]);
+    const settle = async () => { await until(() => quiet.length); while (quiet.length) quiet.shift()(); await new Promise((resolve) => setTimeout(resolve, 50)); };
+    replyFromHub('early', 'early', [], 5, { instructions: ['Old direction.'] });
+    await until(() => told().length === 1);
+    replyFromHub('a', 'a', ['Reply A.'], 5, { instructions: ['New direction.'] });
+    await until(() => told().length === 2);
+    replyFromHub('b', 'b', ['Reply B.'], 5, { first: true });
+    emitLive({ type: 'session.usage.updated', usage: { seconds: 1 }, context_window: { usage_ratio: 0.95 } });
+    await until(() => globalThis.hubAcks?.includes('b'));
+    const held = told();
+    emitLive({ type: 'session.output_transcript.delta', delta: 'Reply A.' });
+    await settle();
+    const afterA = told();
+    emitLive({ type: 'session.output_transcript.delta', delta: 'Reply B.' });
+    await settle();
+    return { held, afterA, afterB: told() };
+  `);
+  const early = [['instructions', 'Old direction.'], ['commentary', 'Reply A.']];
+  assert.deepEqual(result, {
+    held: early,
+    afterA: [...early, ['commentary', 'Reply B.']],
+    afterB: [...early, ['commentary', 'Reply B.'], ['instructions', 'New direction.']],
+  });
+});
+
+test('hub instructions wait while their reply stays unspoken past the hub turn timeout, and follow the model speaking it', async () => {
+  const result = await runWakePage(`
+    const { LivePlayback } = await import('/live-playback.js');
+    const quiet = [];
+    LivePlayback.prototype.quiet = () => new Promise((resolve) => quiet.push(resolve));
+    const told = () => sentLiveEvents.filter((event) => /^(hub|standing)_/.test(event.event_id ?? '')).map(({ type, content }) => [type.split('.')[1], content]);
+    replyFromHub('late', 'late', ['Reply.'], 5, { instructions: ['Direction.'] });
+    await until(() => told().length === 1);
+    await new Promise((resolve) => setTimeout(resolve, 21000));
+    const timedOut = told();
+    emitLive({ type: 'session.output_transcript.delta', delta: 'Reply.' });
+    await until(() => quiet.length);
+    while (quiet.length) quiet.shift()();
+    await until(() => told().length === 2);
+    return { timedOut, spoken: told() };
+  `, { budget: 30000 });
+  assert.deepEqual(result, {
+    timedOut: [['commentary', 'Reply.']],
+    spoken: [['commentary', 'Reply.'], ['instructions', 'Direction.']],
   });
 });
 

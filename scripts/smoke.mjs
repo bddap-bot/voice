@@ -55,7 +55,7 @@ export async function send_only(bytes) {
   else if (value.startsWith('puppet-select\\n')) { const request=JSON.parse(value.slice(value.indexOf('\\n')+1)); push(enc.encode('puppet-selected\\n'+JSON.stringify({id:request.id}))); }
   else if (value === 'wake-model') push(enc.encode('wake-model-none'));
   else if (value.startsWith('offer\\n')) { const offer=JSON.parse(value.slice(6)); push(enc.encode('answer\\n'+JSON.stringify({offer_id:offer.id,sdp:'answer'}))); }
-  else if (value.startsWith('delegate\\n')) { const request=JSON.parse(value.slice(value.indexOf('\\n')+1)); push(enc.encode('hub\\n'+JSON.stringify({id:request.id,commentary:['The fixture is complete.'],thinking:[],instructions:[],timing_ms:42,stamp:'fixture'}))); }
+  else if (value.startsWith('delegate\\n')) { const request=JSON.parse(value.slice(value.indexOf('\\n')+1)); push(enc.encode('hub\\n'+JSON.stringify({id:request.id,commentary:['The fixture is complete.'],instructions:[],timing_ms:42,stamp:'fixture'}))); }
   else if (value.startsWith('telemetry\\n')) { const batch=JSON.parse(value.slice(value.indexOf('\\n')+1)); push(enc.encode('telemetry-ack\\n'+JSON.stringify({batch_id:batch.batch_id}))); }
 }`;
 
@@ -192,7 +192,7 @@ async function runViewport(viewport, executable, server) {
           const channel = super.createDataChannel(...args);
           const record = { channel, events: [], spoken: '', spokeAt: 0, delegations: 0, replies: 0 }; globalThis.__smokeLiveChannels.push(record);
           const send = channel.send.bind(channel);
-          channel.send = (data) => { if (/^(hub|instructions|thinking)_/.test(JSON.parse(data).event_id)) record.replies++; return send(data); };
+          channel.send = (data) => { if (/^hub_/.test(JSON.parse(data).event_id)) record.replies++; return send(data); };
           channel.addEventListener('message', ({ data }) => {
             const event = JSON.parse(data);
             if (['session.started', 'session.closed'].includes(event.type)) record.events.push(event.type);

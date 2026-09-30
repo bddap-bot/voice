@@ -1091,7 +1091,14 @@ function onLiveEvent(message, source) {
   }
   else if (event.type === 'input_audio_buffer.speech_stopped') listeningDriver.activity(false);
   else if (event.type === 'session.output_transcript.delta') presentTranscript(event);
-  else if (event.type === 'session.usage.updated') usageSeconds = Number(event.usage?.seconds ?? usageSeconds);
+  else if (event.type === 'session.usage.updated') {
+    usageSeconds = Number(event.usage?.seconds ?? usageSeconds);
+    const ratio = event.context_window?.usage_ratio;
+    if (conversation && typeof ratio === 'number') {
+      if (ratio > 0.9 && !conversation.overContext && conversation.standing && !conversation.pendingStanding) standBy(conversation.standing);
+      conversation.overContext = ratio > 0.9;
+    }
+  }
   else if (event.type === 'session.closed') {
     usageSeconds = Number(event.usage?.seconds ?? usageSeconds);
     if (source === conversation?.channel) stopConversation('Session ended — tap to continue');
@@ -1112,6 +1119,12 @@ function presentTranscript(event) {
     conversation?.transcript?.add('model', event.delta ?? '');
     const said = (conversation?.said ?? '') + (event.delta ?? '');
     if (conversation) conversation.said = said.slice(-4 * SIGN_OFF.length);
+    if (conversation) conversation.replyUnspoken = false;
+    if (conversation?.pendingStanding && !conversation.settling) {
+      const current = conversation;
+      current.settling = true;
+      current.audioOwner.playback.quiet(HUB_TURN_QUIET_MS).then(() => { current.settling = false; applyStanding(); });
+    }
     if (includesPhrase(said, SIGN_OFF)) fallAsleep();
 }
 function awaken(channel) {
@@ -1161,23 +1174,26 @@ async function receiveHub(raw) {
   const result = JSON.parse(dec.decode(raw.slice(start, boundary)));
   const reply = { result, image: boundary < raw.length ? raw.slice(boundary + 1) : null };
   const unspoken = result.commentary.length && (!conversation || conversation.sleeping) ? 'Live is asleep' : undefined;
-  if (result.first && hubTurn) presentHubReply(reply);
+  if (result.first && hubTurn && !result.instructions.length && !conversation?.pendingStanding) presentHubReply(reply);
   else {
     hubReplies.push(reply);
     playHubReplies().catch(recordPageError);
   }
+  if (result.instructions.length) standBy(result.instructions);
   await sendFrame(`hub-ack\n${JSON.stringify({ id: result.id, stamp: result.stamp, unspoken })}`);
 }
 function presentHubReply({ result, image }) {
   if (result.display) showDisplay(result.display, image);
-  if (!result.commentary.length) return null;
+  if (!result.commentary.length && !result.instructions.length) return null;
   finishHubWait(result.id);
   trace.hub(result.id, result.commentary, result.timing_ms);
   stageTrace?.hubReplied(result.id);
+  if (!result.commentary.length) return null;
   const current = conversation;
   if (!current || current.sleeping) return null;
   const owner = current.audioOwner;
   const delegation = owner.delegations.has(result.id) ? result.id : null;
+  current.replyUnspoken = true;
   result.commentary.forEach((content, index) => tell(owner, 'session.commentary.append', index ? `hub_${result.stamp}_${index}` : `hub_${result.stamp}`, delegation, content));
   return owner;
 }
@@ -1205,6 +1221,21 @@ async function playHubReplies() {
       else hubTurn.end();
     }
   } finally { hubTurn = null; }
+  applyStanding();
+}
+function standBy(instructions) {
+  if (!conversation || conversation.sleeping) return;
+  conversation.pendingStanding = instructions;
+  applyStanding();
+}
+function applyStanding() {
+  const current = conversation;
+  if (!current?.pendingStanding || current.sleeping || current.replyUnspoken || current.settling || hubTurn || hubReplies.length) return;
+  const instructions = current.pendingStanding;
+  current.pendingStanding = null;
+  current.standing = instructions;
+  const stamp = crypto.randomUUID();
+  instructions.forEach((content, index) => tell(current.audioOwner, 'session.instructions.append', index ? `standing_${stamp}_${index}` : `standing_${stamp}`, null, content));
 }
 function interruptHubReplies(reason) {
   for (const { result } of hubReplies.splice(0)) recordSession('hub-reply-dropped', JSON.stringify({ id: result.id, stamp: result.stamp, reason }));

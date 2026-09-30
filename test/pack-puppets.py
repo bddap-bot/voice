@@ -77,11 +77,11 @@ class Packing(unittest.TestCase):
             accessor = result['accessors'][0]
             self.assertNotIn('bufferView', accessor)
             sparse = accessor['sparse']
-            self.assertEqual(sparse['count'], 2)
+            self.assertEqual(sparse['count'], 1)
             restored = bytearray(36)
-            for j, index in enumerate(struct.unpack('<2H', view(sparse['indices']['bufferView']))):
+            for j, index in enumerate(struct.unpack('<H', view(sparse['indices']['bufferView']))):
                 restored[index * 12:(index + 1) * 12] = view(sparse['values']['bufferView'])[j * 12:(j + 1) * 12]
-            self.assertEqual(restored, morph)
+            self.assertEqual(struct.unpack('<9f', restored), struct.unpack('<9f', morph))
 
 
 unittest.main()

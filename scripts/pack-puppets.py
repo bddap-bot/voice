@@ -85,7 +85,7 @@ def pack(data, scratch):
         view = doc['bufferViews'][old]
         offset, stride = accessor.get('byteOffset', 0), view.get('byteStride', 12)
         values = [views[old][offset + i * stride:offset + i * stride + 12] for i in range(accessor['count'])]
-        moved = [i for i, value in enumerate(values) if value != bytes(12)]
+        moved = [i for i, value in enumerate(values) if any(struct.unpack('<3f', value))]
         del accessor['bufferView']
         accessor.pop('byteOffset', None)
         removed.add(old)

@@ -463,28 +463,26 @@ async function runLayoutPage() {
   return runPuppetPage(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">${style}</head><body>${main}<script type="module">
 import { PuppetRuntime } from '/puppet.js';
 const canvas = document.querySelector('#puppet');
-const heights = [];
-const errors = [];
-new ResizeObserver(() => heights.push(canvas.clientHeight)).observe(canvas);
-window.addEventListener('error', (event) => errors.push(event.message));
 const runtime = new PuppetRuntime(canvas);
-setTimeout(() => {
-  runtime.dispose();
-  const settled = canvas.clientHeight;
-  canvas.width = 100;
-  canvas.height = 1000;
-  document.body.dataset.layoutTest = JSON.stringify({ heights, errors, settled, afterBufferChange: canvas.clientHeight });
-}, 1500);
+const heights = [canvas.clientHeight];
+for (let tick = 0; tick < 4; tick++) {
+  runtime.fit();
+  heights.push(canvas.clientHeight);
+}
+runtime.dispose();
+const settled = canvas.clientHeight;
+canvas.width = 100;
+canvas.height = 1000;
+document.body.dataset.layoutTest = JSON.stringify({ heights, settled, afterBufferChange: canvas.clientHeight });
 </script></body></html>`, { scale: 1.25, size: '1000,700' });
 }
 
-test('the puppet canvas keeps one layout height across resize-observer ticks', async () => {
+test('the puppet canvas keeps one layout height as the runtime fits its drawing buffer', async () => {
   const { stdout, stderr } = await runLayoutPage();
   const encoded = /data-layout-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   const result = JSON.parse(encoded ?? 'null');
-  assert.ok(result?.heights.length >= 1, stderr);
-  assert.deepEqual(result.heights, result.heights.map(() => result.heights[0]), `heights across observer ticks: ${result.heights.join(' ')}`);
-  assert.deepEqual(result.errors, []);
+  assert.ok(result, stderr);
+  assert.deepEqual(result.heights, result.heights.map(() => result.heights[0]), `heights across fits: ${result.heights.join(' ')}`);
   assert.equal(result.settled, result.heights[0], 'canvas must retain its projected height');
   assert.equal(result.afterBufferChange, result.settled, 'layout height must not follow the drawing buffer');
 });

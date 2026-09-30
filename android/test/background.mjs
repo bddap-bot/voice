@@ -243,24 +243,36 @@ try {
     assert.deepEqual(state, { pressed: String(muted), label: muted ? 'Unmute mic' : 'Mute mic', disabled: false, enabled: !muted });
     console.log('page mute state', JSON.stringify(state));
   };
-  await expectMute(false);
-  await screenshot('page-unmuted');
-  for (const muted of [true, false]) {
+  const expectNotification = async muted => {
     run('shell', 'cmd', 'statusbar', 'expand-notifications');
-    await pause(1000);
-    await screenshot(`notification-before-${muted ? 'mute' : 'unmute'}`);
-    await tap('Mute');
-    await expectMute(muted);
-    run('shell', 'cmd', 'statusbar', 'collapse');
-    await pause(1000);
-    await screenshot(`page-${muted ? 'muted' : 'unmuted-again'}`);
-  }
-  await tap('Mute mic');
-  await expectMute(true);
-  run('shell', 'cmd', 'statusbar', 'expand-notifications');
-  await tap('Mute');
+    let labels;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await pause(250);
+      run('shell', 'uiautomator', 'dump', '/data/local/tmp/voice-ui.xml');
+      const ui = run('shell', 'cat', '/data/local/tmp/voice-ui.xml');
+      labels = [...ui.matchAll(/<node[^>]*text="([^"]*)"[^>]*resource-id="android:id\/action[^" ]*"/g)]
+        .map(match => match[1].toLowerCase());
+      if (labels.includes(muted ? 'unmute' : 'mute')) break;
+    }
+    assert.deepEqual(labels, [muted ? 'unmute' : 'mute', 'close'], 'notification mirrors the page mute state');
+    await writeFile(path.join(artifacts, `notification-${muted ? 'muted' : 'live'}.png`),
+      execFileSync(adb, ['-s', serial, 'exec-out', 'screencap', '-p'], { timeout: 60000 }));
+    console.log('notification actions', JSON.stringify(labels));
+  };
   await expectMute(false);
+  await expectNotification(false);
+  for (const muted of [true, false]) {
+    await tap(muted ? 'Mute' : 'Unmute');
+    await expectMute(muted);
+    await expectNotification(muted);
+  }
   run('shell', 'cmd', 'statusbar', 'collapse');
+  for (const muted of [true, false]) {
+    await tap(muted ? 'Mute mic' : 'Unmute mic');
+    await expectMute(muted);
+    await expectNotification(muted);
+    run('shell', 'cmd', 'statusbar', 'collapse');
+  }
   await saveDump('before-audio', 'dumpsys', 'audio');
   await saveDump('before-services', 'dumpsys', 'activity', 'services', 'voice.live');
   await saveDump('before-appops', 'cmd', 'appops', 'get', 'voice.live', 'RECORD_AUDIO');
@@ -312,7 +324,7 @@ try {
   assert.ok(!/active\? true\n[^\n]*pack:voice\.live/.test(audio), `${stopAction} releases microphone capture`);
   assert.ok(!appops.includes('(running)'), `${stopAction} ends the microphone app-op`);
   await writeFile(evidence, JSON.stringify({ scope: 'Android emulator duplex WebRTC: real microphone and synthetic reply through deployed LivePlayback; mute fixture starts the deployed page session and capture without a relay, leaving its mute handler unchanged; no model or physical acoustic verification', stopAction, stopped: true, screenOff: /mScreenState=OFF|state OFF|state=OFF/.test(display), wakefulness: power.match(/mWakefulness=(\w+)/)?.[1], rows }, null, 2));
-  console.log(`PASS: microphone, RTP and playback advance while backgrounded and screen off; notification Mute and page button share capture state; ${stopAction} releases service, microphone and task`);
+  console.log(`PASS: microphone, RTP and playback advance while backgrounded and screen off; notification and page taps both mirror Mute→Unmute→Mute and share capture state; ${stopAction} releases service, microphone and task`);
 } finally {
   socket?.close();
   for (const command of [['dumpsys', 'deviceidle', 'unforce'], ['dumpsys', 'battery', 'reset'], ['settings', 'put', 'global', 'always_finish_activities', '0'], ['am', 'force-stop', 'voice.live']]) {

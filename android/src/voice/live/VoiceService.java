@@ -16,6 +16,7 @@ import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
 import android.view.ViewGroup;
+import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebChromeClient;
@@ -36,6 +37,23 @@ public final class VoiceService extends Service {
             && (uri.getPort() == -1 || uri.getPort() == 443)
             && ("/voice/".equals(uri.getPath()) || "/voice/index.html".equals(uri.getPath()));
     }
+    private Notification notification(boolean muted) {
+        PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        PendingIntent stop = PendingIntent.getService(this, 1, new Intent(this, VoiceService.class).setAction("stop"), PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        PendingIntent mute = PendingIntent.getService(this, 2, new Intent(this, VoiceService.class).setAction("mute"), PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        return new Notification.Builder(this, "conversation")
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setContentIntent(open).setOngoing(true)
+            .addAction(new Notification.Action.Builder(null, muted ? "Unmute" : "Mute", mute).build())
+            .addAction(new Notification.Action.Builder(null, "Close", stop).build()).build();
+    }
+    public final class MuteMirror {
+        @JavascriptInterface public void changed(boolean muted) {
+            new android.os.Handler(getMainLooper()).post(() -> {
+                if (web != null) getSystemService(NotificationManager.class).notify(1, notification(muted));
+            });
+        }
+    }
     public int onStartCommand(Intent intent, int flags, int id) {
         if (intent != null && "stop".equals(intent.getAction())) {
             close();
@@ -50,20 +68,14 @@ public final class VoiceService extends Service {
         if (web != null) return START_NOT_STICKY;
         getSystemService(NotificationManager.class).createNotificationChannel(
             new NotificationChannel("conversation", "Voice conversation", NotificationManager.IMPORTANCE_LOW));
-        PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-        PendingIntent stop = PendingIntent.getService(this, 1, new Intent(this, VoiceService.class).setAction("stop"), PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-        PendingIntent mute = PendingIntent.getService(this, 2, new Intent(this, VoiceService.class).setAction("mute"), PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-        Notification notice = new Notification.Builder(this, "conversation")
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentIntent(open).setOngoing(true)
-            .addAction(new Notification.Action.Builder(null, "Mute", mute).build())
-            .addAction(new Notification.Action.Builder(null, "Close", stop).build()).build();
+        Notification notice = notification(false);
         if (Build.VERSION.SDK_INT >= 30) startForeground(1, notice, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE | ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
         else startForeground(1, notice);
         wake = getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LiveVoice:conversation");
         wake.acquire();
         WebView.setWebContentsDebuggingEnabled((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0);
         web = new WebView(this);
+        web.addJavascriptInterface(new MuteMirror(), "VoiceMute");
         web.getSettings().setJavaScriptEnabled(true);
         web.getSettings().setDomStorageEnabled(true);
         web.getSettings().setMediaPlaybackRequiresUserGesture(false);
@@ -76,6 +88,13 @@ public final class VoiceService extends Service {
             }
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap icon) {
                 if (!allowed(Uri.parse(url))) { view.stopLoading(); close(); }
+            }
+            public void onPageFinished(WebView view, String url) {
+                if (allowed(Uri.parse(url))) view.evaluateJavascript(
+                    "(() => { const button = document.getElementById('mic-mute'); if (!button) return;"
+                    + "const update = () => VoiceMute.changed(button.getAttribute('aria-pressed') === 'true');"
+                    + "new MutationObserver(update).observe(button, { attributes: true, attributeFilter: ['aria-pressed'] });"
+                    + "update(); })()", null);
             }
             public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
                 close();

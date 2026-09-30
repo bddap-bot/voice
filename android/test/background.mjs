@@ -1,4 +1,4 @@
-import { spawn, execFileSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 
@@ -6,15 +6,29 @@ const adb = `${process.env.ANDROID_HOME}/platform-tools/adb`;
 const serial = process.env.ANDROID_SERIAL || 'emulator-5646';
 const run = (...args) => execFileSync(adb, ['-s', serial, ...args], { encoding: 'utf8', timeout: 60000 });
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+run('shell', 'input', 'keyevent', 'KEYCODE_WAKEUP');
+run('shell', 'wm', 'dismiss-keyguard');
+run('shell', 'settings', 'put', 'system', 'screen_off_timeout', '600000');
 run('shell', 'settings', 'put', 'global', 'stay_on_while_plugged_in', '0');
 run('shell', 'dumpsys', 'battery', 'unplug');
-run('install', '-r', 'android/build/live-voice.apk');
-run('install', '-r', 'android/build/probe.apk');
+run('install', '-r', 'android/build/live-voice-test.apk');
 run('shell', 'pm', 'grant', 'voice.live', 'android.permission.RECORD_AUDIO');
 run('shell', 'pm', 'grant', 'voice.live', 'android.permission.POST_NOTIFICATIONS');
-const instrument = spawn(adb, ['-s', serial, 'shell', 'am', 'instrument', '-w', 'voice.live.probe/voice.live.Probe'], { stdio: 'ignore' });
+const tap = async text => {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    await pause(1000);
+    try {
+      run('shell', 'uiautomator', 'dump', '/data/local/tmp/voice-ui.xml');
+      const button = run('shell', 'cat', '/data/local/tmp/voice-ui.xml').match(new RegExp(`<node[^>]*text="(?:${text}|${text.toUpperCase()})"[^>]*bounds="\\[(\\d+),(\\d+)\\]\\[(\\d+),(\\d+)\\]"`));
+      if (button) return run('shell', 'input', 'tap', String((+button[1] + +button[3]) / 2), String((+button[2] + +button[4]) / 2));
+    } catch {}
+  }
+  assert.fail(`${text} control is reachable`);
+};
 let socket;
 try {
+  run('shell', 'am', 'start', '-W', '-n', 'voice.live/.MainActivity');
+  await tap('Open Live Voice');
   let pages;
   for (let attempt = 0; attempt < 90; attempt++) {
     let pid = '';
@@ -100,60 +114,68 @@ try {
       const source = [...(await a.getStats()).values()].find(s => s.type === 'media-source' && s.kind === 'audio');
       const inbound = [...(await b.getStats()).values()].find(s => s.type === 'inbound-rtp' && s.kind === 'audio');
       const reply = [...(await a.getStats()).values()].find(s => s.type === 'inbound-rtp' && s.kind === 'audio');
-      const wave = new Float32Array(analyser.fftSize);
-      analyser.getFloatTimeDomainData(wave);
-      const peak = wave.reduce((value, sample) => Math.max(value, Math.abs(sample)), 0);
-      return { replyReceived: reply?.packetsReceived || 0, peak, visibility: document.visibilityState, mic: mic.getAudioTracks()[0].readyState, muted: mic.getAudioTracks()[0].muted,
+      const state = { replyReceived: reply?.packetsReceived || 0, visibility: document.visibilityState, mic: mic.getAudioTracks()[0].readyState, muted: mic.getAudioTracks()[0].muted,
         peer: a.connectionState, context: playback.context.state, contextTime: playback.context.currentTime,
         outputTime: speaker.currentTime, paused: speaker.paused, sent: outbound?.packetsSent || 0,
-        received: inbound?.packetsReceived || 0, samples: source?.totalSamplesDuration || 0, error: window.probeError || null };
+        received: inbound?.packetsReceived || 0, samples: source?.totalSamplesDuration || 0, error: window.probeError || null, wall: performance.now() / 1000 };
+      const wave = new Float32Array(analyser.fftSize);
+      let peak = 0;
+      for (let read = 0; read < 20 && !peak; read++) {
+        analyser.getFloatTimeDomainData(wave);
+        peak = wave.reduce((value, sample) => Math.max(value, Math.abs(sample)), peak);
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      return { ...state, peak };
     })()`);
+    data.recording = /active\? true\n[^\n]*pack:voice\.live[^\n]*silenced:false/.test(run('shell', 'dumpsys', 'audio'));
     console.log(label, JSON.stringify(data));
     return { label, ...data };
   };
   await pause(5000);
-  const rows = [await sample('foreground')];
+  const rows = [await sample('start')];
+  const interval = async label => {
+    socket.close();
+    await pause(30000);
+    await connect();
+    rows.push(await sample(label));
+  };
+  await interval('foreground-30s');
   run('shell', 'input', 'keyevent', 'KEYCODE_HOME');
-  socket.close();
-  await pause(30000);
-  await connect();
-  rows.push(await sample('background-30s'));
+  await interval('background-30s');
   run('shell', 'input', 'keyevent', 'KEYCODE_SLEEP');
-  await pause(3000);
-  const power = run('shell', 'dumpsys', 'power');
+  let power = '', display = '';
+  for (let attempt = 0; attempt < 20; attempt++) {
+    await pause(1000);
+    power = run('shell', 'dumpsys', 'power');
+    display = run('shell', 'dumpsys', 'display');
+    if (/mWakefulness=(Asleep|Dozing)/.test(power) && /mScreenState=OFF|state OFF|state=OFF/.test(display)) break;
+  }
   assert.match(power, /mWakefulness=(Asleep|Dozing)/, 'Android confirms the device is sleeping or dozing');
-  const display = run('shell', 'dumpsys', 'display');
   assert.match(display, /mScreenState=OFF|state OFF|state=OFF/, 'Android confirms the display is off');
-  socket.close();
-  await pause(30000);
-  await connect();
-  rows.push(await sample('screen-off-30s'));
-  for (let index = 1; index < rows.length; index++) {
-    const row = rows[index], previous = rows[index - 1];
-    assert.equal(row.visibility, 'hidden');
+  await interval('screen-off-30s');
+  const rate = (row, key) => (row[key] - rows[rows.indexOf(row) - 1][key]) / (row.wall - rows[rows.indexOf(row) - 1].wall);
+  const rates = rows.slice(1).map(row => ({ label: row.label, ...Object.fromEntries(['samples', 'contextTime', 'outputTime', 'sent', 'received', 'replyReceived'].map(key => [key, +rate(row, key).toFixed(3)])) }));
+  console.log('rates per wall second', JSON.stringify(rates));
+  const [control, ...hidden] = rows.slice(1);
+  for (const row of rows.slice(1)) {
+    assert.equal(row.visibility, row === control ? 'visible' : 'hidden');
     assert.equal(row.mic, 'live');
     assert.equal(row.muted, false);
     assert.equal(row.peer, 'connected');
     assert.equal(row.context, 'running');
     assert.equal(row.paused, false);
     assert.equal(row.error, null);
+    assert.equal(row.recording, true, 'Android reports an active, unsilenced voice.live recording');
     assert.ok(row.peak > 0.01, 'reply processing produces nonzero audio');
-    assert.ok(row.replyReceived > previous.replyReceived + 100, 'reply reception keeps advancing');
-    assert.ok(row.sent > previous.sent + 100, 'microphone RTP keeps advancing');
-    assert.ok(row.received > previous.received + 100, 'reply RTP keeps advancing');
-    assert.ok(row.samples > previous.samples + 10, 'captured sample duration keeps advancing');
-    assert.ok(row.contextTime > previous.contextTime + 10, 'playback processing keeps advancing');
-    assert.ok(row.outputTime > previous.outputTime + 10, 'speaker playback keeps advancing');
+  }
+  for (const row of hidden) for (const key of ['samples', 'contextTime', 'outputTime', 'sent', 'received', 'replyReceived']) {
+    assert.ok(rate(control, key) > 0, `${key} advances in the visible control interval`);
+    assert.ok(rate(row, key) >= rate(control, key) / 4, `${row.label} ${key} keeps at least a quarter of the visible control rate`);
   }
   run('shell', 'input', 'keyevent', 'KEYCODE_WAKEUP');
   run('shell', 'wm', 'dismiss-keyguard');
   run('shell', 'am', 'start', '-n', 'voice.live/.MainActivity');
-  await pause(1000);
-  run('shell', 'uiautomator', 'dump', '/data/local/tmp/voice-ui.xml');
-  const ui = run('shell', 'cat', '/data/local/tmp/voice-ui.xml');
-  const button = ui.match(/<node[^>]*text="(?:Stop and close|STOP AND CLOSE)"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/);
-  assert.ok(button, 'Stop and close control is reachable');
-  run('shell', 'input', 'tap', String((+button[1] + +button[3]) / 2), String((+button[2] + +button[4]) / 2));
+  await tap('Stop and close');
   let services = '';
   for (let attempt = 0; attempt < 20; attempt++) {
     await pause(1000);
@@ -167,5 +189,4 @@ try {
   socket?.close();
   run('shell', 'am', 'force-stop', 'voice.live');
   try { run('forward', '--remove', 'tcp:15646'); } catch {}
-  instrument.kill();
 }

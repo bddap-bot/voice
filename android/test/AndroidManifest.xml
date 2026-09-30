@@ -1,5 +1,0 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="voice.live.probe">
-    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="35" />
-    <instrumentation android:name="voice.live.Probe" android:targetPackage="voice.live" />
-    <application android:label="Live Voice probe" />
-</manifest>

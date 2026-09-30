@@ -84,7 +84,7 @@ async function renderTicking(t, tick) {
   const record = async () => { processes.push(...(await chrome.devtools.call('SystemInfo.getProcessInfo')).processInfo); };
   try {
     server = createServer(async (request, response) => {
-      if (request.url !== '/tick') return response.end(`<!doctype html><script>addEventListener('load', () => setInterval(async () => { await fetch('/tick'); document.body.dataset.ticks = (Number(document.body.dataset.ticks) || 0) + 1; }, 1000));</script>`);
+      if (request.url !== '/tick') return response.end(`<!doctype html><script>addEventListener('load', async () => { for (let ticks = 1; ; ticks++) { await new Promise(resolve => setTimeout(resolve, 1000)); await fetch('/tick'); document.body.dataset.ticks = ticks; } });</script>`);
       const index = ++requested;
       while (announced < index) await new Promise(resolve => { announce = resolve; });
       await record().catch(() => {});

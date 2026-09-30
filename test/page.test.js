@@ -341,14 +341,19 @@ async function runPage(testSetup = '', { scale = 1, size = '390,844', budget = 3
 async function driveLifecycle(testSetup, drive) {
   const { server, url } = await pageServer(testSetup);
   const chrome = await launchChromium({ args: ['--headless=new', '--no-sandbox', '--disable-gpu'] });
-  const { call, listen, closed } = chrome.devtools;
-  let ended = false;
-  closed.then(() => { ended = true; });
+  const { listen, closed } = chrome.devtools;
+  let fail, expectingCrash = false;
+  const failure = new Promise(resolve => { fail = resolve; });
+  closed.then(() => fail(new Error(`Chromium's browser process ended: ${chrome.stderr}`)));
+  const call = (...args) => Promise.race([chrome.devtools.call(...args), failure.then(error => { throw error; })]);
   const events = [];
   const stop = listen(({ method, params }) => {
     if (method === 'Page.lifecycleEvent') events.push(`lifecycle:${params.name}`);
     else if (method === 'Page.frameNavigated' && !params.frame.parentId) events.push(`navigated:${params.type ?? 'Navigation'}`);
-    else if (method === 'Inspector.targetCrashed') events.push('crashed');
+    else if (method === 'Inspector.targetCrashed') {
+      events.push('crashed');
+      if (!expectingCrash) fail(new Error(`Chromium renderer crashed: ${chrome.stderr}`));
+    }
   });
   try {
     const { targetId } = await call('Target.createTarget', { url: 'about:blank' });
@@ -364,14 +369,18 @@ async function driveLifecycle(testSetup, drive) {
     };
     const poll = async (check) => {
       while (!(await check())) {
-        if (ended) throw new Error(`Chromium's browser process ended: ${chrome.stderr}`);
-        await new Promise((resolve) => setTimeout(resolve, 20));
+        await Promise.race([new Promise(resolve => setTimeout(resolve, 20)), failure.then(error => { throw error; })]);
       }
     };
-    const until = (expression) => poll(() => evaluate(expression).catch(() => false));
+    const until = (expression) => poll(() => evaluate(expression));
     const event = (name) => poll(() => events.includes(name));
+    const expectCrash = async (work) => {
+      expectingCrash = true;
+      try { await work(); await event('crashed'); }
+      finally { expectingCrash = false; }
+    };
     await page('Page.navigate', { url });
-    return await drive({ call, page, evaluate, until, event, events, targetId });
+    return await drive({ call, page, evaluate, until, event, events, targetId, expectCrash });
   } finally {
     stop();
     await chrome.close();
@@ -2520,9 +2529,24 @@ test('a spoken hub reply that reaches an asleep page is acknowledged as unspoken
   assert.deepEqual(result, [{ id: 'late', stamp: 'late_stamp', unspoken: 'Live is asleep' }]);
 });
 
+test('lifecycle waits propagate page evaluation failures', async () => {
+  await assert.rejects(driveLifecycle('', async ({ until }) => {
+    await until(`(() => { throw new Error('broken readiness'); })()`);
+  }), /broken readiness/);
+});
+
+test('lifecycle waits fail when an unexpected renderer crash interrupts evaluation', async () => {
+  await driveLifecycle('', async ({ call, evaluate }) => {
+    const pending = evaluate('new Promise(() => {})');
+    const crashed = assert.rejects(pending, /renderer crashed/);
+    for (const { id, type } of (await call('SystemInfo.getProcessInfo')).processInfo) if (type === 'renderer') process.kill(id, 'SIGKILL');
+    await crashed;
+  });
+});
+
 test('leaving the app keeps the delegation log and whether Live was awake through a freeze, a discard-and-reload and a reload, but not a crash in view', async () => {
   const lifecycle = `for (const name of ['visibilitychange', 'freeze', 'resume', 'pagehide', 'pageshow']) document.addEventListener(name, () => sessionStorage.setItem('lifecycle', JSON.stringify([...JSON.parse(sessionStorage.getItem('lifecycle') ?? '[]'), name === 'visibilitychange' ? document.visibilityState : name])), true);`;
-  const result = await driveLifecycle(untilAsleep + lifecycle, async ({ call, page, evaluate, until, event, events, targetId }) => {
+  const result = await driveLifecycle(untilAsleep + lifecycle, async ({ call, page, evaluate, until, event, events, targetId, expectCrash }) => {
     const { windowId } = await call('Browser.getWindowForTarget', { targetId });
     const state = () => evaluate(`({ log: document.querySelector('#log').innerText, pressed: document.querySelector('#puppet').getAttribute('aria-pressed') })`);
     const pressed = (value) => until(`document.querySelector('#puppet').getAttribute('aria-pressed') === '${value}'`);
@@ -2546,15 +2570,16 @@ test('leaving the app keeps the delegation log and whether Live was awake throug
     };
     const discardAndReturn = async () => {
       events.length = 0;
-      for (const { id, type } of (await call('SystemInfo.getProcessInfo')).processInfo) if (type === 'renderer') process.kill(id, 'SIGKILL');
-      await event('crashed');
+      await expectCrash(async () => {
+        for (const { id, type } of (await call('SystemInfo.getProcessInfo')).processInfo) if (type === 'renderer') process.kill(id, 'SIGKILL');
+      });
       await call('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } });
       await reload();
     };
     const restores = () => evaluate(`sessionEvents('restore').map((event) => JSON.parse(event.detail).awake)`);
     const offers = () => evaluate(`count('offer')`);
     const memory = () => evaluate(`JSON.parse(lastOffer.context[0].text.split('\\n').slice(1).join('\\n')).flatMap((conversation) => conversation.turns.map((turn) => turn.text))`);
-    await until(`document.body.dataset.startTest === 'puppet'`);
+    await until(`document.body?.dataset.startTest === 'puppet'`);
     await evaluate(`hear('Where is the beacon?'); emitLive({ type: 'session.output_transcript.delta', delta: 'The beacon is green.' }); 0`);
     const awake = await state();
     events.length = 0;

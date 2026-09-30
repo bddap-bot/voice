@@ -269,11 +269,20 @@ try {
   assert.match(run('shell', 'dumpsys', 'audio'), /active\? true\n[^\n]*pack:voice\.live[^\n]*silenced:false/, 'capture is active before closing');
   if (stopAction === 'swipe') {
     run('shell', 'input', 'keyevent', 'KEYCODE_APP_SWITCH');
-    await pause(2000);
+    run('shell', 'uiautomator', 'dump', '/data/local/tmp/voice-ui.xml');
+    const ui = await saveDump('recents-ui', 'cat', '/data/local/tmp/voice-ui.xml');
     await screenshot('recents-before-swipe');
-    const size = run('shell', 'wm', 'size').match(/(\d+)x(\d+)/);
-    assert.ok(size);
-    run('shell', 'input', 'swipe', String(+size[1] / 2), String(+size[2] / 2), String(+size[1] / 2), String(Math.round(+size[2] * 0.1)), '150');
+    const cards = [...ui.matchAll(/<node\b[^>]*>/g)].map(match => match[0])
+      .filter(node => /resource-id="[^"]+:id\/task"/.test(node) && /content-desc="Live Voice"/.test(node));
+    assert.equal(cards.length, 1, 'Live Voice has one visible Recents card');
+    const bounds = cards[0].match(/bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/);
+    assert.ok(bounds, 'Live Voice Recents card has bounds');
+    const [left, top, right, bottom] = bounds.slice(1).map(Number);
+    assert.ok(right > left && bottom > top, 'Live Voice Recents card has visible area');
+    const x = Math.round((left + right) / 2);
+    const y = Math.round((top + bottom) / 2);
+    console.log('Recents swipe', JSON.stringify({ left, top, right, bottom, x, y }));
+    run('shell', 'input', 'swipe', String(x), String(y), String(x), String(Math.round(top / 2)), '150');
   } else {
     run('shell', 'cmd', 'statusbar', 'expand-notifications');
     await tap('Close');

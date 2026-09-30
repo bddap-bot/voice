@@ -250,7 +250,7 @@ try {
       await pause(250);
       run('shell', 'uiautomator', 'dump', '/data/local/tmp/voice-ui.xml');
       const ui = run('shell', 'cat', '/data/local/tmp/voice-ui.xml');
-      labels = [...ui.matchAll(/<node[^>]*text="([^"]*)"[^>]*resource-id="android:id\/action[^" ]*"/g)]
+      labels = [...ui.matchAll(/<node[^>]*text="([^"]*)"[^>]*resource-id="android:id\/action0"/g)]
         .map(match => match[1].toLowerCase());
       if (labels.includes(muted ? 'unmute' : 'mute')) break;
     }

@@ -27,11 +27,9 @@
   .display, .ledger { position: relative; z-index: 3; min-width: 0; min-height: 0; padding: 18px; overflow: hidden; display: flex; flex-direction: column; background: linear-gradient(145deg, #201e22ee, #111217ee); border: 1px solid #6d5c49; border-radius: 4px; box-shadow: 0 18px 42px #0008, inset 0 0 35px #8a684111; }
   .display { grid-area: display; }
   .ledger { grid-area: ledger; }
-  .pane-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 0 0 12px; }
-  .pane-full { min-height: 32px; padding: 4px 10px; font-size: 12px; color: #cfc4b6; }
   .display.full, .ledger.full { position: fixed; inset: var(--pad); z-index: 20; background: #16151a; }
   body:has(.full) header { visibility: hidden; }
-  .display h2, .ledger h2 { margin: 0; font-size: 14px; text-transform: uppercase; letter-spacing: .08em; color: #a5a5aa; }
+  .display h2, .ledger h2 { margin: 0 0 12px; font-size: 14px; text-transform: uppercase; letter-spacing: .08em; color: #a5a5aa; }
   .grip { position: relative; z-index: 5; display: flex; align-items: center; justify-content: center; cursor: col-resize; touch-action: none; user-select: none; outline: none; }
   .grip[data-pane="ledger"] { grid-area: ledger-grip; } .grip[data-pane="display"] { grid-area: display-grip; }
   .grip::before { content: ''; position: absolute; top: 12%; bottom: 12%; left: 50%; width: 1px; background: linear-gradient(transparent, #6d5c4999, transparent); }
@@ -108,10 +106,10 @@
     <div id="puppet-prompt" aria-hidden="true">Tap to talk</div>
     <div id="puppet-credit"></div>
   </section>
-  <section id="ledger" class="ledger"><div class="pane-head"><h2>delegation log</h2><button class="pane-full" type="button" data-pane="ledger" aria-pressed="false">Full screen</button></div><div id="log" aria-live="polite"></div></section>
+  <section id="ledger" class="ledger"><h2>delegation log</h2><div id="log" aria-live="polite"></div></section>
   <div class="grip" data-pane="ledger" role="separator" aria-orientation="vertical" aria-label="resize delegation log" tabindex="0"></div>
   <div class="grip" data-pane="display" role="separator" aria-orientation="vertical" aria-label="resize hub display" tabindex="0"></div>
-  <section id="display" class="display" aria-label="hub display"><div class="pane-head"><h2>from the hub</h2><button class="pane-full" type="button" data-pane="display" aria-pressed="false">Full screen</button></div><div id="display-items" aria-live="polite"></div></section>
+  <section id="display" class="display" aria-label="hub display"><h2>from the hub</h2><div id="display-items" aria-live="polite"></div></section>
 </main>
 <div class="dock">
   <section id="controls" aria-label="controls">
@@ -292,12 +290,7 @@ const FULL_PULL = 64;
 let fullPane;
 function setFull(pane) {
   fullPane = pane;
-  for (const button of document.querySelectorAll('.pane-full')) {
-    const full = button.dataset.pane === pane;
-    $(button.dataset.pane).classList.toggle('full', full);
-    button.setAttribute('aria-pressed', String(full));
-    button.textContent = full ? 'Exit full screen' : 'Full screen';
-  }
+  for (const grip of grips) $(grip.dataset.pane).classList.toggle('full', grip.dataset.pane === pane);
 }
 function sizePane(grip, size) {
   paneSizes[paneKey(grip)] = Math.round(size);
@@ -313,7 +306,6 @@ function savePanes(grip) {
 }
 applyPanes();
 stacked.addEventListener('change', applyPanes);
-for (const button of document.querySelectorAll('.pane-full')) button.addEventListener('click', () => setFull(fullPane === button.dataset.pane ? undefined : button.dataset.pane));
 for (const grip of grips) {
   grip.addEventListener('pointerdown', (event) => {
     if (event.button !== 0) return;
@@ -341,10 +333,7 @@ for (const grip of grips) {
     event.preventDefault();
     const step = growth(grip) * delta, before = paneSize(grip), pane = grip.dataset.pane;
     if (step < 0 && fullPane === pane) setFull();
-    else {
-      sizePane(grip, before + step);
-      if (step > 0 && paneSize(grip) - before < 1) setFull(pane);
-    }
+    else sizePane(grip, before + step);
     savePanes(grip);
   });
   grip.addEventListener('dblclick', () => { delete paneSizes[paneKey(grip)]; setFull(); applyPanes(); savePanes(); });

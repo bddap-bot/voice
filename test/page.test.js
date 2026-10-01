@@ -885,45 +885,7 @@ window.addEventListener('test-ready', () => {
   assert.equal(result.display, huge ? result.limit : Math.round(1440 * .24));
   assert.ok(result.stage >= 200, JSON.stringify(result));
   assert.equal(result.saved, huge ? result.limit : Math.round(1440 * .24) + 24);
-  assert.equal(result.full, huge);
-});
-
-for (const [size, grow, shrink] of [['1440,900', 'ArrowRight', 'ArrowLeft'], ['390,844', 'ArrowUp', 'ArrowDown']]) test(`a pane grows past its default to full screen and comes back by button, Escape and grip at ${size}`, async () => {
-  const { stdout, stderr } = await runPage(`
-window.addEventListener('test-ready', () => {
-  const ledger = document.querySelector('#ledger');
-  const grip = document.querySelector('.grip[data-pane="ledger"]');
-  const button = document.querySelector('.pane-full[data-pane="ledger"]');
-  const box = () => { const rect = ledger.getBoundingClientRect(); return Math.round(rect.width * rect.height); };
-  const state = () => ({ full: ledger.classList.contains('full'), pressed: button.getAttribute('aria-pressed'), label: button.textContent });
-  const initial = box();
-  button.click();
-  const on = (selector) => { const rect = document.querySelector(selector).getBoundingClientRect(); return document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)?.closest(selector) !== null; };
-  const buttonFull = { ...state(), covers: box() > innerWidth * innerHeight * .8, mute: on('#mic-mute'), exit: on('.pane-full[data-pane="ledger"]') };
-  button.click();
-  const buttonBack = { ...state(), restored: box() === initial };
-  button.click();
-  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
-  const escaped = { ...state(), card: document.querySelector('#controls').classList.contains('open') };
-  let steps = 0;
-  while (!ledger.classList.contains('full') && steps < 100) { grip.dispatchEvent(new KeyboardEvent('keydown', { key: '${grow}', bubbles: true })); steps++; }
-  const grown = { ...state(), grewPastDefault: steps > 2 };
-  grip.dispatchEvent(new KeyboardEvent('keydown', { key: '${shrink}', bubbles: true }));
-  const stage = document.querySelector('.control').getBoundingClientRect(), dock = document.querySelector('#controls').getBoundingClientRect(), rect = ledger.getBoundingClientRect();
-  const gripBack = { ...state(), larger: box() > initial, stageKept: Math.round(innerWidth > 720 ? stage.width : stage.height) >= (innerWidth > 720 ? 200 : 120), clearOfDock: innerWidth > 720 || rect.bottom <= dock.top };
-  document.body.dataset.fullTest = JSON.stringify({ buttonFull, buttonBack, escaped, grown, gripBack });
-});
-`, { size });
-  const encoded = /data-full-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  const out = { full: false, pressed: 'false', label: 'Full screen' };
-  const inn = { full: true, pressed: 'true', label: 'Exit full screen' };
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), {
-    buttonFull: { ...inn, covers: true, mute: true, exit: true },
-    buttonBack: { ...out, restored: true },
-    escaped: { ...out, card: false },
-    grown: { ...inn, grewPastDefault: true },
-    gripBack: { ...out, larger: true, stageKept: true, clearOfDock: true },
-  }, stderr);
+  assert.equal(result.full, false);
 });
 
 test('Android DPR 3 keeps the visual stage height stable and renders after sixty seconds', async () => {

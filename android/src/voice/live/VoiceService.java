@@ -8,6 +8,7 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
+import android.content.MutableContextWrapper;
 import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.net.Uri;
@@ -74,7 +75,7 @@ public final class VoiceService extends Service {
         wake = getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LiveVoice:conversation");
         wake.acquire();
         WebView.setWebContentsDebuggingEnabled((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0);
-        web = new WebView(this);
+        web = new WebView(new MutableContextWrapper(this));
         web.addJavascriptInterface(new MuteMirror(), "VoiceMute");
         web.getSettings().setJavaScriptEnabled(true);
         web.getSettings().setDomStorageEnabled(true);

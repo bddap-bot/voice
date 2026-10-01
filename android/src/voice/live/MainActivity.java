@@ -4,6 +4,7 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.ComponentName;
 import android.content.Intent;
+import android.content.MutableContextWrapper;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
 import android.os.Build;
@@ -23,6 +24,7 @@ public final class MainActivity extends Activity {
             ViewGroup parent = (ViewGroup) service.web.getParent();
             if (parent != null) parent.removeView(service.web);
             content.removeAllViews();
+            ((MutableContextWrapper) service.web.getContext()).setBaseContext(MainActivity.this);
             content.addView(service.web, new FrameLayout.LayoutParams(-1, -1));
         }
         public void onServiceDisconnected(ComponentName name) { service = null; finish(); }
@@ -50,7 +52,10 @@ public final class MainActivity extends Activity {
         bound = bindService(intent, connection, BIND_AUTO_CREATE);
     }
     protected void onDestroy() {
-        if (service != null && service.web != null && service.web.getParent() == content) content.removeView(service.web);
+        if (service != null && service.web != null && service.web.getParent() == content) {
+            content.removeView(service.web);
+            ((MutableContextWrapper) service.web.getContext()).setBaseContext(service);
+        }
         if (bound) unbindService(connection);
         super.onDestroy();
     }

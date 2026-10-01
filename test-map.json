@@ -8,6 +8,7 @@
       "tests": [
         "bash -n android/build.sh",
         "node --check android/test/background.mjs",
+        "node --check android/test/appearance.mjs",
         "bash android/build.sh --test"
       ],
       "why": "Compile, package, align and verify the signed Android host with SDK 35 and a private signing key."

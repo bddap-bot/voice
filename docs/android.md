@@ -1,8 +1,8 @@
 # Live Voice on Android
 
-[Install Live Voice](https://github.com/bddap-bot/voice/releases/download/android-v5/live-voice.apk) (Android 9 or newer). The app loads the same [Live page](https://bddap-bot.github.io/voice/) as the browser. Conversation logic, authentication, wake detection, speaker filtering and replies remain in that page; the app keeps that page running and hearing while it is hidden.
+[Install Live Voice](https://github.com/bddap-bot/voice/releases/download/android-v6/live-voice.apk) (Android 9 or newer). The app loads the same [Live page](https://bddap-bot.github.io/voice/) as the browser. Conversation logic, authentication, wake detection, speaker filtering and replies remain in that page; the app keeps that page running and hearing while it is hidden.
 
-Tap the APK link → Download → Open → Settings → Allow from this source → Back → Install → Open. Version 5 installs over versions 2, 3 and 4 and preserves the connection token. Version 1 used a different signing key and must be uninstalled first. Open the app, allow microphone access while using the app, and allow notifications. Re-enroll with **Learn my voice** if you want voice filtering; the saved browser voiceprint does not transfer. Browser storage does not transfer to the app. You can turn off “Allow from this source” after installation.
+Tap the APK link → Download → Open → Settings → Allow from this source → Back → Install → Open. Version 6 installs over versions 2, 3, 4 and 5 and preserves the connection token. Version 1 used a different signing key and must be uninstalled first. Open the app, allow microphone access while using the app, and allow notifications. Re-enroll with **Learn my voice** if you want voice filtering; the saved browser voiceprint does not transfer. Browser storage does not transfer to the app. You can turn off “Allow from this source” after installation.
 
 Swiping Live Voice away from Recents ends background capture. Before a page session starts, the notification’s mute action does nothing. An OS-killed process does not silently restart capture.
 
@@ -27,3 +27,7 @@ Install JDK 17 or newer, Android SDK platform 35, build-tools 35.0.0 and zip. Se
 The test drives the app through adb input only, because an attached instrumentation exempts the app from Android's background microphone restriction.
 
 Run `npm test`, `npm run build` and `npm run smoke:ci` for the page. The emulator cannot prove physical speaker output, a real model reply, OEM power management, Bluetooth routing or long idle periods; those remain checks on the phone.
+
+`node android/test/appearance.mjs` checks native HTML select dialogs with neutral choices, their change event and storage, activity destruction/recreation, and process restart. Run it against an installed app with WebView debugging enabled; `ANDROID_HOME` and `ANDROID_SERIAL` choose the SDK and emulator. `VOICE_ANDROID_EVIDENCE_DIR` chooses the evidence directory. On a rooted test emulator, `VOICE_ANDROID_DEBUG_HELPER` may name an executable that enables inspection of an unchanged release APK before each connection. The test replaces the page body with its fixture; real appearance rendering and server-side selection persistence are separate checks on the published page.
+
+Version 6 supplies the current activity context to the service-owned WebView while attached, and releases that activity on detach. Native appearance dialogs can then open without changing the background capture lifecycle.

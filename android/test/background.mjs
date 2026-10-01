@@ -232,15 +232,15 @@ try {
   }
   await call('Fetch.disable');
   await evaluate('androidTestStart()');
-  const muteState = () => evaluate(`({ pressed: document.getElementById('mic-mute').getAttribute('aria-pressed'), label: document.getElementById('mic-mute').textContent, disabled: document.getElementById('mic-mute').disabled, enabled: androidTestMic.getAudioTracks()[0].enabled })`);
+  const muteState = async () => ({ ...await evaluate(`({ pressed: document.getElementById('mic-mute').getAttribute('aria-pressed'), label: document.getElementById('mic-mute').textContent, disabled: document.getElementById('mic-mute').disabled, })`), recording: /active\? true\n[^\n]*pack:voice\.live/.test(run('shell', 'dumpsys', 'audio')) });
   const expectMute = async muted => {
     let state;
     for (let attempt = 0; attempt < 20; attempt++) {
       state = await muteState();
-      if (state.pressed === String(muted) && state.enabled === !muted) break;
+      if (state.pressed === String(muted) && state.recording === !muted) break;
       await pause(250);
     }
-    assert.deepEqual(state, { pressed: String(muted), label: muted ? 'Unmute mic' : 'Mute mic', disabled: false, enabled: !muted });
+    assert.deepEqual(state, { pressed: String(muted), label: muted ? 'Unmute mic' : 'Mute mic', disabled: false, recording: !muted });
     console.log('page mute state', JSON.stringify(state));
   };
   const expectNotification = async muted => {

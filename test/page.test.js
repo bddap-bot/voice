@@ -191,16 +191,23 @@ Object.defineProperty(globalThis, 'caches', { value: { open: async () => ({
   put: async (request, response) => puppetCache.set(request.url, response.clone()),
 }) } });
 globalThis.microphoneOpens = 0;
+const destination = AudioContext.prototype.createMediaStreamDestination;
+AudioContext.prototype.createMediaStreamDestination = function () {
+  const output = destination.call(this);
+  globalThis.testMicrophoneOutput = output.stream.getAudioTracks()[0];
+  return output;
+};
 Object.defineProperty(navigator, 'mediaDevices', { value: Object.assign(new EventTarget(), { getUserMedia: async () => {
   if (globalThis.microphoneMissing) throw new DOMException('Requested device not found', 'NotFoundError');
   if (globalThis.microphoneRefused) throw new DOMException('Permission denied', 'NotAllowedError');
-  const track = Object.assign(new EventTarget(), { enabled: true, readyState: 'live', stop() { this.readyState = 'ended'; } });
+  const stream = destination.call(new AudioContext()).stream;
+  const track = stream.getAudioTracks()[0];
   globalThis.testMicrophoneTrack = track;
   microphoneOpens++;
-  return { getTracks: () => [track], getAudioTracks: () => [track] };
+  return stream;
 } }) });
 globalThis.endMicrophone = () => {
-  testMicrophoneTrack.readyState = 'ended';
+  testMicrophoneTrack.stop();
   testMicrophoneTrack.dispatchEvent(new Event('ended'));
 };
 class FakeMediaRecorder extends EventTarget {
@@ -325,6 +332,7 @@ async function runPage(testSetup = '', { scale = 1, size = '390,844', budget = 3
   try {
     const { stdout, stderr } = await dumpDom(url, [
       '--disable-gpu',
+      '--autoplay-policy=no-user-gesture-required',
       '--disable-popup-blocking',
       '--disable-background-timer-throttling',
       '--disable-renderer-backgrounding',
@@ -614,7 +622,7 @@ window.addEventListener('test-ready', () => {
   const button = document.querySelector('#mic-mute');
   const puppet = document.querySelector('#puppet');
   const states = [];
-  const capture = () => states.push({ enabled: testMicrophoneTrack.enabled, muted: button.getAttribute('aria-pressed'), label: button.textContent, live: puppet.getAttribute('aria-pressed'), channel: testChannel.readyState });
+  const capture = () => states.push({ capture: testMicrophoneTrack.readyState, muted: button.getAttribute('aria-pressed'), label: button.textContent, live: puppet.getAttribute('aria-pressed'), channel: testChannel.readyState });
   capture();
   button.click();
   capture();
@@ -625,9 +633,9 @@ window.addEventListener('test-ready', () => {
 `);
   const encoded = /data-microphone-mute-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   assert.deepEqual(JSON.parse(encoded ?? 'null'), [
-    { enabled: true, muted: 'false', label: 'Mute mic', live: 'true', channel: 'open' },
-    { enabled: false, muted: 'true', label: 'Unmute mic', live: 'true', channel: 'open' },
-    { enabled: true, muted: 'false', label: 'Mute mic', live: 'true', channel: 'open' },
+    { capture: 'live', muted: 'false', label: 'Mute mic', live: 'true', channel: 'open' },
+    { capture: 'ended', muted: 'true', label: 'Unmute mic', live: 'true', channel: 'open' },
+    { capture: 'live', muted: 'false', label: 'Mute mic', live: 'true', channel: 'open' },
   ], stderr);
 });
 
@@ -635,7 +643,7 @@ const voiceprintSetup = (model = MODEL.sha256, off = false) => `localStorage.set
 
 test('without a voiceprint for the current model a conversation sends the microphone itself', async () => {
   const result = await runWakePage(`
-    return { sent: sentTracks.at(-1) === testMicrophoneTrack, gates: gateStarts.length, prepared: speakerPrepared, label: document.querySelector('#voice-print').textContent, toggle: document.querySelector('#voice-filter').classList.contains('hidden') };
+    return { sent: sentTracks.at(-1) === testMicrophoneOutput, gates: gateStarts.length, prepared: speakerPrepared, label: document.querySelector('#voice-print').textContent, toggle: document.querySelector('#voice-filter').classList.contains('hidden') };
   `, { setup: voiceprintSetup('an earlier model') });
   assert.deepEqual(result, { sent: true, gates: 0, prepared: 0, label: 'Learn my voice', toggle: true });
 });
@@ -647,7 +655,7 @@ test('voice ID switches a live session both ways, keeps the voiceprint, and off 
     const on = { ...state(), sent: sentTracks.at(-1).gated === true };
     toggle.click();
     await until(() => (globalThis.replacedTracks ?? []).length === 1);
-    const off = { ...state(), sent: replacedTracks.at(-1) === testMicrophoneTrack };
+    const off = { ...state(), sent: replacedTracks.at(-1) === testMicrophoneOutput };
     toggle.click();
     await until(() => replacedTracks.length === 2);
     const back = state();
@@ -656,7 +664,7 @@ test('voice ID switches a live session both ways, keeps the voiceprint, and off 
     await sleepNow();
     document.querySelector('#puppet').click();
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
-    const next = { gates: gateStarts.length, sent: sentTracks.at(-1) === testMicrophoneTrack, stored: JSON.parse(localStorage.getItem('voice.token.voiceprint')) };
+    const next = { gates: gateStarts.length, sent: sentTracks.at(-1) === testMicrophoneOutput, stored: JSON.parse(localStorage.getItem('voice.token.voiceprint')) };
     return { on, off, back, next };
   `, { setup: voiceprintSetup() });
   assert.deepEqual(result, {
@@ -681,7 +689,7 @@ test('a voice ID gate that starts late is closed unless it is still wanted, and 
     toggle.click();
     await settle();
     await settle();
-    const settled = { closed: gateStarts.map((gate) => gate.closed), sent: replacedTracks.map((track) => track === testMicrophoneTrack ? 'mic' : gateStarts.findIndex((gate) => gate.stream.getAudioTracks()[0] === track)) };
+    const settled = { closed: gateStarts.map((gate) => gate.closed), sent: replacedTracks.map((track) => track === testMicrophoneOutput ? 'mic' : gateStarts.findIndex((gate) => gate.stream.getAudioTracks()[0] === track)) };
     toggle.click();
     toggle.click();
     await sleepNow();
@@ -698,7 +706,7 @@ test('forgetting the voice during a conversation stops filtering it at once', as
   const result = await runWakePage(`
     document.querySelector('#voice-print').click();
     await until(() => (globalThis.replacedTracks ?? []).length === 1);
-    return { closed: gateStarts[0].closed, sent: replacedTracks[0] === testMicrophoneTrack, hidden: document.querySelector('#voice-filter').classList.contains('hidden'), live: document.querySelector('#puppet').getAttribute('aria-pressed') };
+    return { closed: gateStarts[0].closed, sent: replacedTracks[0] === testMicrophoneOutput, hidden: document.querySelector('#voice-filter').classList.contains('hidden'), live: document.querySelector('#puppet').getAttribute('aria-pressed') };
   `, { setup: voiceprintSetup() });
   assert.deepEqual(result, { closed: 1, sent: true, hidden: true, live: 'true' });
 });
@@ -706,7 +714,7 @@ test('forgetting the voice during a conversation stops filtering it at once', as
 test('voice ID off persists across reloads with no model loaded, and forgetting the voice clears it', async () => {
   const result = await runWakePage(`
     const toggle = document.querySelector('#voice-filter');
-    const loaded = { label: toggle.textContent, gates: gateStarts.length, prepared: speakerPrepared, sent: sentTracks.at(-1) === testMicrophoneTrack };
+    const loaded = { label: toggle.textContent, gates: gateStarts.length, prepared: speakerPrepared, sent: sentTracks.at(-1) === testMicrophoneOutput };
     await sleepNow();
     document.querySelector('#voice-print').click();
     return { loaded, forgotten: { stored: localStorage.getItem('voice.token.voiceprint'), hidden: toggle.classList.contains('hidden'), label: toggle.textContent } };
@@ -722,6 +730,7 @@ test('learning a voice happens between conversations, pauses wake listening and 
     document.querySelector('#voice-print').click();
     const refused = document.querySelector('#status').textContent;
     await sleepNow();
+    await until(() => !testSpotter.closed);
     const spotter = testSpotter;
     const before = spotter.closed;
     document.querySelector('#voice-print').click();
@@ -732,7 +741,7 @@ test('learning a voice happens between conversations, pauses wake listening and 
     const halfway = document.querySelector('#voice-print').textContent;
     learning.heard({ voiceprint: Float32Array.from([0.5, 0.75]) });
     await until(() => testSpotter !== spotter);
-    return { refused, input: learning.input.getAudioTracks()[0] === testMicrophoneTrack, learnedFrom: learning.voiceprint, paused, halfway, label: document.querySelector('#voice-print').textContent, closed: learning.closed, stored: JSON.parse(localStorage.getItem('voice.token.voiceprint')), status: document.querySelector('#status').textContent, keys: Object.keys(localStorage).sort() };
+    return { refused, input: learning.input.getAudioTracks()[0] === testMicrophoneOutput, learnedFrom: learning.voiceprint, paused, halfway, label: document.querySelector('#voice-print').textContent, closed: learning.closed, stored: JSON.parse(localStorage.getItem('voice.token.voiceprint')), status: document.querySelector('#status').textContent, keys: Object.keys(localStorage).sort() };
   `, { setup: voiceprintSetup('an earlier model', true) });
   assert.deepEqual(result, { refused: 'learn your voice between conversations', input: true, learnedFrom: null, paused: 1, halfway: 'Stop learning (50%)', label: 'Forget my voice', closed: 1, stored: { model: MODEL.sha256, print: [0.5, 0.75] }, status: 'voice learned: other voices are filtered out', keys: ['voice.audio-diagnostics.v1', 'voice.token', 'voice.token.voiceprint'] });
 });
@@ -740,14 +749,14 @@ test('learning a voice happens between conversations, pauses wake listening and 
 test('a voiceprint filters each conversation, mute still silences the microphone, and a filter failure falls back to it', async () => {
   const result = await runWakePage(`
     const gate = gateStarts[0];
-    const filtered = { prepared: speakerPrepared, input: gate.input.getAudioTracks()[0] === testMicrophoneTrack, voiceprint: gate.voiceprint, sent: sentTracks.at(-1).gated === true };
+    const filtered = { prepared: speakerPrepared, input: gate.input.getAudioTracks()[0] === testMicrophoneOutput, voiceprint: gate.voiceprint, sent: sentTracks.at(-1).gated === true };
     document.querySelector('#mic-mute').click();
-    const muted = testMicrophoneTrack.enabled;
+    const muted = testMicrophoneTrack.readyState;
     document.querySelector('#mic-mute').click();
     gate.heard({ score: 0.75, from: 0, to: 16000, ms: 90 });
     gate.heard({ error: 'Error: speaker model download failed: 404\\n    at modelBytes' });
     await until(() => (globalThis.replacedTracks ?? []).length && sessionEvents('speaker-score').length);
-    const failed = { replaced: replacedTracks[0] === testMicrophoneTrack, closed: gate.closed, status: document.querySelector('#status').textContent, live: document.querySelector('#puppet').getAttribute('aria-pressed') };
+    const failed = { replaced: replacedTracks[0] === testMicrophoneOutput, closed: gate.closed, status: document.querySelector('#status').textContent, live: document.querySelector('#puppet').getAttribute('aria-pressed') };
     await sleepNow();
     document.querySelector('#puppet').click();
     await until(() => gateStarts.length === 2);
@@ -755,7 +764,7 @@ test('a voiceprint filters each conversation, mute still silences the microphone
   `, { setup: voiceprintSetup() });
   assert.deepEqual(result, {
     filtered: { prepared: 1, input: true, voiceprint: [0.5, 0.75], sent: true },
-    muted: false,
+    muted: 'ended',
     failed: { replaced: true, closed: 1, status: 'speaker filter off, hearing everyone: Error: speaker model download failed: 404', live: 'true' },
     scores: [{ score: 0.75, from: 0, to: 16000, ms: 90 }],
     next: [0.5, 0.75],
@@ -769,7 +778,7 @@ test('forgetting the voice sends the unfiltered microphone from the next convers
     const forgotten = { stored: localStorage.getItem('voice.token.voiceprint'), label: document.querySelector('#voice-print').textContent, status: document.querySelector('#status').textContent };
     document.querySelector('#puppet').click();
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
-    return { ...forgotten, gates: gateStarts.length, sent: sentTracks.at(-1) === testMicrophoneTrack };
+    return { ...forgotten, gates: gateStarts.length, sent: sentTracks.at(-1) === testMicrophoneOutput };
   `, { setup: voiceprintSetup() });
   assert.deepEqual(result, { stored: null, label: 'Learn my voice', status: 'voice forgotten: conversations hear everyone', gates: 1, sent: true });
 });
@@ -2004,7 +2013,7 @@ test('inactivity sleeps after the generous window even while a hub request is pe
 
 test('muting the microphone persists while asleep and into the next session', async () => {
   const result = await runWakePage(`
-    const state = () => ({ enabled: testMicrophoneTrack.enabled, pressed: document.querySelector('#mic-mute').getAttribute('aria-pressed'), disabled: document.querySelector('#mic-mute').disabled, live: document.querySelector('#puppet').getAttribute('aria-pressed') });
+    const state = () => ({ capture: testMicrophoneTrack.readyState, pressed: document.querySelector('#mic-mute').getAttribute('aria-pressed'), disabled: document.querySelector('#mic-mute').disabled, live: document.querySelector('#puppet').getAttribute('aria-pressed') });
     document.querySelector('#mic-mute').click();
     await sleepNow();
     const asleep = state();
@@ -2012,18 +2021,20 @@ test('muting the microphone persists while asleep and into the next session', as
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
     const awake = state();
     document.querySelector('#mic-mute').click();
+    await until(() => testMicrophoneTrack.readyState === 'live');
     return { asleep, awake, unmuted: state() };
   `);
   assert.deepEqual(result, {
-    asleep: { enabled: false, pressed: 'true', disabled: false, live: 'false' },
-    awake: { enabled: false, pressed: 'true', disabled: false, live: 'true' },
-    unmuted: { enabled: true, pressed: 'false', disabled: false, live: 'true' },
+    asleep: { capture: 'ended', pressed: 'true', disabled: false, live: 'false' },
+    awake: { capture: 'ended', pressed: 'true', disabled: false, live: 'true' },
+    unmuted: { capture: 'live', pressed: 'false', disabled: false, live: 'true' },
   });
 });
 
 test('a muted microphone runs no wake spotter, not even after a session ends, and unmuting starts one that hears the phrase', async () => {
   const result = await runWakePage(`
     await sleepNow();
+    await until(() => !testSpotter.closed);
     const listening = testSpotter;
     const before = listening.closed;
     document.querySelector('#mic-mute').click();
@@ -2129,12 +2140,11 @@ test('a refused microphone shows on the status line, asleep or tapped, as a sess
     endMicrophone();
     await new Promise((resolve) => setTimeout(resolve, 300));
     const asleep = { status: status(), refusals: sessionEvents('microphone-refused').map((event) => event.detail), running: !testSpotter.closed };
-    document.querySelector('#mic-mute').click();
     document.querySelector('#puppet').click();
     await new Promise((resolve) => setTimeout(resolve, 300));
     const tapped = { status: status(), pressed: document.querySelector('#puppet').getAttribute('aria-pressed') };
     globalThis.microphoneRefused = false;
-    document.querySelector('#mic-mute').click();
+    navigator.mediaDevices.dispatchEvent(new Event('devicechange'));
     await new Promise((resolve) => setTimeout(resolve, 300));
     return { asleep, tapped, allowed: { status: status(), running: !testSpotter.closed, hears: testSpotter.stream.getAudioTracks()[0].readyState }, errors: fleetLines };
   `);
@@ -2155,10 +2165,10 @@ test('with no microphone at load, mute is available at once and holds when a dev
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
     return { before, arrived, sends: { state: sentTracks.at(-1).readyState, enabled: sentTracks.at(-1).enabled } };
   `, { setup: 'globalThis.microphoneMissing = true;' });
-  assert.deepEqual(result, { before: { opens: 0, disabled: false }, arrived: { opens: 0, pressed: 'true' }, sends: { state: 'live', enabled: false } });
+  assert.deepEqual(result, { before: { opens: 0, disabled: false }, arrived: { opens: 0, pressed: 'true' }, sends: { state: 'live', enabled: true } });
 });
 
-test('a mute set while no microphone is open holds, and the next session opens the microphone muted', async () => {
+test('a mute set while no microphone is open holds, and the next session uses silent output without capture', async () => {
   const result = await runWakePage(`
     await sleepNow();
     await until(() => globalThis.testSpotter && !testSpotter.closed);
@@ -2176,7 +2186,7 @@ test('a mute set while no microphone is open holds, and the next session opens t
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
     return { muted, sends: { state: sentTracks.at(-1).readyState, enabled: sentTracks.at(-1).enabled } };
   `);
-  assert.deepEqual(result, { muted: { opens: 0, running: false, pressed: 'true', disabled: false }, sends: { state: 'live', enabled: false } });
+  assert.deepEqual(result, { muted: { opens: 0, running: false, pressed: 'true', disabled: false }, sends: { state: 'live', enabled: true } });
 });
 
 test('a running spotter survives relay loss and the wake phrase reconnects', async () => {

@@ -131,6 +131,7 @@
 </div>
 <audio id="speaker" autoplay></audio>
 <script type="module">
+import { Microphone } from './microphone.js';
 import wbgInit, { init as wasmInit, connect, send_only, recv } from './relay/botq_dash_wasm.js';
 import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, SessionClock, TranscriptBatcher, errorEvent, includesPhrase, modelToolFields, formatElapsed, formatStartError, isOfferFor, shareFrame } from './live.js';
 import { PuppetChannel } from './puppet-client.js';
@@ -188,7 +189,6 @@ let selectedImage;
 let sharing = false;
 let microphoneMuted = false;
 let microphone;
-let microphoneStream;
 let listening = false;
 let spotter;
 let wakeModelWaiter;
@@ -379,7 +379,10 @@ function syncScreenLock() {
 }
 function setMicrophoneMuted(muted) {
   microphoneMuted = muted;
-  for (const track of microphoneStream?.getAudioTracks?.() ?? microphoneStream?.getTracks?.() ?? []) track.enabled = !microphoneMuted;
+  if (muted) {
+    microphone?.release();
+    stopLearning();
+  } else if (listening) acquireMicrophone().catch(recordPageError);
   $('mic-mute').disabled = !listening;
   $('mic-mute').textContent = microphoneMuted ? 'Unmute mic' : 'Mute mic';
   $('mic-mute').setAttribute('aria-pressed', String(microphoneMuted));
@@ -771,31 +774,23 @@ function waitIce(pc, attempt) {
   });
 }
 function acquireMicrophone() {
-  if (microphone) return microphone;
-  const opening = microphone = navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
-    if (microphone !== opening) {
-      for (const track of stream.getTracks()) track.stop();
-      throw new Error('microphone released while opening');
-    }
-    microphoneStream = stream;
-    for (const track of stream.getAudioTracks()) audioDiagnostics()?.track(track);
-    for (const track of stream.getTracks()) track.addEventListener('ended', () => microphoneEnded(stream));
-    setMicrophoneMuted(microphoneMuted);
+  microphone ??= new Microphone({ track: track => audioDiagnostics()?.track(track), ended: microphoneEnded });
+  const current = microphone;
+  return current.open(() => !microphoneMuted).then(stream => {
+    if (microphone !== current) throw new Error('microphone released while opening');
     if ($('status').textContent === microphoneRefusal.message) setStatus();
     return stream;
-  }, (error) => {
-    if (microphone === opening) microphone = undefined;
+  }, error => {
     if (error?.name !== 'NotAllowedError') throw error;
     recordSession('microphone-refused', error.message);
     setStatus(microphoneRefusal.message, 'err');
     throw microphoneRefusal;
   });
-  return opening;
 }
 function microphoneEnded(stream) {
-  if (microphoneStream !== stream) return;
+  if (microphone?.output.stream !== stream) return;
+  microphone?.close();
   microphone = undefined;
-  microphoneStream = undefined;
   recordSession('microphone-ended');
   stopLearning('voice learning stopped: microphone lost', 'err');
   closeSpotter();
@@ -927,14 +922,14 @@ async function wakeModel() {
 function syncSpotter() {
   if (!wakeable()) return closeSpotter();
   if (spotter || !listeningModel) return;
-  const current = spotter = Promise.all([acquireMicrophone(), listeningModel]).then(([stream, model]) => startSpotter(stream, heard, model));
+  const current = spotter = Promise.all([acquireMicrophone(), listeningModel]).then(([stream, model]) => spotter === current && wakeable() ? startSpotter(stream, heard, model) : null);
   current.catch((error) => {
     if (spotter === current) spotter = undefined;
     recordPageError(error);
   });
 }
 function closeSpotter() {
-  spotter?.then((running) => running.close()).catch(() => {});
+  spotter?.then((running) => running?.close()).catch(() => {});
   spotter = undefined;
 }
 function stopListening() {
@@ -942,9 +937,8 @@ function stopListening() {
   listening = false;
   listeningModel = undefined;
   syncSpotter();
-  for (const track of microphoneStream?.getTracks?.() ?? []) track.stop();
+  microphone?.close();
   microphone = undefined;
-  microphoneStream = undefined;
   setMicrophoneMuted(false);
 }
 function heard({ wake, miss, error }) {

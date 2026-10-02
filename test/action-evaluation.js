@@ -7,7 +7,6 @@ export const evaluation = [
   ['gesture','nod','I concur with that conclusion.'], ['gesture','nod','You have my approval.'], ['gesture','nod','That answer checks out.'], ['gesture','nod','Proceed with the plan.'],
   ['gesture','shrug','Your guess is as good as mine.'], ['gesture','shrug','Either option works for me.'], ['gesture','shrug','I have no idea.'],
   ['gesture','think','I need a moment to weigh the alternatives.'], ['gesture','think','Let me reason through the consequences.'], ['gesture','think','I will work out the answer.'],
-  ['gesture','point','Focus on the chart to the right.'], ['gesture','point','Take a look at the highlighted section.'], ['gesture','point','The key evidence is over there.'],
   ['gesture','wave','It is lovely to meet you.'], ['gesture','wave','Farewell until next time.'], ['gesture','wave','Hi there, welcome in.'],
   ['gesture','no','No, I cannot agree with that.'], ['gesture','no','That conclusion is simply incorrect.'], ['gesture','no','I reject that suggestion.'],
   ['gesture','laugh','That made me laugh out loud.'], ['gesture','laugh','I burst out laughing at the punchline.'], ['gesture','laugh','I am still laughing about that story.'],
@@ -34,7 +33,7 @@ export const evaluation = [
 
 export async function evaluate(loadEmbedder) {
   const classifier = new EmbeddingActionClassifier(loadEmbedder);
-  for (const [sentence, token] of [['Yes.', 'gesture:nod'], ['No idea.', 'gesture:shrug'], ['Hmm.', 'mood:thinking'], ['Happy.', 'mood:pleased'], ['Sad.', 'mood:sad'], ['Angry.', 'mood:angry'], ['Relaxed.', 'mood:relaxed'], ['Surprised.', 'mood:surprised'], ["I'm neutral.", 'mood:neutral'], ['I feel neutral.', 'mood:neutral'], ['My expression is neutral.', 'mood:neutral'], ['Pointing at the panel.', 'gesture:point']]) {
+  for (const [sentence, token] of [['Yes.', 'gesture:nod'], ['No idea.', 'gesture:shrug'], ['Hmm.', 'mood:thinking'], ['Happy.', 'mood:pleased'], ['Sad.', 'mood:sad'], ['Angry.', 'mood:angry'], ['Relaxed.', 'mood:relaxed'], ['Surprised.', 'mood:surprised'], ["I'm neutral.", 'mood:neutral'], ['I feel neutral.', 'mood:neutral'], ['My expression is neutral.', 'mood:neutral']]) {
     const result = await classifier.classify(sentence);
     assert.equal(`${result.kind}:${result.name}`, token, `short sentence ${sentence}`);
   }
@@ -52,10 +51,6 @@ export async function evaluate(loadEmbedder) {
     if (hit) row.hits++;
   }
   for (const row of rows.values()) assert.ok(row.hits, `unreachable action token: ${row.token}`);
-  for (const sentence of ['The available expressions are neutral, happy, sad, angry, surprised, blink, and mouth open.', 'The list includes alpha, beta, gamma, and delta.', 'First is setup, second is execution, and third is review.']) {
-    const result = await classifier.classify(sentence);
-    assert.notEqual(`${result.kind}:${result.name}`, 'gesture:point', `enumeration sentence ${sentence}`);
-  }
   return { total: evaluation.length, before, after, rows: [...rows.values()].map((row) => ({ ...row, hitRate: `${row.hits}/${row.examples.length}` })) };
 }
 

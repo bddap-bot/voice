@@ -48,7 +48,6 @@ test('the spoken demonstration list reaches the intended actions through complet
     ['Angry.', 'mood', 'angry'],
     ['Relaxed.', 'mood', 'relaxed'],
     ['Surprised.', 'mood', 'surprised'],
-    ['Pointing at the panel.', 'gesture', 'point'],
   ];
   const classifier = { classify: async (text) => {
     const [, kind, name] = expected.find(([sentence]) => sentence === text);

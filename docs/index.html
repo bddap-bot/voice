@@ -207,8 +207,7 @@ function applyTranscriptAction(action, timing) {
   let outcome = puppetRuntime ? 'played' : 'refused';
   if (outcome === 'played' && action.kind === 'mood') puppetRuntime.mood(action.name);
   else if (outcome === 'played' && action.kind === 'gesture') {
-    const target = action.name === 'point' ? 'panel' : undefined;
-    if ((target && !$('display-items').childElementCount) || !puppetRuntime.gesture(action.name, target)) outcome = 'refused';
+    if (!puppetRuntime.gesture(action.name)) outcome = 'refused';
   }
   recordSession('transcript-action', JSON.stringify({ source: action.source, sentence: timing.sentence, action: `${action.kind}:${action.name}`, score: action.score, pose, outcome, playAtMinusNow: timing.playAtMinusNow }));
 }
@@ -474,7 +473,7 @@ let trace = new ConversationTrace(render, restored?.trace);
 if (restored?.awake) trace.slept(restored.at);
 render(trace.entries);
 try {
-  puppetRuntime = new PuppetRuntime($('puppet'), $('display'));
+  puppetRuntime = new PuppetRuntime($('puppet'));
   puppetRuntime.onAnimation = (state) => recordSession('animation', JSON.stringify(state));
   puppetRuntime.pause();
 } catch (error) {
@@ -650,7 +649,6 @@ function showDisplay(payload, bytes) {
   if (!item.childNodes.length) return;
   $('display-items').prepend(item);
   while ($('display-items').childNodes.length > 20) { const removed = $('display-items').lastChild; if (removed.imageUrl) URL.revokeObjectURL(removed.imageUrl); for (const renderer of removed.querySelectorAll('.chart')) disposeRenderer(renderer); removed.remove(); }
-  puppetRuntime?.gesture('point', 'panel');
 }
 function receiveShare(result) {
   const waiter = shareWaiters.get(result.id);

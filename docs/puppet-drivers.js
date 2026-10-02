@@ -6,7 +6,6 @@ const LABELS = {
     nod: ['yes, I agree completely', 'that conclusion is correct', 'absolutely, you have my approval', 'I concur with that', 'please proceed with the plan'],
     shrug: ['I do not know', 'it could be either way', 'I have no preference'],
     think: ['let me reason about this', 'I need to consider the options', 'give me a moment to work it out'],
-    point: ['look at this part', 'notice the item over there', 'here is the important detail'],
     wave: ['hello, good to see you', 'goodbye, see you later', 'welcome'],
     no: ['no, I disagree with that', 'that is not correct', 'I have to reject that idea'],
     laugh: ['that made me burst out laughing', 'I cannot stop laughing at that', 'I laughed out loud when I heard that'],

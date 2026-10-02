@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { MOOD_TABLE, PuppetRuntime, animationClip, audioEnergy, loudnessViseme, pointAtOffsets, screenTarget, shouldBeat, transcriptVisemes } from '../src/puppet.js';
+import { MOOD_TABLE, PuppetRuntime, animationClip, audioEnergy, loudnessViseme, shouldBeat, transcriptVisemes } from '../src/puppet.js';
 
 function waveform(amplitude) {
   return Uint8Array.from({ length: 256 }, (_, index) => 128 + Math.round(Math.sin(index / 3) * amplitude));
@@ -82,11 +82,11 @@ test('audio beats never replace an active explicit gesture', () => {
   runtime.previousEnergy = 0;
   runtime.waitingForHub = false;
   runtime.clipGesture = 'nod';
-  runtime.gestureState = { name: 'point_at' };
+  runtime.gestureState = { name: 'beat' };
   runtime.beginGesture = (name) => { runtime.gestureState = { name }; };
   const manager = { setValue() {} };
   runtime.updateMouth(manager);
-  assert.equal(runtime.gestureState.name, 'point_at');
+  assert.equal(runtime.gestureState.name, 'beat');
   runtime.gestureState = null;
   runtime.previousEnergy = 0;
   runtime.updateMouth(manager);
@@ -120,12 +120,7 @@ test('explicit gestures replace a hub wait and beats cannot replace either', () 
   assert.deepEqual(played, ['nod']);
   runtime.gesture('beat');
   assert.equal(runtime.clipGesture, 'nod');
-  runtime.gesture('point', 'panel');
-  assert.equal(runtime.gestureState.name, 'point_at');
-  assert.equal(runtime.clipGesture, null);
-  assert.deepEqual(played, ['nod', 'idle']);
-  runtime.gesture('beat');
-  assert.equal(runtime.gestureState.name, 'point_at');
+
 });
 
 test('named clip gestures play during a pending hub wait', () => {
@@ -246,99 +241,6 @@ test('idle variants use random dwell and never repeat consecutively', () => {
   assert.equal(runtime.nextIdleAt, 15000);
 });
 
-test('the look-at target glances to a fresh panel and returns to camera dwell', () => {
-  const head = new THREE.Object3D();
-  const target = new THREE.Object3D();
-  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
-    vrm: { lookAt: { target } },
-    gazeTarget: target,
-    gazePoint: new THREE.Vector3(0, 1.25, 6.4),
-    gazeDestination: new THREE.Vector3(0, 1.25, 6.4),
-    gazeMode: 'camera',
-    gazeUntil: 0,
-    nextSaccade: Infinity,
-    gazeRotation: new THREE.Quaternion(),
-    bones: new Map([['head', { node: head }]]),
-  });
-  runtime.setGaze('panel', 2200, 0);
-  for (let frame = 0; frame < 30; frame++) {
-    head.quaternion.identity();
-    runtime.updateGaze(100 + frame * 16);
-  }
-  assert.equal(runtime.gazeMode, 'panel');
-  assert.ok(target.position.x > 2.5);
-  const panelX = target.position.x;
-  const panelHeadYaw = head.rotation.y;
-  const random = Math.random;
-  Math.random = () => 0.5;
-  try {
-    for (let frame = 0; frame < 30; frame++) {
-      head.quaternion.identity();
-      runtime.updateGaze(2201 + frame * 16);
-    }
-  } finally {
-    Math.random = random;
-  }
-  assert.equal(runtime.gazeMode, 'camera');
-  assert.ok(target.position.x < panelX * 0.1);
-  assert.ok(panelHeadYaw > 0.08);
-  assert.ok(Math.abs(head.rotation.y) < panelHeadYaw * 0.1);
-});
-
-test('point-at uses the near hand for panels on either side', () => {
-  const camera = new THREE.PerspectiveCamera(28, 1, 0.05, 30);
-  camera.position.set(0, 1.25, 6.4);
-  camera.lookAt(0, 1.25, 0);
-  camera.updateMatrixWorld();
-  camera.updateProjectionMatrix();
-  const viewport = { left: 300, top: 0, width: 400, height: 700 };
-  const panels = [
-    { rect: { left: 720, top: 200, width: 250, height: 340 }, near: 'left', far: 'right' },
-    { rect: { left: 30, top: 180, width: 220, height: 360 }, near: 'right', far: 'left' },
-  ];
-  for (const { rect, near, far } of panels) {
-    const target = screenTarget(camera, viewport, rect);
-    const torso = new THREE.Object3D();
-    const hands = {};
-    const shoulders = {};
-    const bones = new Map();
-    for (const side of ['left', 'right']) {
-      const upper = new THREE.Object3D();
-      const lower = new THREE.Object3D();
-      const hand = new THREE.Object3D();
-      upper.position.set(side === 'left' ? 0.2 : -0.2, 1.35, 0);
-      lower.position.y = 0.45;
-      hand.position.y = 0.42;
-      upper.rotation.set(0.25, side === 'left' ? -0.35 : 0.35, side === 'left' ? 0.4 : -0.4);
-      torso.add(upper);
-      upper.add(lower);
-      lower.add(hand);
-      bones.set(`${side}UpperArm`, { node: upper });
-      bones.set(`${side}LowerArm`, { node: lower });
-      hands[side] = hand;
-      shoulders[side] = upper;
-    }
-    torso.updateMatrixWorld(true);
-    const offsets = pointAtOffsets(target, bones);
-    assert.ok(`${near}UpperArm` in offsets);
-    assert.ok(!(`${far}UpperArm` in offsets));
-    const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
-      bones, gestureRotation: new THREE.Quaternion(), gestureOffsets: offsets,
-      gestureState: { from: {}, to: offsets, started: 0, releaseAt: Infinity, releasing: false },
-    });
-    runtime.updateGesture(1000);
-    torso.updateMatrixWorld(true);
-    const nearPosition = hands[near].getWorldPosition(new THREE.Vector3());
-    const farPosition = hands[far].getWorldPosition(new THREE.Vector3());
-    const shoulderPosition = shoulders[near].getWorldPosition(new THREE.Vector3());
-    const handDirection = nearPosition.clone().sub(shoulderPosition).normalize();
-    const targetDirection = target.clone().sub(shoulderPosition).normalize();
-    assert.ok(Math.sign(nearPosition.x) === Math.sign(target.x));
-    assert.ok(Math.abs(nearPosition.x - target.x) < Math.abs(farPosition.x - target.x));
-    assert.ok(handDirection.angleTo(targetDirection) < 0.12);
-  }
-});
-
 test('gaze is inert when a puppet has no look-at rig', () => {
   const target = new THREE.Object3D();
   const head = new THREE.Object3D();
@@ -347,7 +249,7 @@ test('gaze is inert when a puppet has no look-at rig', () => {
     gazeTarget: target,
     gazePoint: new THREE.Vector3(0, 1.25, 6.4),
     gazeDestination: new THREE.Vector3(2.8, 1.35, 2.4),
-    gazeMode: 'panel',
+    gazeMode: 'away',
     gazeUntil: 2200,
     nextSaccade: 0,
     gazeRotation: new THREE.Quaternion(),
@@ -380,7 +282,7 @@ test('a hub wait resumes after an explicit clip finishes', () => {
 test('a hub wait resumes after an explicit procedural gesture releases', () => {
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
     waitingForHub: true,
-    gestureState: { name: 'point_at', from: {}, to: {}, started: 0, releaseAt: Infinity, releasing: true },
+    gestureState: { name: 'beat', from: {}, to: {}, started: 0, releaseAt: Infinity, releasing: true },
     gestureOffsets: {},
     bones: new Map(),
   });

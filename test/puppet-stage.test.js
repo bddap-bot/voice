@@ -11,7 +11,7 @@ test('the puppet stage preserves hips world XZ throughout an idle cycle', () => 
     cancelAnimationFrame: () => {},
   });
   const renderer = { setPixelRatio() {}, setSize() {}, dispose() {} };
-  const runtime = new PuppetRuntime({ clientWidth: 320, clientHeight: 240 }, null, renderer);
+  const runtime = new PuppetRuntime({ clientWidth: 320, clientHeight: 240 }, renderer);
   runtime.pause();
   const hips = new THREE.Object3D();
   hips.position.set(0.125, 1, -0.25);

@@ -180,7 +180,7 @@ globalThis.replyFromHub = (id, stamp, commentary = [], timing_ms = 5, extra = {}
 window.addEventListener('error', (event) => { document.body.dataset.browserError = event.message; });
 window.addEventListener('unhandledrejection', (event) => { document.body.dataset.browserError = String(event.reason?.stack || event.reason); });
 globalThis.__voiceLoadEmbedder = async () => async (texts) => texts.map((text) => {
-  const labels = [/yes|correct|agree|ahead/, /know|either|preference/, /reason|consider|moment|think/, /look|notice|detail/, /hello|goodbye|welcome/, /disagree|reject|incorrect/, /laughing|laughed/, /clap|applaud/, /honor|respect/, /thumbs up|endorsement/, /stretch|loosen/, /around|surroundings/, /sorry|forgive|fault|mistake/, /unexpected|astonish|believe/, /hilarious|funny|joke|laugh/, /delight|excellent|wonderful/, /understand|confus|sense/, /convinced|doubt|question/, /considering|think|perhaps|approach/, /careful|warning|danger/, /exhaust|sleep|drowsy|rest/, /wonder|why|learn/];
+  const labels = [/yes|correct|agree|ahead/, /know|either|preference/, /reason|consider|moment|think/, /hello|goodbye|welcome/, /disagree|reject|incorrect/, /laughing|laughed/, /clap|applaud/, /honor|respect/, /thumbs up|endorsement/, /stretch|loosen/, /around|surroundings/, /sorry|forgive|fault|mistake/, /unexpected|astonish|believe/, /hilarious|funny|joke|laugh/, /delight|excellent|wonderful/, /understand|confus|sense/, /convinced|doubt|question/, /considering|think|perhaps|approach/, /careful|warning|danger/, /exhaust|sleep|drowsy|rest/, /wonder|why|learn/];
   const lower = text.toLowerCase();
   const vector = labels.map((pattern) => pattern.test(lower) ? 1 : 0.001);
   return vector;
@@ -415,22 +415,6 @@ async function runPuppetPage(html, { scale = 1, size = '390,844', budget = 3000,
   } finally {
     if (server.listening) await new Promise((resolve) => server.close(resolve));
   }
-}
-
-function runGazePage() {
-  return runPuppetPage(`<!doctype html><canvas id="puppet" style="width:390px;height:844px"></canvas><script type="module">
-import { PuppetRuntime } from '/puppet.js';
-const runtime = new PuppetRuntime(document.querySelector('#puppet'));
-runtime.pause();
-runtime.vrm = { lookAt: {} };
-runtime.setGaze('panel', 2200, 0);
-for (let frame = 0; frame < 30; frame++) runtime.updateGaze(100 + frame * 16);
-const panel = { mode: runtime.gazeMode, x: runtime.gazeTarget.position.x };
-Math.random = () => 0.5;
-for (let frame = 0; frame < 30; frame++) runtime.updateGaze(2201 + frame * 16);
-document.body.dataset.gazeTest = JSON.stringify({ panel, returned: { mode: runtime.gazeMode, x: runtime.gazeTarget.position.x } });
-runtime.dispose();
-</script>`);
 }
 
 function runVisibilityPage() {
@@ -918,16 +902,6 @@ test('Android DPR 3 keeps the visual stage height stable and renders after sixty
   assert.deepEqual(result.heights, result.heights.map(() => result.settled));
 });
 
-test('the real page runtime moves its look-at target to the panel and back over time', async () => {
-  const { stdout, stderr } = await runGazePage();
-  const encoded = /data-gaze-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  const result = JSON.parse(encoded ?? 'null');
-  assert.equal(result?.panel.mode, 'panel', stderr);
-  assert.ok(result.panel.x > 2.5, stderr);
-  assert.equal(result.returned.mode, 'camera', stderr);
-  assert.ok(result.returned.x < 0.3, stderr);
-});
-
 test('tapping the puppet starts standing and tapping it again stops sitting', async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
@@ -1175,17 +1149,17 @@ window.addEventListener('test-ready', () => {
   assert.deepEqual(JSON.parse(encoded ?? 'null'), { status: 'hub queue is full', disabled: false }, stderr);
 });
 
-test('a display payload appears newest first and points the puppet while a plain hub reply adds nothing', async () => {
+test('a display payload appears newest first without changing the puppet gesture while a plain hub reply adds nothing', async () => {
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   replyFromHub('unknown', 'display_1', [], 1, { display: { markdown: '**Result** details', link: 'https://example.test/result', image: { mime: 'image/png' } } }, Uint8Array.from([137,80,78,71,13,10,26,10]));
   replyFromHub('unknown', 'display_2', [], 1, { display: { markdown: 'Newest' } });
   replyFromHub('unknown', undefined, ['plain'], 1);
-  setTimeout(() => { document.body.dataset.displayTest = JSON.stringify({ count: document.querySelectorAll('.display-item').length, first: document.querySelector('.display-item')?.textContent, link: document.querySelector('.display-item:last-child a')?.href, image: Boolean(document.querySelector('.display-item:last-child img')), pointed: testPuppet.calls.some((call) => call[0] === 'gesture' && call[1] === 'point' && call[2] === 'panel') }); }, 40);
+  setTimeout(() => { document.body.dataset.displayTest = JSON.stringify({ count: document.querySelectorAll('.display-item').length, first: document.querySelector('.display-item')?.textContent, link: document.querySelector('.display-item:last-child a')?.href, image: Boolean(document.querySelector('.display-item:last-child img')), gestured: testPuppet.calls.some((call) => call[0] === 'gesture') }); }, 40);
 });
 `);
   const encoded = /data-display-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { count: 2, first: 'Newest', link: 'https://example.test/result', image: true, pointed: true }, stderr);
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), { count: 2, first: 'Newest', link: 'https://example.test/result', image: true, gestured: false }, stderr);
 });
 
 for (const size of ['720,1280', '1440,900']) test(`the delegation log keeps its newest entry in view at ${size}`, async () => {
@@ -1444,18 +1418,7 @@ window.addEventListener('test-ready', () => {
 });
 `);
   const encoded = /data-catalog-action-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), [['gesture', 'clap', null]], stderr);
-});
-
-test('a classified point is dropped until the display has a target', async () => {
-  const { stdout, stderr } = await runPage(`
-window.addEventListener('test-ready', () => {
-  testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.output_transcript.delta', delta: 'Look at the important detail.' }) }));
-  setTimeout(() => { document.body.dataset.pointTest = JSON.stringify(testPuppet.calls.filter(([name]) => name === 'gesture')); }, 20);
-});
-`);
-  const encoded = /data-point-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), [], stderr);
+  assert.deepEqual(JSON.parse(encoded ?? 'null'), [['gesture', 'clap']], stderr);
 });
 
 async function libBytes(paths) {

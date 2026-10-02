@@ -13,7 +13,7 @@ const GESTURES = {
   waiting: { spine: [-0.08, 0.12, 0], head: [0.12, -0.18, 0.08], leftUpperArm: [-0.28, 0, -0.15], rightUpperArm: [-0.58, 0, 0.4], rightLowerArm: [-0.92, 0, 0.26] },
 };
 
-const CLIP_GESTURES = new Set(['point', 'nod', 'shrug', 'think', 'wave', 'no', 'laugh', 'clap', 'bow', 'thumbs-up', 'stretch', 'look-around']);
+const CLIP_GESTURES = new Set(['nod', 'shrug', 'think', 'wave', 'no', 'laugh', 'clap', 'bow', 'thumbs-up', 'stretch', 'look-around']);
 const IDLE_CLIPS = { stand: ['idle', 'idle-2', 'idle-3'], sit: ['sit-idle', 'sit-idle-2'] };
 const SEATED_ARM_CLEARANCE = { leftUpperArm: [0, 0, -0.1], rightUpperArm: [0, 0, 0.1] };
 
@@ -21,41 +21,6 @@ const GAZE_POINTS = {
   camera: [0, 1.25, 6.4],
   away: [-1.8, 1.8, 2.8],
 };
-
-export function screenTarget(camera, viewport, rect, depth = 2.4) {
-  const x = ((rect.left + rect.width / 2 - viewport.left) / viewport.width) * 2 - 1;
-  const y = 1 - ((rect.top + rect.height / 2 - viewport.top) / viewport.height) * 2;
-  const ray = new THREE.Vector3(x, y, 0.5).unproject(camera).sub(camera.position);
-  return camera.position.clone().addScaledVector(ray, (depth - camera.position.z) / ray.z);
-}
-
-export function pointAtOffsets(target, bones = new Map()) {
-  const left = bones.get('leftUpperArm')?.node;
-  const right = bones.get('rightUpperArm')?.node;
-  left?.updateWorldMatrix(true, false);
-  right?.updateWorldMatrix(true, false);
-  const arm = left && right
-    ? (left.getWorldPosition(new THREE.Vector3()).distanceToSquared(target) < right.getWorldPosition(new THREE.Vector3()).distanceToSquared(target) ? 'left' : 'right')
-    : (target.x < 0 ? 'right' : 'left');
-  const side = arm === 'left' ? 1 : -1;
-  const offsets = { [`${arm}LowerArm`]: [0, 0, side * 0.08] };
-  const upper = bones.get(`${arm}UpperArm`)?.node;
-  const lower = bones.get(`${arm}LowerArm`)?.node;
-  if (!upper || !lower) return offsets;
-  upper.updateWorldMatrix(true, false);
-  lower.updateWorldMatrix(true, false);
-  const shoulder = upper.getWorldPosition(new THREE.Vector3());
-  const segment = lower.getWorldPosition(new THREE.Vector3()).sub(shoulder).normalize();
-  const aim = target.clone().sub(shoulder).normalize();
-  const worldTurn = new THREE.Quaternion().setFromUnitVectors(segment, aim);
-  const worldRotation = upper.getWorldQuaternion(new THREE.Quaternion());
-  const parentRotation = upper.parent?.getWorldQuaternion(new THREE.Quaternion()) ?? new THREE.Quaternion();
-  const localTarget = parentRotation.invert().multiply(worldTurn.multiply(worldRotation));
-  const localDelta = upper.quaternion.clone().invert().multiply(localTarget);
-  const euler = new THREE.Euler().setFromQuaternion(localDelta);
-  offsets[`${arm}UpperArm`] = [euler.x, euler.y, euler.z];
-  return offsets;
-}
 
 function handoverFor(from, to) {
   const fromTracks = new Map((from.userData.poseTracks ?? []).map((track) => [track.name, track]));
@@ -181,9 +146,8 @@ function fitScene(vrm) {
 }
 
 export class PuppetRuntime {
-  constructor(canvas, panel, renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true })) {
+  constructor(canvas, renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true })) {
     this.canvas = canvas;
-    this.panel = panel;
     this.renderer = renderer;
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -398,12 +362,6 @@ export class PuppetRuntime {
     this.renderer.setSize(width, height, false);
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
-    this.updatePanelTarget();
-  }
-  updatePanelTarget() {
-    if (!this.panel) return;
-    this.panelPoint = screenTarget(this.camera, this.canvas.getBoundingClientRect(), this.panel.getBoundingClientRect());
-    if (this.gazeMode === 'panel') this.gazeDestination.copy(this.panelPoint);
   }
   pose(name) {
     if (!['sit', 'stand', 'listen'].includes(name)) throw new Error(`unknown pose ${name}`);
@@ -416,26 +374,24 @@ export class PuppetRuntime {
     this.poseName = name;
     if (transition) this.playClip(seated ? 'sit' : 'stand', seated ? 'sit-idle' : 'idle');
   }
-  gesture(name, target) {
-    const resolved = name === 'point' && target === 'panel' ? 'point_at' : name;
-    if (resolved !== 'point_at' && !GESTURES[resolved] && !CLIP_GESTURES.has(resolved)) throw new Error(`unknown gesture ${name}`);
-    if (resolved === 'beat' && (this.waitingForHub || this.gestureState || this.clipGesture)) return;
-    if (resolved === 'point_at') this.setGaze('panel', 2200);
-    if (resolved === 'think') this.setGaze('away', 1800);
-    if (CLIP_GESTURES.has(resolved)) {
-      if (this.poseName === 'sit' && this.clipStance(resolved) === 'stand') {
+  gesture(name) {
+    if (!GESTURES[name] && !CLIP_GESTURES.has(name)) throw new Error(`unknown gesture ${name}`);
+    if (name === 'beat' && (this.waitingForHub || this.gestureState || this.clipGesture)) return;
+    if (name === 'think') this.setGaze('away', 1800);
+    if (CLIP_GESTURES.has(name)) {
+      if (this.poseName === 'sit' && this.clipStance(name) === 'stand') {
         this.pose('stand');
-        this.pendingGesture = { name, target };
+        this.pendingGesture = { name };
         return true;
       }
       this.gestureState = null;
       this.gestureOffsets = {};
-      this.playClip(resolved, this.poseName === 'sit' ? 'sit-idle' : 'idle');
-      this.clipGesture = resolved;
+      this.playClip(name, this.poseName === 'sit' ? 'sit-idle' : 'idle');
+      this.clipGesture = name;
     } else {
       if (this.clipGesture) this.playClip(this.poseName === 'sit' ? 'sit-idle' : 'idle', this.poseName === 'sit' ? 'sit-idle' : 'idle');
       this.clipGesture = null;
-      this.beginGesture(resolved, false);
+      this.beginGesture(name, false);
     }
     return true;
   }
@@ -477,7 +433,7 @@ export class PuppetRuntime {
   }
   beginGesture(name, hold) {
     const now = performance.now();
-    const offsets = name === 'point_at' ? pointAtOffsets(this.panelPoint ?? this.gazeDestination, this.bones) : GESTURES[name];
+    const offsets = GESTURES[name];
     this.gestureState = { name, from: copyOffsets(this.gestureOffsets), to: copyOffsets(offsets), started: now, releaseAt: hold ? Infinity : now + 900, releasing: false };
   }
   waiting(active) {
@@ -501,10 +457,7 @@ export class PuppetRuntime {
   setGaze(mode, duration, now = performance.now()) {
     this.gazeMode = mode;
     this.gazeUntil = now + duration;
-    if (mode === 'panel') {
-      this.updatePanelTarget();
-      this.gazeDestination.copy(this.panelPoint ?? new THREE.Vector3(2.8, 1.35, 2.4));
-    } else this.gazeDestination.fromArray(GAZE_POINTS[mode]);
+    this.gazeDestination.fromArray(GAZE_POINTS[mode]);
   }
   asleep(value) {
     this.sleeping = value;
@@ -528,7 +481,7 @@ export class PuppetRuntime {
       if (this.pendingGesture) {
         const pending = this.pendingGesture;
         this.pendingGesture = null;
-        this.gesture(pending.name, pending.target);
+        this.gesture(pending.name);
         return;
       }
       this.playIdle(now);
@@ -619,8 +572,7 @@ export class PuppetRuntime {
       this.gazeDestination.x += (Math.random() - 0.5) * 0.24;
       this.gazeDestination.y += (Math.random() - 0.5) * 0.12;
       this.nextSaccade = now + 1800 + Math.random() * 3200;
-    } else if (this.gazeMode === 'panel') this.gazeDestination.copy(this.panelPoint ?? this.gazeDestination);
-    else if (this.gazeMode !== 'camera') this.gazeDestination.fromArray(GAZE_POINTS[this.gazeMode]);
+    } else if (this.gazeMode !== 'camera') this.gazeDestination.fromArray(GAZE_POINTS[this.gazeMode]);
     this.gazePoint.lerp(this.gazeDestination, 0.08);
     this.gazeTarget.position.copy(this.gazePoint);
     const head = this.bones.get('head')?.node;

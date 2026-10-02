@@ -738,6 +738,7 @@ async function dial() {
     audioDiagnostics()?.record('relay', { state: 'rejected' });
     throw new Error('token rejected');
   }
+  if (config.relayTag) await sendFrame(`route\n${JSON.stringify({ tag: config.relayTag })}`);
   connected = true;
   audioDiagnostics()?.record('relay', { state: 'connected' });
   everConnected = true;

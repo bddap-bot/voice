@@ -277,7 +277,7 @@ window.addEventListener('load', () => {
     document.querySelector('#puppet').click();
     const started = poll(() => {
       const status = document.querySelector('#status').textContent;
-      if (document.querySelector('#puppet').getAttribute('aria-pressed') !== 'true' && !status.startsWith('conversation could not start:')) return;
+      if (document.querySelector('#puppet').getAttribute('aria-pressed') !== 'true' && !status.startsWith('conversation could not start:') && status !== 'no microphone found') return;
       clearInterval(started);
       document.body.dataset.startTest = status || 'puppet';
       window.dispatchEvent(new Event('test-ready'));
@@ -2114,7 +2114,7 @@ for (const [phase, enter, status] of [
   assert.deepEqual(result, { lost: { status, pressed: 'false', events: 1, opens: 1, closed: 1, replaced: true, running: true, hears: 'live' }, sends: 'live', errors: [] });
 });
 
-test('a microphone that cannot reopen after it ends comes back on the next device change', async () => {
+test('a microphone that cannot reopen after it ends shows on the status line as a session event and no page error, and comes back on the next device change', async () => {
   const result = await runWakePage(`
     await sleepNow();
     await until(() => globalThis.testSpotter && !testSpotter.closed);
@@ -2122,13 +2122,13 @@ test('a microphone that cannot reopen after it ends comes back on the next devic
     globalThis.microphoneMissing = true;
     endMicrophone();
     await new Promise((resolve) => setTimeout(resolve, 300));
-    const missing = { opens: microphoneOpens - opens, running: !testSpotter.closed };
+    const missing = { opens: microphoneOpens - opens, running: !testSpotter.closed, status: document.querySelector('#status').textContent, events: sessionEvents('microphone-missing').map((event) => event.detail) };
     globalThis.microphoneMissing = false;
     navigator.mediaDevices.dispatchEvent(new Event('devicechange'));
     await new Promise((resolve) => setTimeout(resolve, 300));
-    return { missing, returned: { opens: microphoneOpens - opens, running: !testSpotter.closed, hears: testSpotter.stream.getAudioTracks()[0].readyState }, errors: fleetLines };
+    return { missing, returned: { opens: microphoneOpens - opens, running: !testSpotter.closed, hears: testSpotter.stream.getAudioTracks()[0].readyState, status: document.querySelector('#status').textContent }, errors: fleetLines };
   `);
-  assert.deepEqual(result, { missing: { opens: 0, running: false }, returned: { opens: 1, running: true, hears: 'live' }, errors: ['fleet-error: voice/page — NotFoundError: Requested device not found'] });
+  assert.deepEqual(result, { missing: { opens: 0, running: false, status: 'no microphone found', events: ['Requested device not found'] }, returned: { opens: 1, running: true, hears: 'live', status: '' }, errors: [] });
 });
 
 test('a refused microphone shows on the status line, asleep or tapped, as a session event and no page error, and clears once allowed', async () => {

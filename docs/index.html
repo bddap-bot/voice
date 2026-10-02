@@ -227,8 +227,12 @@ const persistenceUploads = new AckUploader(sendBytes, { maximumBytes: 128 * 1024
 function sessionId() { return conversation?.id ?? starting?.offerId ?? null; }
 let webGpuAdapterFound = null;
 webGpuAdapter().then((adapter) => { webGpuAdapterFound = Boolean(adapter); });
-const microphoneRefusal = new Error("microphone not allowed — enable it in this site's settings");
-function recordPageError(error, id = sessionId()) { if (error !== microphoneRefusal) telemetry.add(errorEvent(error, id, Date.now(), { userAgent: navigator.userAgent, webgpuAdapter: webGpuAdapterFound })); }
+const microphoneUnavailable = new Map([
+  ['NotAllowedError', { event: 'microphone-refused', error: new Error("microphone not allowed — enable it in this site's settings") }],
+  ['NotFoundError', { event: 'microphone-missing', error: new Error('no microphone found') }],
+]);
+const isMicrophoneUnavailable = error => [...microphoneUnavailable.values()].some(reason => reason.error === error);
+function recordPageError(error, id = sessionId()) { if (!isMicrophoneUnavailable(error)) telemetry.add(errorEvent(error, id, Date.now(), { userAgent: navigator.userAgent, webgpuAdapter: webGpuAdapterFound })); }
 function recordSession(name, detail = '', id = sessionId()) { telemetry.add({ kind: 'session', session_id: id, name, detail: String(detail).slice(0, 2048), at: Date.now() }); }
 window.addEventListener('error', (event) => recordPageError(event.error || Object.assign(new Error(event.message), { stack: `${event.filename || ''}:${event.lineno || 0}:${event.colno || 0}` })));
 window.addEventListener('unhandledrejection', (event) => recordPageError(event.reason));
@@ -779,13 +783,14 @@ function acquireMicrophone() {
   const current = microphone;
   return current.open(() => !microphoneMuted).then(stream => {
     if (microphone !== current) throw new Error('microphone released while opening');
-    if ($('status').textContent === microphoneRefusal.message) setStatus();
+    if ([...microphoneUnavailable.values()].some(reason => reason.error.message === $('status').textContent)) setStatus();
     return stream;
   }, error => {
-    if (error?.name !== 'NotAllowedError') throw error;
-    recordSession('microphone-refused', error.message);
-    setStatus(microphoneRefusal.message, 'err');
-    throw microphoneRefusal;
+    const unavailable = microphoneUnavailable.get(error?.name);
+    if (!unavailable) throw error;
+    recordSession(unavailable.event, error.message);
+    setStatus(unavailable.error.message, 'err');
+    throw unavailable.error;
   });
 }
 function microphoneEnded(stream) {
@@ -1397,7 +1402,7 @@ async function toggleConversation() {
     if (conversation) stopConversation('conversation could not start');
     else paintOff();
     console.warn('voice:', error);
-    if (error !== microphoneRefusal) setStatus(`conversation could not start: ${formatStartError(error)}`, 'err');
+    if (!isMicrophoneUnavailable(error)) setStatus(`conversation could not start: ${formatStartError(error)}`, 'err');
   }
 }
 async function start(raw) {

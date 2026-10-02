@@ -116,6 +116,7 @@
     <div class="card-body" id="card-body">
       <section class="group" aria-label="microphone"><h3>Microphone</h3><button id="voice-filter" type="button" aria-pressed="true">Voice ID on</button><button id="voice-print" type="button">Learn my voice</button></section>
       <section class="group" aria-label="appearance"><h3>Appearance</h3><select id="puppet-choice" aria-label="puppet appearance"></select></section>
+      <section class="group" aria-label="conversation"><h3>Conversation</h3><button id="reset" type="button">Reset</button></section>
       <section class="group wide" aria-label="send text or image"><h3>Send to the hub</h3>
         <textarea id="share-text" maxlength="8192" placeholder="Paste text, a URL, or an image"></textarea>
         <div id="share-target">Drop or paste an image here</div>
@@ -1489,6 +1490,14 @@ async function loadPrivatePuppets() {
 }
 
 $('puppet').addEventListener('click', toggleConversation);
+$('reset').addEventListener('click', () => {
+  stopConversation();
+  interruptHubReplies('reset');
+  paintOff();
+  trace = new ConversationTrace(render);
+  render(trace.entries);
+  sendFrame('forget').catch((error) => setStatus(`reset incomplete: ${error.message}`, 'err'));
+});
 $('puppet').addEventListener('keydown', (event) => {
   if (event.key !== 'Enter' && event.key !== ' ') return;
   event.preventDefault();

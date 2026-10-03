@@ -136,7 +136,7 @@ import { Microphone } from './microphone.js';
 import wbgInit, { init as wasmInit, connect, send_only, recv } from './relay/botq_dash_wasm.js';
 import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, SessionClock, TranscriptBatcher, errorEvent, includesPhrase, modelToolFields, formatElapsed, formatStartError, isOfferFor, shareFrame } from './live.js';
 import { PuppetChannel } from './puppet-client.js';
-import { ListeningReactionDriver, TranscriptActionDriver, webGpuAdapter } from './puppet-drivers.js';
+import { TranscriptActionDriver, webGpuAdapter } from './puppet-drivers.js';
 import { StageTrace, traceStages } from './stage-trace.js';
 import { LivePlayback } from './live-playback.js';
 import { audioDiagnostics } from './audio-diagnostics.js';
@@ -212,7 +212,6 @@ function applyTranscriptAction(action, timing) {
   recordSession('transcript-action', JSON.stringify({ source: action.source, sentence: timing.sentence, action: `${action.kind}:${action.name}`, score: action.score, pose, outcome, playAtMinusNow: timing.playAtMinusNow }));
 }
 const actionDriver = new TranscriptActionDriver(applyTranscriptAction);
-const listeningDriver = new ListeningReactionDriver((motion) => puppetRuntime?.listening(motion));
 const hubWaiting = new Set();
 const hubReplies = [];
 let hubTurn = null;
@@ -1084,11 +1083,7 @@ function onLiveEvent(message, source) {
       if (hubWaiting.size && !conversation?.sleeping) unanswered = setTimeout(() => handOff(`turn_${crypto.randomUUID()}`), UNANSWERED_MS);
     }
   }
-  else if (event.type === 'input_audio_buffer.speech_started') {
-    recordSession('input_speech_started');
-    listeningDriver.activity(true);
-  }
-  else if (event.type === 'input_audio_buffer.speech_stopped') listeningDriver.activity(false);
+  else if (event.type === 'input_audio_buffer.speech_started') recordSession('input_speech_started');
   else if (event.type === 'session.output_transcript.delta') presentTranscript(event);
   else if (event.type === 'session.usage.updated') {
     usageSeconds = Number(event.usage?.seconds ?? usageSeconds);
@@ -1250,7 +1245,6 @@ function paintOff() {
   clearTimeout(unanswered);
   interruptHubReplies('conversation ended');
   actionDriver.reset();
-  listeningDriver.reset();
   clearTimeout(inactivity);
   puppetRuntime?.waiting(false);
   puppetRuntime?.pose('sit');
@@ -1478,10 +1472,16 @@ async function loadPuppet(id, epoch, request, stage) {
   }
 }
 
+const CHAIR_ACTIONS = new Set(['sit', 'stand', 'sit-idle', 'sit-idle-2']);
+
 function clipMotions() {
   const motions = puppetMotions ??= puppetChannel.clips().then(async (catalog) => {
     const clips = [];
-    for (const entry of catalog.clips) clips.push(entry.format === 'fbx' ? { ...entry, format: 'motion', data: JSON.parse(dec.decode(await puppetChannel.motionBytes(entry))) } : { ...entry, data: await puppetChannel.clipBytes(entry) });
+    if (vrHost) clips.push({ action: 'sit-idle', name: 'sit-floor.vrma', format: 'vrma', data: await fetch('poses/sit-floor.vrma').then((response) => {
+      if (!response.ok) throw new Error(`floor sit unavailable: ${response.status}`);
+      return response.arrayBuffer();
+    }) });
+    for (const entry of catalog.clips) if (!vrHost || !CHAIR_ACTIONS.has(entry.action)) clips.push(entry.format === 'fbx' ? { ...entry, format: 'motion', data: JSON.parse(dec.decode(await puppetChannel.motionBytes(entry))) } : { ...entry, data: await puppetChannel.clipBytes(entry) });
     return clips;
   });
   motions.catch(() => { if (puppetMotions === motions) puppetMotions = undefined; });

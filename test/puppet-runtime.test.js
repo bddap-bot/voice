@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { MOOD_TABLE, PuppetRuntime, animationClip, audioEnergy, loudnessViseme, shouldBeat, transcriptVisemes } from '../src/puppet.js';
+import { MOOD_TABLE, PuppetRuntime, animationClip, audioEnergy, loudnessViseme, transcriptVisemes } from '../src/puppet.js';
 
 function waveform(amplitude) {
   return Uint8Array.from({ length: 256 }, (_, index) => 128 + Math.round(Math.sin(index / 3) * amplitude));
@@ -45,13 +45,10 @@ test('live amplitude opens the mouth between transcript vowels', () => {
   assert.deepEqual(Object.keys(values).filter((name) => name !== 'aa' && values[name]), []);
 });
 
-test('moods have bounded expressions and poses, with empty neutral targets', () => {
+test('moods are bounded expression weights, with an empty neutral target', () => {
   assert.deepEqual(Object.keys(MOOD_TABLE), ['neutral', 'curious', 'amused', 'puzzled', 'thinking', 'pleased', 'sad', 'angry', 'apologetic', 'alert', 'sleepy', 'relaxed', 'surprised', 'skeptical']);
-  assert.deepEqual(MOOD_TABLE.neutral, { expressions: {}, bones: {} });
-  for (const [name, mood] of Object.entries(MOOD_TABLE)) {
-    assert.ok(Object.values(mood.expressions).every((value) => value >= 0 && value <= 1));
-    if (name !== 'neutral') assert.ok(['head', 'leftShoulder', 'rightShoulder'].some((bone) => bone in mood.bones));
-  }
+  assert.deepEqual(MOOD_TABLE.neutral, {});
+  for (const mood of Object.values(MOOD_TABLE)) assert.ok(Object.values(mood).every((value) => value >= 0 && value <= 1));
 });
 
 test('audio energy distinguishes silence from a speech beat', () => {
@@ -59,80 +56,15 @@ test('audio energy distinguishes silence from a speech beat', () => {
   assert.ok(audioEnergy(Uint8Array.from({ length: 32 }, (_, index) => index % 2 ? 180 : 76)) > 0.35);
 });
 
-test('speech attacks trigger bounded beats outside hub waits', () => {
-  assert.equal(shouldBeat(0.12, 0.04, false), true);
-  assert.equal(shouldBeat(0.12, 0.1, false), false);
-  assert.equal(shouldBeat(0.12, 0.04, true), false);
-});
-
-test('audio beats never replace an active explicit gesture', () => {
-  const runtime = Object.create(PuppetRuntime.prototype);
-  runtime.audio = {
-    analyser: {
-      fftSize: 256,
-      getByteTimeDomainData: (data) => data.forEach((_, index) => { data[index] = index % 2 ? 180 : 76; }),
-      getByteFrequencyData: (data) => data.fill(80),
-    },
-    context: { sampleRate: 48000 },
-    waveform: new Uint8Array(256),
-    spectrum: new Uint8Array(128),
-  };
-  runtime.speech = [{ name: 'aa', at: 0 }];
-  runtime.mouthValues = { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 };
-  runtime.previousEnergy = 0;
-  runtime.waitingForHub = false;
-  runtime.clipGesture = 'nod';
-  runtime.gestureState = { name: 'beat' };
-  runtime.beginGesture = (name) => { runtime.gestureState = { name }; };
-  const manager = { setValue() {} };
-  runtime.updateMouth(manager);
-  assert.equal(runtime.gestureState.name, 'beat');
-  runtime.gestureState = null;
-  runtime.previousEnergy = 0;
-  runtime.updateMouth(manager);
-  assert.equal(runtime.gestureState, null);
-  runtime.clipGesture = null;
-  runtime.previousEnergy = 0;
-  runtime.updateMouth(manager);
-  assert.equal(runtime.gestureState.name, 'beat');
-});
-
-test('waiting holds a readable gesture until the hub result releases it', () => {
-  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), { waitingForHub: false, gestureState: null, gestureOffsets: {} });
-  runtime.waiting(true);
-  assert.equal(runtime.waitingForHub, true);
-  assert.equal(runtime.gestureState.name, 'waiting');
-  assert.equal(runtime.gestureState.releaseAt, Infinity);
-  runtime.waiting(false);
-  assert.equal(runtime.waitingForHub, false);
-  assert.equal(runtime.gestureState.releasing, true);
-});
-
-test('explicit gestures replace a hub wait and beats cannot replace either', () => {
-  const played = [];
-  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), { waitingForHub: true, gestureState: { name: 'waiting' }, gestureOffsets: { head: [1, 0, 0] }, clips: new Map(), clipGesture: null, poseName: 'stand', gazeDestination: new THREE.Vector3(), playClip: (name) => played.push(name) });
-  runtime.gesture('beat');
-  assert.equal(runtime.gestureState.name, 'waiting');
-  runtime.gesture('nod');
-  assert.equal(runtime.gestureState, null);
-  assert.deepEqual(runtime.gestureOffsets, {});
-  assert.equal(runtime.clipGesture, 'nod');
-  assert.deepEqual(played, ['nod']);
-  runtime.gesture('beat');
-  assert.equal(runtime.clipGesture, 'nod');
-
-});
-
 test('named clip gestures play during a pending hub wait', () => {
   const played = [];
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
-    waitingForHub: true, gestureState: { name: 'waiting' }, gestureOffsets: { head: [0.2, 0, 0] },
+    waitingForHub: true,
     clips: new Map(), clipGesture: null, pendingGesture: null, poseName: 'stand',
     playClip: (name) => played.push(name),
   });
   assert.equal(runtime.gesture('wave'), true);
   assert.deepEqual(played, ['wave']);
-  assert.equal(runtime.gestureState, null);
   assert.equal(runtime.clipGesture, 'wave');
 });
 
@@ -141,9 +73,7 @@ test('a standing gesture requested while seated stands first and then plays', ()
   const played = [];
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
     waitingForHub: false,
-    gestureState: null,
-    gestureOffsets: {},
-    clips: new Map([['idle', clip('idle', 1)], ['sit-idle', clip('sit-idle', 0.5)], ['clap', clip('clap', 0.95)]]),
+    clips: new Map([['idle', clip('idle', 1)], ['sit-idle', clip('sit-idle', 0.5)], ['stand', clip('stand', 0.5)], ['clap', clip('clap', 0.95)]]),
     clipGesture: null,
     pendingGesture: null,
     poseName: 'sit',
@@ -158,19 +88,6 @@ test('a standing gesture requested while seated stands first and then plays', ()
   assert.equal(runtime.clipGesture, 'clap');
 });
 
-test('procedural mood rotation composes on a running clip pose', () => {
-  const bone = new THREE.Object3D();
-  const clipRotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.4, 0.2, -0.1));
-  bone.quaternion.copy(clipRotation);
-  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
-    moodName: 'thinking', moodFrom: {}, moodBones: {}, moodStarted: 0,
-    bones: new Map([['head', { node: bone }]]), gestureRotation: new THREE.Quaternion(),
-  });
-  runtime.updateMood(1000, { expressions: [] });
-  assert.ok(bone.quaternion.angleTo(clipRotation) > 0.01);
-  assert.ok(bone.quaternion.angleTo(new THREE.Quaternion().setFromEuler(new THREE.Euler(...MOOD_TABLE.thinking.bones.head))) > 0.01);
-});
-
 test('procedural rotations stay bounded without a clip and across a clip handover', () => {
   const run = (handover) => {
     const head = new THREE.Bone();
@@ -181,13 +98,12 @@ test('procedural rotations stay bounded without a clip and across a clip handove
     const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
       bones: new Map([['head', { node: head, rest, base: rest.clone() }]]),
       mixer: { update() { if (handover && frame <= 90) head.quaternion.copy(frame < 90 ? first : second); } },
-      gestureRotation: new THREE.Quaternion(),
-      listeningMotion: { lean: 0, nod: 0.03, tilt: 0.04 },
     });
+    const gaze = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.03, 0, 0.04));
     const samples = [];
     for (; frame <= 180; frame++) {
       runtime.updateBasePose(1 / 60);
-      runtime.updateListening();
+      head.quaternion.multiply(gaze);
       if (frame % 30 === 0) samples.push(head.quaternion.clone());
     }
     return { rest, first, second, samples };
@@ -199,25 +115,6 @@ test('procedural rotations stay bounded without a clip and across a clip handove
   assert.ok(clipped.samples[2].angleTo(clipped.first) < 0.06);
   assert.ok(clipped.samples.at(-1).angleTo(clipped.second) < 0.06);
   assert.ok(clipped.samples.at(-1).angleTo(clipped.samples.at(-2)) < 1e-7);
-});
-
-test('seated poses move both upper arms outward without changing standing poses', () => {
-  const left = new THREE.Object3D();
-  const right = new THREE.Object3D();
-  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
-    poseName: 'sit',
-    bones: new Map([['leftUpperArm', { node: left }], ['rightUpperArm', { node: right }]]),
-    gestureRotation: new THREE.Quaternion(),
-  });
-  runtime.updateSeatedClearance();
-  assert.ok(left.rotation.z < -0.09);
-  assert.ok(right.rotation.z > 0.09);
-  left.rotation.set(0, 0, 0);
-  right.rotation.set(0, 0, 0);
-  runtime.poseName = 'stand';
-  runtime.updateSeatedClearance();
-  assert.deepEqual(left.quaternion.toArray(), [0, 0, 0, 1]);
-  assert.deepEqual(right.quaternion.toArray(), [0, 0, 0, 1]);
 });
 
 test('idle variants use random dwell and never repeat consecutively', () => {
@@ -258,37 +155,6 @@ test('gaze is inert when a puppet has no look-at rig', () => {
   runtime.updateGaze(1000);
   assert.deepEqual(target.position.toArray(), [0, 0, 0]);
   assert.deepEqual(head.quaternion.toArray(), [0, 0, 0, 1]);
-});
-
-test('a hub wait resumes after an explicit clip finishes', () => {
-  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
-    waitingForHub: true,
-    clipGesture: 'nod',
-    clipAction: { isRunning: () => false },
-    clipFallback: 'sit-idle',
-    gestureState: null,
-    gestureOffsets: {},
-    clips: new Map([['sit-idle', {}]]),
-    poseName: 'sit',
-    idleClip: null,
-    playClip() {},
-  });
-  runtime.updatePose(performance.now());
-  assert.equal(runtime.clipGesture, null);
-  assert.equal(runtime.gestureState.name, 'waiting');
-  assert.equal(runtime.gestureState.releaseAt, Infinity);
-});
-
-test('a hub wait resumes after an explicit procedural gesture releases', () => {
-  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
-    waitingForHub: true,
-    gestureState: { name: 'beat', from: {}, to: {}, started: 0, releaseAt: Infinity, releasing: true },
-    gestureOffsets: {},
-    bones: new Map(),
-  });
-  runtime.updateGesture(1000);
-  assert.equal(runtime.gestureState.name, 'waiting');
-  assert.equal(runtime.gestureState.releaseAt, Infinity);
 });
 
 test('sit and stand transitions keep model-root and head velocity bounded', () => {
@@ -534,40 +400,31 @@ test('a posture already held never replays or restarts a clip, so the hips hold 
   assert.ok(hipHeights(2).every((height) => Math.abs(height - 0.75) < 0.01), 'sit while seated must hold the seated idle');
 });
 
-test('asleep holds the eyes shut under a sleepy droop and waking reopens them and clears the droop', () => {
+test('asleep holds the eyes shut and waking reopens them, with no droop on the head', () => {
   const head = new THREE.Object3D();
   const values = {};
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
-    moodName: null, moodFrom: {}, moodBones: {}, moodStarted: 0, sleeping: false, nextBlink: Infinity, blinkStart: 0,
+    moodName: null, sleeping: false, nextBlink: Infinity, blinkStart: 0,
     mouthValues: { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 }, audio: null,
-    bones: new Map([['head', { node: head }]]), gestureRotation: new THREE.Quaternion(),
+    bones: new Map([['head', { node: head }]]),
     vrm: { expressionManager: { expressions: [], setValue: (name, value) => { values[name] = value; } } },
   });
   runtime.asleep(true);
-  runtime.moodStarted = 0;
   for (const now of [1000, 9000]) {
-    head.quaternion.identity();
     runtime.nextBlink = now - 1;
     runtime.updateFace(now);
     assert.equal(values.blink, 1);
   }
   assert.equal(runtime.moodName, 'sleepy');
-  assert.ok(head.quaternion.angleTo(new THREE.Quaternion()) > 0.1);
+  assert.deepEqual(head.quaternion.toArray(), [0, 0, 0, 1]);
   runtime.asleep(false);
   runtime.nextBlink = Infinity;
-  runtime.moodStarted = 840;
-  head.quaternion.identity();
-  runtime.updateFace(1000);
-  assert.ok(head.quaternion.angleTo(new THREE.Quaternion()) > 0.01);
-  runtime.moodStarted = 0;
-  head.quaternion.identity();
   runtime.updateFace(1000);
   assert.equal(values.blink, 0);
   assert.equal(runtime.moodName, null);
-  assert.ok(head.quaternion.angleTo(new THREE.Quaternion()) < 1e-6);
 });
 
-for (const name of ['surprised', 'Surprised', 'SURPRISED']) test(`mood actions reach ${name} and neutral clears weights and pose`, async () => {
+for (const name of ['surprised', 'Surprised', 'SURPRISED']) test(`mood actions reach ${name} and neutral clears weights`, async () => {
   const { VRMExpression, VRMExpressionManager, VRMExpressionMorphTargetBind } = await import('@pixiv/three-vrm');
   const manager = new VRMExpressionManager();
   const mesh = new THREE.Mesh();
@@ -577,15 +434,10 @@ for (const name of ['surprised', 'Surprised', 'SURPRISED']) test(`mood actions r
     expression.addBind(new VRMExpressionMorphTargetBind({ primitives: [mesh], index, weight: 1 }));
     manager.registerExpression(expression);
   }
-  const head = new THREE.Object3D();
-  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
-    moodName: null, moodFrom: {}, moodBones: {}, moodStarted: 0,
-    bones: new Map([['head', { node: head }]]), gestureRotation: new THREE.Quaternion(),
-  });
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), { moodName: null });
   const settle = () => {
     for (let i = 0; i < 120; i++) {
-      head.quaternion.identity();
-      runtime.updateMood(performance.now() + 1000, manager);
+      runtime.updateMood(manager);
       manager.update();
     }
   };
@@ -595,11 +447,9 @@ for (const name of ['surprised', 'Surprised', 'SURPRISED']) test(`mood actions r
   runtime.mood('angry');
   settle();
   assert.ok(mesh.morphTargetInfluences[1] > 0.77);
-  assert.ok(head.quaternion.angleTo(new THREE.Quaternion()) > 0.01);
   runtime.mood('neutral');
   settle();
   assert.ok(mesh.morphTargetInfluences.every(value => value < 1e-6));
-  assert.ok(head.quaternion.angleTo(new THREE.Quaternion()) < 1e-6);
   assert.throws(() => runtime.mood('unknown'), /unknown mood/);
 });
 
@@ -693,7 +543,7 @@ function gestureRuntime() {
     vrm, clips, mixer: new THREE.AnimationMixer(new THREE.Group()), idleRoot: new THREE.Group(),
     bones: new Map(), handovers: new Map(), poseName: 'stand', idleClip: null,
     renderer: { render() {}, getContext: () => ({ finish() {} }) },
-    nextIdleAt: Infinity, clipGesture: null, pendingGesture: null, gestureState: null, gestureOffsets: {},
+    nextIdleAt: Infinity, clipGesture: null, pendingGesture: null,
   });
 }
 
@@ -703,6 +553,30 @@ function advanceGesture(runtime, seconds) {
     runtime.updatePose(runtime.mixer.time * 1000);
   }
 }
+
+test('a hub wait plays the thinking clip once as it begins, never over a running gesture', () => {
+  const runtime = gestureRuntime();
+  runtime.clips.set('think', runtime.clips.get('nod'));
+  runtime.gazeDestination = new THREE.Vector3();
+  const fired = [];
+  runtime.playClip = (name) => fired.push(name);
+  runtime.waiting(true);
+  runtime.waiting(true);
+  assert.deepEqual(fired, ['think']);
+  runtime.waiting(false);
+  runtime.clipGesture = 'wave';
+  runtime.waiting(true);
+  assert.deepEqual(fired, ['think']);
+});
+
+test('without a transition clip the pose change goes straight to its idle', () => {
+  const runtime = gestureRuntime();
+  runtime.clips.delete('sit');
+  const fired = [];
+  runtime.playClip = (name, fallback) => fired.push([name, fallback]);
+  runtime.pose('sit');
+  assert.deepEqual(fired, [['sit-idle', 'sit-idle']]);
+});
 
 test('the paintOff pose cancels a queued standing gesture before the stand completes', () => {
   for (const cancel of [false, true]) {
@@ -747,7 +621,5 @@ test('model reload drops clip and queued gestures and resumes idle rotation', as
     runtime.updatePose(runtime.nextIdleAt + 1);
     assert.notEqual(runtime.clipAction.getClip().name, idle);
     assert.ok(Number.isFinite(runtime.nextIdleAt));
-    runtime.gesture('beat');
-    assert.equal(runtime.gestureState.name, 'beat');
   }
 });

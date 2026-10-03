@@ -10,24 +10,8 @@ export { connectVrHost } from './vr.js';
 const VISEMES = ['aa', 'ih', 'ou', 'ee', 'oh'];
 const MOOD_EXPRESSIONS = ['happy', 'angry', 'sad', 'relaxed', 'surprised'];
 
-const GESTURES = {
-  beat: { rightUpperArm: [-0.24, 0, 0.4], rightLowerArm: [-0.48, 0, 0.16] },
-  waiting: { spine: [-0.08, 0.12, 0], head: [0.12, -0.18, 0.08], leftUpperArm: [-0.28, 0, -0.15], rightUpperArm: [-0.58, 0, 0.4], rightLowerArm: [-0.92, 0, 0.26] },
-};
-
 const CLIP_GESTURES = new Set(['nod', 'shrug', 'think', 'wave', 'no', 'laugh', 'clap', 'bow', 'thumbs-up', 'stretch', 'look-around']);
 const IDLE_CLIPS = { stand: ['idle', 'idle-2', 'idle-3'], sit: ['sit-idle', 'sit-idle-2'] };
-const SEATED_ARM_CLEARANCE = { leftUpperArm: [0, 0, -0.1], rightUpperArm: [0, 0, 0.1] };
-const DOWN = new THREE.Vector3(0, -1, 0);
-const FORWARD = new THREE.Vector3(0, 0, 1);
-const FLOOR_SEAT = [
-  ['leftUpperLeg', DOWN, [0.55, -0.05, 0.83]],
-  ['leftLowerLeg', DOWN, [-0.9, -0.02, -0.42]],
-  ['leftFoot', FORWARD, [-0.35, -0.1, 0.93]],
-  ['rightUpperLeg', DOWN, [-0.55, -0.12, 0.83]],
-  ['rightLowerLeg', DOWN, [0.9, -0.16, -0.42]],
-  ['rightFoot', FORWARD, [0.35, -0.2, 0.93]],
-];
 
 const GAZE_POINTS = {
   camera: [0, 1.25, 6.4],
@@ -89,30 +73,21 @@ export async function animationClip(data, format, vrm) {
 }
 
 export const MOOD_TABLE = {
-  neutral: { expressions: {}, bones: {} },
-  curious: { expressions: { surprised: 0.22 }, bones: { head: [-0.03, 0.12, 0.08], leftShoulder: [0, 0, 0.05] } },
-  amused: { expressions: { happy: 0.68, relaxed: 0.12 }, bones: { head: [0.02, -0.08, -0.07], rightShoulder: [0, 0, -0.06] } },
-  puzzled: { expressions: { sad: 0.2, surprised: 0.12 }, bones: { head: [0.04, 0.14, 0.1], leftShoulder: [0, 0, 0.08] } },
-  thinking: { expressions: { relaxed: 0.28 }, bones: { head: [0.08, -0.12, 0.04], rightShoulder: [0.03, 0, -0.05] } },
-  pleased: { expressions: { happy: 0.76 }, bones: { head: [-0.04, 0, -0.03], leftShoulder: [0, 0, 0.04], rightShoulder: [0, 0, -0.04] } },
-  sad: { expressions: { sad: 0.78 }, bones: { head: [0.13, 0, 0.06], leftShoulder: [0.09, 0, 0.06], rightShoulder: [0.09, 0, -0.06] } },
-  angry: { expressions: { angry: 0.78 }, bones: { head: [0.03, -0.1, -0.08], spine: [-0.05, 0, 0] } },
-  apologetic: { expressions: { sad: 0.48 }, bones: { head: [0.09, 0, 0.04], leftShoulder: [0.06, 0, 0.03], rightShoulder: [0.06, 0, -0.03] } },
-  alert: { expressions: { surprised: 0.35 }, bones: { head: [-0.08, 0, 0], spine: [-0.04, 0, 0] } },
-  sleepy: { expressions: { relaxed: 0.68 }, bones: { head: [0.16, -0.08, 0.08], spine: [0.08, 0, 0] } },
-  relaxed: { expressions: { relaxed: 0.78 }, bones: { head: [0.06, 0.05, 0.04], leftShoulder: [0.07, 0, 0.05], rightShoulder: [0.07, 0, -0.05] } },
-  surprised: { expressions: { surprised: 0.9 }, bones: { head: [-0.12, 0, 0], leftShoulder: [-0.08, 0, 0.08], rightShoulder: [-0.08, 0, -0.08] } },
-  skeptical: { expressions: { angry: 0.18 }, bones: { head: [0.02, -0.16, -0.11], rightShoulder: [0, 0, -0.06] } },
+  neutral: {},
+  curious: { surprised: 0.22 },
+  amused: { happy: 0.68, relaxed: 0.12 },
+  puzzled: { sad: 0.2, surprised: 0.12 },
+  thinking: { relaxed: 0.28 },
+  pleased: { happy: 0.76 },
+  sad: { sad: 0.78 },
+  angry: { angry: 0.78 },
+  apologetic: { sad: 0.48 },
+  alert: { surprised: 0.35 },
+  sleepy: { relaxed: 0.68 },
+  relaxed: { relaxed: 0.78 },
+  surprised: { surprised: 0.9 },
+  skeptical: { angry: 0.18 },
 };
-
-function copyOffsets(source = {}) {
-  return Object.fromEntries(Object.entries(source).map(([name, values]) => [name, [...values]]));
-}
-
-function blendOffsets(from, to, amount) {
-  const names = new Set([...Object.keys(from), ...Object.keys(to)]);
-  return Object.fromEntries([...names].map((name) => [name, [0, 1, 2].map((axis) => THREE.MathUtils.lerp(from[name]?.[axis] ?? 0, to[name]?.[axis] ?? 0, amount))]));
-}
 
 const LETTER_VISEMES = { a: 'aa', i: 'ih', u: 'ou', e: 'ee', y: 'ee', o: 'oh', w: 'oh' };
 
@@ -132,10 +107,6 @@ export function audioEnergy(waveform) {
     square += centered * centered;
   }
   return Math.sqrt(square / waveform.length);
-}
-
-export function shouldBeat(energy, previousEnergy, waiting) {
-  return !waiting && energy > 0.075 && energy > previousEnergy * 1.28;
 }
 
 function feetOf(vrm) {
@@ -162,8 +133,6 @@ export class PuppetRuntime {
     this.canvas = canvas;
     this.renderer = renderer;
     this.view = view;
-    this.floorSeated = Boolean(view);
-    this.floorSeat = 0;
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.scene = new THREE.Scene();
@@ -214,15 +183,7 @@ export class PuppetRuntime {
     this.mouthValues = Object.fromEntries(VISEMES.map((name) => [name, 0]));
     this.moodName = 'sleepy';
     this.sleeping = true;
-    this.moodFrom = {};
-    this.moodBones = {};
-    this.moodStarted = performance.now();
-    this.gestureState = null;
-    this.gestureOffsets = {};
-    this.gestureRotation = new THREE.Quaternion();
-    this.listeningMotion = { amount: 0, lean: 0, nod: 0, tilt: 0 };
     this.waitingForHub = false;
-    this.previousEnergy = 0;
     this.resize = new ResizeObserver(() => this.fit());
     this.resize.observe(canvas);
     view?.attach(this.renderer);
@@ -266,12 +227,8 @@ export class PuppetRuntime {
     this.ankleHeight = ankleHeight;
     if (vrm.lookAt) vrm.lookAt.target = this.gazeTarget;
     this.bones.clear();
-    for (const bone of ['leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg', 'spine', 'head', 'leftShoulder', 'rightShoulder', 'leftUpperArm', 'rightUpperArm', 'leftLowerArm', 'rightLowerArm']) {
-      const node = vrm.humanoid?.getNormalizedBoneNode(bone);
-      if (!node) continue;
-      const rest = node.quaternion.clone();
-      this.bones.set(bone, { node, rest, base: rest.clone(), from: rest.clone(), target: rest.clone() });
-    }
+    const head = vrm.humanoid?.getNormalizedBoneNode('head');
+    if (head) this.bones.set('head', { node: head, base: head.quaternion.clone() });
     for (const expression of vrm.expressionManager?.expressions ?? []) {
       if (!MOOD_EXPRESSIONS.includes(expression.expressionName.toLowerCase())) continue;
       expression.overrideMouth = 'none';
@@ -300,7 +257,7 @@ export class PuppetRuntime {
       this.clips.set(entry.action, clip);
     }
     this.prepareHandovers();
-    if (this.poseName === 'sit') this.playClip('sit', 'sit-idle');
+    if (this.poseName === 'sit') this.settle('sit');
     else if (!this.clipAction) this.playIdle();
   }
   prepareHandovers() {
@@ -386,32 +343,24 @@ export class PuppetRuntime {
     if (!['sit', 'stand', 'listen'].includes(name)) throw new Error(`unknown pose ${name}`);
     this.clipGesture = null;
     this.pendingGesture = null;
-    this.gestureState = null;
-    this.gestureOffsets = {};
-    const seated = name === 'sit';
-    const transition = seated !== (this.poseName === 'sit');
+    const transition = (name === 'sit') !== (this.poseName === 'sit');
     this.poseName = name;
-    if (transition) this.playClip(seated ? 'sit' : 'stand', seated ? 'sit-idle' : 'idle');
+    if (transition) this.settle(name === 'sit' ? 'sit' : 'stand');
+  }
+  settle(transition) {
+    const idle = transition === 'sit' ? 'sit-idle' : 'idle';
+    this.playClip(this.clips.has(transition) ? transition : idle, idle);
   }
   gesture(name) {
-    if (!GESTURES[name] && !CLIP_GESTURES.has(name)) throw new Error(`unknown gesture ${name}`);
-    if (name === 'beat' && (this.waitingForHub || this.gestureState || this.clipGesture)) return;
+    if (!CLIP_GESTURES.has(name)) throw new Error(`unknown gesture ${name}`);
     if (name === 'think') this.setGaze('away', 1800);
-    if (CLIP_GESTURES.has(name)) {
-      if (this.poseName === 'sit' && this.clipStance(name) === 'stand') {
-        this.pose('stand');
-        this.pendingGesture = { name };
-        return true;
-      }
-      this.gestureState = null;
-      this.gestureOffsets = {};
-      this.playClip(name, this.poseName === 'sit' ? 'sit-idle' : 'idle');
-      this.clipGesture = name;
-    } else {
-      if (this.clipGesture) this.playClip(this.poseName === 'sit' ? 'sit-idle' : 'idle', this.poseName === 'sit' ? 'sit-idle' : 'idle');
-      this.clipGesture = null;
-      this.beginGesture(name, false);
+    if (this.poseName === 'sit' && this.clipStance(name) === 'stand') {
+      this.pose('stand');
+      this.pendingGesture = { name };
+      return true;
     }
+    this.playClip(name, this.poseName === 'sit' ? 'sit-idle' : 'idle');
+    this.clipGesture = name;
     return true;
   }
   clipStance(name) {
@@ -450,18 +399,10 @@ export class PuppetRuntime {
     this.clipAction = action;
     this.clipFallback = fallback;
   }
-  beginGesture(name, hold) {
-    const now = performance.now();
-    const offsets = GESTURES[name];
-    this.gestureState = { name, from: copyOffsets(this.gestureOffsets), to: copyOffsets(offsets), started: now, releaseAt: hold ? Infinity : now + 900, releasing: false };
-  }
   waiting(active) {
+    const started = active && !this.waitingForHub;
     this.waitingForHub = active;
-    if (active && !this.clipGesture && !this.gestureState) this.beginGesture('waiting', true);
-    else if (this.gestureState?.name === 'waiting') this.releaseGesture(performance.now());
-  }
-  listening(motion) {
-    this.listeningMotion = motion;
+    if (started && !this.clipGesture && this.clips.has('think')) this.gesture('think');
   }
   speak(text, playAt = performance.now()) {
     if (playAt > this.speechUntil) this.speech = [];
@@ -469,9 +410,6 @@ export class PuppetRuntime {
     const cadence = 72;
     this.speech.push(...transcriptVisemes(text).map((name, index) => ({ name, at: start + index * cadence })));
     this.speechUntil = start + text.length * cadence;
-  }
-  releaseGesture(now) {
-    this.gestureState = { name: this.gestureState?.name, from: copyOffsets(this.gestureOffsets), to: {}, started: now, releaseAt: Infinity, releasing: true };
   }
   setGaze(mode, duration, now = performance.now()) {
     this.gazeMode = mode;
@@ -486,8 +424,6 @@ export class PuppetRuntime {
     if (name !== null && !MOOD_TABLE[name]) throw new Error(`unknown mood ${name}`);
     if (this.moodName === name) return;
     this.moodName = name;
-    this.moodFrom = copyOffsets(this.moodBones);
-    this.moodStarted = performance.now();
   }
   updatePose(now) {
     if (this.clipAction?.isRunning() && this.clipAction.getClip() === this.clips.get(this.idleClip) && now >= this.nextIdleAt) {
@@ -504,7 +440,6 @@ export class PuppetRuntime {
         return;
       }
       this.playIdle(now);
-      if (this.waitingForHub) this.beginGesture('waiting', true);
     }
   }
   updateBasePose(delta) {
@@ -512,75 +447,11 @@ export class PuppetRuntime {
     this.mixer.update(delta);
     for (const { node, base } of this.bones.values()) base.copy(node.quaternion);
   }
-  updateGesture(now) {
-    if (!this.gestureState) return;
-    if (!this.gestureState.releasing && now >= this.gestureState.releaseAt) this.releaseGesture(now);
-    const amount = THREE.MathUtils.smoothstep((now - this.gestureState.started) / 320, 0, 1);
-    this.gestureOffsets = blendOffsets(this.gestureState.from, this.gestureState.to, amount);
-    for (const [name, values] of Object.entries(this.gestureOffsets)) {
-      const bone = this.bones.get(name)?.node;
-      if (!bone) continue;
-      this.gestureRotation.setFromEuler(new THREE.Euler(...values));
-      bone.quaternion.multiply(this.gestureRotation);
-    }
-    if (this.gestureState.releasing && amount === 1) {
-      this.gestureState = null;
-      if (this.waitingForHub) this.beginGesture('waiting', true);
-    }
-  }
-  updateSeatedClearance() {
-    if (this.poseName !== 'sit') return;
-    for (const [name, values] of Object.entries(SEATED_ARM_CLEARANCE)) {
-      const bone = this.bones.get(name)?.node;
-      if (!bone) continue;
-      this.gestureRotation.setFromEuler(new THREE.Euler(...values));
-      bone.quaternion.multiply(this.gestureRotation);
-    }
-  }
-  updateFloorSeat(delta) {
-    const target = this.floorSeated && this.poseName === 'sit' ? 1 : 0;
-    this.floorSeat += (target - this.floorSeat) * Math.min(1, delta * 2);
-    const humanoid = this.vrm?.humanoid;
-    const hips = humanoid?.getNormalizedBoneNode('hips');
-    if (this.floorSeat < 1e-3 || !hips) return;
-    const toward = new THREE.Quaternion();
-    const parent = new THREE.Quaternion();
-    const hipsWorld = hips.getWorldQuaternion(new THREE.Quaternion());
-    for (const [name, rest, direction] of FLOOR_SEAT) {
-      const node = humanoid.getNormalizedBoneNode(name);
-      if (!node?.parent) continue;
-      node.parent.getWorldQuaternion(parent);
-      toward.setFromUnitVectors(rest, new THREE.Vector3(...direction).normalize()).premultiply(hipsWorld).premultiply(parent.invert());
-      node.quaternion.slerp(toward, this.floorSeat);
-      node.updateMatrixWorld();
-    }
-  }
-  updateListening() {
-    const { lean, nod, tilt } = this.listeningMotion;
-    const spine = this.bones.get('spine')?.node;
-    const head = this.bones.get('head')?.node;
-    if (spine) {
-      this.gestureRotation.setFromEuler(new THREE.Euler(lean, 0, 0));
-      spine.quaternion.multiply(this.gestureRotation);
-    }
-    if (head) {
-      this.gestureRotation.setFromEuler(new THREE.Euler(nod, 0, tilt));
-      head.quaternion.multiply(this.gestureRotation);
-    }
-  }
-  updateMood(now, manager) {
+  updateMood(manager) {
     const mood = MOOD_TABLE[this.moodName];
     for (const expression of manager.expressions) {
       const name = expression.expressionName.toLowerCase();
-      if (MOOD_EXPRESSIONS.includes(name)) expression.weight = THREE.MathUtils.lerp(expression.weight, mood?.expressions[name] ?? 0, 0.12);
-    }
-    const amount = THREE.MathUtils.smoothstep((now - this.moodStarted) / 320, 0, 1);
-    this.moodBones = blendOffsets(this.moodFrom, mood?.bones ?? {}, amount);
-    for (const [name, values] of Object.entries(this.moodBones)) {
-      const bone = this.bones.get(name)?.node;
-      if (!bone) continue;
-      this.gestureRotation.setFromEuler(new THREE.Euler(...values));
-      bone.quaternion.multiply(this.gestureRotation);
+      if (MOOD_EXPRESSIONS.includes(name)) expression.weight = THREE.MathUtils.lerp(expression.weight, mood?.[name] ?? 0, 0.12);
     }
   }
   updateFace(now) {
@@ -593,7 +464,7 @@ export class PuppetRuntime {
         this.blinkStart = 0;
         this.nextBlink = now + 2200 + Math.random() * 4200;
       }
-      this.updateMood(now, manager);
+      this.updateMood(manager);
       this.updateMouth(manager, now);
     }
     this.updateGaze(now);
@@ -629,15 +500,11 @@ export class PuppetRuntime {
       const speaking = this.speech[0]?.at <= now && now < this.speechUntil;
       const name = speaking ? this.speech[0].name ?? 'aa' : 'aa';
       targets = loudnessViseme(name, this.audio.waveform);
-      const energy = audioEnergy(this.audio.waveform);
-      if (shouldBeat(energy, this.previousEnergy, this.waitingForHub)) this.gesture('beat');
-      this.previousEnergy = energy;
     }
     for (const name of VISEMES) {
       this.mouthValues[name] = THREE.MathUtils.lerp(this.mouthValues[name], targets?.[name] ?? 0, 0.65);
       manager.setValue(name, this.mouthValues[name]);
     }
-    if (!this.audio) this.previousEnergy = 0;
   }
   plantFeet() {
     const { humanoid, scene } = this.vrm;
@@ -669,10 +536,6 @@ export class PuppetRuntime {
     const delta = Math.min(this.clock.getDelta(), 0.05);
     this.updateBasePose(delta);
     this.updatePose(now);
-    this.updateSeatedClearance();
-    this.updateFloorSeat(delta);
-    this.updateGesture(now);
-    this.updateListening();
     this.updateFace(now);
     if (this.vrm) this.plantFeet();
     this.vrm?.update(delta);

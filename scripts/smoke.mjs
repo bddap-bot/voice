@@ -60,13 +60,14 @@ export async function send_only(bytes) {
 }`;
 
 const neutralSilhouettePuppet = `
+export const SEAT_CLIPS = new Set();
 export function connectVrHost() { throw new Error('no vr host in the smoke'); }
 export class PuppetRuntime {
   constructor(canvas) { this.canvas=canvas; this.poseName='sit'; globalThis.__smokeRuntime=this; }
   async load(bytes, valid, beforeCommit, stage) { await stage('select', beforeCommit); this.draw(false); return valid(); }
   async loadClips() {} start() {} pause() {} clear() {} dispose() {} async attachAudio() {} async detachAudio() {}
   draw(standing) { const c=this.canvas, width=Math.max(1,c.clientWidth), height=Math.max(1,c.clientHeight); if(c.width!==width)c.width=width;if(c.height!==height)c.height=height;const x=c.getContext('2d'); x.clearRect(0,0,c.width,c.height); x.fillStyle='#b9bdc7'; const cx=c.width/2, head=c.height*.2; x.beginPath(); x.arc(cx,head,c.height*.055,0,Math.PI*2); x.fill(); x.lineWidth=Math.max(8,c.width*.025); x.strokeStyle='#b9bdc7'; x.beginPath(); x.moveTo(cx,head+c.height*.06); x.lineTo(cx,standing?c.height*.58:c.height*.52); x.moveTo(cx,head+c.height*.15); x.lineTo(cx-c.width*.1,c.height*.42); x.moveTo(cx,head+c.height*.15); x.lineTo(cx+c.width*.1,c.height*.42); x.moveTo(cx,standing?c.height*.58:c.height*.52); x.lineTo(cx-c.width*.07,standing?c.height*.82:c.height*.65); x.moveTo(cx,standing?c.height*.58:c.height*.52); x.lineTo(cx+c.width*.07,standing?c.height*.82:c.height*.65); x.stroke(); }
-  pose(name) { this.poseName=name; this.draw(name!=='sit'); } gesture() { return true; } mood() {} waiting() {} listening() {} speak() {} asleep() {}
+  pose(name) { this.poseName=name; this.draw(name!=='sit'); } gesture() { return true; } mood() {} waiting() {} speak() {} asleep() {}
 }`;
 
 const browserMocks = `

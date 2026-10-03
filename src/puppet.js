@@ -12,6 +12,7 @@ const MOOD_EXPRESSIONS = ['happy', 'angry', 'sad', 'relaxed', 'surprised'];
 
 const CLIP_GESTURES = new Set(['nod', 'shrug', 'think', 'wave', 'no', 'laugh', 'clap', 'bow', 'thumbs-up', 'stretch', 'look-around']);
 const IDLE_CLIPS = { stand: ['idle', 'idle-2', 'idle-3'], sit: ['sit-idle', 'sit-idle-2'] };
+export const SEAT_CLIPS = new Set(['sit', 'stand', ...IDLE_CLIPS.sit]);
 
 const GAZE_POINTS = {
   camera: [0, 1.25, 6.4],
@@ -162,7 +163,7 @@ export class PuppetRuntime {
     this.nextIdleAt = Infinity;
     this.clock = new THREE.Clock();
     this.poseName = 'sit';
-    this.bones = new Map();
+    this.head = null;
     this.viewer = new THREE.Vector3().fromArray(GAZE_POINTS.camera);
     this.saccade = new THREE.Vector3();
     this.gazeTarget = new THREE.Object3D();
@@ -226,9 +227,8 @@ export class PuppetRuntime {
     this.vrm = vrm;
     this.ankleHeight = ankleHeight;
     if (vrm.lookAt) vrm.lookAt.target = this.gazeTarget;
-    this.bones.clear();
     const head = vrm.humanoid?.getNormalizedBoneNode('head');
-    if (head) this.bones.set('head', { node: head, base: head.quaternion.clone() });
+    this.head = head ? { node: head, base: head.quaternion.clone() } : null;
     for (const expression of vrm.expressionManager?.expressions ?? []) {
       if (!MOOD_EXPRESSIONS.includes(expression.expressionName.toLowerCase())) continue;
       expression.overrideMouth = 'none';
@@ -257,7 +257,7 @@ export class PuppetRuntime {
       this.clips.set(entry.action, clip);
     }
     this.prepareHandovers();
-    if (this.poseName === 'sit') this.settle('sit');
+    if (this.poseName === 'sit') this.playClip('sit', 'sit-idle');
     else if (!this.clipAction) this.playIdle();
   }
   prepareHandovers() {
@@ -276,7 +276,7 @@ export class PuppetRuntime {
     this.idleRoot.remove(this.vrm.scene);
     VRMUtils.deepDispose(this.vrm.scene);
     this.vrm = null;
-    this.bones.clear();
+    this.head = null;
   }
   async attachAudio(stream, owner = stream) {
     const epoch = ++this.audioEpoch;
@@ -345,11 +345,7 @@ export class PuppetRuntime {
     this.pendingGesture = null;
     const transition = (name === 'sit') !== (this.poseName === 'sit');
     this.poseName = name;
-    if (transition) this.settle(name === 'sit' ? 'sit' : 'stand');
-  }
-  settle(transition) {
-    const idle = transition === 'sit' ? 'sit-idle' : 'idle';
-    this.playClip(this.clips.has(transition) ? transition : idle, idle);
+    if (transition) this.playClip(name === 'sit' ? 'sit' : 'stand', name === 'sit' ? 'sit-idle' : 'idle');
   }
   gesture(name) {
     if (!CLIP_GESTURES.has(name)) throw new Error(`unknown gesture ${name}`);
@@ -443,9 +439,9 @@ export class PuppetRuntime {
     }
   }
   updateBasePose(delta) {
-    for (const { node, base } of this.bones.values()) node.quaternion.copy(base);
+    this.head?.node.quaternion.copy(this.head.base);
     this.mixer.update(delta);
-    for (const { node, base } of this.bones.values()) base.copy(node.quaternion);
+    this.head?.base.copy(this.head.node.quaternion);
   }
   updateMood(manager) {
     const mood = MOOD_TABLE[this.moodName];
@@ -485,7 +481,7 @@ export class PuppetRuntime {
     } else if (this.gazeMode !== 'camera') this.gazeDestination.fromArray(GAZE_POINTS[this.gazeMode]);
     this.gazePoint.lerp(this.gazeDestination, 0.08);
     this.gazeTarget.position.copy(this.gazePoint);
-    const head = this.bones.get('head')?.node;
+    const head = this.head?.node;
     if (!head) return;
     const yaw = THREE.MathUtils.clamp(Math.atan2(this.gazePoint.x, this.gazePoint.z) * 0.18, -0.14, 0.14);
     const pitch = THREE.MathUtils.clamp(-Math.atan2(this.gazePoint.y - 1.25, Math.hypot(this.gazePoint.x, this.gazePoint.z)) * 0.14, -0.08, 0.08);

@@ -146,6 +146,7 @@ export async function recv() {
 `;
 
 const fakePuppet = `
+export const SEAT_CLIPS = new Set();
 export function connectVrHost() { throw new Error('no vr host in page tests'); }
 export class PuppetRuntime {
   constructor(canvas) { this.canvas = canvas; this.calls = []; this.humanoidBone = 0; globalThis.testPuppet = this; }

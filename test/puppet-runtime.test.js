@@ -36,7 +36,7 @@ test('live amplitude opens the mouth between transcript vowels', () => {
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
     audio: { analyser: { getByteTimeDomainData: (data) => data.set(waveform(32)) }, waveform: new Uint8Array(256) },
     speech: [{ name: null, at: 100 }], speechUntil: 200,
-    mouthValues: { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 }, previousEnergy: 0,
+    mouthValues: { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 },
     waitingForHub: true,
   });
   const values = {};
@@ -88,7 +88,7 @@ test('a standing gesture requested while seated stands first and then plays', ()
   assert.equal(runtime.clipGesture, 'clap');
 });
 
-test('procedural rotations stay bounded without a clip and across a clip handover', () => {
+test('the gaze rotation stays bounded without a clip and across a clip handover', () => {
   const run = (handover) => {
     const head = new THREE.Bone();
     const rest = head.quaternion.clone();
@@ -96,7 +96,7 @@ test('procedural rotations stay bounded without a clip and across a clip handove
     const second = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.14, 0.18, -0.06));
     let frame = 0;
     const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
-      bones: new Map([['head', { node: head, rest, base: rest.clone() }]]),
+      head: { node: head, base: rest.clone() },
       mixer: { update() { if (handover && frame <= 90) head.quaternion.copy(frame < 90 ? first : second); } },
     });
     const gaze = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.03, 0, 0.04));
@@ -150,7 +150,7 @@ test('gaze is inert when a puppet has no look-at rig', () => {
     gazeUntil: 2200,
     nextSaccade: 0,
     gazeRotation: new THREE.Quaternion(),
-    bones: new Map([['head', { node: head }]]),
+    head: { node: head },
   });
   runtime.updateGaze(1000);
   assert.deepEqual(target.position.toArray(), [0, 0, 0]);
@@ -406,7 +406,7 @@ test('asleep holds the eyes shut and waking reopens them, with no droop on the h
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
     moodName: null, sleeping: false, nextBlink: Infinity, blinkStart: 0,
     mouthValues: { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 }, audio: null,
-    bones: new Map([['head', { node: head }]]),
+    head: { node: head },
     vrm: { expressionManager: { expressions: [], setValue: (name, value) => { values[name] = value; } } },
   });
   runtime.asleep(true);
@@ -475,7 +475,7 @@ test('the feet anchor the puppet through sitting, gestures and standing while th
   const vrm = { scene, meta: { metaVersion: '1' }, humanoid: { update() {}, getRawBoneNode: node, getNormalizedBoneNode: node, normalizedRestPose: { hips: { position: hips.position.toArray() } } } };
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
     vrm, ankleHeight: 0.1, mixer: new THREE.AnimationMixer(scene), clips: new Map(), handovers: new Map(),
-    bones: new Map(), poseName: 'stand', idleClip: 'idle', nextIdleAt: Infinity,
+    poseName: 'stand', idleClip: 'idle', nextIdleAt: Infinity,
   });
   const bend = (angle, sign) => new THREE.Quaternion().setFromEuler(new THREE.Euler(sign * angle, 0, 0)).toArray();
   const payload = (name, heights, offset, angles) => ({
@@ -541,7 +541,7 @@ function gestureRuntime() {
   }));
   return Object.assign(Object.create(PuppetRuntime.prototype), {
     vrm, clips, mixer: new THREE.AnimationMixer(new THREE.Group()), idleRoot: new THREE.Group(),
-    bones: new Map(), handovers: new Map(), poseName: 'stand', idleClip: null,
+    handovers: new Map(), poseName: 'stand', idleClip: null,
     renderer: { render() {}, getContext: () => ({ finish() {} }) },
     nextIdleAt: Infinity, clipGesture: null, pendingGesture: null,
   });
@@ -567,15 +567,6 @@ test('a hub wait plays the thinking clip once as it begins, never over a running
   runtime.clipGesture = 'wave';
   runtime.waiting(true);
   assert.deepEqual(fired, ['think']);
-});
-
-test('without a transition clip the pose change goes straight to its idle', () => {
-  const runtime = gestureRuntime();
-  runtime.clips.delete('sit');
-  const fired = [];
-  runtime.playClip = (name, fallback) => fired.push([name, fallback]);
-  runtime.pose('sit');
-  assert.deepEqual(fired, [['sit-idle', 'sit-idle']]);
 });
 
 test('the paintOff pose cancels a queued standing gesture before the stand completes', () => {

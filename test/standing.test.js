@@ -48,7 +48,7 @@ for (const version of ['0', '1']) test(`standing idle preserves motion and retur
   const gesture = new THREE.AnimationClip('wave', 0.5, [new THREE.QuaternionKeyframeTrack('head.quaternion', [0, 0.5], [0, 0, 0, 1, 0.3, 0, 0, Math.sqrt(0.91)])]);
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
     vrm, mixer: new THREE.AnimationMixer(vrm.scene), clips: new Map([['idle', idle], ['wave', gesture]]),
-    bones: new Map(), poseName: 'stand', idleClip: null, nextIdleAt: Infinity,
+    poseName: 'stand', idleClip: null, nextIdleAt: Infinity,
   });
   runtime.playIdle(0);
   runtime.mixer.update(0);
@@ -89,7 +89,7 @@ test('an avatar loads and renders Standing before any clip exists', async () => 
   let renders = 0;
   let finishes = 0;
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
-    poseName: 'sit', bones: new Map(), clips: new Map(), idleRoot: new THREE.Group(), gazeTarget: new THREE.Object3D(),
+    poseName: 'sit', clips: new Map(), idleRoot: new THREE.Group(), gazeTarget: new THREE.Object3D(),
     renderer: { render: () => renders++, getContext: () => ({ finish: () => finishes++ }) },
   });
   const stages = [];
@@ -113,7 +113,7 @@ test('an avatar loads and renders Standing before any clip exists', async () => 
     }
     renders = 0;
     Object.assign(runtime, { clock: { getDelta: () => 0 }, renderer: { render: () => renders++ } });
-    for (const method of ['updateBasePose', 'updatePose', 'updateSeatedClearance', 'updateGesture', 'updateListening', 'updateFace', 'recordAnimation']) runtime[method] = () => {};
+    for (const method of ['updateBasePose', 'updatePose', 'updateFace', 'recordAnimation']) runtime[method] = () => {};
     const frame = globalThis.requestAnimationFrame;
     globalThis.requestAnimationFrame = () => 1;
     try { runtime.animate(0); } finally { globalThis.requestAnimationFrame = frame; }

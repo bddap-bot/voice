@@ -146,6 +146,7 @@ export async function recv() {
 `;
 
 const fakePuppet = `
+export function connectVrHost() { throw new Error('no vr host in page tests'); }
 export class PuppetRuntime {
   constructor(canvas) { this.canvas = canvas; this.calls = []; this.humanoidBone = 0; globalThis.testPuppet = this; }
   async load(bytes, valid, beforeCommit, stage) { await stage('select', beforeCommit); globalThis.firstVisible = { playable: 'Standing', order: [...transferOrder] }; const context = this.canvas.getContext('2d'); context.fillStyle = '#50c878'; context.fillRect(0, 0, this.canvas.width, this.canvas.height); return true; }

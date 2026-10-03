@@ -18,6 +18,16 @@ const GESTURES = {
 const CLIP_GESTURES = new Set(['nod', 'shrug', 'think', 'wave', 'no', 'laugh', 'clap', 'bow', 'thumbs-up', 'stretch', 'look-around']);
 const IDLE_CLIPS = { stand: ['idle', 'idle-2', 'idle-3'], sit: ['sit-idle', 'sit-idle-2'] };
 const SEATED_ARM_CLEARANCE = { leftUpperArm: [0, 0, -0.1], rightUpperArm: [0, 0, 0.1] };
+const DOWN = new THREE.Vector3(0, -1, 0);
+const FORWARD = new THREE.Vector3(0, 0, 1);
+const FLOOR_SEAT = [
+  ['leftUpperLeg', DOWN, [0.55, -0.05, 0.83]],
+  ['leftLowerLeg', DOWN, [-0.9, -0.02, -0.42]],
+  ['leftFoot', FORWARD, [-0.35, -0.1, 0.93]],
+  ['rightUpperLeg', DOWN, [-0.55, -0.12, 0.83]],
+  ['rightLowerLeg', DOWN, [0.9, -0.16, -0.42]],
+  ['rightFoot', FORWARD, [0.35, -0.2, 0.93]],
+];
 
 const GAZE_POINTS = {
   camera: [0, 1.25, 6.4],
@@ -152,6 +162,8 @@ export class PuppetRuntime {
     this.canvas = canvas;
     this.renderer = renderer;
     this.view = view;
+    this.floorSeated = Boolean(view);
+    this.floorSeat = 0;
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.scene = new THREE.Scene();
@@ -525,6 +537,24 @@ export class PuppetRuntime {
       bone.quaternion.multiply(this.gestureRotation);
     }
   }
+  updateFloorSeat(delta) {
+    const target = this.floorSeated && this.poseName === 'sit' ? 1 : 0;
+    this.floorSeat += (target - this.floorSeat) * Math.min(1, delta * 2);
+    const humanoid = this.vrm?.humanoid;
+    const hips = humanoid?.getNormalizedBoneNode('hips');
+    if (this.floorSeat < 1e-3 || !hips) return;
+    const toward = new THREE.Quaternion();
+    const parent = new THREE.Quaternion();
+    const hipsWorld = hips.getWorldQuaternion(new THREE.Quaternion());
+    for (const [name, rest, direction] of FLOOR_SEAT) {
+      const node = humanoid.getNormalizedBoneNode(name);
+      if (!node?.parent) continue;
+      node.parent.getWorldQuaternion(parent);
+      toward.setFromUnitVectors(rest, new THREE.Vector3(...direction).normalize()).premultiply(hipsWorld).premultiply(parent.invert());
+      node.quaternion.slerp(toward, this.floorSeat);
+      node.updateMatrixWorld();
+    }
+  }
   updateListening() {
     const { lean, nod, tilt } = this.listeningMotion;
     const spine = this.bones.get('spine')?.node;
@@ -640,6 +670,7 @@ export class PuppetRuntime {
     this.updateBasePose(delta);
     this.updatePose(now);
     this.updateSeatedClearance();
+    this.updateFloorSeat(delta);
     this.updateGesture(now);
     this.updateListening();
     this.updateFace(now);

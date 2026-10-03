@@ -10,6 +10,32 @@ use serde_json::{json, Value};
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tungstenite::{Message, WebSocket};
 
+pub struct Frame {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
+impl Frame {
+    pub fn parse(mut bytes: Vec<u8>, eye: [u32; 2]) -> Result<Frame, String> {
+        if bytes.len() < 8 {
+            return Err(format!("frame of {} bytes has no header", bytes.len()));
+        }
+        let [x, y, width, height] = [0, 1, 2, 3].map(|index| u16::from_le_bytes([bytes[index * 2], bytes[index * 2 + 1]]) as u32);
+        if x + width > eye[0] || y + height > eye[1] {
+            return Err(format!("frame rect {width}×{height} at {x},{y} exceeds the {}×{} eye", eye[0], eye[1]));
+        }
+        let expected = 8 + (2 * width * height * 4) as usize;
+        if bytes.len() != expected {
+            return Err(format!("frame of {} bytes, expected {expected}", bytes.len()));
+        }
+        bytes.drain(..8);
+        Ok(Frame { x, y, width, height, pixels: bytes })
+    }
+}
+
 pub struct Page {
     listener: TcpListener,
     nonce: String,
@@ -169,5 +195,20 @@ mod tests {
         assert_eq!(origin("http://127.0.0.1:5173/"), "http://127.0.0.1:5173");
         assert_eq!(nonce().len(), 32);
         assert_ne!(nonce(), nonce());
+    }
+
+    fn frame(rect: [u16; 4], pixels: usize) -> Vec<u8> {
+        rect.iter().flat_map(|value| value.to_le_bytes()).chain(std::iter::repeat_n(7, pixels)).collect()
+    }
+
+    #[test]
+    fn a_frame_carries_one_rect_read_from_both_eyes() {
+        let parsed = Frame::parse(frame([3, 2, 5, 6], 2 * 5 * 6 * 4), [16, 8]).unwrap();
+        assert_eq!((parsed.x, parsed.y, parsed.width, parsed.height, parsed.pixels.len()), (3, 2, 5, 6, 240));
+        assert_eq!(Frame::parse(frame([0, 0, 0, 0], 0), [16, 8]).unwrap().pixels.len(), 0);
+        assert!(Frame::parse(frame([3, 2, 5, 6], 2 * 5 * 6 * 4 - 1), [16, 8]).is_err());
+        assert!(Frame::parse(frame([12, 0, 5, 1], 40), [16, 8]).is_err());
+        assert!(Frame::parse(frame([0, 4, 1, 5], 40), [16, 8]).is_err());
+        assert!(Frame::parse(vec![0; 7], [16, 8]).is_err());
     }
 }

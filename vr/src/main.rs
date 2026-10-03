@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 
 use openvr::{Runtime, Signal};
-use page::Page;
+use page::{Frame, Page};
 use placement::{desk_spot, Anchor, Interaction, Pose};
 
 const EYE: u32 = 768;
@@ -140,7 +140,7 @@ fn run() -> Result<(), String> {
             }
         }
         if let Some((frame, arrived, asked)) = frame {
-            let mut texture = uploader.upload(&frame)?;
+            let mut texture = uploader.upload(&Frame::parse(frame, [EYE, EYE])?)?;
             overlay.submit(&mut texture)?;
             if let Some(asked) = asked {
                 meter.frame(arrived - asked, arrived.elapsed());

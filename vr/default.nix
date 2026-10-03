@@ -39,9 +39,10 @@ let
     export VOICE_VR_BROWSER="''${VOICE_VR_BROWSER:-$here/chromium}"
     exec "$here/voice-vr-host" "$@"
     EOF
+    # The Flatpak's sandboxed zygote is spawned through flatpak-portal, outside --die-with-parent, and would outlive the host.
     cat > $out/bin/chromium <<'EOF'
     #!/bin/sh
-    exec flatpak run --die-with-parent org.chromium.Chromium "$@"
+    exec flatpak run --die-with-parent org.chromium.Chromium --no-zygote --no-sandbox "$@"
     EOF
     chmod 755 $out/bin/voice-vr $out/bin/chromium
     substitute ${./voice-vr.vrmanifest} $out/voice-vr.vrmanifest --replace-fail '"binary_path_linux": "@out@/bin/voice-vr"' '"binary_path_linux_arm": "bin/voice-vr"'

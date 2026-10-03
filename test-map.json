@@ -6,9 +6,10 @@
         "vr/**"
       ],
       "tests": [
-        "nix-build vr/default.nix --no-out-link"
+        "nix-build vr/default.nix --no-out-link",
+        "nix-build vr/default.nix -A bundle --no-out-link"
       ],
-      "why": "the overlay host's build runs its unit tests (placement, page handshake) and wraps the runtime libraries SteamVR's client needs"
+      "why": "the overlay host's build runs its unit tests (placement, page handshake) and wraps the runtime libraries SteamVR's client needs; the headset bundle's build checks its architecture, loader, libraries and glibc floor"
     },
     {
       "paths": [

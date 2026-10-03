@@ -83,6 +83,15 @@ impl Runtime {
         head.bPoseIsValid.then(|| Pose::from_m34(&head.mDeviceToAbsoluteTracking.m))
     }
 
+    pub fn display_period(&self) -> Result<std::time::Duration, String> {
+        let mut error = 0;
+        let hertz = call!(self.system, GetFloatTrackedDeviceProperty, sys::k_unTrackedDeviceIndex_Hmd as u32, sys::ETrackedDeviceProperty_Prop_DisplayFrequency_Float, &mut error);
+        if error != 0 || hertz <= 0.0 {
+            return Err(format!("display frequency {hertz} (error {error})"));
+        }
+        Ok(std::time::Duration::from_secs_f32(1.0 / hertz))
+    }
+
     pub fn eye_offsets(&self) -> [Pose; 2] {
         [sys::EVREye_Eye_Left, sys::EVREye_Eye_Right].map(|eye| Pose::from_m34(&call!(self.system, GetEyeToHeadTransform, eye).m))
     }

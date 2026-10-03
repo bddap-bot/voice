@@ -61,7 +61,7 @@ function fakeRenderer() {
   };
 }
 
-test('a stereo frame renders each eye into its half and waits for the host before the next', () => {
+test('each host pose requests one stereo frame, each eye rendered into its half', () => {
   const sent = [];
   const view = new StereoView(HELLO, (pixels) => sent.push(pixels));
   const renderer = fakeRenderer();
@@ -69,22 +69,18 @@ test('a stereo frame renders each eye into its half and waits for the host befor
   assert.deepEqual(renderer.calls.splice(0), [['ratio', 1], ['size', 8, 2, false]]);
   view.render(renderer, null);
   assert.equal(renderer.calls.length, 0, 'no frame before the first pose');
+  view.onPose = () => view.render(renderer, null);
   view.pose({ eyes: [[-0.03, 0, 0.5], [0.03, 0, 0.5]], head: [0, 0, 0.5] });
-  view.render(renderer, null);
   assert.deepEqual(renderer.calls.filter(([name]) => name === 'viewport'), [['viewport', 0, 0, 4, 2], ['viewport', 4, 0, 4, 2]]);
   assert.deepEqual(renderer.calls.at(-1), ['readPixels', 0, 0, 8, 2]);
   assert.equal(sent.length, 1);
   assert.equal(sent[0].length, 8 * 2 * 4);
   renderer.calls.length = 0;
-  view.render(renderer, null);
-  assert.equal(renderer.calls.length, 0, 'unacknowledged frame holds the next');
-  view.ready = true;
   view.pose({ eyes: [[-0.03, 0, -0.5], [0.03, 0, -0.5]], head: [0, 0, -0.5] });
-  view.render(renderer, null);
   assert.equal(renderer.calls.length, 0, 'no frame from behind the window');
 });
 
-test('the vr host hands over its credential, poses, acknowledgements and taps', async () => {
+test('the vr host hands over its credential, poses and taps', async () => {
   const sockets = [];
   class FakeSocket extends EventTarget {
     constructor(url) { super(); this.url = url; this.sent = []; sockets.push(this); queueMicrotask(() => this.dispatchEvent(new Event('open'))); }
@@ -103,9 +99,6 @@ test('the vr host hands over its credential, poses, acknowledgements and taps', 
   assert.equal(token, 'vr-token');
   socket.deliver({ type: 'pose', eyes: [[0, 0, 1], [0.06, 0, 1]], head: [0.03, 0, 1] });
   assert.ok(view.viewer instanceof THREE.Vector3);
-  view.ready = false;
-  socket.deliver({ type: 'ready' });
-  assert.equal(view.ready, true);
   socket.deliver({ type: 'tap' });
   assert.equal(taps, 1);
 });

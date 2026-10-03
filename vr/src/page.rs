@@ -1,5 +1,6 @@
 use std::io::{ErrorKind, Read};
 use std::net::{TcpListener, TcpStream};
+use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -122,6 +123,12 @@ impl Page {
             }
         }
         frame
+    }
+
+    pub fn wait(&self, timeout: Duration) {
+        let fd = self.socket.as_ref().map_or(self.listener.as_raw_fd(), |socket| socket.get_ref().as_raw_fd());
+        let mut readable = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        unsafe { libc::poll(&mut readable, 1, timeout.as_millis().max(1) as i32) };
     }
 
     pub fn send(&mut self, message: Value) {

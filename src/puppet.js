@@ -194,9 +194,11 @@ export class PuppetRuntime {
     this.start();
   }
   start() {
-    if (!this.frame) this.frame = requestAnimationFrame(this.animate);
+    if (this.view) this.view.onPose = this.animate;
+    else if (!this.frame) this.frame = requestAnimationFrame(this.animate);
   }
   pause() {
+    if (this.view) this.view.onPose = null;
     cancelAnimationFrame(this.frame);
     this.frame = 0;
   }
@@ -528,7 +530,7 @@ export class PuppetRuntime {
     const hipHeight = hips ? Number(hips.getWorldPosition(new THREE.Vector3()).y.toFixed(4)) : null;
     this.onAnimation({ clips, hip_height: hipHeight });
   }
-  animate(now) {
+  animate(now = performance.now()) {
     const delta = Math.min(this.clock.getDelta(), 0.05);
     this.updateBasePose(delta);
     this.updatePose(now);
@@ -538,7 +540,7 @@ export class PuppetRuntime {
     this.recordAnimation();
     if (this.vrm && this.view) this.view.render(this.renderer, this.scene);
     else if (this.vrm) this.renderer.render(this.scene, this.camera);
-    this.frame = requestAnimationFrame(this.animate);
+    if (!this.view) this.frame = requestAnimationFrame(this.animate);
   }
   dispose() {
     this.pause();

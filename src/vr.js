@@ -18,7 +18,7 @@ export class StereoView {
     this.camera = new THREE.PerspectiveCamera();
     this.eyes = null;
     this.viewer = null;
-    this.ready = true;
+    this.onPose = null;
     this.pixels = new Uint8Array(eye[0] * 2 * eye[1] * 4);
   }
   scene([x, y, z]) {
@@ -27,6 +27,7 @@ export class StereoView {
   pose({ eyes, head }) {
     this.eyes = eyes.map((point) => this.scene(point));
     this.viewer = new THREE.Vector3(...this.scene(head));
+    this.onPose?.();
   }
   attach(renderer) {
     renderer.setPixelRatio(1);
@@ -34,7 +35,7 @@ export class StereoView {
     renderer.setClearColor(0x000000, 0);
   }
   render(renderer, scene) {
-    if (!this.ready || !this.eyes || this.eyes.some(([, , z]) => z <= 0.01)) return;
+    if (!this.eyes || this.eyes.some(([, , z]) => z <= 0.01)) return;
     const [width, height] = this.eye;
     const near = 0.05;
     renderer.setScissorTest(true);
@@ -53,7 +54,6 @@ export class StereoView {
     renderer.setScissorTest(false);
     const gl = renderer.getContext();
     gl.readPixels(0, 0, width * 2, height, gl.RGBA, gl.UNSIGNED_BYTE, this.pixels);
-    this.ready = false;
     this.send(this.pixels);
   }
 }
@@ -74,7 +74,6 @@ export function connectVrHost(param, { WebSocket = globalThis.WebSocket, onTap =
         view = new StereoView(message, (pixels) => socket.send(pixels));
         resolve({ token: message.token, view });
       } else if (message.type === 'pose') view?.pose(message);
-      else if (message.type === 'ready' && view) view.ready = true;
       else if (message.type === 'tap') onTap();
     });
   });

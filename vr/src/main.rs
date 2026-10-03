@@ -18,6 +18,7 @@ const HEIGHT: f32 = 0.3;
 const MARGIN: f32 = 0.03;
 const PAGE: &str = "https://bddap-bot.github.io/voice/";
 const HEAD_AHEAD: f32 = 0.04;
+const REQUEST_LOST: Duration = Duration::from_millis(100);
 
 fn directory(variable: &str, fallback: &str) -> PathBuf {
     std::env::var_os(variable).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").expect("HOME")).join(fallback)).join("voice-vr")
@@ -57,7 +58,7 @@ impl Meter {
         let elapsed = now - window;
         if elapsed >= Duration::from_secs(5) {
             let rate = self.waits.len() as f64 / elapsed.as_secs_f64();
-            eprintln!("overlay {rate:.1} fps; ready→frame {}; upload+submit {}", summary(&mut self.waits), summary(&mut self.uploads));
+            eprintln!("overlay {rate:.1} fps; pose→frame {}; upload+submit {}", summary(&mut self.waits), summary(&mut self.uploads));
             *self = Meter { window: Some(now), ..Meter::default() };
         }
     }
@@ -82,8 +83,10 @@ fn run() -> Result<(), String> {
     let mut interaction = Interaction::new([0.0, -QUAD / 2.0 + MARGIN + HEIGHT * 0.55, 0.0]);
     let mut anchor = load(&placement_file);
     let started = Instant::now();
+    let period = runtime.display_period()?;
     let mut meter = Meter::default();
-    let mut readied = Instant::now();
+    let mut requested: Option<Instant> = None;
+    let mut last_request = Instant::now() - period;
 
     loop {
         if let Some(Signal::Quit) = runtime.poll() {
@@ -97,6 +100,7 @@ fn run() -> Result<(), String> {
             std::thread::sleep(Duration::from_millis(100));
             continue;
         };
+        let frame = page.latest_frame().map(|frame| (frame, Instant::now(), requested.take()));
         let hands = runtime.hands(&poses);
         let current = *anchor.get_or_insert_with(|| Anchor::World(desk_spot(&head)));
         let hand_pose = |which| hands.iter().find(|hand| hand.hand == which).map(|hand| hand.pose);
@@ -126,20 +130,24 @@ fn run() -> Result<(), String> {
                 }
                 None => {}
             }
-            let predicted = runtime.head(&runtime.poses(HEAD_AHEAD)).unwrap_or(head);
-            let local = placed.inverse();
-            let eyes = eye_offsets.map(|eye: Pose| local.apply(predicted.then(&eye).t));
-            page.pose(eyes, local.apply(predicted.t));
+            if requested.is_none_or(|at| at.elapsed() >= REQUEST_LOST) && last_request.elapsed() >= period {
+                let predicted = runtime.head(&runtime.poses(HEAD_AHEAD)).unwrap_or(head);
+                let local = placed.inverse();
+                let eyes = eye_offsets.map(|eye: Pose| local.apply(predicted.then(&eye).t));
+                page.pose(eyes, local.apply(predicted.t));
+                last_request = Instant::now();
+                requested = Some(last_request);
+            }
         }
-        if let Some(frame) = page.latest_frame() {
-            let arrived = Instant::now();
+        if let Some((frame, arrived, asked)) = frame {
             let mut texture = uploader.upload(&frame)?;
             overlay.submit(&mut texture)?;
-            page.send(json!({ "type": "ready" }));
-            meter.frame(arrived - readied, arrived.elapsed());
-            readied = Instant::now();
+            if let Some(asked) = asked {
+                meter.frame(arrived - asked, arrived.elapsed());
+            }
         }
-        std::thread::sleep(Duration::from_millis(11));
+        let due = (last_request + period).saturating_duration_since(Instant::now());
+        page.wait(if requested.is_none() && !due.is_zero() { due } else { period });
     }
 }
 

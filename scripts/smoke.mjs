@@ -60,6 +60,7 @@ export async function send_only(bytes) {
 }`;
 
 const neutralSilhouettePuppet = `
+export function connectVrHost() { throw new Error('no vr host in the smoke'); }
 export class PuppetRuntime {
   constructor(canvas) { this.canvas=canvas; this.poseName='sit'; globalThis.__smokeRuntime=this; }
   async load(bytes, valid, beforeCommit, stage) { await stage('select', beforeCommit); this.draw(false); return valid(); }

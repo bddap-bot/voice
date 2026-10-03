@@ -34,6 +34,35 @@ fn save(path: &PathBuf, anchor: &Anchor) {
     }
 }
 
+#[derive(Default)]
+struct Meter {
+    window: Option<Instant>,
+    waits: Vec<Duration>,
+    uploads: Vec<Duration>,
+}
+
+fn summary(samples: &mut [Duration]) -> String {
+    samples.sort();
+    let mean = samples.iter().sum::<Duration>().as_secs_f64() * 1e3 / samples.len() as f64;
+    let p95 = samples[(samples.len() * 95 / 100).min(samples.len() - 1)].as_secs_f64() * 1e3;
+    format!("mean {mean:.1} p95 {p95:.1} ms")
+}
+
+impl Meter {
+    fn frame(&mut self, wait: Duration, upload: Duration) {
+        let now = Instant::now();
+        let window = *self.window.get_or_insert(now);
+        self.waits.push(wait);
+        self.uploads.push(upload);
+        let elapsed = now - window;
+        if elapsed >= Duration::from_secs(5) {
+            let rate = self.waits.len() as f64 / elapsed.as_secs_f64();
+            eprintln!("overlay {rate:.1} fps; ready→frame {}; upload+submit {}", summary(&mut self.waits), summary(&mut self.uploads));
+            *self = Meter { window: Some(now), ..Meter::default() };
+        }
+    }
+}
+
 fn run() -> Result<(), String> {
     let config = directory("XDG_CONFIG_HOME", ".config");
     let state = directory("XDG_STATE_HOME", ".local/state");
@@ -53,6 +82,8 @@ fn run() -> Result<(), String> {
     let mut interaction = Interaction::new([0.0, -QUAD / 2.0 + MARGIN + HEIGHT * 0.55, 0.0]);
     let mut anchor = load(&placement_file);
     let started = Instant::now();
+    let mut meter = Meter::default();
+    let mut readied = Instant::now();
 
     loop {
         if let Some(Signal::Quit) = runtime.poll() {
@@ -101,9 +132,12 @@ fn run() -> Result<(), String> {
             page.pose(eyes, local.apply(predicted.t));
         }
         if let Some(frame) = page.latest_frame() {
+            let arrived = Instant::now();
             let mut texture = uploader.upload(&frame)?;
             overlay.submit(&mut texture)?;
             page.send(json!({ "type": "ready" }));
+            meter.frame(arrived - readied, arrived.elapsed());
+            readied = Instant::now();
         }
         std::thread::sleep(Duration::from_millis(11));
     }

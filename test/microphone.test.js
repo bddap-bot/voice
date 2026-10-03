@@ -2,20 +2,28 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Microphone } from '../docs/microphone.js';
 
-function fixture() {
+function fixture(initial = 'running') {
   const track = () => Object.assign(new EventTarget(), { readyState: 'live', stop() { this.readyState = 'ended'; } });
   const output = track();
   const requests = [], sources = [];
-  globalThis.AudioContext = class {
-    state = 'running';
+  const page = new EventTarget();
+  globalThis.addEventListener = page.addEventListener.bind(page);
+  globalThis.removeEventListener = page.removeEventListener.bind(page);
+  const resumes = [];
+  globalThis.AudioContext = class extends EventTarget {
+    state = initial;
+    become(state) {
+      this.state = state;
+      this.dispatchEvent(new Event('statechange'));
+    }
     createMediaStreamDestination() { return { stream: { getTracks: () => [output] } }; }
     createMediaStreamSource(stream) {
       const source = { stream, connected: false, connect() { this.connected = true; }, disconnect() { this.connected = false; } };
       sources.push(source);
       return source;
     }
-    async resume() {}
-    async close() { this.state = 'closed'; }
+    async resume() { resumes.push(this.state); }
+    async close() { this.become('closed'); }
   };
   Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { mediaDevices: {
     getUserMedia: () => new Promise((resolve, reject) => {
@@ -23,9 +31,9 @@ function fixture() {
       requests.push({ input, reject, resolve: () => resolve({ getTracks: () => [input], getAudioTracks: () => [input] }) });
     }),
   } } });
-  const ended = [];
-  const microphone = new Microphone({ track() {}, ended: stream => ended.push(stream) });
-  return { microphone, requests, output, sources, ended };
+  const ended = [], states = [];
+  const microphone = new Microphone({ track() {}, ended: stream => ended.push(stream), state: state => states.push(state) });
+  return { microphone, requests, output, sources, ended, states, resumes, page };
 }
 
 test('mute stops capture while the same session stream survives repeated unmute', async () => {
@@ -87,4 +95,38 @@ test('permission refusal can be retried and natural device loss reaches the page
   requests[1].input.dispatchEvent(new Event('ended'));
   assert.deepEqual(ended, [stream]);
   microphone.close();
+});
+
+test('capture opened on a suspended context waits for a gesture to resume audio', async () => {
+  const { microphone, requests, states, resumes, page } = fixture('suspended');
+  let opened = false;
+  const opening = microphone.open(() => true).then(() => { opened = true; });
+  requests[0].resolve();
+  await new Promise(resolve => setTimeout(resolve));
+  assert.equal(opened, false);
+  page.dispatchEvent(new Event('pointerdown'));
+  assert.equal(resumes.at(-1), 'suspended');
+  microphone.context.become('running');
+  await opening;
+  assert.deepEqual(states, ['running']);
+  microphone.close();
+});
+
+test('audio suspended mid-session is reported and resumed at once and on every gesture', async () => {
+  const { microphone, requests, states, resumes, page } = fixture();
+  const opening = microphone.open(() => true);
+  requests[0].resolve();
+  await opening;
+  microphone.context.become('interrupted');
+  assert.deepEqual(states, ['interrupted']);
+  assert.equal(resumes.length, 1);
+  page.dispatchEvent(new Event('keydown'));
+  page.dispatchEvent(new Event('pointerdown'));
+  assert.equal(resumes.length, 3);
+  microphone.context.become('running');
+  page.dispatchEvent(new Event('pointerdown'));
+  assert.equal(resumes.length, 3);
+  microphone.close();
+  page.dispatchEvent(new Event('pointerdown'));
+  assert.equal(resumes.length, 3);
 });

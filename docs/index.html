@@ -777,8 +777,10 @@ function waitIce(pc, attempt) {
     pc.addEventListener('icegatheringstatechange', onChange);
   });
 }
+const MICROPHONE_PAUSED = 'tap to let me hear you';
+let microphonePaused = false;
 function acquireMicrophone() {
-  microphone ??= new Microphone({ track: track => audioDiagnostics()?.track(track), ended: microphoneEnded });
+  microphone ??= new Microphone({ track: track => audioDiagnostics()?.track(track), ended: microphoneEnded, state: microphoneState });
   const current = microphone;
   return current.open(() => !microphoneMuted).then(stream => {
     if (microphone !== current) throw new Error('microphone released while opening');
@@ -791,6 +793,14 @@ function acquireMicrophone() {
     setStatus(unavailable.error.message, 'err');
     throw unavailable.error;
   });
+}
+function microphoneState(state) {
+  const paused = state !== 'running' && state !== 'closed';
+  if (paused === microphonePaused) return;
+  microphonePaused = paused;
+  recordSession('microphone-audio', state);
+  if (paused) setStatus(MICROPHONE_PAUSED, 'err');
+  else if ($('status').textContent === MICROPHONE_PAUSED) setStatus();
 }
 function microphoneEnded(stream) {
   if (microphone?.output.stream !== stream) return;

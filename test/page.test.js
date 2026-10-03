@@ -295,7 +295,7 @@ for (let index = 0; index < 10; index++) {
 `;
 
 async function dumpDom(url, args, budget) {
-  const chrome = await launchChromium({ args: ['--headless=new', '--no-sandbox', ...args] });
+  const chrome = await launchChromium({ args: ['--headless=new', '--no-sandbox', '--autoplay-policy=no-user-gesture-required', ...args] });
   try {
     return { stdout: await renderDom(chrome, url, { budget }), stderr: chrome.stderr };
   } finally {
@@ -348,7 +348,7 @@ async function runPage(testSetup = '', { scale = 1, size = '390,844', budget = 3
 
 async function driveLifecycle(testSetup, drive) {
   const { server, url } = await pageServer(testSetup);
-  const chrome = await launchChromium({ args: ['--headless=new', '--no-sandbox', '--disable-gpu'] });
+  const chrome = await launchChromium({ args: ['--headless=new', '--no-sandbox', '--disable-gpu', '--autoplay-policy=no-user-gesture-required'] });
   const { listen, closed } = chrome.devtools;
   let fail, expectingCrash = false;
   const failure = new Promise(resolve => { fail = resolve; });

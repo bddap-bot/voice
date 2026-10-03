@@ -1,15 +1,31 @@
 export class Microphone {
-  constructor({ track, ended }) {
+  constructor({ track, ended, state }) {
     this.context = new AudioContext();
     this.output = this.context.createMediaStreamDestination();
-    if (this.context.state === 'suspended') for (const type of ['pointerdown', 'keydown']) addEventListener(type, () => {
-      if (this.context.state === 'suspended') this.context.resume();
-    }, { once: true });
+    this.resume = () => {
+      if (this.context.state !== 'running' && this.context.state !== 'closed') this.context.resume().catch(() => {});
+    };
+    for (const type of ['pointerdown', 'keydown']) addEventListener(type, this.resume);
+    this.context.addEventListener('statechange', () => {
+      state(this.context.state);
+      this.resume();
+    });
     this.track = track;
     this.ended = ended;
   }
+  running() {
+    return new Promise(resolve => {
+      const settle = () => {
+        if (this.context.state !== 'running' && this.context.state !== 'closed') return;
+        this.context.removeEventListener('statechange', settle);
+        resolve();
+      };
+      this.context.addEventListener('statechange', settle);
+      settle();
+      this.resume();
+    });
+  }
   async open(capture) {
-    this.context.resume().catch(() => {});
     if (capture() && !this.opening) {
       const opening = this.opening = navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
         if (this.opening !== opening) {
@@ -32,6 +48,7 @@ export class Microphone {
       });
     }
     await this.opening;
+    await this.running();
     return this.output.stream;
   }
   release() {
@@ -42,6 +59,7 @@ export class Microphone {
     this.input = undefined;
   }
   close() {
+    for (const type of ['pointerdown', 'keydown']) removeEventListener(type, this.resume);
     this.release();
     this.output.stream.getTracks().forEach(track => track.stop());
     this.context.close();

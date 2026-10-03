@@ -3,6 +3,15 @@
   "rules": [
     {
       "paths": [
+        "vr/**"
+      ],
+      "tests": [
+        "nix-build vr/default.nix --no-out-link"
+      ],
+      "why": "the overlay host's build runs its unit tests (placement, page handshake) and wraps the runtime libraries SteamVR's client needs"
+    },
+    {
+      "paths": [
         "android/**"
       ],
       "tests": [

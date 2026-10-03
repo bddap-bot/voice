@@ -1,0 +1,17 @@
+{
+  "source": "builtin",
+  "applications": [
+    {
+      "app_key": "voice.puppet",
+      "launch_type": "binary",
+      "binary_path_linux": "@out@/bin/voice-vr",
+      "is_dashboard_overlay": true,
+      "strings": {
+        "en_us": {
+          "name": "Voice puppet",
+          "description": "The voice puppet, standing in the room"
+        }
+      }
+    }
+  ]
+}

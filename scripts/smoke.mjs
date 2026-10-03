@@ -88,7 +88,7 @@ async function makeServer() {
   } else {
     const { stdout } = await execute('voice-web', ['token']);
     token = stdout.trim();
-    index = index.replace('puppetRuntime = new PuppetRuntime($(\'puppet\'));', "puppetRuntime = new PuppetRuntime($('puppet')); globalThis.__smokeRuntime = puppetRuntime;");
+    index = index.replace('puppetRuntime = new PuppetRuntime($(\'puppet\'), undefined, vrHost?.view);', "puppetRuntime = new PuppetRuntime($('puppet'), undefined, vrHost?.view); globalThis.__smokeRuntime = puppetRuntime;");
   }
   if (deployed) return { url: 'https://bddap-bot.github.io/voice/', token, close() {} };
   index = index.replace('</head>', `<script>localStorage.setItem('voice.token', ${JSON.stringify(token)});</script></head>`);

@@ -1,0 +1,117 @@
+mod openvr;
+mod page;
+mod placement;
+mod vulkan;
+
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use serde_json::json;
+
+use openvr::{Runtime, Signal};
+use page::Page;
+use placement::{desk_spot, Anchor, Interaction, Pose};
+
+const EYE: u32 = 768;
+const QUAD: f32 = 0.4;
+const HEIGHT: f32 = 0.3;
+const MARGIN: f32 = 0.03;
+const PAGE: &str = "https://bddap-bot.github.io/voice/";
+const HEAD_AHEAD: f32 = 0.04;
+
+fn directory(variable: &str, fallback: &str) -> PathBuf {
+    std::env::var_os(variable).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").expect("HOME")).join(fallback)).join("voice-vr")
+}
+
+fn load(path: &PathBuf) -> Option<Anchor> {
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+fn save(path: &PathBuf, anchor: &Anchor) {
+    let temporary = path.with_extension("tmp");
+    if let Err(error) = std::fs::write(&temporary, serde_json::to_vec(anchor).unwrap()).and_then(|()| std::fs::rename(&temporary, path)) {
+        eprintln!("placement not saved: {error}");
+    }
+}
+
+fn run() -> Result<(), String> {
+    let config = directory("XDG_CONFIG_HOME", ".config");
+    let state = directory("XDG_STATE_HOME", ".local/state");
+    std::fs::create_dir_all(&state).map_err(|error| format!("{}: {error}", state.display()))?;
+    let token_file = config.join("token");
+    let token = std::fs::read_to_string(&token_file).map_err(|error| format!("{}: {error}", token_file.display()))?.trim().to_owned();
+    let page_address = std::env::var("VOICE_VR_PAGE").unwrap_or_else(|_| PAGE.to_owned());
+    let browser = std::env::var("VOICE_VR_BROWSER").unwrap_or_else(|_| "chromium".to_owned());
+    let placement_file = state.join("placement.json");
+
+    let runtime = Runtime::init()?;
+    let mut uploader = vulkan::Uploader::new(&runtime, EYE * 2, EYE)?;
+    let mut overlay = runtime.create_overlay("voice.puppet", "Puppet", QUAD)?;
+    let hello = json!({ "type": "hello", "token": token, "eye": [EYE, EYE], "quad": [QUAD, QUAD], "height": HEIGHT, "margin": MARGIN });
+    let mut page = Page::open(&browser, &page_address, &state.join("browser"), hello).map_err(|error| format!("{browser}: {error}"))?;
+    let eye_offsets = runtime.eye_offsets();
+    let mut interaction = Interaction::new([0.0, -QUAD / 2.0 + MARGIN + HEIGHT * 0.55, 0.0]);
+    let mut anchor = load(&placement_file);
+    let started = Instant::now();
+
+    loop {
+        if let Some(Signal::Quit) = runtime.poll() {
+            return Ok(());
+        }
+        if let Some(status) = page.browser_exited() {
+            return Err(format!("browser exited: {status}"));
+        }
+        let poses = runtime.poses(0.0);
+        let Some(head) = runtime.head(&poses) else {
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        };
+        let hands = runtime.hands(&poses);
+        let current = *anchor.get_or_insert_with(|| Anchor::World(desk_spot(&head)));
+        let hand_pose = |which| hands.iter().find(|hand| hand.hand == which).map(|hand| hand.pose);
+        let placed = match (interaction.carrying(), current) {
+            (Some((hand, offset)), _) => hand_pose(hand).map(|pose| pose.then(&offset)),
+            (None, Anchor::World(pose)) => Some(pose),
+            (None, Anchor::Wrist { hand, offset }) => hand_pose(hand).map(|pose| pose.then(&offset)),
+        };
+        match (interaction.carrying(), current) {
+            (Some(_), _) | (None, Anchor::World(_)) => {
+                if let Some(pose) = placed {
+                    overlay.place_world(&pose);
+                }
+            }
+            (None, Anchor::Wrist { hand, offset }) => {
+                if let Some(index) = runtime.hand_index(hand) {
+                    overlay.place_on(index, &offset);
+                }
+            }
+        }
+        if let Some(placed) = placed {
+            match interaction.step(started.elapsed().as_secs_f32(), &current, &placed, &hands, &head) {
+                Some(placement::Event::Tap) => page.send(json!({ "type": "tap" })),
+                Some(placement::Event::Moved(moved)) => {
+                    anchor = Some(moved);
+                    save(&placement_file, &moved);
+                }
+                None => {}
+            }
+            let predicted = runtime.head(&runtime.poses(HEAD_AHEAD)).unwrap_or(head);
+            let local = placed.inverse();
+            let eyes = eye_offsets.map(|eye: Pose| local.apply(predicted.then(&eye).t));
+            page.pose(eyes, local.apply(predicted.t));
+        }
+        if let Some(frame) = page.latest_frame() {
+            let mut texture = uploader.upload(&frame)?;
+            overlay.submit(&mut texture)?;
+            page.send(json!({ "type": "ready" }));
+        }
+        std::thread::sleep(Duration::from_millis(11));
+    }
+}
+
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("voice-vr: {error}");
+        std::process::exit(1);
+    }
+}

@@ -104,11 +104,12 @@ test('capture opened on a suspended context waits for a gesture to resume audio'
   requests[0].resolve();
   await new Promise(resolve => setTimeout(resolve));
   assert.equal(opened, false);
+  assert.deepEqual(states, ['suspended']);
   page.dispatchEvent(new Event('pointerdown'));
   assert.equal(resumes.at(-1), 'suspended');
   microphone.context.become('running');
   await opening;
-  assert.deepEqual(states, ['running']);
+  assert.deepEqual(states, ['suspended', 'running']);
   microphone.close();
 });
 

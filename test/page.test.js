@@ -2078,6 +2078,32 @@ for (const [phase, enter, status] of [
   assert.deepEqual(result, { lost: { status, pressed: 'false', events: 1, opens: 1, closed: 1, replaced: true, running: true, hears: 'live' }, sends: 'live', errors: [] });
 });
 
+test('microphone audio that has never run is reported and shown, and a tapped conversation waits for it to start', async () => {
+  const result = await runWakePage(`
+    const status = () => document.querySelector('#status').textContent;
+    const audio = () => sessionEvents('microphone-audio').map((event) => event.detail);
+    document.querySelector('#puppet').click();
+    await until(() => status() === 'tap to let me hear you');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const held = { status: status(), events: audio(), offers: count('offer') };
+    globalThis.audioHeld = false;
+    heldAudio.dispatchEvent(new Event('statechange'));
+    await until(() => count('offer') > 0 && audio().length > 1);
+    return { held, started: { status: status(), events: audio() }, errors: fleetLines };
+  `, { setup: `
+    globalThis.skipTap = true;
+    globalThis.audioHeld = true;
+    const running = Object.getOwnPropertyDescriptor(BaseAudioContext.prototype, 'state').get;
+    Object.defineProperty(BaseAudioContext.prototype, 'state', { configurable: true, get() { return globalThis.audioHeld && this === globalThis.heldAudio ? 'suspended' : running.call(this); } });
+    const held = AudioContext.prototype.createMediaStreamDestination;
+    AudioContext.prototype.createMediaStreamDestination = function () {
+      globalThis.heldAudio ??= this;
+      return held.call(this);
+    };
+  ` });
+  assert.deepEqual(result, { held: { status: 'tap to let me hear you', events: ['suspended'], offers: 0 }, started: { status: '', events: ['suspended', 'running'] }, errors: [] });
+});
+
 test('a microphone that cannot reopen after it ends shows on the status line as a session event and no page error, and comes back on the next device change', async () => {
   const result = await runWakePage(`
     await sleepNow();

@@ -799,11 +799,11 @@ function acquireMicrophone() {
 }
 function microphoneState(state) {
   const paused = state !== 'running' && state !== 'closed';
+  if (paused) setStatus(MICROPHONE_PAUSED, 'err');
+  else if ($('status').textContent === MICROPHONE_PAUSED) setStatus();
   if (paused === microphonePaused) return;
   microphonePaused = paused;
   recordSession('microphone-audio', state);
-  if (paused) setStatus(MICROPHONE_PAUSED, 'err');
-  else if ($('status').textContent === MICROPHONE_PAUSED) setStatus();
 }
 function microphoneEnded(stream) {
   if (microphone?.output.stream !== stream) return;

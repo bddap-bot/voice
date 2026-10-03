@@ -7,11 +7,12 @@ export class Microphone {
     };
     for (const type of ['pointerdown', 'keydown']) addEventListener(type, this.resume);
     this.context.addEventListener('statechange', () => {
-      state(this.context.state);
+      this.state(this.context.state);
       this.resume();
     });
     this.track = track;
     this.ended = ended;
+    this.state = state;
   }
   running() {
     return new Promise(resolve => {
@@ -22,6 +23,7 @@ export class Microphone {
       };
       this.context.addEventListener('statechange', settle);
       settle();
+      if (this.context.state !== 'running') this.state(this.context.state);
       this.resume();
     });
   }

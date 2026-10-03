@@ -2,6 +2,11 @@ export class Microphone {
   constructor({ track, ended, state }) {
     this.context = new AudioContext();
     this.output = this.context.createMediaStreamDestination();
+    // An unconnected destination emits no frames, and Live's timeline (its replies too) advances only on input frames.
+    this.silence = this.context.createConstantSource();
+    this.silence.offset.value = 0;
+    this.silence.connect(this.output);
+    this.silence.start();
     this.resume = () => {
       if (this.context.state !== 'running' && this.context.state !== 'closed') this.context.resume().catch(() => {});
     };

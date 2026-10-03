@@ -1995,6 +1995,64 @@ test('muting the microphone persists while asleep and into the next session', as
   });
 });
 
+
+test('a muted microphone still sends silent frames, so Live keeps speaking a pushed hub reply', async () => {
+  const timelineLive = `
+const level = (frame) => { const samples = new Float32Array(frame.numberOfFrames); frame.copyTo(samples, { planeIndex: 0 }); return samples.reduce((peak, sample) => Math.max(peak, Math.abs(sample)), 0); };
+globalThis.measure = (track, sink) => { const reader = new MediaStreamTrackProcessor({ track }).readable.getReader(); (async () => { for (;;) { const { value, done } = await reader.read(); if (done) return; sink.frames++; sink.peak = Math.max(sink.peak, level(value)); value.close(); } })(); };
+globalThis.sent = { frames: 0, peak: 0 };
+navigator.mediaDevices.getUserMedia = async () => {
+  const context = new AudioContext(), tone = context.createOscillator(), out = context.createMediaStreamDestination();
+  tone.connect(out);
+  tone.start();
+  globalThis.testMicrophoneTrack = out.stream.getAudioTracks()[0];
+  return out.stream;
+};
+const FakeLive = globalThis.RTCPeerConnection;
+globalThis.RTCPeerConnection = class extends FakeLive {
+  addTrack(track) {
+    const output = new MediaStreamTrackGenerator({ kind: 'audio' }), writer = output.writable.getWriter();
+    let spoken = 0, owed = 0, timestamp = 0;
+    const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
+    (async () => {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        sent.frames++;
+        sent.peak = Math.max(sent.peak, level(value));
+        const { numberOfFrames, sampleRate } = value;
+        value.close();
+        const replies = sentLiveEvents.filter((event) => event.type === 'session.commentary.append' && event.event_id.startsWith('hub_')).length;
+        if (replies > spoken) { owed += 50 * (replies - spoken); spoken = replies; }
+        const data = new Float32Array(numberOfFrames).map((_, index) => owed ? 0.5 * Math.sin(index / 4) : 0);
+        if (owed) owed--;
+        writer.write(new AudioData({ format: 'f32-planar', sampleRate, numberOfFrames, numberOfChannels: 1, timestamp, data }));
+        timestamp += numberOfFrames * 1e6 / sampleRate;
+      }
+    })();
+    queueMicrotask(() => this.ontrack?.({ track: output, streams: [new MediaStream([output])] }));
+    return super.addTrack(track);
+  }
+};
+`;
+  const result = await driveLifecycle(timelineLive, async ({ evaluate, until }) => {
+    await until(`document.querySelector('#puppet').getAttribute('aria-pressed') === 'true' && document.querySelector('#speaker').srcObject && sent.frames > 20`);
+    return evaluate(`(async () => {
+      const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const heard = { frames: 0, peak: 0 };
+      measure(document.querySelector('#speaker').srcObject.getAudioTracks()[0], heard);
+      const open = sent.peak;
+      document.querySelector('#mic-mute').click();
+      await pause(300);
+      Object.assign(sent, { frames: 0, peak: 0 });
+      heard.peak = 0;
+      replyFromHub('pushed', 'pushed', ['The beacon is green.']);
+      await pause(1000);
+      return { open: open > 0.1, muted: document.querySelector('#mic-mute').getAttribute('aria-pressed'), capture: testMicrophoneTrack.readyState, sentFrames: sent.frames > 50, sentPeak: sent.peak, spoken: heard.peak > 0.1, live: document.querySelector('#puppet').getAttribute('aria-pressed') };
+    })()`);
+  });
+  assert.deepEqual(result, { open: true, muted: 'true', capture: 'ended', sentFrames: true, sentPeak: 0, spoken: true, live: 'true' });
+});
 test('a muted microphone runs no wake spotter, not even after a session ends, and unmuting starts one that hears the phrase', async () => {
   const result = await runWakePage(`
     await sleepNow();

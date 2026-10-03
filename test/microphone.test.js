@@ -17,6 +17,7 @@ function fixture(initial = 'running') {
       this.dispatchEvent(new Event('statechange'));
     }
     createMediaStreamDestination() { return { stream: { getTracks: () => [output] } }; }
+    createConstantSource() { return { offset: {}, connect() {}, start() {} }; }
     createMediaStreamSource(stream) {
       const source = { stream, connected: false, connect() { this.connected = true; }, disconnect() { this.connected = false; } };
       sources.push(source);

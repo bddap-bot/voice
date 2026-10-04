@@ -509,6 +509,7 @@ async function listen(mine) {
       }
       else if (verb === 'wake-model') wakeModelWaiter?.resolve(JSON.parse(body));
       else if (verb === 'wake-model-none') wakeModelWaiter?.resolve(null);
+      else if (verb === 'wake-model-error') wakeModelWaiter?.reject(new Error(JSON.parse(body).message));
       else if (verb === 'hub-error') {
         const failure = JSON.parse(body);
         hubFailed(failure.id, failure.message);

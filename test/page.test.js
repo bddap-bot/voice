@@ -125,7 +125,7 @@ export async function send_only(bytes) {
     const id = JSON.parse(frame.slice(frame.indexOf('\\n') + 1)).id;
     deliver(enc.encode('puppet-selected\\n' + JSON.stringify({ id })));
   }
-  else if (frame === 'wake-model' && globalThis.backendWakeModel === 'unreadable') deliver(enc.encode('error\\nwake model unreadable'));
+  else if (frame === 'wake-model' && globalThis.backendWakeModel === 'unreadable') deliver(enc.encode('wake-model-error\\n{"message":"wake model unreadable"}'));
   else if (frame === 'wake-model' && globalThis.backendWakeModel !== 'unanswered') deliver(enc.encode(globalThis.backendWakeModel === null ? 'wake-model-none' : 'wake-model\\n' + JSON.stringify(globalThis.backendWakeModel ?? testWakeModel)));
   else if (frame.startsWith('offer\\n')) {
     const offer = JSON.parse(frame.slice(6));

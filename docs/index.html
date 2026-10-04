@@ -27,7 +27,10 @@
   .display, .ledger { position: relative; z-index: 3; min-width: 0; min-height: 0; padding: 18px; overflow: hidden; display: flex; flex-direction: column; background: linear-gradient(145deg, #201e22ee, #111217ee); border: 1px solid #6d5c49; border-radius: 4px; box-shadow: 0 18px 42px #0008, inset 0 0 35px #8a684111; }
   .display { grid-area: display; }
   .ledger { grid-area: ledger; }
-  .display.full, .ledger.full { position: fixed; inset: var(--pad); z-index: 20; background: #16151a; cursor: zoom-out; }
+  .display.full, .ledger.full { position: fixed; inset: var(--pad); z-index: 20; background: #16151a; }
+  .display.full { left: calc(var(--pad) + var(--grip)); } .ledger.full { right: calc(var(--pad) + var(--grip)); }
+  .grip.full { position: fixed; z-index: 21; top: var(--pad); bottom: var(--pad); width: var(--grip); }
+  .grip.full[data-pane="display"] { left: var(--pad); } .grip.full[data-pane="ledger"] { right: var(--pad); }
   body:has(.full) header { visibility: hidden; }
   .display h2, .ledger h2 { margin: 0 0 12px; font-size: 14px; text-transform: uppercase; letter-spacing: .08em; color: #a5a5aa; }
   .grip { position: relative; z-index: 5; display: flex; align-items: center; justify-content: center; cursor: col-resize; touch-action: none; user-select: none; outline: none; }
@@ -88,6 +91,8 @@
     main { min-height: 0; flex: 1; grid: "stage" minmax(120px, 1fr) "display-grip" var(--grip) "display" var(--display-row) "ledger-grip" var(--grip) "ledger" var(--ledger-row) "dock" 76px / minmax(0, 1fr); }
     #puppet-credit { top: auto; bottom: 0; font-size: 10px; }
     .grip { cursor: row-resize; }
+    .display.full, .ledger.full { inset: calc(var(--pad) + var(--grip)) var(--pad) var(--pad); }
+    .grip.full { inset: var(--pad) var(--pad) auto; width: auto; height: var(--grip); }
     .grip::before { top: 50%; bottom: auto; left: 10%; right: 10%; width: auto; height: 1px; background: linear-gradient(90deg, transparent, #6d5c4999, transparent); }
     .grip::after { width: 64px; height: 10px; background-size: 9px 10px; background-repeat: repeat-x; }
     .grip:hover::after, .grip:focus-visible::after, .grip.dragging::after { width: 96px; height: 10px; }
@@ -293,13 +298,18 @@ const FULL_PULL = 64;
 let fullPane;
 function setFull(pane) {
   fullPane = pane;
-  for (const grip of grips) $(grip.dataset.pane).classList.toggle('full', grip.dataset.pane === pane);
+  for (const grip of grips) for (const element of [grip, $(grip.dataset.pane)]) element.classList.toggle('full', grip.dataset.pane === pane);
+}
+function syncFullHistory() {
+  if (fullPane && !history.state?.full) history.pushState({ full: true }, '');
+  else if (!fullPane && history.state?.full) {
+    history.replaceState(null, '');
+    history.back();
+  }
 }
 function leaveFull() {
   setFull();
-  if (!history.state?.full) return;
-  history.replaceState(null, '');
-  history.back();
+  syncFullHistory();
 }
 function sizePane(grip, size) {
   paneSizes[paneKey(grip)] = Math.round(size);
@@ -312,7 +322,7 @@ function savePanes(grip) {
     applyPanes();
   }
   localStorage.setItem(PANES_KEY, JSON.stringify(paneSizes));
-  if (fullPane && !history.state?.full) history.pushState({ full: true }, '');
+  syncFullHistory();
 }
 applyPanes();
 if (history.state?.full) history.replaceState(null, '');
@@ -321,6 +331,7 @@ stacked.addEventListener('change', applyPanes);
 for (const grip of grips) {
   grip.addEventListener('pointerdown', (event) => {
     if (event.button !== 0) return;
+    event.preventDefault();
     const axis = stacked.matches ? 'clientY' : 'clientX';
     const start = paneSize(grip), from = event[axis], sign = growth(grip);
     const drag = new AbortController();
@@ -349,7 +360,6 @@ for (const grip of grips) {
     savePanes(grip);
   });
   grip.addEventListener('dblclick', () => { delete paneSizes[paneKey(grip)]; leaveFull(); applyPanes(); savePanes(); });
-  $(grip.dataset.pane).addEventListener('click', (event) => { if (fullPane === grip.dataset.pane && getSelection().isCollapsed && !event.target.closest('a, .chart')) leaveFull(); });
 }
 function savedState(saved) {
   $('entry').classList.toggle('hidden', saved);

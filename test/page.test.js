@@ -863,31 +863,45 @@ window.addEventListener('test-ready', () => {
   assert.deepEqual(JSON.parse(encoded ?? 'null'), { ledger: { restored: 130, grown: 154, saved: 154 }, display: { restored: 140, grown: 164, saved: 164 }, stored: '{}', orientation: axis === 'width' ? 'vertical' : 'horizontal' }, stderr);
 });
 
-for (const [width, height] of [[1440, 900], [390, 844]]) test(`a full display panel holding a hub image leaves by a tap on the image, back or Escape, and not by a link tap at ${width}x${height}`, async () => {
+for (const [width, height] of [[1440, 900], [390, 844]]) test(`a full display panel keeps its grip, selects text by drag or double-click, survives taps and touches, and leaves by dragging the grip back, back or Escape at ${width}x${height}`, async () => {
   const result = await driveLifecycle(`window.addEventListener('test-ready', () => { document.body.dataset.ready = 'yes'; });`, async ({ page, evaluate, until }) => {
     await page('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
     await until(`document.body?.dataset.ready === 'yes'`);
-    await evaluate(`replyFromHub('unknown', 'display', [], 1, { display: { markdown: 'See [the source](https://example.test/source)', image: { mime: 'image/png' } } }, Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAQAAAADCAIAAAA7ljmRAAAAEElEQVR4nGM4kGAARww4OQA6Fg/BwfqvjwAAAABJRU5ErkJggg=='), (c) => c.charCodeAt(0)))`);
+    await evaluate(`replyFromHub('unknown', 'display', [], 1, { display: { markdown: 'Pick these words\\n\\n| a | b |\\n|---|---|\\n| one | two |', image: { mime: 'image/png' } } }, Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAQAAAADCAIAAAA7ljmRAAAAEElEQVR4nGM4kGAARww4OQA6Fg/BwfqvjwAAAABJRU5ErkJggg=='), (c) => c.charCodeAt(0)))`);
     await until(`document.querySelector('#display img')?.naturalWidth === 4`);
     await until(`document.querySelector('.grip').getAttribute('aria-orientation') === '${width < 720 ? 'horizontal' : 'vertical'}'`);
-    await evaluate(`document.querySelector('.display-item a').addEventListener('click', (event) => event.preventDefault())`);
+    const grip = '.grip[data-pane="display"]';
     const full = () => evaluate(`document.querySelector('#display').classList.contains('full')`);
-    const center = (selector) => evaluate(`(() => { const box = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return { x: box.left + box.width / 2, y: box.top + box.height / 2 }; })()`);
-    const mouse = (type, { x, y }) => page('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons: type === 'mouseReleased' ? 0 : 1, clickCount: 1 });
+    const box = (selector) => evaluate(`(() => { const box = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, x: box.left + box.width / 2, y: box.top + box.height / 2 }; })()`);
+    const mouse = (type, { x, y }, clickCount = 1) => page('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons: type === 'mouseReleased' ? 0 : 1, clickCount });
+    const drag = async (from, to) => {
+      await mouse('mousePressed', from);
+      for (let step = 1; step <= 8; step++) await mouse('mouseMoved', { x: from.x + (to.x - from.x) * step / 8, y: from.y + (to.y - from.y) * step / 8 });
+      await mouse('mouseReleased', to);
+    };
     const enter = async () => {
       for (let pull = 0; pull < 3 && !await full(); pull++) {
-        const from = await center('.grip[data-pane="display"]');
-        const to = width < 720 ? { x: from.x, y: 0 } : { x: 0, y: from.y };
-        await mouse('mousePressed', from);
-        for (let step = 1; step <= 8; step++) await mouse('mouseMoved', { x: from.x + (to.x - from.x) * step / 8, y: from.y + (to.y - from.y) * step / 8 });
-        await mouse('mouseReleased', to);
+        const from = await box(grip);
+        await drag(from, width < 720 ? { x: from.x, y: 0 } : { x: 0, y: from.y });
       }
       return full();
     };
-    const tap = async (selector) => {
-      const point = await center(selector);
-      await mouse('mousePressed', point);
-      await mouse('mouseReleased', point);
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 300));
+    const selected = () => evaluate('getSelection().toString()');
+    const dragSelect = async () => {
+      await evaluate('getSelection().removeAllRanges()');
+      const words = await box('.display-item p');
+      await drag({ x: words.left + 1, y: words.y }, { x: words.right - 1, y: words.y });
+      await settle();
+      return [await selected(), await full()];
+    };
+    const doubleClick = async () => {
+      await evaluate('getSelection().removeAllRanges()');
+      const words = await box('.display-item p');
+      const point = { x: words.left + 8, y: words.y };
+      for (const count of [1, 2]) { await mouse('mousePressed', point, count); await mouse('mouseReleased', point, count); }
+      await settle();
+      return [await selected(), await full()];
     };
     const left = async () => {
       for (const end = Date.now() + 2000; Date.now() < end; await new Promise((resolve) => setTimeout(resolve, 20))) if (!await full()) return true;
@@ -895,17 +909,38 @@ for (const [width, height] of [[1440, 900], [390, 844]]) test(`a full display pa
     };
     const depth = await evaluate('history.length');
     const outcome = {};
-    outcome.tapEntered = await enter();
-    await tap('#display img');
-    outcome.tapLeft = await left();
-    outcome.linkEntered = await enter();
-    await tap('.display-item a');
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    outcome.linkStays = await full();
+    outcome.normalDrag = await dragSelect();
+    outcome.normalDoubleClick = await doubleClick();
+    outcome.entered = await enter();
+    const [handle, pane] = [await box(grip), await box('#display')];
+    outcome.gripShown = await evaluate(`document.elementFromPoint(${handle.x}, ${handle.y})?.closest('.grip') === document.querySelector(${JSON.stringify(grip)})`)
+      && handle.left >= 0 && handle.top >= 0 && handle.right <= width && handle.bottom <= height
+      && (width < 720 ? handle.bottom <= pane.top : handle.right <= pane.left);
+    const image = await box('#display img');
+    await mouse('mousePressed', image);
+    await mouse('mouseReleased', image);
+    await settle();
+    outcome.tapStays = await full();
+    outcome.fullDrag = await dragSelect();
+    outcome.fullDoubleClick = await doubleClick();
+    await page('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
+    const words = await box('.display-item p');
+    await page('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: words.left + 8, y: words.y }] });
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    await page('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await settle();
+    await page('Emulation.setTouchEmulationEnabled', { enabled: false });
+    outcome.touchStays = await full();
+    const back = await box(grip);
+    await drag(back, { x: width < 720 ? back.x : width / 2, y: width < 720 ? height / 2 : back.y });
+    outcome.dragLeft = await left();
+    await settle();
+    outcome.dragState = await evaluate('JSON.stringify(history.state)');
+    outcome.backEntered = await enter();
     await evaluate('history.back()');
     outcome.backLeft = await left();
     await evaluate('history.forward()');
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await settle();
     outcome.forwardState = await evaluate(`JSON.stringify([document.querySelector('#display').classList.contains('full'), history.state])`);
     outcome.escapeEntered = await enter();
     await page('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
@@ -915,7 +950,8 @@ for (const [width, height] of [[1440, 900], [390, 844]]) test(`a full display pa
     outcome.stillFull = await full();
     return outcome;
   });
-  assert.deepEqual(result, { tapEntered: true, tapLeft: true, linkEntered: true, linkStays: true, backLeft: true, forwardState: '[false,null]', escapeEntered: true, escapeLeft: true, historyGrew: 2, stillFull: false });
+  const words = ['Pick these words', false];
+  assert.deepEqual(result, { normalDrag: words, normalDoubleClick: ['Pick', false], entered: true, gripShown: true, tapStays: true, fullDrag: [words[0], true], fullDoubleClick: ['Pick', true], touchStays: true, dragLeft: true, dragState: 'null', backEntered: true, backLeft: true, forwardState: '[false,null]', escapeEntered: true, escapeLeft: true, historyGrew: 2, stillFull: false });
 });
 
 for (const stored of ['{', 'null', '{"ledger-w":"wide","display-w":99999}']) test(`stored pane sizes ${stored} neither break the page nor escape the pane limits`, async () => {

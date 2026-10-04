@@ -360,10 +360,12 @@ async function driveLifecycle(testSetup, drive) {
   const failure = new Promise(resolve => { fail = resolve; });
   closed.then(() => fail(new Error(`Chromium's browser process ended: ${chrome.stderr}`)));
   const call = (...args) => Promise.race([chrome.devtools.call(...args), failure.then(error => { throw error; })]);
-  const events = [];
+  const events = [], contentLoaded = new Set();
   const stop = listen(({ method, params }) => {
-    if (method === 'Page.lifecycleEvent') events.push(`lifecycle:${params.name}`);
-    else if (method === 'Page.frameNavigated' && !params.frame.parentId) events.push(`navigated:${params.type ?? 'Navigation'}`);
+    if (method === 'Page.lifecycleEvent') {
+      events.push(`lifecycle:${params.name}`);
+      if (params.name === 'DOMContentLoaded') contentLoaded.add(params.loaderId);
+    } else if (method === 'Page.frameNavigated' && !params.frame.parentId) events.push(`navigated:${params.type ?? 'Navigation'}`);
     else if (method === 'Inspector.targetCrashed') {
       events.push('crashed');
       if (!expectingCrash) fail(new Error(`Chromium renderer crashed: ${chrome.stderr}`));
@@ -393,7 +395,8 @@ async function driveLifecycle(testSetup, drive) {
       try { await work(); await event('crashed'); }
       finally { expectingCrash = false; }
     };
-    await page('Page.navigate', { url });
+    const { loaderId } = await page('Page.navigate', { url });
+    await poll(() => contentLoaded.has(loaderId));
     return await drive({ call, page, evaluate, until, event, events, targetId, expectCrash });
   } finally {
     stop();
@@ -2115,7 +2118,8 @@ test('muting the microphone persists while asleep and into the next session', as
 test('a muted microphone still sends silent frames, so Live keeps speaking a pushed hub reply', async () => {
   const timelineLive = `
 const level = (frame) => { const samples = new Float32Array(frame.numberOfFrames); frame.copyTo(samples, { planeIndex: 0 }); return samples.reduce((peak, sample) => Math.max(peak, Math.abs(sample)), 0); };
-globalThis.measure = (track, sink) => { const reader = new MediaStreamTrackProcessor({ track }).readable.getReader(); (async () => { for (;;) { const { value, done } = await reader.read(); if (done) return; sink.frames++; sink.peak = Math.max(sink.peak, level(value)); value.close(); } })(); };
+// The default buffer keeps 10 frames and drops older ones, so a reader starved under load would miss a burst.
+globalThis.measure = (track, sink) => { const reader = new MediaStreamTrackProcessor({ track, maxBufferSize: 10000 }).readable.getReader(); (async () => { for (;;) { const { value, done } = await reader.read(); if (done) return; sink.frames++; sink.last = level(value); sink.peak = Math.max(sink.peak, sink.last); value.close(); } })(); };
 globalThis.sent = { frames: 0, peak: 0 };
 navigator.mediaDevices.getUserMedia = async () => {
   const context = new AudioContext(), tone = context.createOscillator(), out = context.createMediaStreamDestination();
@@ -2127,44 +2131,55 @@ navigator.mediaDevices.getUserMedia = async () => {
 const FakeLive = globalThis.RTCPeerConnection;
 globalThis.RTCPeerConnection = class extends FakeLive {
   addTrack(track) {
-    const output = new MediaStreamTrackGenerator({ kind: 'audio' }), writer = output.writable.getWriter();
-    let spoken = 0, owed = 0, timestamp = 0;
+    // Speech plays out on an audio clock, as WebRTC's jitter buffer would: the page's MediaStreamSource drops audio written in faster-than-real-time bursts.
+    const voice = new AudioContext(), output = voice.createMediaStreamDestination();
+    let spoken = 0, owed = 0, playout = 0;
+    globalThis.sentTrack = track;
+    measure(track, sent);
     const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
     (async () => {
       for (;;) {
         const { value, done } = await reader.read();
         if (done) return;
-        sent.frames++;
-        sent.peak = Math.max(sent.peak, level(value));
         const { numberOfFrames, sampleRate } = value;
         value.close();
         const replies = sentLiveEvents.filter((event) => event.type === 'session.commentary.append' && event.event_id.startsWith('hub_')).length;
         if (replies > spoken) { owed += 50 * (replies - spoken); spoken = replies; }
-        const data = new Float32Array(numberOfFrames).map((_, index) => owed ? 0.5 * Math.sin(index / 4) : 0);
-        if (owed) owed--;
-        writer.write(new AudioData({ format: 'f32-planar', sampleRate, numberOfFrames, numberOfChannels: 1, timestamp, data }));
-        timestamp += numberOfFrames * 1e6 / sampleRate;
+        if (!owed) continue;
+        owed--;
+        const speech = voice.createBufferSource();
+        speech.buffer = new AudioBuffer({ length: numberOfFrames, sampleRate, numberOfChannels: 1 });
+        speech.buffer.copyToChannel(new Float32Array(numberOfFrames).map((_, index) => 0.5 * Math.sin(index / 4)), 0);
+        speech.connect(output);
+        playout = Math.max(playout, voice.currentTime);
+        speech.start(playout);
+        playout += speech.buffer.duration;
       }
     })();
-    queueMicrotask(() => this.ontrack?.({ track: output, streams: [new MediaStream([output])] }));
+    queueMicrotask(() => this.ontrack?.({ track: output.stream.getAudioTracks()[0], streams: [output.stream] }));
     return super.addTrack(track);
   }
 };
 `;
   const result = await driveLifecycle(timelineLive, async ({ evaluate, until }) => {
-    await until(`document.querySelector('#puppet').getAttribute('aria-pressed') === 'true' && document.querySelector('#speaker').srcObject && sent.frames > 20`);
+    await until(`document.querySelector('#puppet').getAttribute('aria-pressed') === 'true' && document.querySelector('#speaker').srcObject`);
     return evaluate(`(async () => {
-      const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      // Bounded because these waits are the asserted outcomes: a regression should fail the assertion, not hang the run.
+      const waitFor = async (done) => { for (const deadline = Date.now() + 60000; !done() && Date.now() < deadline;) await new Promise((resolve) => setTimeout(resolve, 20)); };
       const heard = { frames: 0, peak: 0 };
       measure(document.querySelector('#speaker').srcObject.getAudioTracks()[0], heard);
+      await waitFor(() => sent.peak > 0.1);
       const open = sent.peak;
       document.querySelector('#mic-mute').click();
-      await pause(300);
-      Object.assign(sent, { frames: 0, peak: 0 });
+      // Tone frames queued before the mute never reach a processor made after it, and any still rendering arrive before its first silent frame.
+      const muted = { frames: 0, peak: 0 };
+      measure(sentTrack, muted);
+      await waitFor(() => muted.last === 0);
+      Object.assign(muted, { frames: 0, peak: 0 });
       heard.peak = 0;
       replyFromHub('pushed', 'pushed', ['The beacon is green.']);
-      await pause(1000);
-      return { open: open > 0.1, muted: document.querySelector('#mic-mute').getAttribute('aria-pressed'), capture: testMicrophoneTrack.readyState, sentFrames: sent.frames > 50, sentPeak: sent.peak, spoken: heard.peak > 0.1, live: document.querySelector('#puppet').getAttribute('aria-pressed') };
+      await waitFor(() => muted.frames > 50 && heard.peak > 0.1);
+      return { open: open > 0.1, muted: document.querySelector('#mic-mute').getAttribute('aria-pressed'), capture: testMicrophoneTrack.readyState, sentFrames: muted.frames > 50, sentPeak: muted.peak, spoken: heard.peak > 0.1, live: document.querySelector('#puppet').getAttribute('aria-pressed') };
     })()`);
   });
   assert.deepEqual(result, { open: true, muted: 'true', capture: 'ended', sentFrames: true, sentPeak: 0, spoken: true, live: 'true' });

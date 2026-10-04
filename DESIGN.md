@@ -6,7 +6,7 @@ Above 720 CSS pixels wide, and on any screen 540 CSS pixels tall or less, the st
 
 In portrait at 720 CSS pixels wide or below, the stage stacks: status line, puppet, display, delegation log, and a dock row for the controls card. A grip above each panel resizes its height, down to 80 CSS pixels and up until the puppet row is 120 CSS pixels tall. Panel sizes are kept per layout in local storage.
 
-Full screen is the top of the same resize: pulling a grip past the panel's largest size makes the panel cover the page, with the minimized card still in front of it. Escape, the shrink arrow, or dragging back before letting go returns it to its size; the status line hides while a panel is full. Full screen is not saved.
+Full screen is the top of the same resize: pulling a grip past the panel's largest size makes the panel cover the page, with the minimized card still in front of it. A tap on the full panel outside a link, Escape, back, the shrink arrow, or dragging back before letting go returns it to its size; the status line hides while a panel is full. Full screen is not saved.
 
 All controls live on one card. Minimized, it shows only Mute mic and the expand button. Expanded, it groups Microphone, Appearance, Send to the hub, and Device: two columns on wide screens and a one-column sheet on phones, every button at least 44 CSS pixels tall. Before a token is saved, the card opens on its own to the token entry.
 

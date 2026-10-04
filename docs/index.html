@@ -27,7 +27,7 @@
   .display, .ledger { position: relative; z-index: 3; min-width: 0; min-height: 0; padding: 18px; overflow: hidden; display: flex; flex-direction: column; background: linear-gradient(145deg, #201e22ee, #111217ee); border: 1px solid #6d5c49; border-radius: 4px; box-shadow: 0 18px 42px #0008, inset 0 0 35px #8a684111; }
   .display { grid-area: display; }
   .ledger { grid-area: ledger; }
-  .display.full, .ledger.full { position: fixed; inset: var(--pad); z-index: 20; background: #16151a; }
+  .display.full, .ledger.full { position: fixed; inset: var(--pad); z-index: 20; background: #16151a; cursor: zoom-out; }
   body:has(.full) header { visibility: hidden; }
   .display h2, .ledger h2 { margin: 0 0 12px; font-size: 14px; text-transform: uppercase; letter-spacing: .08em; color: #a5a5aa; }
   .grip { position: relative; z-index: 5; display: flex; align-items: center; justify-content: center; cursor: col-resize; touch-action: none; user-select: none; outline: none; }
@@ -295,6 +295,10 @@ function setFull(pane) {
   fullPane = pane;
   for (const grip of grips) $(grip.dataset.pane).classList.toggle('full', grip.dataset.pane === pane);
 }
+function leaveFull() {
+  if (history.state?.full) history.back();
+  else setFull();
+}
 function sizePane(grip, size) {
   paneSizes[paneKey(grip)] = Math.round(size);
   applyPanes();
@@ -306,8 +310,11 @@ function savePanes(grip) {
     applyPanes();
   }
   localStorage.setItem(PANES_KEY, JSON.stringify(paneSizes));
+  if (fullPane && !history.state?.full) history.pushState({ full: true }, '');
 }
 applyPanes();
+if (history.state?.full) history.replaceState(null, '');
+addEventListener('popstate', () => setFull());
 stacked.addEventListener('change', applyPanes);
 for (const grip of grips) {
   grip.addEventListener('pointerdown', (event) => {
@@ -335,11 +342,12 @@ for (const grip of grips) {
     if (!delta || (fullPane && fullPane !== grip.dataset.pane)) return;
     event.preventDefault();
     const step = growth(grip) * delta, before = paneSize(grip), pane = grip.dataset.pane;
-    if (step < 0 && fullPane === pane) setFull();
+    if (step < 0 && fullPane === pane) leaveFull();
     else sizePane(grip, before + step);
     savePanes(grip);
   });
-  grip.addEventListener('dblclick', () => { delete paneSizes[paneKey(grip)]; setFull(); applyPanes(); savePanes(); });
+  grip.addEventListener('dblclick', () => { delete paneSizes[paneKey(grip)]; leaveFull(); applyPanes(); savePanes(); });
+  $(grip.dataset.pane).addEventListener('click', (event) => { if (fullPane === grip.dataset.pane && !event.target.closest('a')) leaveFull(); });
 }
 function savedState(saved) {
   $('entry').classList.toggle('hidden', saved);
@@ -1534,7 +1542,7 @@ $('card-toggle').addEventListener('click', () => setCard(!$('controls').classLis
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
   if ($('controls').classList.contains('open') && $('entry').classList.contains('hidden')) setCard(false);
-  else if (fullPane) setFull();
+  else if (fullPane) leaveFull();
 });
 $('mic-mute').addEventListener('click', () => setMicrophoneMuted(!microphoneMuted));
 $('voice-print').addEventListener('click', toggleVoiceprint);

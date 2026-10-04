@@ -863,6 +863,58 @@ window.addEventListener('test-ready', () => {
   assert.deepEqual(JSON.parse(encoded ?? 'null'), { ledger: { restored: 130, grown: 154, saved: 154 }, display: { restored: 140, grown: 164, saved: 164 }, stored: '{}', orientation: axis === 'width' ? 'vertical' : 'horizontal' }, stderr);
 });
 
+for (const [width, height] of [[1440, 900], [390, 844]]) test(`a full display panel holding a hub image leaves by a tap on the image, back or Escape, and not by a link tap at ${width}x${height}`, async () => {
+  const result = await driveLifecycle(`window.addEventListener('test-ready', () => { document.body.dataset.ready = 'yes'; });`, async ({ page, evaluate, until }) => {
+    await page('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+    await until(`document.body?.dataset.ready === 'yes'`);
+    await evaluate(`replyFromHub('unknown', 'display', [], 1, { display: { markdown: 'See [the source](https://example.test/source)', image: { mime: 'image/png' } } }, Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAQAAAADCAIAAAA7ljmRAAAAEElEQVR4nGM4kGAARww4OQA6Fg/BwfqvjwAAAABJRU5ErkJggg=='), (c) => c.charCodeAt(0)))`);
+    await until(`document.querySelector('#display img')?.naturalWidth === 4`);
+    await until(`document.querySelector('.grip').getAttribute('aria-orientation') === '${width < 720 ? 'horizontal' : 'vertical'}'`);
+    await evaluate(`document.querySelector('.display-item a').addEventListener('click', (event) => event.preventDefault())`);
+    const full = () => evaluate(`document.querySelector('#display').classList.contains('full')`);
+    const center = (selector) => evaluate(`(() => { const box = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return { x: box.left + box.width / 2, y: box.top + box.height / 2 }; })()`);
+    const mouse = (type, { x, y }) => page('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons: type === 'mouseReleased' ? 0 : 1, clickCount: 1 });
+    const enter = async () => {
+      for (let pull = 0; pull < 3 && !await full(); pull++) {
+        const from = await center('.grip[data-pane="display"]');
+        const to = width < 720 ? { x: from.x, y: 0 } : { x: 0, y: from.y };
+        await mouse('mousePressed', from);
+        for (let step = 1; step <= 8; step++) await mouse('mouseMoved', { x: from.x + (to.x - from.x) * step / 8, y: from.y + (to.y - from.y) * step / 8 });
+        await mouse('mouseReleased', to);
+      }
+      return full();
+    };
+    const tap = async (selector) => {
+      const point = await center(selector);
+      await mouse('mousePressed', point);
+      await mouse('mouseReleased', point);
+    };
+    const left = async () => {
+      for (const end = Date.now() + 2000; Date.now() < end; await new Promise((resolve) => setTimeout(resolve, 20))) if (!await full()) return true;
+      return false;
+    };
+    const depth = await evaluate('history.length');
+    const outcome = {};
+    outcome.tapEntered = await enter();
+    await tap('#display img');
+    outcome.tapLeft = await left();
+    outcome.linkEntered = await enter();
+    await tap('.display-item a');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    outcome.linkStays = await full();
+    await evaluate('history.back()');
+    outcome.backLeft = await left();
+    outcome.escapeEntered = await enter();
+    await page('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    outcome.escapeLeft = await left();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    outcome.historyGrew = await evaluate('history.length') - depth;
+    outcome.stillFull = await full();
+    return outcome;
+  });
+  assert.deepEqual(result, { tapEntered: true, tapLeft: true, linkEntered: true, linkStays: true, backLeft: true, escapeEntered: true, escapeLeft: true, historyGrew: 1, stillFull: false });
+});
+
 for (const stored of ['{', 'null', '{"ledger-w":"wide","display-w":99999}']) test(`stored pane sizes ${stored} neither break the page nor escape the pane limits`, async () => {
   const { stdout, stderr } = await runPage(`
 localStorage.setItem('voice.token.panes', ${JSON.stringify(stored)});

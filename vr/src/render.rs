@@ -43,7 +43,7 @@ struct MaterialData {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct Variant {
+struct PipelineKey {
     blend: bool,
     cull: Cull,
     depth_write: bool,
@@ -104,7 +104,7 @@ pub struct Renderer {
     render_pass: vk::RenderPass,
     set_layout: vk::DescriptorSetLayout,
     layout: vk::PipelineLayout,
-    pipelines: HashMap<Variant, vk::Pipeline>,
+    pipelines: HashMap<PipelineKey, vk::Pipeline>,
     descriptors: vk::DescriptorPool,
     sampler: vk::Sampler,
     textures: Vec<Texture>,
@@ -112,7 +112,7 @@ pub struct Renderer {
     indices: Buffer,
     palette: Buffer,
     joints: usize,
-    material_data: Buffer,
+    materials: Buffer,
     drawn: Vec<DrawCall>,
     outline_scale: f32,
     next: usize,
@@ -128,7 +128,8 @@ fn barrier(image: vk::Image, range: vk::ImageSubresourceRange, from: vk::ImageLa
 }
 
 impl Renderer {
-    pub fn new(gpu: Gpu, eye: [u32; 2], model: &Model, skinned: &Skinned, joints: usize, outline_scale: f32) -> Result<Renderer, String> {
+    pub fn new(gpu: Gpu, eye: [u32; 2], model: &Model, skinned: &Skinned, outline_scale: f32) -> Result<Renderer, String> {
+        let joints = skinned.joints();
         let device = &gpu.device;
         let attachments = [
             vk::AttachmentDescription::default()
@@ -211,20 +212,19 @@ impl Renderer {
             indices,
             palette,
             joints,
-            material_data: material_buffer,
+            materials: material_buffer,
             drawn: Vec::new(),
             outline_scale,
             next: 0,
             last: None,
         };
-        let variant = |material: &crate::vrm::Material, outline: bool| Variant {
+        let key = |material: &crate::vrm::Material, outline: bool| PipelineKey {
             blend: material.alpha == Alpha::Blend,
             cull: if outline { Cull::Front } else if material.double_sided { Cull::None } else { Cull::Back },
             depth_write: material.depth_write,
         };
-        let mut variants: Vec<Variant> = model.materials.iter().flat_map(|material| [Some(variant(material, false)), material.outline.as_ref().map(|_| variant(material, true))]).flatten().collect();
-        variants.dedup();
-        renderer.pipelines = renderer.pipelines(&variants)?;
+        let keys: Vec<PipelineKey> = model.materials.iter().flat_map(|material| [Some(key(material, false)), material.outline.as_ref().map(|_| key(material, true))]).flatten().collect();
+        renderer.pipelines = renderer.pipelines(&keys)?;
         renderer.depth = renderer.attachment(DEPTH, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::ImageAspectFlags::DEPTH)?;
         for _ in 0..RING {
             let target = renderer.target()?;
@@ -244,7 +244,7 @@ impl Renderer {
             let (base, shade, width) = (image(material.base_image), image(material.shade_image), image(material.outline.as_ref().and_then(|outline| outline.width_image)));
             let sampler = [vk::DescriptorImageInfo::default().sampler(renderer.sampler)];
             let palette = [vk::DescriptorBufferInfo::default().buffer(renderer.palette.0).range(vk::WHOLE_SIZE)];
-            let materials = [vk::DescriptorBufferInfo::default().buffer(renderer.material_data.0).range(vk::WHOLE_SIZE)];
+            let materials = [vk::DescriptorBufferInfo::default().buffer(renderer.materials.0).range(vk::WHOLE_SIZE)];
             let writes = [
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(0).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&base),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(1).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&shade),
@@ -260,7 +260,7 @@ impl Renderer {
             .iter()
             .flat_map(|draw| {
                 let material = &model.materials[draw.material];
-                let call = |outline| DrawCall { first: draw.first, count: draw.count, set: sets[draw.material], pipeline: renderer.pipelines[&variant(material, outline)], material: draw.material as u32, outline };
+                let call = |outline| DrawCall { first: draw.first, count: draw.count, set: sets[draw.material], pipeline: renderer.pipelines[&key(material, outline)], material: draw.material as u32, outline };
                 [Some(call(false)), material.outline.as_ref().map(|_| call(true))]
             })
             .flatten()
@@ -268,7 +268,7 @@ impl Renderer {
         Ok(renderer)
     }
 
-    fn pipelines(&self, variants: &[Variant]) -> Result<HashMap<Variant, vk::Pipeline>, String> {
+    fn pipelines(&self, keys: &[PipelineKey]) -> Result<HashMap<PipelineKey, vk::Pipeline>, String> {
         let device = &self.gpu.device;
         let module = |code: &[u8]| {
             let words: Vec<u32> = code.chunks_exact(4).map(|word| u32::from_le_bytes(word.try_into().unwrap())).collect();
@@ -295,20 +295,20 @@ impl Renderer {
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
         let mut pipelines = HashMap::new();
-        for &variant in variants {
-            if pipelines.contains_key(&variant) {
+        for &key in keys {
+            if pipelines.contains_key(&key) {
                 continue;
             }
             {
-                let cull = match variant.cull {
+                let cull = match key.cull {
                     Cull::None => vk::CullModeFlags::NONE,
                     Cull::Back => vk::CullModeFlags::BACK,
                     Cull::Front => vk::CullModeFlags::FRONT,
                 };
                 let raster = vk::PipelineRasterizationStateCreateInfo::default().polygon_mode(vk::PolygonMode::FILL).cull_mode(cull).front_face(vk::FrontFace::COUNTER_CLOCKWISE).line_width(1.0);
-                let depth = vk::PipelineDepthStencilStateCreateInfo::default().depth_test_enable(true).depth_write_enable(variant.depth_write).depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
+                let depth = vk::PipelineDepthStencilStateCreateInfo::default().depth_test_enable(true).depth_write_enable(key.depth_write).depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
                 let attachment = [vk::PipelineColorBlendAttachmentState::default()
-                    .blend_enable(variant.blend)
+                    .blend_enable(key.blend)
                     .src_color_blend_factor(vk::BlendFactor::ONE)
                     .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
                     .color_blend_op(vk::BlendOp::ADD)
@@ -330,7 +330,7 @@ impl Renderer {
                     .layout(self.layout)
                     .render_pass(self.render_pass);
                 let created = unsafe { device.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None) }.map_err(|(_, error)| format!("vkCreateGraphicsPipelines: {error}"))?;
-                pipelines.insert(variant, created[0]);
+                pipelines.insert(key, created[0]);
             }
         }
         unsafe {
@@ -513,7 +513,7 @@ impl Drop for Renderer {
         let device = &self.gpu.device;
         unsafe {
             let _ = device.device_wait_idle();
-            for buffer in [self.vertices, self.indices, self.palette, self.material_data] {
+            for buffer in [self.vertices, self.indices, self.palette, self.materials] {
                 self.gpu.free_buffer(buffer);
             }
             for target in &self.targets {
@@ -538,7 +538,7 @@ impl Drop for Renderer {
 }
 
 #[cfg(test)]
-pub mod tests {
+mod tests {
     use super::*;
     use crate::vrm::{tests::figure, Version};
 
@@ -558,16 +558,17 @@ pub mod tests {
         assert!(eye_projection(Vec3::new(0.0, 0.0, 0.01), 0.2, 0.2).is_none(), "an eye at the window draws nothing");
     }
 
-    pub fn draw(model: &Model, pose: &crate::vrm::Pose, eye: [u32; 2], eyes: [Option<Mat4>; 2], shift: Vec3) -> Vec<u8> {
-        draw_at(model, pose, eye, eyes, shift, 0.3, -0.17)
+    fn draw(model: &Model, pose: &crate::vrm::Pose, eye: [u32; 2], eyes: [Option<Mat4>; 2], shift: Vec3) -> Vec<u8> {
+        draw_at(model, pose, eye, eyes, shift, crate::HEIGHT, crate::FLOOR)
     }
 
     fn draw_at(model: &Model, pose: &crate::vrm::Pose, eye: [u32; 2], eyes: [Option<Mat4>; 2], shift: Vec3, height: f32, floor: f32) -> Vec<u8> {
-        let mut skinned = model.skinned();
+        let mut skinned = model.skinned().unwrap();
         let changed = skinned.morph(&pose.weights);
         let fit = crate::vrm::Fit::new(model, &skinned, height);
-        let palette = skinned.palette(model, pose, Mat4::from_translation(shift) * fit.placement(model, pose, floor));
-        let mut renderer = Renderer::new(Gpu::new(None).unwrap(), eye, model, &skinned, skinned.joints(), height / PAGE_HEIGHT).unwrap();
+        let worlds = model.worlds(pose);
+        let palette = skinned.palette(&worlds, Mat4::from_translation(shift) * fit.placement(model, &worlds, floor));
+        let mut renderer = Renderer::new(Gpu::new(None).unwrap(), eye, model, &skinned, height / PAGE_HEIGHT).unwrap();
         renderer.update(&palette, &skinned.vertices, &changed);
         renderer.render(eyes).unwrap();
         renderer.read().unwrap()
@@ -625,6 +626,7 @@ pub mod tests {
     }
 
     #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
     struct Golden {
         eye: [f32; 3],
         size: u32,
@@ -632,10 +634,21 @@ pub mod tests {
         quad: f32,
         floor: f32,
         height: f32,
+        page_height: f32,
     }
 
-    pub fn golden_render(model: &Model, motion: &[u8]) -> (Vec<u8>, u32) {
-        let golden: Golden = serde_json::from_str(include_str!("../golden/pose.json")).unwrap();
+    fn golden() -> Golden {
+        serde_json::from_str(include_str!("../golden/pose.json")).unwrap()
+    }
+
+    #[test]
+    fn the_golden_pose_is_framed_as_the_host_frames_the_puppet() {
+        let golden = golden();
+        assert_eq!([golden.quad, golden.floor, golden.height, golden.page_height], [crate::QUAD, crate::FLOOR, crate::HEIGHT, PAGE_HEIGHT]);
+    }
+
+    fn golden_render(model: &Model, motion: &[u8]) -> Vec<u8> {
+        let golden = golden();
         let standing = model.standing();
         let mut clip = crate::motion::Clip::parse(motion, model.version, model.rest_hips()).unwrap();
         clip.anchor(&standing);
@@ -646,15 +659,15 @@ pub mod tests {
         let eyes = [eye_projection(Vec3::from(golden.eye), golden.quad / 2.0, golden.quad / 2.0), None];
         let pixels = draw_at(model, &pose, [golden.size; 2], eyes, Vec3::ZERO, golden.height, golden.floor);
         let row = (golden.size * 8) as usize;
-        (pixels.chunks_exact(row).flat_map(|line| &line[..row / 2]).copied().collect(), golden.size)
+        pixels.chunks_exact(row).flat_map(|line| &line[..row / 2]).copied().collect()
     }
 
-    pub struct Difference {
-        pub coverage: f32,
-        pub color: f32,
+    struct Difference {
+        coverage: f32,
+        color: f32,
     }
 
-    pub fn difference(native: &[u8], page: &[u8]) -> Difference {
+    fn difference(native: &[u8], page: &[u8]) -> Difference {
         let (mut both, mut either, mut error) = (0usize, 0usize, 0f64);
         for (a, b) in native.chunks_exact(4).zip(page.chunks_exact(4)) {
             let (in_a, in_b) = (a[3] > 127, b[3] > 127);
@@ -670,7 +683,7 @@ pub mod tests {
     #[test]
     fn the_native_render_of_the_golden_pose_matches_the_page() {
         let model = Model::parse(include_bytes!("../golden/figure.vrm")).unwrap();
-        let (native, _) = golden_render(&model, include_bytes!("../golden/idle.json"));
+        let native = golden_render(&model, include_bytes!("../golden/idle.json"));
         let mut page = Vec::new();
         std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&include_bytes!("../golden/page.rgba.gz")[..]), &mut page).unwrap();
         let difference = difference(&native, &page);

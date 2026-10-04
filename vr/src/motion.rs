@@ -68,8 +68,8 @@ impl Clip {
                 let values = track.values.chunks_exact(4).map(|v| if mirrored { Quat::from_xyzw(-v[0], v[1], -v[2], v[3]) } else { Quat::from_xyzw(v[0], v[1], v[2], v[3]) }).collect();
                 rotations.push((bone.to_owned(), Keys { times: track.times, values }));
             } else {
-                let height = source.hips_height.filter(|&height| height > 0.0).ok_or("motion has no source hips height")?;
                 let Some(rest) = rest_hips else { continue };
+                let height = source.hips_height.filter(|&height| height > 0.0).ok_or("motion has no source hips height")?;
                 let scale = rest.y.abs() / height;
                 let values = track.values.chunks_exact(3).map(|v| Vec3::new(v[0], v[1], v[2]) * scale * if mirrored { Vec3::new(-1.0, 1.0, -1.0) } else { Vec3::ONE }).collect();
                 hips = Some(Keys { times: track.times, values });
@@ -94,11 +94,17 @@ impl Clip {
     }
 }
 
+struct Fade {
+    start: f32,
+    from: f32,
+    to: f32,
+}
+
 struct Action {
     clip: String,
     time: f32,
     weight: f32,
-    fade: Option<(f32, f32, f32, f32)>,
+    fade: Option<Fade>,
 }
 
 pub struct Random(u64);
@@ -146,19 +152,19 @@ impl Animator {
     fn play(&mut self, name: &str) {
         let fading = self.actions.iter().any(|action| action.weight > 0.0);
         for action in &mut self.actions {
-            action.fade = Some((self.now, IDLE_FADE, action.weight, 0.0));
+            action.fade = Some(Fade { start: self.now, from: action.weight, to: 0.0 });
         }
         self.actions.retain(|action| action.clip != name);
-        self.actions.push(Action { clip: name.to_owned(), time: 0.0, weight: if fading { 0.0 } else { 1.0 }, fade: fading.then_some((self.now, IDLE_FADE, 0.0, 1.0)) });
+        self.actions.push(Action { clip: name.to_owned(), time: 0.0, weight: if fading { 0.0 } else { 1.0 }, fade: fading.then_some(Fade { start: self.now, from: 0.0, to: 1.0 }) });
     }
 
-    pub fn update(&mut self, delta: f32) {
+    pub fn update(&mut self, delta: f32) -> Option<&str> {
         self.now += delta;
         for action in &mut self.actions {
             let duration = self.clips[&action.clip].duration;
             action.time = (action.time + delta) % duration;
-            if let Some((start, length, from, to)) = action.fade {
-                let progress = ((self.now - start) / length).clamp(0.0, 1.0);
+            if let Some(Fade { start, from, to }) = action.fade {
+                let progress = ((self.now - start) / IDLE_FADE).clamp(0.0, 1.0);
                 action.weight = from + (to - from) * progress;
                 if progress >= 1.0 {
                     action.fade = None;
@@ -166,7 +172,8 @@ impl Animator {
             }
         }
         self.actions.retain(|action| action.weight > 0.0 || action.fade.is_some());
-        if self.now >= self.next_idle {
+        let switched = self.now >= self.next_idle;
+        if switched {
             self.play_idle();
         }
         if self.blink_start.is_none() && self.now >= self.next_blink {
@@ -176,6 +183,7 @@ impl Animator {
             self.blink_start = None;
             self.next_blink = self.now + 2.2 + self.random.next() * 4.2;
         }
+        switched.then(|| self.idle.as_deref()).flatten()
     }
 
     pub fn blink(&self) -> f32 {

@@ -1,5 +1,3 @@
-// Writes vr/golden/: a synthetic VRM 1 figure, a synthetic idle clip, and the page's render of them in one fixed pose.
-// Needs cwebp and Chromium: nix-shell -p libwebp chromium --run 'node scripts/vr-golden.mjs'
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,7 +7,7 @@ import { build } from 'esbuild';
 import { launchChromium } from './chromium.mjs';
 
 const out = new URL('../vr/golden/', import.meta.url).pathname;
-export const GOLDEN = { eye: [-0.03, 0.02, 0.5], size: 256, time: 0.5, quad: 0.4, floor: -0.17, height: 0.3 };
+const GOLDEN = { eye: [-0.03, 0.02, 0.5], size: 256, time: 0.5, quad: 0.4, floor: -0.17, height: 0.3, pageHeight: 2.7 };
 
 function png(width, height, rgba) {
   const chunk = (type, data) => {
@@ -221,8 +219,8 @@ async function pageRender(vrm, motion) {
       contents: `
         import * as THREE from 'three';
         import { PuppetRuntime } from '../src/puppet.js';
-        globalThis.renderGolden = async (vrm, motion, { eye: [x, y, z], size, time, quad, floor, height }) => {
-          const units = 2.7 / height;
+        globalThis.renderGolden = async (vrm, motion, { eye: [x, y, z], size, time, quad, floor, height, pageHeight }) => {
+          const units = pageHeight / height;
           const canvas = document.createElement('canvas');
           document.body.append(canvas);
           const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: false, preserveDrawingBuffer: true });
@@ -243,6 +241,7 @@ async function pageRender(vrm, motion) {
           const bytes = Uint8Array.from(atob(vrm), (char) => char.charCodeAt(0)).buffer;
           if (!await runtime.load(bytes)) throw new Error('figure did not load');
           runtime.vrm.lookAt = null;
+          runtime.sleeping = true;
           await runtime.loadClips([{ action: 'idle', format: 'motion', data: motion }]);
           runtime.pose('stand');
           runtime.playIdle();

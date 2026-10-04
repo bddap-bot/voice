@@ -432,7 +432,7 @@ impl Model {
         let document = Document { json, binary };
         let json = &document.json;
         let extensions = &json["extensions"];
-        let (version, humanoid) = if let Some(vrm) = extensions.get("VRMC_vrm") {
+        let (version, humanoid): (Version, HashMap<String, usize>) = if let Some(vrm) = extensions.get("VRMC_vrm") {
             let bones = vrm["humanoid"]["humanBones"].as_object().ok_or("VRMC_vrm without humanBones")?;
             (Version::One, bones.iter().filter_map(|(name, bone)| Some((name.clone(), index(&bone["node"])?))).collect())
         } else if let Some(vrm) = extensions.get("VRM") {
@@ -456,7 +456,10 @@ impl Model {
             .collect();
         for (parent, node) in list("nodes").iter().enumerate() {
             for child in node["children"].as_array().unwrap_or(&empty).iter().filter_map(index) {
-                nodes.get_mut(child).ok_or("child node out of range")?.parent = Some(parent);
+                let node = nodes.get_mut(child).ok_or("child node out of range")?;
+                if node.parent.replace(parent).is_some() {
+                    return Err("a node has two parents".into());
+                }
             }
         }
 
@@ -569,6 +572,21 @@ impl Model {
                 return Err("vertex joint outside its skin".into());
             }
         }
+        for start in 0..nodes.len() {
+            let mut node = start;
+            for _ in 0..=nodes.len() {
+                match nodes[node].parent {
+                    Some(parent) => node = parent,
+                    None => break,
+                }
+            }
+            if nodes[node].parent.is_some() {
+                return Err("the node hierarchy has a cycle".into());
+            }
+        }
+        if nodes.iter().any(|node| node.mesh.is_some_and(|mesh| mesh >= meshes.len())) || humanoid.values().any(|&node| node >= nodes.len()) {
+            return Err("a node or bone index is out of range".into());
+        }
         if !nodes.iter().any(|node| node.mesh.is_some()) {
             return Err("the puppet has no mesh".into());
         }
@@ -611,7 +629,7 @@ impl Model {
         Ok(Model { version, nodes, meshes, skins, materials, images, humanoid, expressions })
     }
 
-    fn worlds(&self, pose: &Pose) -> Vec<Mat4> {
+    pub fn worlds(&self, pose: &Pose) -> Vec<Mat4> {
         let mut worlds: Vec<Option<Mat4>> = vec![None; self.nodes.len()];
         fn resolve(model: &Model, pose: &Pose, worlds: &mut [Option<Mat4>], node: usize) -> Mat4 {
             if let Some(world) = worlds[node] {
@@ -676,12 +694,12 @@ impl Model {
         }
     }
 
-    pub fn feet(&self, pose: &Pose) -> Option<[Vec3; 2]> {
-        let worlds = self.worlds(pose);
+    pub fn feet(&self, worlds: &[Mat4]) -> Option<[Vec3; 2]> {
         Some([*self.humanoid.get("leftFoot")?, *self.humanoid.get("rightFoot")?].map(|node| worlds[node].w_axis.truncate()))
     }
 
-    pub fn skinned(&self) -> Skinned {
+    pub fn skinned(&self) -> Result<Skinned, String> {
+        let palette_index = |index: usize| u16::try_from(index).map_err(|_| "the model has more than 65536 joints".to_owned());
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
         let mut draws = Vec::new();
@@ -690,14 +708,18 @@ impl Model {
         for (node, entry) in self.nodes.iter().enumerate() {
             let Some(mesh_index) = entry.mesh else { continue };
             let mesh = &self.meshes[mesh_index];
-            let own = joints.len() as u16;
+            let own = palette_index(joints.len())?;
             joints.push((node, Mat4::IDENTITY));
-            let skin = entry.skin.map(|skin| {
-                let skin = &self.skins[skin];
-                let first = joints.len() as u16;
-                joints.extend(skin.joints.iter().copied().zip(skin.inverse_bind.iter().copied()));
-                first
-            });
+            let skin = match entry.skin {
+                Some(skin) => {
+                    let skin = &self.skins[skin];
+                    let first = joints.len();
+                    joints.extend(skin.joints.iter().copied().zip(skin.inverse_bind.iter().copied()));
+                    palette_index(joints.len())?;
+                    Some(first as u16)
+                }
+                None => None,
+            };
             for primitive in &mesh.primitives {
                 let base = vertices.len() as u32;
                 for vertex in 0..primitive.positions.len() {
@@ -741,13 +763,12 @@ impl Model {
         let base = touched.iter().map(|&vertex| (Vec3::from(vertices[vertex as usize].position), Vec3::from(vertices[vertex as usize].normal))).collect();
         let mut skinned = Skinned { vertices, indices, draws, joints, applied: vec![0.0; morphs.len()], stamps: vec![0; touched.len()], morphs, touched, base, offsets, entries, stamp: 0 };
         skinned.morph(&self.rest().weights);
-        skinned
+        Ok(skinned)
     }
 }
 
 impl Skinned {
-    pub fn palette(&self, model: &Model, pose: &Pose, placement: Mat4) -> Vec<Mat4> {
-        let worlds = model.worlds(pose);
+    pub fn palette(&self, worlds: &[Mat4], placement: Mat4) -> Vec<Mat4> {
         self.joints.iter().map(|&(node, inverse)| placement * worlds[node] * inverse).collect()
     }
 
@@ -811,21 +832,21 @@ pub struct Fit {
 
 impl Fit {
     pub fn new(model: &Model, skinned: &Skinned, height: f32) -> Fit {
-        let rest = model.rest();
-        let points = skinned.positions(&skinned.palette(model, &rest, Mat4::IDENTITY));
+        let worlds = model.worlds(&model.rest());
+        let points = skinned.positions(&skinned.palette(&worlds, Mat4::IDENTITY));
         let (low, high) = bounds(&points);
         let size = high.y - low.y;
-        let feet = model.feet(&rest).map_or(low.y, |feet| feet[0].y.min(feet[1].y));
+        let feet = model.feet(&worlds).map_or(low.y, |feet| feet[0].y.min(feet[1].y));
         Fit { scale: if size > 0.0 { height / size } else { 1.0 }, ground: low.y, ankle: feet - low.y }
     }
 
-    pub fn placement(&self, model: &Model, pose: &Pose, floor: f32) -> Mat4 {
+    pub fn placement(&self, model: &Model, worlds: &[Mat4], floor: f32) -> Mat4 {
         let turn = match model.version {
             Version::Zero => Quat::from_rotation_y(std::f32::consts::PI),
             Version::One => Quat::IDENTITY,
         };
         let oriented = Mat4::from_quat(turn) * Mat4::from_scale(Vec3::splat(self.scale));
-        let shift = match model.feet(pose) {
+        let shift = match model.feet(worlds) {
             Some(feet) => {
                 let [left, right] = feet.map(|foot| oriented.transform_point3(foot));
                 Vec3::new(-(left.x + right.x) / 2.0, floor + self.ankle * self.scale - left.y.min(right.y), -(left.z + right.z) / 2.0)
@@ -971,6 +992,23 @@ pub mod tests {
     }
 
     #[test]
+    fn a_hierarchy_with_a_cycle_or_a_stray_index_is_refused() {
+        let parse = |nodes: Value, bones: Value| {
+            let mut builder = Builder::new(serde_json::json!({ "VRMC_vrm": { "humanoid": { "humanBones": bones } } }));
+            let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+            builder.set("nodes", nodes);
+            builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position } }] }]));
+            Model::parse(&builder.glb()).err()
+        };
+        assert!(parse(serde_json::json!([{ "children": [2] }, { "children": [2] }, { "mesh": 0 }]), serde_json::json!({})).unwrap().contains("two parents"));
+        assert!(parse(serde_json::json!([{ "mesh": 0, "children": [1] }, { "children": [0] }]), serde_json::json!({})).unwrap().contains("cycle"));
+        assert!(parse(serde_json::json!([{ "mesh": 0 }, { "children": [2] }, { "children": [1] }]), serde_json::json!({})).unwrap().contains("cycle"));
+        assert!(parse(serde_json::json!([{ "mesh": 0 }, { "mesh": 5 }]), serde_json::json!({})).unwrap().contains("out of range"));
+        assert!(parse(serde_json::json!([{ "mesh": 0 }]), serde_json::json!({ "hips": { "node": 9 } })).unwrap().contains("out of range"));
+        assert!(parse(serde_json::json!([{ "mesh": 0 }]), serde_json::json!({ "hips": { "node": 0 } })).is_none());
+    }
+
+    #[test]
     fn a_rendered_texture_that_is_not_webp_is_refused() {
         let mut bytes = figure(Version::One);
         let at = bytes.windows(10).position(|window| window == b"image/webp").unwrap();
@@ -987,14 +1025,14 @@ pub mod tests {
     }
 
     fn positions(model: &Model, pose: &Pose) -> Vec<Vec3> {
-        let skinned = model.skinned();
-        skinned.positions(&skinned.palette(model, pose, Mat4::IDENTITY))
+        let skinned = model.skinned().unwrap();
+        skinned.positions(&skinned.palette(&model.worlds(pose), Mat4::IDENTITY))
     }
 
     #[test]
     fn the_rest_pose_skins_vertices_where_the_file_put_them() {
         let model = Model::parse(&figure(Version::One)).unwrap();
-        let skinned = model.skinned();
+        let skinned = model.skinned().unwrap();
         assert_eq!((skinned.vertices.len(), skinned.indices.len(), skinned.joints()), (8, 12, 3));
         for (vertex, expected) in positions(&model, &model.rest()).iter().zip([[-0.2, 0.0], [0.2, 0.0], [0.2, 1.0], [-0.2, 1.0], [0.2, 0.9], [0.6, 0.9], [0.6, 1.0], [0.2, 1.0]]) {
             assert!((vertex.x - expected[0]).abs() < 1e-5 && (vertex.y - expected[1]).abs() < 1e-5, "{vertex}");
@@ -1041,11 +1079,11 @@ pub mod tests {
     fn fitting_scales_to_the_height_and_stands_on_the_floor_facing_the_viewer() {
         for version in [Version::Zero, Version::One] {
             let model = Model::parse(&figure(version)).unwrap();
-            let skinned = model.skinned();
+            let skinned = model.skinned().unwrap();
             let fit = Fit::new(&model, &skinned, 0.3);
-            let rest = model.rest();
-            let placement = fit.placement(&model, &rest, -0.17);
-            let (low, high) = bounds(&skinned.positions(&skinned.palette(&model, &rest, placement)));
+            let worlds = model.worlds(&model.rest());
+            let placement = fit.placement(&model, &worlds, -0.17);
+            let (low, high) = bounds(&skinned.positions(&skinned.palette(&worlds, placement)));
             assert!((low.y + 0.17).abs() < 1e-5 && (high.y - 0.13).abs() < 1e-5, "{low} {high}");
             let facing = placement.transform_vector3(Vec3::from(skinned.vertices[0].normal));
             assert!(facing.z > 0.0, "a VRM 0 figure faces -Z and is turned toward the viewer ({version:?})");
@@ -1059,12 +1097,13 @@ pub mod tests {
         builder.set("nodes", serde_json::json!([{ "children": [1], "mesh": 0 }, { "translation": [0.0, 0.5, 0.0], "children": [2, 3] }, { "translation": [-0.1, -0.4, 0.0] }, { "translation": [0.1, -0.4, 0.0] }]));
         builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position } }] }]));
         let model = Model::parse(&builder.glb()).unwrap();
-        let skinned = model.skinned();
+        let skinned = model.skinned().unwrap();
         let fit = Fit::new(&model, &skinned, 1.0);
         assert!((fit.ankle - 0.1).abs() < 1e-6);
         let mut lifted = model.pose(&Humanoid { rotations: HashMap::new(), hips: Some(Vec3::new(0.3, 0.8, 0.2)) });
         lifted.rotations[1] = Quat::from_rotation_z(0.2);
-        let feet = model.feet(&lifted).unwrap().map(|foot| fit.placement(&model, &lifted, -0.5).transform_point3(foot));
+        let worlds = model.worlds(&lifted);
+        let feet = model.feet(&worlds).unwrap().map(|foot| fit.placement(&model, &worlds, -0.5).transform_point3(foot));
         assert!(((feet[0].x + feet[1].x) / 2.0).abs() < 1e-5 && ((feet[0].z + feet[1].z) / 2.0).abs() < 1e-5, "the feet are centred: {feet:?}");
         assert!((feet[0].y.min(feet[1].y) - (-0.5 + 0.1)).abs() < 1e-5, "the lower foot stands at its ankle height: {feet:?}");
     }
@@ -1078,7 +1117,7 @@ pub mod tests {
         builder.set("nodes", serde_json::json!([{ "mesh": 0 }]));
         builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position }, "targets": [{ "POSITION": blink }, { "POSITION": open }] }] }]));
         let model = Model::parse(&builder.glb()).unwrap();
-        let mut skinned = model.skinned();
+        let mut skinned = model.skinned().unwrap();
         let mut pose = model.rest();
         model.express(&mut pose, "blink", 0.5);
         model.express(&mut pose, "a", 0.6);
@@ -1127,7 +1166,7 @@ pub mod tests {
         builder.set("nodes", serde_json::json!([{ "mesh": 0 }]));
         builder.set("meshes", serde_json::json!([{ "weights": [0.5], "primitives": [{ "attributes": { "POSITION": position }, "targets": [{ "POSITION": target }] }] }]));
         let model = Model::parse(&builder.glb()).unwrap();
-        let skinned = model.skinned();
+        let skinned = model.skinned().unwrap();
         assert_eq!(skinned.vertices[1].position, [1.0, 0.0, 0.0]);
         assert_eq!(skinned.vertices[2].position, [0.0, 1.25, 0.0], "the mesh's default weight applies at load");
     }

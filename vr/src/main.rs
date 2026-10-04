@@ -49,8 +49,8 @@ fn save(path: &PathBuf, anchor: &Anchor) {
 struct Meter {
     labels: [&'static str; 2],
     window: Option<Instant>,
-    waits: Vec<Duration>,
-    uploads: Vec<Duration>,
+    first: Vec<Duration>,
+    second: Vec<Duration>,
 }
 
 fn summary(samples: &mut [Duration]) -> String {
@@ -62,19 +62,19 @@ fn summary(samples: &mut [Duration]) -> String {
 
 impl Meter {
     fn new(first: &'static str, second: &'static str) -> Meter {
-        Meter { labels: [first, second], window: None, waits: Vec::new(), uploads: Vec::new() }
+        Meter { labels: [first, second], window: None, first: Vec::new(), second: Vec::new() }
     }
 
-    fn frame(&mut self, wait: Duration, upload: Duration) {
+    fn frame(&mut self, first: Duration, second: Duration) {
         let now = Instant::now();
         let window = *self.window.get_or_insert(now);
-        self.waits.push(wait);
-        self.uploads.push(upload);
+        self.first.push(first);
+        self.second.push(second);
         let elapsed = now - window;
         if elapsed >= Duration::from_secs(5) {
-            let rate = self.waits.len() as f64 / elapsed.as_secs_f64();
+            let rate = self.first.len() as f64 / elapsed.as_secs_f64();
             let [first, second] = self.labels;
-            eprintln!("overlay {rate:.1} fps; {first} {}; {second} {}", summary(&mut self.waits), summary(&mut self.uploads));
+            eprintln!("overlay {rate:.1} fps; {first} {}; {second} {}", summary(&mut self.first), summary(&mut self.second));
             *self = Meter { window: Some(now), ..Meter::new(first, second) };
         }
     }
@@ -82,7 +82,7 @@ impl Meter {
 
 fn appearance(relay: &mut Relay) -> Result<(Model, HashMap<String, Clip>), String> {
     let catalog = relay.catalog()?;
-    let avatar = catalog.avatars.iter().find(|avatar| avatar.id == catalog.active).or(catalog.avatars.first()).ok_or("the puppet catalog is empty")?;
+    let avatar = catalog.avatars.iter().find(|avatar| avatar.id == catalog.active).ok_or_else(|| format!("the selected appearance {} is not in the catalog", catalog.active))?;
     let model = Model::parse(&relay.puppet(avatar)?).map_err(|error| format!("{}: {error}", avatar.id))?;
     let standing = model.standing();
     let mut clips = HashMap::new();
@@ -91,23 +91,26 @@ fn appearance(relay: &mut Relay) -> Result<(Model, HashMap<String, Clip>), Strin
             eprintln!("{}: {} clips are not played natively", entry.name, entry.format);
             continue;
         }
-        let mut clip = Clip::parse(&relay.motion(entry)?, model.version, model.rest_hips()).map_err(|error| format!("{}: {error}", entry.name))?;
-        clip.anchor(&standing);
-        clips.insert(entry.action.clone(), clip);
+        match relay.motion(entry).and_then(|bytes| Clip::parse(&bytes, model.version, model.rest_hips())) {
+            Ok(mut clip) => {
+                clip.anchor(&standing);
+                clips.insert(entry.action.clone(), clip);
+            }
+            Err(error) => eprintln!("{}: {error}", entry.name),
+        }
     }
     eprintln!("appearance {} with {} standing idle clips", avatar.id, clips.len());
     Ok((model, clips))
 }
 
 fn native(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(), String> {
-    let mut relay = Relay::connect(token, &state.join("assets"))?;
-    let (model, clips) = appearance(&mut relay)?;
+    let (model, clips) = appearance(&mut Relay::connect(token, &state.join("assets"))?)?;
     let standing = model.standing();
     let rest_hips = model.rest_hips();
     let mut animator = Animator::new(clips, Random::seeded());
-    let mut skinned = model.skinned();
+    let mut skinned = model.skinned()?;
     let fit = Fit::new(&model, &skinned, HEIGHT);
-    let mut renderer = Renderer::new(vulkan::Gpu::new(Some(runtime))?, [EYE, EYE], &model, &skinned, skinned.joints(), HEIGHT / render::PAGE_HEIGHT)?;
+    let mut renderer = Renderer::new(vulkan::Gpu::new(Some(runtime))?, [EYE, EYE], &model, &skinned, HEIGHT / render::PAGE_HEIGHT)?;
     let mut overlay = runtime.create_overlay("voice.puppet", "Puppet", QUAD)?;
     let eye_offsets = runtime.eye_offsets();
     let mut meter = Meter::new("frame interval", "animate+draw+submit");
@@ -126,11 +129,14 @@ fn native(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(
             std::thread::sleep(Duration::from_millis(100));
             continue;
         };
-        animator.update(interval.as_secs_f32().min(0.05));
+        if let Some(idle) = animator.update(interval.as_secs_f32().min(0.05)) {
+            eprintln!("idle {idle}");
+        }
         let mut pose = model.pose(&animator.humanoid(&standing, rest_hips));
         model.express(&mut pose, "blink", animator.blink());
         let changed = skinned.morph(&pose.weights);
-        let palette = skinned.palette(&model, &pose, fit.placement(&model, &pose, FLOOR));
+        let worlds = model.worlds(&pose);
+        let palette = skinned.palette(&worlds, fit.placement(&model, &worlds, FLOOR));
         renderer.update(&palette, &skinned.vertices, &changed);
         let quad = above_hand(&hand.pose, &head, -FLOOR);
         overlay.place_on(device, &hand.pose.inverse().then(&quad));

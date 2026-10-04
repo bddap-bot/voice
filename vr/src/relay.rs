@@ -1,13 +1,16 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 const ALPN: &[u8] = b"voice-web/1";
-const TRANSFER_TIMEOUT: Duration = Duration::from_secs(30);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const TRANSFER_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_FRAME: usize = 32 << 20;
+const MAX_ASSET: usize = 256 << 20;
 
 #[derive(Deserialize)]
 pub struct Token {
@@ -97,7 +100,7 @@ impl Relay {
         std::fs::create_dir_all(&cache).map_err(|error| format!("{}: {error}", cache.display()))?;
         let mut relay = Relay { runtime, _endpoint: endpoint, _connection: connection, send, recv, cache };
         relay.send(json!({ "auth": token.secret }).to_string().as_bytes())?;
-        let reply: Value = serde_json::from_slice(&relay.recv(TRANSFER_TIMEOUT)?).map_err(|_| "authentication reply is not JSON")?;
+        let reply: Value = serde_json::from_slice(&relay.recv(Instant::now() + REQUEST_TIMEOUT)?).map_err(|_| "authentication reply is not JSON")?;
         if reply["ok"].as_bool() != Some(true) {
             return Err("token rejected".into());
         }
@@ -114,13 +117,17 @@ impl Relay {
         .map_err(|error| format!("relay write: {error}"))
     }
 
-    fn recv(&mut self, timeout: Duration) -> Result<Vec<u8>, String> {
+    fn recv(&mut self, deadline: Instant) -> Result<Vec<u8>, String> {
         let recv = &mut self.recv;
         self.runtime.block_on(async {
-            tokio::time::timeout(timeout, async {
+            tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), async {
                 let mut length = [0u8; 4];
                 recv.read_exact(&mut length).await.map_err(|error| format!("relay read: {error}"))?;
-                let mut frame = vec![0u8; u32::from_le_bytes(length) as usize];
+                let length = u32::from_le_bytes(length) as usize;
+                if length > MAX_FRAME {
+                    return Err(format!("relay frame of {length} bytes"));
+                }
+                let mut frame = vec![0u8; length];
                 recv.read_exact(&mut frame).await.map_err(|error| format!("relay read: {error}"))?;
                 Ok(frame)
             })
@@ -131,8 +138,9 @@ impl Relay {
 
     fn request(&mut self, verb: &str) -> Result<Vec<u8>, String> {
         self.send(verb.as_bytes())?;
+        let deadline = Instant::now() + REQUEST_TIMEOUT;
         loop {
-            let frame = self.recv(TRANSFER_TIMEOUT)?;
+            let frame = self.recv(deadline)?;
             let (reply, body) = split(&frame);
             if reply == verb {
                 return Ok(body.to_vec());
@@ -170,10 +178,11 @@ impl Relay {
         fields["id"] = id.into();
         fields["encodings"] = json!(["gzip"]);
         self.send(format!("{kind}\n{fields}").as_bytes())?;
+        let deadline = Instant::now() + TRANSFER_TIMEOUT;
         let mut start: Option<Start> = None;
         let mut compressed = Vec::new();
         loop {
-            let frame = self.recv(TRANSFER_TIMEOUT)?;
+            let frame = self.recv(deadline)?;
             let (verb, body) = split(&frame);
             let Some(step) = verb.strip_prefix(kind).and_then(|rest| rest.strip_prefix('-')) else { continue };
             match step {
@@ -182,7 +191,7 @@ impl Relay {
                     if value.id != id {
                         continue;
                     }
-                    if value.content_hash != content_hash || value.encoding != "gzip" || value.size == 0 || value.original_size == 0 {
+                    if start.is_some() || value.content_hash != content_hash || value.encoding != "gzip" || value.size == 0 || value.original_size == 0 || value.size > MAX_ASSET || value.original_size > MAX_ASSET {
                         return Err(format!("{kind} {id}: invalid transfer"));
                     }
                     compressed.reserve(value.size);
@@ -205,11 +214,11 @@ impl Relay {
                         return Err(format!("{kind} {id}: incomplete transfer"));
                     }
                     let mut bytes = Vec::with_capacity(start.original_size);
-                    flate2::read::GzDecoder::new(compressed.as_slice()).read_to_end(&mut bytes).map_err(|error| format!("{kind} {id}: {error}"))?;
+                    flate2::read::GzDecoder::new(compressed.as_slice()).take(start.original_size as u64 + 1).read_to_end(&mut bytes).map_err(|error| format!("{kind} {id}: {error}"))?;
                     if bytes.len() != start.original_size {
                         return Err(format!("{kind} {id}: invalid decompressed size"));
                     }
-                    let temporary = cached.with_extension("tmp");
+                    let temporary = cached.with_extension(format!("{extension}.tmp"));
                     if let Err(error) = std::fs::write(&temporary, &bytes).and_then(|()| std::fs::rename(&temporary, &cached)) {
                         eprintln!("{} not cached: {error}", cached.display());
                     }

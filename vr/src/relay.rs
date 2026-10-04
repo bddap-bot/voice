@@ -160,6 +160,9 @@ impl Relay {
     }
 
     fn transfer(&mut self, kind: &str, id: &str, content_hash: &str, extension: &str, mut fields: Value) -> Result<Vec<u8>, String> {
+        if content_hash.is_empty() || !content_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(format!("{kind} {id}: the catalog's content hash is not hex"));
+        }
         let cached = self.cache.join(format!("{content_hash}.{extension}"));
         if let Ok(bytes) = std::fs::read(&cached) {
             return Ok(bytes);

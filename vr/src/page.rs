@@ -132,13 +132,17 @@ impl Page {
         Ok(socket)
     }
 
-    pub fn latest_frame(&mut self) -> Option<Vec<u8>> {
+    pub fn latest_frame(&mut self) -> Option<(Vec<u8>, usize)> {
         self.accept();
         let socket = self.socket.as_mut()?;
         let mut frame = None;
+        let mut count = 0;
         loop {
             match socket.read() {
-                Ok(Message::Binary(bytes)) => frame = Some(bytes),
+                Ok(Message::Binary(bytes)) => {
+                    frame = Some(bytes);
+                    count += 1;
+                }
                 Ok(_) => {}
                 Err(tungstenite::Error::Io(error)) if error.kind() == ErrorKind::WouldBlock => break,
                 Err(error) => {
@@ -148,13 +152,14 @@ impl Page {
                 }
             }
         }
-        frame
+        frame.map(|frame| (frame, count))
     }
 
     pub fn wait(&self, timeout: Duration) {
         let fd = self.socket.as_ref().map_or(self.listener.as_raw_fd(), |socket| socket.get_ref().as_raw_fd());
         let mut readable = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-        unsafe { libc::poll(&mut readable, 1, timeout.as_millis().max(1) as i32) };
+        let timeout = libc::timespec { tv_sec: timeout.as_secs() as libc::time_t, tv_nsec: timeout.subsec_nanos() as libc::c_long };
+        unsafe { libc::ppoll(&mut readable, 1, &timeout, std::ptr::null()) };
     }
 
     pub fn send(&mut self, message: Value) {

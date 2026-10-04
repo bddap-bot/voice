@@ -167,6 +167,8 @@ export class StereoView {
     this.viewer = null;
     this.onPose = null;
     this.frame = new Uint8Array(HEADER + eye[0] * 2 * eye[1] * 4);
+    this.pending = [];
+    this.spare = [];
   }
   scene([x, y, z]) {
     return [x * this.units, (y + this.offset) * this.units, z * this.units];
@@ -202,20 +204,72 @@ export class StereoView {
     renderer.setScissorTest(false);
     const bounds = puppetBounds(scene);
     const [x, y, w, h] = union(this.cameras.map((camera) => pixelRect(camera, bounds, this.eye)), this.eye);
-    const header = new DataView(this.frame.buffer);
-    [x, y, w, h].forEach((value, index) => header.setUint16(index * 2, value, true));
     const gl = renderer.getContext();
     const size = w * h * 4;
-    if (size) this.eyes.forEach((_, index) => gl.readPixels(index * width + x, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, this.frame, HEADER + index * size));
-    this.send(this.frame.subarray(0, HEADER + 2 * size));
+    const buffers = this.spare.pop() ?? this.eyes.map(() => this.packBuffer(gl));
+    if (size) buffers.forEach((buffer, index) => {
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buffer);
+      gl.readPixels(index * width + x, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, 0);
+    });
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    this.pending.push({ buffers, rect: [x, y, w, h] });
+    gl.flush();
+    this.ship(gl);
+  }
+  packBuffer(gl) {
+    const buffer = gl.createBuffer();
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buffer);
+    gl.bufferData(gl.PIXEL_PACK_BUFFER, (this.frame.length - HEADER) / 2, gl.STREAM_READ);
+    return buffer;
+  }
+  ship(gl) {
+    while (this.pending.length > 1) {
+      const { buffers, rect } = this.pending.shift();
+      const header = new DataView(this.frame.buffer);
+      rect.forEach((value, index) => header.setUint16(index * 2, value, true));
+      const size = rect[2] * rect[3] * 4;
+      if (size) {
+        buffers.forEach((buffer, index) => {
+          gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buffer);
+          gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, this.frame, HEADER + index * size, size);
+        });
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      }
+      this.spare.push(buffers);
+      this.send(this.frame.subarray(0, HEADER + 2 * size));
+    }
   }
 }
 
-export function connectVrHost(param, { WebSocket = globalThis.WebSocket, onTap = () => {} } = {}) {
+const RELAY = `
+let socket;
+onmessage = ({ data }) => {
+  if (socket) return socket.send(data);
+  socket = new WebSocket(data);
+  socket.binaryType = 'arraybuffer';
+  for (const type of ['open', 'error', 'close']) socket.addEventListener(type, () => postMessage({ type }));
+  socket.addEventListener('message', ({ data }) => postMessage({ type: 'message', data }));
+};
+`;
+
+export class RelaySocket extends EventTarget {
+  constructor(url, Worker = globalThis.Worker) {
+    super();
+    this.worker = new Worker(URL.createObjectURL(new Blob([RELAY], { type: 'text/javascript' })));
+    this.worker.onmessage = ({ data: { type, data } }) => this.dispatchEvent(type === 'message' ? new MessageEvent(type, { data }) : new Event(type));
+    this.worker.postMessage(url);
+  }
+  send(data) {
+    if (typeof data === 'string') return this.worker.postMessage(data);
+    const { buffer } = data.slice();
+    this.worker.postMessage(buffer, [buffer]);
+  }
+}
+
+export function connectVrHost(param, { WebSocket = RelaySocket, onTap = () => {} } = {}) {
   const [port, nonce] = String(param).split('.');
   if (!/^\d+$/.test(port) || !nonce) throw new Error('vr host parameter is <port>.<nonce>');
   const socket = new WebSocket(`ws://127.0.0.1:${port}/`);
-  socket.binaryType = 'arraybuffer';
   return new Promise((resolve, reject) => {
     let view = null;
     socket.addEventListener('open', () => socket.send(JSON.stringify({ type: 'hello', nonce })));

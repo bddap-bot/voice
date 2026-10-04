@@ -3,6 +3,7 @@ mod page;
 mod placement;
 mod vulkan;
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,7 @@ const MARGIN: f32 = 0.03;
 const PAGE: &str = "https://bddap-bot.github.io/voice/";
 const HEAD_AHEAD: f32 = 0.04;
 const REQUEST_LOST: Duration = Duration::from_millis(100);
+const IN_FLIGHT: usize = 3;
 
 fn directory(variable: &str, fallback: &str) -> PathBuf {
     std::env::var_os(variable).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").expect("HOME")).join(fallback)).join("voice-vr")
@@ -85,8 +87,8 @@ fn run() -> Result<(), String> {
     let started = Instant::now();
     let period = runtime.display_period()?;
     let mut meter = Meter::default();
-    let mut requested: Option<Instant> = None;
-    let mut last_request = Instant::now() - period;
+    let mut requested: VecDeque<Instant> = VecDeque::new();
+    let mut next_request = Instant::now();
 
     loop {
         if let Some(Signal::Quit) = runtime.poll() {
@@ -100,7 +102,7 @@ fn run() -> Result<(), String> {
             std::thread::sleep(Duration::from_millis(100));
             continue;
         };
-        let frame = page.latest_frame().map(|frame| (frame, Instant::now(), requested.take()));
+        let frame = page.latest_frame().map(|(frame, count)| (frame, Instant::now(), requested.drain(..count.min(requested.len())).last()));
         let hands = runtime.hands(&poses);
         let current = *anchor.get_or_insert_with(|| Anchor::World(desk_spot(&head)));
         let hand_pose = |which| hands.iter().find(|hand| hand.hand == which).map(|hand| hand.pose);
@@ -130,13 +132,17 @@ fn run() -> Result<(), String> {
                 }
                 None => {}
             }
-            if requested.is_none_or(|at| at.elapsed() >= REQUEST_LOST) && last_request.elapsed() >= period {
+            if requested.front().is_some_and(|at| at.elapsed() >= REQUEST_LOST) {
+                requested.clear();
+            }
+            if requested.len() < IN_FLIGHT && Instant::now() >= next_request {
                 let predicted = runtime.head(&runtime.poses(HEAD_AHEAD)).unwrap_or(head);
                 let local = placed.inverse();
                 let eyes = eye_offsets.map(|eye: Pose| local.apply(predicted.then(&eye).t));
                 page.pose(eyes, local.apply(predicted.t));
-                last_request = Instant::now();
-                requested = Some(last_request);
+                let now = Instant::now();
+                next_request = (next_request + period).max(now);
+                requested.push_back(now);
             }
         }
         if let Some((frame, arrived, asked)) = frame {
@@ -146,8 +152,8 @@ fn run() -> Result<(), String> {
                 meter.frame(arrived - asked, arrived.elapsed());
             }
         }
-        let due = (last_request + period).saturating_duration_since(Instant::now());
-        page.wait(if requested.is_none() && !due.is_zero() { due } else { period });
+        let due = next_request.saturating_duration_since(Instant::now());
+        page.wait(if requested.len() < IN_FLIGHT && !due.is_zero() { due } else { period });
     }
 }
 

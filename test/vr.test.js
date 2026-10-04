@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as THREE from 'three';
-import { StereoView, connectVrHost, eyeFrustum, puppetBounds } from '../src/vr.js';
+import { RelaySocket, StereoView, connectVrHost, eyeFrustum, puppetBounds } from '../src/vr.js';
 
 const HELLO = { type: 'hello', token: 'vr-token', eye: [4, 2], quad: [0.4, 0.4], height: 0.3, margin: 0.03 };
 
@@ -46,7 +46,15 @@ test('the puppet stands on the window floor at its configured height', () => {
 
 function fakeRenderer() {
   const calls = [];
-  const gl = { RGBA: 1, UNSIGNED_BYTE: 2, readPixels: (...args) => calls.push(['readPixels', ...args.slice(0, 4), args[7]]) };
+  const gl = {
+    RGBA: 1, UNSIGNED_BYTE: 2, PIXEL_PACK_BUFFER: 3, STREAM_READ: 4,
+    createBuffer: () => ({}),
+    bindBuffer: () => {},
+    bufferData: (target, size) => calls.push(['bufferData', size]),
+    readPixels: (...args) => calls.push(['readPixels', ...args.slice(0, 4), args[6]]),
+    flush: () => {},
+    getBufferSubData: (target, source, destination, offset, length) => calls.push(['getBufferSubData', offset, length]),
+  };
   return {
     calls,
     setPixelRatio: (ratio) => calls.push(['ratio', ratio]),
@@ -90,14 +98,36 @@ test('each host pose requests one stereo frame, each eye rendered into its half'
   view.onPose = () => view.render(renderer, scene);
   view.pose({ eyes: [[-0.03, 0, 0.5], [0.03, 0, 0.5]], head: [0, 0, 0.5] });
   assert.deepEqual(renderer.calls.filter(([name]) => name === 'viewport'), [['viewport', 0, 0, 64, 64], ['viewport', 64, 0, 64, 64]]);
+  view.onPose = () => view.render(renderer, new THREE.Scene());
+  view.pose({ eyes: [[-0.03, 0, 0.5], [0.03, 0, 0.5]], head: [0, 0, 0.5] });
   assert.equal(sent.length, 1);
   const [x, y, w, h] = header(sent[0]);
   assert.ok(w > 0 && h > 0 && w < 32 && h < 32, `a small box crops to a small rect, got ${w}×${h}`);
-  assert.deepEqual(renderer.calls.filter(([name]) => name === 'readPixels'), [['readPixels', x, y, w, h, 8], ['readPixels', 64 + x, y, w, h, 8 + w * h * 4]]);
+  assert.deepEqual(renderer.calls.filter(([name]) => name === 'readPixels'), [['readPixels', x, y, w, h, 0], ['readPixels', 64 + x, y, w, h, 0]]);
+  assert.deepEqual(renderer.calls.filter(([name]) => name === 'getBufferSubData'), [['getBufferSubData', 8, w * h * 4], ['getBufferSubData', 8 + w * h * 4, w * h * 4]]);
   assert.equal(sent[0].length, 8 + 2 * w * h * 4);
   renderer.calls.length = 0;
   view.pose({ eyes: [[-0.03, 0, -0.5], [0.03, 0, -0.5]], head: [0, 0, -0.5] });
   assert.equal(renderer.calls.length, 0, 'no frame from behind the window');
+});
+
+test('each frame leaves when the next pose arrives, so its readback never waits on the GPU', () => {
+  const sent = [];
+  const view = new StereoView({ ...HELLO, eye: [64, 64] }, (frame) => sent.push(header(frame)));
+  const renderer = fakeRenderer();
+  view.attach(renderer);
+  const sizes = [0.3, 0.6, 0.3];
+  view.onPose = () => view.render(renderer, box(sizes.shift(), [0, 1.35, 0]));
+  const pose = () => view.pose({ eyes: [[-0.03, 0, 0.5], [0.03, 0, 0.5]], head: [0, 0, 0.5] });
+  pose();
+  assert.equal(sent.length, 0);
+  pose();
+  assert.equal(sent.length, 1);
+  assert.equal(renderer.calls.filter(([name]) => name === 'bufferData').length, 4, 'each eye of each frame in flight has its own pack buffer');
+  pose();
+  assert.equal(sent.length, 2);
+  assert.ok(sent[0][2] < sent[1][2], 'the frames leave in the order they were rendered');
+  assert.equal(renderer.calls.filter(([name]) => name === 'bufferData').length, 4, 'pack buffers are reused');
 });
 
 test('an empty scene sends an empty rect and reads no pixels', () => {
@@ -106,6 +136,7 @@ test('an empty scene sends an empty rect and reads no pixels', () => {
   const renderer = fakeRenderer();
   view.attach(renderer);
   view.pose({ eyes: [[-0.03, 0, 0.5], [0.03, 0, 0.5]], head: [0, 0, 0.5] });
+  view.render(renderer, new THREE.Scene());
   view.render(renderer, new THREE.Scene());
   assert.deepEqual(header(sent[0]), [0, 0, 0, 0]);
   assert.equal(sent[0].length, 8);
@@ -119,6 +150,7 @@ test('a box straddling an eye sends the whole frame', () => {
   view.attach(renderer);
   view.pose({ eyes: [[-0.03, 0, 0.5], [0.03, 0, 0.5]], head: [0, 0, 0.5] });
   view.render(renderer, box(20, [0, 1.35, 0]));
+  view.render(renderer, new THREE.Scene());
   assert.deepEqual(header(sent[0]), [0, 0, 4, 2]);
 });
 
@@ -172,6 +204,8 @@ test('the crop holds every skinned, morphed vertex in both eyes', () => {
   const { scene, mesh } = skinnedPuppet();
   view.pose({ eyes: [[-0.032, 0.1, 0.55], [0.032, 0.1, 0.55]], head: [0, 0.1, 0.55] });
   view.render(renderer, scene);
+  const eyes = cameras.splice(0);
+  view.render(renderer, new THREE.Scene());
   const [x, y, w, h] = header(sent[0]);
   assert.ok(w * h < 256 * 256 / 2, `crop ${w}×${h} is well under the eye`);
   const point = new THREE.Vector3();
@@ -179,7 +213,7 @@ test('the crop holds every skinned, morphed vertex in both eyes', () => {
   for (let vertex = 0; vertex < mesh.geometry.attributes.position.count; vertex++) {
     mesh.getVertexPosition(vertex, point);
     point.applyMatrix4(mesh.matrixWorld);
-    for (const camera of cameras) {
+    for (const camera of eyes) {
       const ndc = point.clone().project(camera);
       const px = (ndc.x + 1) / 2 * 256;
       const py = (ndc.y + 1) / 2 * 256;
@@ -215,4 +249,29 @@ test('the vr host hands over its credential, poses and taps', async () => {
   assert.ok(view.viewer instanceof THREE.Vector3);
   socket.deliver({ type: 'tap' });
   assert.equal(taps, 1);
+});
+
+test('the relay hands the socket to a worker and transfers frames off the main thread', () => {
+  const posted = [];
+  class FakeWorker {
+    constructor(url) { this.url = url; }
+    postMessage(data, transfer = []) { posted.push({ data, transfer }); }
+  }
+  const socket = new RelaySocket('ws://127.0.0.1:9/', FakeWorker);
+  assert.match(socket.worker.url, /^blob:/);
+  assert.deepEqual(posted.shift(), { data: 'ws://127.0.0.1:9/', transfer: [] });
+  socket.send('{"type":"hello"}');
+  assert.deepEqual(posted.shift(), { data: '{"type":"hello"}', transfer: [] });
+  const frame = new Uint8Array([1, 2, 3, 4, 5]);
+  socket.send(frame.subarray(1, 4));
+  const { data, transfer } = posted.shift();
+  assert.deepEqual([...new Uint8Array(data)], [2, 3, 4]);
+  assert.deepEqual(transfer, [data]);
+  assert.deepEqual([...frame], [1, 2, 3, 4, 5], 'the reused frame buffer stays with the page');
+  const seen = [];
+  socket.addEventListener('open', () => seen.push('open'));
+  socket.addEventListener('message', ({ data: message }) => seen.push(message));
+  socket.worker.onmessage({ data: { type: 'open' } });
+  socket.worker.onmessage({ data: { type: 'message', data: '{"type":"pose"}' } });
+  assert.deepEqual(seen, ['open', '{"type":"pose"}']);
 });

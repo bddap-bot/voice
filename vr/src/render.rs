@@ -625,6 +625,28 @@ mod tests {
         assert!(left[0] > right[0], "in front of the window the left eye sees it further right: {left:?} {right:?}");
     }
 
+    #[test]
+    fn a_transparent_surface_that_writes_depth_hides_a_later_one_behind_it() {
+        let mut builder = crate::vrm::tests::Builder::new(serde_json::json!({ "VRMC_vrm": { "humanoid": { "humanBones": {} } } }));
+        let quad = |z: f32| [-1.0, 0.0, z, 1.0, 0.0, z, 1.0, 1.0, z, -1.0, 1.0, z];
+        let positions: Vec<f32> = quad(0.5).iter().chain(&quad(0.0)).copied().collect();
+        let position = builder.accessor("VEC3", &positions);
+        let normal = builder.accessor("VEC3", &[0.0, 0.0, 1.0].repeat(8));
+        let near = builder.indices(&[0, 1, 2, 0, 2, 3]);
+        let far = builder.indices(&[4, 5, 6, 4, 6, 7]);
+        builder.set("nodes", serde_json::json!([{ "mesh": 0 }]));
+        builder.set("meshes", serde_json::json!([{ "primitives": [
+            { "attributes": { "POSITION": position, "NORMAL": normal }, "indices": near, "material": 0 },
+            { "attributes": { "POSITION": position, "NORMAL": normal }, "indices": far, "material": 1 }
+        ] }]));
+        let toon = |zwrite: bool, color: [f32; 4]| serde_json::json!({ "alphaMode": "BLEND", "pbrMetallicRoughness": { "baseColorFactor": color }, "extensions": { "VRMC_materials_mtoon": { "transparentWithZWrite": zwrite } } });
+        builder.set("materials", serde_json::json!([toon(true, [1.0, 0.0, 0.0, 0.5]), toon(false, [0.0, 0.0, 1.0, 0.5])]));
+        let model = Model::parse(&builder.glb()).unwrap();
+        let pixels = draw(&model, &model.rest(), [32, 32], [eye_projection(Vec3::new(0.0, 0.0, 0.4), 0.2, 0.2), None], Vec3::ZERO);
+        let center = pixel(&pixels, 64, 16, 16);
+        assert!(center[0] > 100 && center[2] == 0, "only the near surface shows: {center:?}");
+    }
+
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Golden {

@@ -310,6 +310,28 @@ mod tests {
     }
 
     #[test]
+    fn a_bone_only_the_outgoing_idle_moves_returns_to_standing_during_the_fade() {
+        let neck = |angle: f32| {
+            let values = Quat::from_rotation_x(angle).to_array().repeat(2);
+            serde_json::json!({ "name": "neck.quaternion", "times": [0.0, 1.0], "values": values })
+        };
+        let hips = serde_json::json!({ "name": "hips.position", "times": [0.0, 1.0], "values": [0.0, 120.0, 0.0, 0.0, 120.0, 0.0] });
+        let first = serde_json::json!({ "name": "a", "duration": 1.0, "hipsHeight": 100.0, "tracks": [neck(0.6), hips] });
+        let second = serde_json::json!({ "name": "b", "duration": 1.0, "tracks": [{ "name": "spine.quaternion", "times": [0.0], "values": [0.0, 0.0, 0.0, 1.0] }] });
+        let rest = Some(Vec3::new(0.0, 1.0, 0.0));
+        let clips = [("idle", first), ("idle-2", second)].map(|(name, json)| (name.to_owned(), Clip::parse(&serde_json::to_vec(&json).unwrap(), Version::One, rest).unwrap()));
+        let mut animator = Animator::new(HashMap::new(), Random(3));
+        animator.clips = clips.into_iter().collect();
+        animator.play("idle");
+        animator.play("idle-2");
+        animator.update(IDLE_FADE / 2.0);
+        let standing = Humanoid { rotations: HashMap::from([("neck".to_owned(), Quat::from_rotation_x(0.2))]), hips: None };
+        let mixed = animator.humanoid(&standing, rest);
+        assert!((mixed.rotations["neck"].to_axis_angle().1 - 0.4).abs() < 1e-4, "half way, the neck is half way back to standing");
+        assert!(mixed.hips.unwrap().abs_diff_eq(Vec3::new(0.0, 1.1, 0.0), 1e-5), "and the hips half way back to rest");
+    }
+
+    #[test]
     fn a_lone_idle_loops_without_switching() {
         let mut animator = animator(&["idle", "wave"]);
         assert_eq!(animator.idle.as_deref(), Some("idle"));

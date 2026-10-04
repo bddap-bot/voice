@@ -699,7 +699,7 @@ impl Model {
     }
 
     pub fn skinned(&self) -> Result<Skinned, String> {
-        let palette_index = |index: usize| u16::try_from(index).map_err(|_| "the model has more than 65536 joints".to_owned());
+        let palette_index = |index: usize| u16::try_from(index).map_err(|_| "the model has 65536 or more joints".to_owned());
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
         let mut draws = Vec::new();
@@ -1134,17 +1134,34 @@ pub mod tests {
     }
 
     #[test]
+    fn a_morph_update_keeps_the_unchanged_targets_on_a_shared_vertex() {
+        let mut builder = Builder::new(serde_json::json!({ "VRMC_vrm": { "humanoid": { "humanBones": {} } } }));
+        let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        let up = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0]);
+        let right = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.25, 0.0, 0.0]);
+        builder.set("nodes", serde_json::json!([{ "mesh": 0 }]));
+        builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position }, "targets": [{ "POSITION": up }, { "POSITION": right }] }] }]));
+        let model = Model::parse(&builder.glb()).unwrap();
+        let mut skinned = model.skinned().unwrap();
+        skinned.morph(&[vec![1.0, 0.0]]);
+        assert_eq!(skinned.morph(&[vec![1.0, 1.0]]), vec![2]);
+        assert_eq!(skinned.vertices[2].position, [0.25, 1.5, 0.0]);
+    }
+
+    #[test]
     fn outline_and_depth_write_settings_read_as_three_vrm_reads_them() {
         let mut builder = Builder::new(serde_json::json!({ "VRM": { "humanoid": { "humanBones": [] }, "materialProperties": [
             { "shader": "VRM/MToon", "keywordMap": { "_ALPHABLEND_ON": true }, "floatProperties": { "_BlendMode": 3, "_ZWrite": 1, "_OutlineWidthMode": 1, "_OutlineWidth": 0.08, "_OutlineColorMode": 1, "_OutlineLightingMix": 0.5 }, "vectorProperties": {}, "textureProperties": {}, "renderQueue": 2501 },
             { "shader": "VRM/MToon", "keywordMap": { "_ALPHABLEND_ON": true }, "floatProperties": { "_BlendMode": 2, "_ZWrite": 0, "_OutlineWidthMode": 0, "_OutlineWidth": 0.08 }, "vectorProperties": {}, "textureProperties": {}, "renderQueue": 3000 },
-            { "shader": "VRM/MToon", "keywordMap": { "_ALPHATEST_ON": true }, "floatProperties": { "_BlendMode": 1, "_OutlineWidthMode": 2, "_OutlineWidth": 0.5 }, "vectorProperties": { "_OutlineColor": [1.0, 0.5, 0.0, 1.0] }, "textureProperties": {}, "renderQueue": 2450 }
+            { "shader": "VRM/MToon", "keywordMap": { "_ALPHATEST_ON": true }, "floatProperties": { "_BlendMode": 1, "_OutlineWidthMode": 2, "_OutlineWidth": 0.5 }, "vectorProperties": { "_OutlineColor": [1.0, 0.5, 0.0, 1.0] }, "textureProperties": {}, "renderQueue": 2450 },
+            { "shader": "VRM/MToon", "keywordMap": { "_ALPHATEST_ON": true }, "floatProperties": { "_BlendMode": 3, "_Cutoff": 0.3 }, "vectorProperties": {}, "textureProperties": {}, "renderQueue": 2450 }
         ] } }));
         let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
         builder.set("nodes", serde_json::json!([{ "mesh": 0 }]));
         builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position }, "material": 0 }] }]));
-        builder.set("materials", serde_json::json!([{}, {}, {}]));
+        builder.set("materials", serde_json::json!([{}, {}, {}, {}]));
         let model = Model::parse(&builder.glb()).unwrap();
+        assert!(matches!(model.materials[3].alpha, Alpha::Cutout(cutoff) if (cutoff - 0.3).abs() < 1e-6), "the keywords decide the alpha mode, not _BlendMode");
         let [zwrite, plain, cutout] = [0, 1, 2].map(|at| model.materials[at].clone());
         assert!(zwrite.alpha == Alpha::Blend && zwrite.depth_write);
         assert!(plain.alpha == Alpha::Blend && !plain.depth_write && plain.outline.is_none());

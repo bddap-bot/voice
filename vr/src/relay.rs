@@ -71,6 +71,7 @@ pub struct Relay {
     send: iroh::endpoint::SendStream,
     recv: iroh::endpoint::RecvStream,
     cache: PathBuf,
+    broken: bool,
 }
 
 fn split(frame: &[u8]) -> (&str, &[u8]) {
@@ -98,7 +99,7 @@ impl Relay {
         })?;
         let cache = cache.join(&token.endpoint_id);
         std::fs::create_dir_all(&cache).map_err(|error| format!("{}: {error}", cache.display()))?;
-        let mut relay = Relay { runtime, _endpoint: endpoint, _connection: connection, send, recv, cache };
+        let mut relay = Relay { runtime, _endpoint: endpoint, _connection: connection, send, recv, cache, broken: false };
         relay.send(json!({ "auth": token.secret }).to_string().as_bytes())?;
         let reply: Value = serde_json::from_slice(&relay.recv(Instant::now() + REQUEST_TIMEOUT)?).map_err(|_| "authentication reply is not JSON")?;
         if reply["ok"].as_bool() != Some(true) {
@@ -118,8 +119,11 @@ impl Relay {
     }
 
     fn recv(&mut self, deadline: Instant) -> Result<Vec<u8>, String> {
+        if self.broken {
+            return Err("the relay stream lost its framing".into());
+        }
         let recv = &mut self.recv;
-        self.runtime.block_on(async {
+        let frame = self.runtime.block_on(async {
             tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), async {
                 let mut length = [0u8; 4];
                 recv.read_exact(&mut length).await.map_err(|error| format!("relay read: {error}"))?;
@@ -133,7 +137,9 @@ impl Relay {
             })
             .await
             .map_err(|_| "the relay went quiet".to_owned())?
-        })
+        });
+        self.broken = frame.is_err();
+        frame
     }
 
     fn request(&mut self, verb: &str) -> Result<Vec<u8>, String> {

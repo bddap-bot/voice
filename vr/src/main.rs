@@ -2,6 +2,8 @@ mod openvr;
 mod page;
 mod placement;
 mod vulkan;
+mod vrm;
+mod render;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -11,12 +13,15 @@ use serde_json::json;
 
 use openvr::{Runtime, Signal};
 use page::{Frame, Page};
-use placement::{desk_spot, Anchor, Interaction, Pose};
+use placement::{above_hand, desk_spot, Anchor, Hand, Interaction, Pose};
+use render::{eye_projection, Renderer};
+use vrm::Model;
 
 const EYE: u32 = 768;
 const QUAD: f32 = 0.4;
 const HEIGHT: f32 = 0.3;
 const MARGIN: f32 = 0.03;
+const FLOOR: f32 = -QUAD / 2.0 + MARGIN;
 const PAGE: &str = "https://bddap-bot.github.io/voice/";
 const HEAD_AHEAD: f32 = 0.04;
 const REQUEST_LOST: Duration = Duration::from_millis(100);
@@ -66,18 +71,50 @@ impl Meter {
     }
 }
 
+fn native(runtime: &Runtime, puppet: &std::path::Path) -> Result<(), String> {
+    let model = Model::parse(&std::fs::read(puppet).map_err(|error| format!("{}: {error}", puppet.display()))?).map_err(|error| format!("{}: {error}", puppet.display()))?;
+    let fit = model.pose(&model.rest()).fit(HEIGHT);
+    let mut posed = model.pose(&model.standing());
+    posed.place(&fit, model.version, FLOOR);
+    let mut renderer = Renderer::new(vulkan::Gpu::new(Some(runtime))?, [EYE, EYE], &model)?;
+    renderer.set_mesh(&posed)?;
+    let mut overlay = runtime.create_overlay("voice.puppet", "Puppet", QUAD)?;
+    let eye_offsets = runtime.eye_offsets();
+    loop {
+        if let Some(Signal::Quit) = runtime.poll() {
+            return Ok(());
+        }
+        let poses = runtime.poses(0.0);
+        let left = runtime.hands(&poses).into_iter().find(|hand| hand.hand == Hand::Left).zip(runtime.hand_index(Hand::Left));
+        let (Some(head), Some((hand, device))) = (runtime.head(&poses), left) else {
+            overlay.hide();
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        };
+        let quad = above_hand(&hand.pose, &head, -FLOOR);
+        overlay.place_on(device, &hand.pose.inverse().then(&quad));
+        let local = quad.inverse();
+        let eyes = eye_offsets.map(|eye: Pose| eye_projection(local.apply(head.then(&eye).t).into(), QUAD / 2.0, QUAD / 2.0));
+        overlay.submit(&mut renderer.render(eyes)?)?;
+        runtime.wait_frame();
+    }
+}
+
 fn run() -> Result<(), String> {
     let config = directory("XDG_CONFIG_HOME", ".config");
     let state = directory("XDG_STATE_HOME", ".local/state");
     std::fs::create_dir_all(&state).map_err(|error| format!("{}: {error}", state.display()))?;
+    let runtime = Runtime::init()?;
+    if let Some(puppet) = std::env::var_os("VOICE_VR_PUPPET") {
+        return native(&runtime, std::path::Path::new(&puppet));
+    }
     let token_file = config.join("token");
     let token = std::fs::read_to_string(&token_file).map_err(|error| format!("{}: {error}", token_file.display()))?.trim().to_owned();
     let page_address = std::env::var("VOICE_VR_PAGE").unwrap_or_else(|_| PAGE.to_owned());
     let browser = std::env::var("VOICE_VR_BROWSER").unwrap_or_else(|_| "chromium".to_owned());
     let placement_file = state.join("placement.json");
 
-    let runtime = Runtime::init()?;
-    let mut uploader = vulkan::Uploader::new(&runtime, EYE * 2, EYE)?;
+    let mut uploader = vulkan::Uploader::new(vulkan::Gpu::new(Some(&runtime))?, EYE * 2, EYE)?;
     let mut overlay = runtime.create_overlay("voice.puppet", "Puppet", QUAD)?;
     let hello = json!({ "type": "hello", "token": token, "eye": [EYE, EYE], "quad": [QUAD, QUAD], "height": HEIGHT, "margin": MARGIN });
     let mut page = Page::open(&browser, &page_address, &state.join("browser"), hello).map_err(|error| format!("{browser}: {error}"))?;

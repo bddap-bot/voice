@@ -92,6 +92,10 @@ impl Runtime {
         Ok(std::time::Duration::from_secs_f32(1.0 / hertz))
     }
 
+    pub fn wait_frame(&self) {
+        call!(self.overlay, WaitFrameSync, 100);
+    }
+
     pub fn eye_offsets(&self) -> [Pose; 2] {
         [sys::EVREye_Eye_Left, sys::EVREye_Eye_Right].map(|eye| Pose::from_m34(&call!(self.system, GetEyeToHeadTransform, eye).m))
     }
@@ -169,6 +173,13 @@ impl Overlay<'_> {
             self.shown = true;
         }
         Ok(())
+    }
+
+    pub fn hide(&mut self) {
+        if self.shown {
+            call!(self.runtime.overlay, HideOverlay, self.handle);
+            self.shown = false;
+        }
     }
 }
 

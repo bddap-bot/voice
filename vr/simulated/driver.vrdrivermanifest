@@ -1,0 +1,7 @@
+{
+  "alwaysActivate": true,
+  "name": "simulated",
+  "directory": "",
+  "resourceOnly": false,
+  "hmd_presence": []
+}

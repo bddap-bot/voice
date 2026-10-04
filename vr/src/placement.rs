@@ -92,6 +92,12 @@ pub fn desk_spot(head: &Pose) -> Pose {
     upright_facing(at, head.t)
 }
 
+const LIFT: f32 = 0.05;
+
+pub fn above_hand(hand: &Pose, head: &Pose, above_feet: f32) -> Pose {
+    upright_facing(add(hand.t, [0.0, LIFT + above_feet, 0.0]), head.t)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Hand {
     Left,
@@ -242,6 +248,17 @@ mod tests {
         let toward = normalize(sub([0.0, 1.2, 0.0], spot.t));
         assert!(dot(normal, toward) > 0.99);
         assert!(close(spot.axis(1), UP));
+    }
+
+    #[test]
+    fn above_a_hand_it_stands_upright_above_it_and_faces_the_head() {
+        let hand = Pose { r: [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]], t: [-0.2, 1.0, -0.3] };
+        let head = turned(0.0, [0.0, 1.6, 0.2]);
+        let quad = above_hand(&hand, &head, 0.17);
+        assert!(close(quad.t, [-0.2, 1.22, -0.3]));
+        assert!(close(quad.axis(1), UP), "the hand's tilt does not tip the avatar over");
+        let toward = normalize([0.2, 0.0, 0.5]);
+        assert!(dot(quad.axis(2), toward) > 0.999);
     }
 
     fn hand(hand: Hand, t: Vec3, speed: f32) -> HandPose {

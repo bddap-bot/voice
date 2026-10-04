@@ -3,10 +3,19 @@ let
   host = target: target.rustPlatform.buildRustPackage {
     pname = "voice-vr";
     version = "0.1.0";
-    src = pkgs.lib.cleanSource ./.;
+    src = pkgs.lib.fileset.toSource {
+      root = ./..;
+      fileset = pkgs.lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./build.rs ./src ./shaders ../docs/poses/standing.json ];
+    };
+    cargoRoot = "vr";
+    buildAndTestSubdir = "vr";
     cargoLock.lockFile = ./Cargo.lock;
     nativeBuildInputs = [ target.buildPackages.cmake target.rustPlatform.bindgenHook ];
     dontUseCmakeConfigure = true;
+    preCheck = ''
+      export LD_LIBRARY_PATH=${pkgs.vulkan-loader}/lib
+      export VK_ICD_FILENAMES=${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.${pkgs.stdenv.hostPlatform.parsed.cpu.name}.json
+    '';
   };
   native = host pkgs;
   aarch64 = host pkgs.pkgsCross.aarch64-multiplatform;
@@ -48,7 +57,7 @@ let
     substitute ${./voice-vr.vrmanifest} $out/voice-vr.vrmanifest --replace-fail '"binary_path_linux": "@out@/bin/voice-vr"' '"binary_path_linux_arm": "bin/voice-vr"'
   '';
 in
-pkgs.runCommand "voice-vr-${native.version}" { nativeBuildInputs = [ pkgs.makeWrapper ]; passthru = { inherit bundle; }; } ''
+pkgs.runCommand "voice-vr-${native.version}" { nativeBuildInputs = [ pkgs.makeWrapper ]; passthru = { inherit bundle; simulatedController = import ./simulated { inherit pkgs; }; }; } ''
   makeWrapper ${native}/bin/voice-vr $out/bin/voice-vr \
     --prefix LD_LIBRARY_PATH : ${runtimeLibraries} \
     --set-default VOICE_VR_BROWSER ${pkgs.chromium}/bin/chromium

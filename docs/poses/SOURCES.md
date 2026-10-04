@@ -9,7 +9,7 @@ Two sets of clips exist. The server serves the puppet's idles, chair sit and ges
 In the SteamVR overlay, the puppet sits on the floor of the overlay quad instead of on a chair. These three files are that sit: sitting down, the seated hold with the shins crossed and the hands on the knees, and getting up.
 
 - Source: Motion Capture Database HDM05, scene 4-1 "Chair, table, floor", motion "sit down on floor", trial `HDM_bk_04-01_02_120.amc` with skeleton `HDM_bk.asf`, an optical capture of a live performer at 120 Hz. https://resources.mpi-inf.mpg.de/HDM05/
-- Frames: sit-down 5372–5777, hold 5777–5904, get-up 5904–6254.
+- Frames: sit-down 5372–5817, hold 5817–5893, get-up 5893–6254. The sit-down runs until the hands have settled on the knees, and the hold stops before the arms start the get-up.
 - Licence: [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/). The three `.vrma` files are derivatives and are distributed under the same licence.
 - Attribution: The data used in this project was obtained from HDM05. M. Müller, T. Röder, M. Clausen, B. Eberhardt, B. Krüger, A. Weber: Documentation Mocap Database HDM05. Technical Report CG-2007-2, Universität Bonn, 2007.
 - Changes: the AMC was rewritten as BVH without changing any joint rotation. The wrist-flex and thumb joints were dropped, and the root was shifted horizontally by the hold's mean position. Each BVH was converted with [vrm-c/bvh2vrma](https://github.com/vrm-c/bvh2vrma) at `da148d9a`, given an explicit humanoid bone map because its automatic mapper misreads this skeleton. Each clip is turned 180° about the vertical axis so the figure faces the viewer. `sit-floor.vrma` holds the captured frames forward and then backward, so it loops without a seam.

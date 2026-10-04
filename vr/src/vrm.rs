@@ -24,6 +24,21 @@ pub enum Alpha {
     Blend,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum OutlineWidth {
+    World,
+    Screen,
+}
+
+#[derive(Clone, Debug)]
+pub struct Outline {
+    pub width: OutlineWidth,
+    pub factor: f32,
+    pub width_image: Option<usize>,
+    pub color: [f32; 3],
+    pub lighting_mix: f32,
+}
+
 #[derive(Clone, Debug)]
 pub struct Material {
     pub base: [f32; 4],
@@ -31,11 +46,13 @@ pub struct Material {
     pub shade: [f32; 3],
     pub shade_image: Option<usize>,
     pub alpha: Alpha,
+    pub depth_write: bool,
     pub double_sided: bool,
     pub shading_shift: f32,
     pub shading_toony: f32,
     pub equalization: f32,
     pub queue: i32,
+    pub outline: Option<Outline>,
 }
 
 struct Node {
@@ -73,6 +90,11 @@ struct Mesh {
     weights: Vec<f32>,
 }
 
+struct Expression {
+    binds: Vec<(usize, usize, f32)>,
+    binary: bool,
+}
+
 pub struct Model {
     pub version: Version,
     nodes: Vec<Node>,
@@ -81,6 +103,7 @@ pub struct Model {
     pub materials: Vec<Material>,
     pub images: Vec<Image>,
     humanoid: HashMap<String, usize>,
+    expressions: HashMap<String, Expression>,
 }
 
 #[repr(C)]
@@ -89,6 +112,8 @@ pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub uv: [f32; 2],
+    pub joints: [u16; 4],
+    pub weights: [f32; 4],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -98,10 +123,44 @@ pub struct Draw {
     pub material: usize,
 }
 
-pub struct Posed {
+struct Delta {
+    slot: u32,
+    position: Vec3,
+    normal: Vec3,
+}
+
+struct Morph {
+    mesh: usize,
+    target: usize,
+    deltas: Vec<Delta>,
+}
+
+pub struct Skinned {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
     pub draws: Vec<Draw>,
+    joints: Vec<(usize, Mat4)>,
+    morphs: Vec<Morph>,
+    applied: Vec<f32>,
+    touched: Vec<u32>,
+    base: Vec<(Vec3, Vec3)>,
+    offsets: Vec<u32>,
+    entries: Vec<(u32, u32)>,
+    stamps: Vec<u32>,
+    stamp: u32,
+}
+
+#[derive(Clone)]
+pub struct Pose {
+    rotations: Vec<Quat>,
+    translations: Vec<Vec3>,
+    pub weights: Vec<Vec<f32>>,
+}
+
+#[derive(Clone, Default)]
+pub struct Humanoid {
+    pub rotations: HashMap<String, Quat>,
+    pub hips: Option<Vec3>,
 }
 
 struct Document<'a> {
@@ -146,6 +205,10 @@ fn floats<const N: usize>(value: &Value, fallback: [f32; N]) -> [f32; N] {
 
 fn index(value: &Value) -> Option<usize> {
     value.as_u64().map(|value| value as usize)
+}
+
+fn bone_one(name: &str) -> String {
+    name.replace("ThumbProximal", "ThumbMetacarpal").replace("ThumbIntermediate", "ThumbProximal")
 }
 
 fn srgb_to_linear(value: f32) -> f32 {
@@ -275,29 +338,47 @@ fn material_zero(document: &Document, material: &Value, properties: &Value) -> M
     }
     let float = |name: &str, fallback| number(&properties["floatProperties"][name], fallback);
     let color = |name: &str| {
-        let [r, g, b, a] = floats(&properties["vectorProperties"][name], [1.0; 4]);
+        let fallback = if name == "_OutlineColor" { [0.0, 0.0, 0.0, 1.0] } else { [1.0; 4] };
+        let [r, g, b, a] = floats(&properties["vectorProperties"][name], fallback);
         [srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b), a]
     };
     let texture = |name: &str| document.texture_image(&properties["textureProperties"][name]);
     let shade_shift = float("_ShadeShift", 0.0);
     let shading_toony = shade_shift.mul_add(0.5, 0.5) * (1.0 - float("_ShadeToony", 0.9)) + float("_ShadeToony", 0.9);
-    let alpha = match float("_BlendMode", 0.0) as i32 {
-        0 => Alpha::Opaque,
-        1 => Alpha::Cutout(float("_Cutoff", 0.5)),
-        _ => Alpha::Blend,
+    let keyword = |name: &str| properties["keywordMap"][name].as_bool() == Some(true);
+    let alpha = if keyword("_ALPHABLEND_ON") {
+        Alpha::Blend
+    } else if keyword("_ALPHATEST_ON") {
+        Alpha::Cutout(float("_Cutoff", 0.5))
+    } else {
+        Alpha::Opaque
     };
     let [r, g, b, _] = color("_ShadeColor");
+    let width = match float("_OutlineWidthMode", 0.0) as i32 {
+        1 => Some(OutlineWidth::World),
+        2 => Some(OutlineWidth::Screen),
+        _ => None,
+    };
+    let [outline_r, outline_g, outline_b, _] = color("_OutlineColor");
     Material {
         base: color("_Color"),
         base_image: texture("_MainTex"),
         shade: [r, g, b],
         shade_image: texture("_ShadeTexture"),
         alpha,
+        depth_write: alpha != Alpha::Blend || float("_ZWrite", 0.0) == 1.0,
         double_sided: float("_CullMode", 2.0) as i32 == 0,
         shading_shift: -shade_shift - (1.0 - shading_toony),
         shading_toony,
         equalization: 1.0 - float("_IndirectLightIntensity", 0.1),
         queue: properties["renderQueue"].as_i64().map_or(2000, |queue| queue as i32),
+        outline: width.map(|width| Outline {
+            width,
+            factor: 0.01 * float("_OutlineWidth", 0.0),
+            width_image: texture("_OutlineWidthTexture"),
+            color: [outline_r, outline_g, outline_b],
+            lighting_mix: if float("_OutlineColorMode", 0.0) as i32 == 1 { float("_OutlineLightingMix", 1.0) } else { 0.0 },
+        }),
     }
 }
 
@@ -312,10 +393,16 @@ fn material_one(document: &Document, material: &Value) -> Material {
     };
     let toon = &material["extensions"]["VRMC_materials_mtoon"];
     let lit = toon.is_null();
+    let depth_write = alpha != Alpha::Blend || toon["transparentWithZWrite"].as_bool() == Some(true);
     let queue = match alpha {
         Alpha::Opaque => 2000,
         Alpha::Cutout(_) => 2450,
-        Alpha::Blend => 3000 + toon["renderQueueOffsetNumber"].as_i64().unwrap_or(0) as i32,
+        Alpha::Blend => (if depth_write { 2501 } else { 3000 }) + toon["renderQueueOffsetNumber"].as_i64().unwrap_or(0) as i32,
+    };
+    let width = match toon["outlineWidthMode"].as_str() {
+        Some("worldCoordinates") => Some(OutlineWidth::World),
+        Some("screenCoordinates") => Some(OutlineWidth::Screen),
+        _ => None,
     };
     Material {
         base,
@@ -323,11 +410,19 @@ fn material_one(document: &Document, material: &Value) -> Material {
         shade: if lit { [base[0], base[1], base[2]] } else { floats(&toon["shadeColorFactor"], [0.0; 3]) },
         shade_image: if lit { base_image } else { document.texture_image(&toon["shadeMultiplyTexture"]["index"]) },
         alpha,
+        depth_write,
         double_sided: material["doubleSided"].as_bool() == Some(true),
         shading_shift: number(&toon["shadingShiftFactor"], 0.0),
         shading_toony: number(&toon["shadingToonyFactor"], 0.9),
         equalization: number(&toon["giEqualizationFactor"], 0.9),
         queue,
+        outline: width.map(|width| Outline {
+            width,
+            factor: number(&toon["outlineWidthFactor"], 0.0),
+            width_image: document.texture_image(&toon["outlineWidthMultiplyTexture"]["index"]),
+            color: floats(&toon["outlineColorFactor"], [0.0; 3]),
+            lighting_mix: number(&toon["outlineLightingMixFactor"], 1.0),
+        }),
     }
 }
 
@@ -342,7 +437,7 @@ impl Model {
             (Version::One, bones.iter().filter_map(|(name, bone)| Some((name.clone(), index(&bone["node"])?))).collect())
         } else if let Some(vrm) = extensions.get("VRM") {
             let bones = vrm["humanoid"]["humanBones"].as_array().ok_or("VRM without humanBones")?;
-            (Version::Zero, bones.iter().filter_map(|bone| Some((bone["bone"].as_str()?.to_owned(), index(&bone["node"])?))).collect())
+            (Version::Zero, bones.iter().filter_map(|bone| Some((bone_one(bone["bone"].as_str()?), index(&bone["node"])?))).collect())
         } else {
             return Err("file is not a VRM puppet".into());
         };
@@ -478,7 +573,7 @@ impl Model {
             return Err("the puppet has no mesh".into());
         }
 
-        let mut used: Vec<usize> = materials.iter().flat_map(|material| [material.base_image, material.shade_image]).flatten().collect();
+        let mut used: Vec<usize> = materials.iter().flat_map(|material| [material.base_image, material.shade_image, material.outline.as_ref().and_then(|outline| outline.width_image)]).flatten().collect();
         used.sort_unstable();
         used.dedup();
         let mut decoded: HashMap<usize, usize> = HashMap::new();
@@ -490,77 +585,133 @@ impl Model {
         for material in &mut materials {
             material.base_image = material.base_image.map(|image| decoded[&image]);
             material.shade_image = material.shade_image.map(|image| decoded[&image]);
+            if let Some(outline) = &mut material.outline {
+                outline.width_image = outline.width_image.map(|image| decoded[&image]);
+            }
         }
-        Ok(Model { version, nodes, meshes, skins, materials, images, humanoid })
+        let mut expressions = HashMap::new();
+        match version {
+            Version::One => {
+                for (name, expression) in extensions["VRMC_vrm"]["expressions"]["preset"].as_object().into_iter().flatten() {
+                    let binds = expression["morphTargetBinds"].as_array().unwrap_or(&empty).iter().filter_map(|bind| Some((nodes.get(index(&bind["node"])?)?.mesh?, index(&bind["index"])?, number(&bind["weight"], 0.0)))).collect();
+                    expressions.insert(name.clone(), Expression { binds, binary: expression["isBinary"].as_bool() == Some(true) });
+                }
+            }
+            Version::Zero => {
+                for group in extensions["VRM"]["blendShapeMaster"]["blendShapeGroups"].as_array().into_iter().flatten() {
+                    let Some(name) = group["presetName"].as_str().filter(|name| !name.is_empty() && *name != "unknown") else { continue };
+                    let binds = group["binds"].as_array().unwrap_or(&empty).iter().filter_map(|bind| Some((index(&bind["mesh"])?, index(&bind["index"])?, number(&bind["weight"], 0.0) / 100.0))).collect();
+                    expressions.insert(name.to_owned(), Expression { binds, binary: group["isBinary"].as_bool() == Some(true) });
+                }
+            }
+        }
+        for expression in expressions.values_mut() {
+            expression.binds.retain(|&(mesh, target, _)| meshes.get(mesh).is_some_and(|mesh| target < mesh.weights.len()));
+        }
+        Ok(Model { version, nodes, meshes, skins, materials, images, humanoid, expressions })
     }
 
-    fn worlds(&self, rotations: &[Quat]) -> Vec<Mat4> {
+    fn worlds(&self, pose: &Pose) -> Vec<Mat4> {
         let mut worlds: Vec<Option<Mat4>> = vec![None; self.nodes.len()];
-        fn resolve(model: &Model, rotations: &[Quat], worlds: &mut [Option<Mat4>], node: usize) -> Mat4 {
+        fn resolve(model: &Model, pose: &Pose, worlds: &mut [Option<Mat4>], node: usize) -> Mat4 {
             if let Some(world) = worlds[node] {
                 return world;
             }
-            let entry = &model.nodes[node];
-            let local = Mat4::from_scale_rotation_translation(entry.scale, rotations[node], entry.translation);
-            let world = entry.parent.map_or(local, |parent| resolve(model, rotations, worlds, parent) * local);
+            let local = Mat4::from_scale_rotation_translation(model.nodes[node].scale, pose.rotations[node], pose.translations[node]);
+            let world = model.nodes[node].parent.map_or(local, |parent| resolve(model, pose, worlds, parent) * local);
             worlds[node] = Some(world);
             world
         }
-        (0..self.nodes.len()).map(|node| resolve(self, rotations, &mut worlds, node)).collect()
+        (0..self.nodes.len()).map(|node| resolve(self, pose, &mut worlds, node)).collect()
     }
 
-    pub fn rest(&self) -> Vec<Quat> {
-        self.nodes.iter().map(|node| node.rotation).collect()
+    pub fn rest(&self) -> Pose {
+        Pose { rotations: self.nodes.iter().map(|node| node.rotation).collect(), translations: self.nodes.iter().map(|node| node.translation).collect(), weights: self.meshes.iter().map(|mesh| mesh.weights.clone()).collect() }
     }
 
-    pub fn standing(&self) -> Vec<Quat> {
+    pub fn standing(&self) -> Humanoid {
         let preset: Value = serde_json::from_str(STANDING).expect("standing.json");
+        let rotations = preset["data"]
+            .as_object()
+            .expect("standing.json data")
+            .iter()
+            .map(|(name, bone)| {
+                let [x, y, z, w] = floats(&bone["rotation"], [0.0, 0.0, 0.0, 1.0]);
+                let rotation = match self.version {
+                    Version::Zero => Quat::from_xyzw(x, y, z, w),
+                    Version::One => Quat::from_xyzw(-x, y, -z, w),
+                };
+                (bone_one(name), rotation)
+            })
+            .collect();
+        Humanoid { rotations, hips: None }
+    }
+
+    pub fn rest_hips(&self) -> Option<Vec3> {
+        let worlds = self.worlds(&self.rest());
+        Some(worlds[*self.humanoid.get("hips")?].w_axis.truncate())
+    }
+
+    pub fn pose(&self, humanoid: &Humanoid) -> Pose {
         let mut pose = self.rest();
         let rest_worlds = self.worlds(&pose);
-        for (name, bone) in preset["data"].as_object().expect("standing.json data") {
-            let name = match self.version {
-                Version::Zero => name.clone(),
-                Version::One => name.replace("ThumbProximal", "ThumbMetacarpal").replace("ThumbIntermediate", "ThumbProximal"),
-            };
-            let Some(&node) = self.humanoid.get(&name) else { continue };
-            let [x, y, z, w] = floats(&bone["rotation"], [0.0, 0.0, 0.0, 1.0]);
-            let normalized = match self.version {
-                Version::Zero => Quat::from_xyzw(x, y, z, w),
-                Version::One => Quat::from_xyzw(-x, y, -z, w),
-            };
-            let parent = self.nodes[node].parent.map_or(Quat::IDENTITY, |parent| rest_worlds[parent].to_scale_rotation_translation().1);
-            pose[node] = (parent.inverse() * normalized * parent * self.nodes[node].rotation).normalize();
+        let parent_rotation = |node: usize| self.nodes[node].parent.map_or(Quat::IDENTITY, |parent| rest_worlds[parent].to_scale_rotation_translation().1);
+        for (name, normalized) in &humanoid.rotations {
+            let Some(&node) = self.humanoid.get(name) else { continue };
+            let parent = parent_rotation(node);
+            pose.rotations[node] = (parent.inverse() * *normalized * parent * self.nodes[node].rotation).normalize();
+        }
+        if let (Some(position), Some(&hips)) = (humanoid.hips, self.humanoid.get("hips")) {
+            let parent = self.nodes[hips].parent.map_or(Mat4::IDENTITY, |parent| self.worlds(&pose)[parent]);
+            pose.translations[hips] = parent.inverse().transform_point3(position);
         }
         pose
     }
 
-    pub fn pose(&self, rotations: &[Quat]) -> Posed {
-        let worlds = self.worlds(rotations);
+    pub fn express(&self, pose: &mut Pose, name: &str, weight: f32) {
+        let Some(expression) = self.expressions.get(name) else { return };
+        let weight = if expression.binary { if weight > 0.5 { 1.0 } else { 0.0 } } else { weight };
+        for &(mesh, target, bind) in &expression.binds {
+            pose.weights[mesh][target] += weight * bind;
+        }
+    }
+
+    pub fn feet(&self, pose: &Pose) -> Option<[Vec3; 2]> {
+        let worlds = self.worlds(pose);
+        Some([*self.humanoid.get("leftFoot")?, *self.humanoid.get("rightFoot")?].map(|node| worlds[node].w_axis.truncate()))
+    }
+
+    pub fn skinned(&self) -> Skinned {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
         let mut draws = Vec::new();
+        let mut joints = Vec::new();
+        let mut morphs = Vec::new();
         for (node, entry) in self.nodes.iter().enumerate() {
-            let Some(mesh) = entry.mesh.map(|mesh| &self.meshes[mesh]) else { continue };
-            let joints: Option<Vec<Mat4>> = entry.skin.map(|skin| {
+            let Some(mesh_index) = entry.mesh else { continue };
+            let mesh = &self.meshes[mesh_index];
+            let own = joints.len() as u16;
+            joints.push((node, Mat4::IDENTITY));
+            let skin = entry.skin.map(|skin| {
                 let skin = &self.skins[skin];
-                skin.joints.iter().zip(&skin.inverse_bind).map(|(&joint, inverse)| worlds[joint] * *inverse).collect()
+                let first = joints.len() as u16;
+                joints.extend(skin.joints.iter().copied().zip(skin.inverse_bind.iter().copied()));
+                first
             });
             for primitive in &mesh.primitives {
                 let base = vertices.len() as u32;
                 for vertex in 0..primitive.positions.len() {
-                    let mut position = primitive.positions[vertex];
-                    let mut normal = primitive.normals[vertex];
-                    for (target, &weight) in primitive.targets.iter().zip(&mesh.weights) {
-                        if weight != 0.0 {
-                            position += target.positions[vertex] * weight;
-                            normal += target.normals[vertex] * weight;
-                        }
-                    }
-                    let matrix = match (&joints, primitive.joints.get(vertex), primitive.weights.get(vertex)) {
-                        (Some(joints), Some(slots), Some(weights)) if weights.iter().any(|&weight| weight > 0.0) => slots.iter().zip(weights).filter(|(_, &weight)| weight > 0.0).fold(Mat4::ZERO, |sum, (&slot, &weight)| sum + joints[slot] * weight),
-                        _ => worlds[node],
+                    let (slots, weights) = match (skin, primitive.joints.get(vertex), primitive.weights.get(vertex)) {
+                        (Some(first), Some(slots), Some(weights)) if weights.iter().any(|&weight| weight > 0.0) => (slots.map(|slot| first + slot as u16), *weights),
+                        _ => ([own; 4], [1.0, 0.0, 0.0, 0.0]),
                     };
-                    vertices.push(Vertex { position: matrix.transform_point3(position).into(), normal: matrix.transform_vector3(normal).normalize_or_zero().into(), uv: primitive.uvs[vertex].into() });
+                    vertices.push(Vertex { position: primitive.positions[vertex].into(), normal: primitive.normals[vertex].into(), uv: primitive.uvs[vertex].into(), joints: slots, weights });
+                }
+                for (target, data) in primitive.targets.iter().enumerate() {
+                    let deltas: Vec<Delta> = (0..primitive.positions.len()).filter(|&vertex| data.positions[vertex] != Vec3::ZERO || data.normals[vertex] != Vec3::ZERO).map(|vertex| Delta { slot: base + vertex as u32, position: data.positions[vertex], normal: data.normals[vertex] }).collect();
+                    if !deltas.is_empty() {
+                        morphs.push(Morph { mesh: mesh_index, target, deltas });
+                    }
                 }
                 draws.push(Draw { first: indices.len() as u32, count: primitive.indices.len() as u32, material: primitive.material.unwrap_or(self.materials.len() - 1) });
                 indices.extend(primitive.indices.iter().map(|&vertex| vertex + base));
@@ -568,40 +719,125 @@ impl Model {
         }
         let queue = |draw: &Draw| self.materials[draw.material].queue;
         draws.sort_by_key(queue);
-        Posed { vertices, indices, draws }
+        let mut touched: Vec<u32> = morphs.iter().flat_map(|morph| morph.deltas.iter().map(|delta| delta.slot)).collect();
+        touched.sort_unstable();
+        touched.dedup();
+        let mut counts = vec![0u32; touched.len() + 1];
+        for morph in &mut morphs {
+            for delta in &mut morph.deltas {
+                delta.slot = touched.binary_search(&delta.slot).unwrap() as u32;
+                counts[delta.slot as usize + 1] += 1;
+            }
+        }
+        let offsets: Vec<u32> = counts.iter().scan(0, |sum, &count| { *sum += count; Some(*sum) }).collect();
+        let mut entries = vec![(0, 0); *offsets.last().unwrap() as usize];
+        let mut filled = offsets.clone();
+        for (at, morph) in morphs.iter().enumerate() {
+            for (index, delta) in morph.deltas.iter().enumerate() {
+                entries[filled[delta.slot as usize] as usize] = (at as u32, index as u32);
+                filled[delta.slot as usize] += 1;
+            }
+        }
+        let base = touched.iter().map(|&vertex| (Vec3::from(vertices[vertex as usize].position), Vec3::from(vertices[vertex as usize].normal))).collect();
+        let mut skinned = Skinned { vertices, indices, draws, joints, applied: vec![0.0; morphs.len()], stamps: vec![0; touched.len()], morphs, touched, base, offsets, entries, stamp: 0 };
+        skinned.morph(&self.rest().weights);
+        skinned
+    }
+}
+
+impl Skinned {
+    pub fn palette(&self, model: &Model, pose: &Pose, placement: Mat4) -> Vec<Mat4> {
+        let worlds = model.worlds(pose);
+        self.joints.iter().map(|&(node, inverse)| placement * worlds[node] * inverse).collect()
+    }
+
+    pub fn positions(&self, palette: &[Mat4]) -> Vec<Vec3> {
+        self.vertices
+            .iter()
+            .map(|vertex| {
+                let matrix = vertex.joints.iter().zip(vertex.weights).filter(|(_, weight)| *weight > 0.0).fold(Mat4::ZERO, |sum, (&joint, weight)| sum + palette[joint as usize] * weight);
+                matrix.transform_point3(vertex.position.into())
+            })
+            .collect()
+    }
+
+    pub fn morph(&mut self, weights: &[Vec<f32>]) -> Vec<u32> {
+        let current: Vec<f32> = self.morphs.iter().map(|morph| weights[morph.mesh][morph.target]).collect();
+        self.stamp += 1;
+        let mut dirty = Vec::new();
+        for (morph, (now, applied)) in self.morphs.iter().zip(current.iter().zip(&self.applied)) {
+            if now == applied {
+                continue;
+            }
+            for delta in &morph.deltas {
+                let slot = delta.slot as usize;
+                if self.stamps[slot] != self.stamp {
+                    self.stamps[slot] = self.stamp;
+                    dirty.push(delta.slot);
+                }
+            }
+        }
+        let mut updated = Vec::with_capacity(dirty.len());
+        for slot in dirty {
+            let (mut position, mut normal) = self.base[slot as usize];
+            for &(morph, delta) in &self.entries[self.offsets[slot as usize] as usize..self.offsets[slot as usize + 1] as usize] {
+                let weight = current[morph as usize];
+                if weight != 0.0 {
+                    let delta = &self.morphs[morph as usize].deltas[delta as usize];
+                    position += delta.position * weight;
+                    normal += delta.normal * weight;
+                }
+            }
+            let vertex = self.touched[slot as usize];
+            let target = &mut self.vertices[vertex as usize];
+            target.position = position.into();
+            target.normal = normal.into();
+            updated.push(vertex);
+        }
+        self.applied = current;
+        updated
+    }
+
+    pub fn joints(&self) -> usize {
+        self.joints.len()
     }
 }
 
 pub struct Fit {
     pub scale: f32,
     pub ground: f32,
+    pub ankle: f32,
 }
 
-impl Posed {
-    pub fn bounds(&self) -> (Vec3, Vec3) {
-        self.vertices.iter().fold((Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)), |(low, high), vertex| {
-            let point = Vec3::from(vertex.position);
-            (low.min(point), high.max(point))
-        })
-    }
-
-    pub fn fit(&self, height: f32) -> Fit {
-        let (low, high) = self.bounds();
+impl Fit {
+    pub fn new(model: &Model, skinned: &Skinned, height: f32) -> Fit {
+        let rest = model.rest();
+        let points = skinned.positions(&skinned.palette(model, &rest, Mat4::IDENTITY));
+        let (low, high) = bounds(&points);
         let size = high.y - low.y;
-        Fit { scale: if size > 0.0 { height / size } else { 1.0 }, ground: low.y }
+        let feet = model.feet(&rest).map_or(low.y, |feet| feet[0].y.min(feet[1].y));
+        Fit { scale: if size > 0.0 { height / size } else { 1.0 }, ground: low.y, ankle: feet - low.y }
     }
 
-    pub fn place(&mut self, fit: &Fit, version: Version, floor: f32) {
-        let turn = match version {
+    pub fn placement(&self, model: &Model, pose: &Pose, floor: f32) -> Mat4 {
+        let turn = match model.version {
             Version::Zero => Quat::from_rotation_y(std::f32::consts::PI),
             Version::One => Quat::IDENTITY,
         };
-        let placement = Mat4::from_translation(Vec3::new(0.0, floor - fit.ground * fit.scale, 0.0)) * Mat4::from_quat(turn) * Mat4::from_scale(Vec3::splat(fit.scale));
-        for vertex in &mut self.vertices {
-            vertex.position = placement.transform_point3(vertex.position.into()).into();
-            vertex.normal = (turn * Vec3::from(vertex.normal)).into();
-        }
+        let oriented = Mat4::from_quat(turn) * Mat4::from_scale(Vec3::splat(self.scale));
+        let shift = match model.feet(pose) {
+            Some(feet) => {
+                let [left, right] = feet.map(|foot| oriented.transform_point3(foot));
+                Vec3::new(-(left.x + right.x) / 2.0, floor + self.ankle * self.scale - left.y.min(right.y), -(left.z + right.z) / 2.0)
+            }
+            None => Vec3::new(0.0, floor - self.ground * self.scale, 0.0),
+        };
+        Mat4::from_translation(shift) * oriented
     }
+}
+
+pub fn bounds(points: &[Vec3]) -> (Vec3, Vec3) {
+    points.iter().fold((Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)), |(low, high), &point| (low.min(point), high.max(point)))
 }
 
 #[cfg(test)]
@@ -691,7 +927,7 @@ pub mod tests {
     pub fn figure(version: Version) -> Vec<u8> {
         let mut builder = Builder::new(match version {
             Version::One => serde_json::json!({ "VRMC_vrm": { "humanoid": { "humanBones": { "hips": { "node": 1 }, "rightUpperArm": { "node": 2 } } } } }),
-            Version::Zero => serde_json::json!({ "VRM": { "humanoid": { "humanBones": [{ "bone": "hips", "node": 1 }, { "bone": "rightUpperArm", "node": 2 }] }, "materialProperties": [{ "shader": "VRM/MToon", "floatProperties": { "_BlendMode": 1, "_Cutoff": 0.5 }, "vectorProperties": { "_Color": [1, 1, 1, 1], "_ShadeColor": [0.5, 0.5, 0.5, 1] }, "textureProperties": { "_MainTex": 0, "_ShadeTexture": 0 }, "renderQueue": 2450 }] } }),
+            Version::Zero => serde_json::json!({ "VRM": { "humanoid": { "humanBones": [{ "bone": "hips", "node": 1 }, { "bone": "rightUpperArm", "node": 2 }] }, "materialProperties": [{ "shader": "VRM/MToon", "keywordMap": { "_ALPHATEST_ON": true }, "floatProperties": { "_BlendMode": 1, "_Cutoff": 0.5 }, "vectorProperties": { "_Color": [1, 1, 1, 1], "_ShadeColor": [0.5, 0.5, 0.5, 1] }, "textureProperties": { "_MainTex": 0, "_ShadeTexture": 0 }, "renderQueue": 2450 }] } }),
         });
         let body = [-0.2f32, 0.0, 0.0, 0.2, 0.0, 0.0, 0.2, 1.0, 0.0, -0.2, 1.0, 0.0];
         let arm = [0.2f32, 0.9, 0.0, 0.6, 0.9, 0.0, 0.6, 1.0, 0.0, 0.2, 1.0, 0.0];
@@ -750,30 +986,33 @@ pub mod tests {
         assert!(Model::parse(&bytes).err().unwrap().contains("material out of range"));
     }
 
+    fn positions(model: &Model, pose: &Pose) -> Vec<Vec3> {
+        let skinned = model.skinned();
+        skinned.positions(&skinned.palette(model, pose, Mat4::IDENTITY))
+    }
+
     #[test]
     fn the_rest_pose_skins_vertices_where_the_file_put_them() {
         let model = Model::parse(&figure(Version::One)).unwrap();
-        let posed = model.pose(&model.rest());
-        assert_eq!(posed.vertices.len(), 8);
-        assert_eq!(posed.indices.len(), 12);
-        for (vertex, expected) in posed.vertices.iter().zip([[-0.2, 0.0], [0.2, 0.0], [0.2, 1.0], [-0.2, 1.0], [0.2, 0.9], [0.6, 0.9], [0.6, 1.0], [0.2, 1.0]]) {
-            assert!((vertex.position[0] - expected[0]).abs() < 1e-5 && (vertex.position[1] - expected[1]).abs() < 1e-5, "{vertex:?}");
+        let skinned = model.skinned();
+        assert_eq!((skinned.vertices.len(), skinned.indices.len(), skinned.joints()), (8, 12, 3));
+        for (vertex, expected) in positions(&model, &model.rest()).iter().zip([[-0.2, 0.0], [0.2, 0.0], [0.2, 1.0], [-0.2, 1.0], [0.2, 0.9], [0.6, 0.9], [0.6, 1.0], [0.2, 1.0]]) {
+            assert!((vertex.x - expected[0]).abs() < 1e-5 && (vertex.y - expected[1]).abs() < 1e-5, "{vertex}");
         }
     }
 
     #[test]
     fn the_standing_preset_turns_a_bone_through_its_normalized_frame() {
         let model = Model::parse(&figure(Version::One)).unwrap();
-        let pose = model.standing();
+        let pose = model.pose(&model.standing());
         let preset: Value = serde_json::from_str(STANDING).unwrap();
         let [x, y, z, w] = floats(&preset["data"]["rightUpperArm"]["rotation"], [0.0; 4]);
-        assert!(pose[2].abs_diff_eq(Quat::from_xyzw(-x, y, -z, w), 1e-5), "with an unrotated parent the raw rotation is the normalized one");
-        let posed = model.pose(&pose);
-        let moved = Vec3::from(posed.vertices[5].position);
-        let hips = Mat4::from_quat(pose[1]);
-        let expected = hips * Mat4::from_translation(Vec3::new(0.2, 0.95, 0.0)) * Mat4::from_quat(pose[2]) * Mat4::from_translation(Vec3::new(-0.2, -0.95, 0.0));
-        assert!(moved.abs_diff_eq(expected.transform_point3(Vec3::new(0.6, 0.9, 0.0)), 1e-5));
-        assert!(Vec3::from(posed.vertices[0].position).abs_diff_eq(hips.transform_point3(Vec3::new(-0.2, 0.0, 0.0)), 1e-5), "the body follows the hips");
+        assert!(pose.rotations[2].abs_diff_eq(Quat::from_xyzw(-x, y, -z, w), 1e-5), "with an unrotated parent the raw rotation is the normalized one");
+        let points = positions(&model, &pose);
+        let hips = Mat4::from_quat(pose.rotations[1]);
+        let expected = hips * Mat4::from_translation(Vec3::new(0.2, 0.95, 0.0)) * Mat4::from_quat(pose.rotations[2]) * Mat4::from_translation(Vec3::new(-0.2, -0.95, 0.0));
+        assert!(points[5].abs_diff_eq(expected.transform_point3(Vec3::new(0.6, 0.9, 0.0)), 1e-5));
+        assert!(points[0].abs_diff_eq(hips.transform_point3(Vec3::new(-0.2, 0.0, 0.0)), 1e-5), "the body follows the hips");
     }
 
     #[test]
@@ -782,23 +1021,99 @@ pub mod tests {
         let turn = Quat::from_rotation_z(0.5);
         model.nodes[1].rotation = turn;
         model.nodes[0].scale = Vec3::splat(0.01);
-        let pose = model.standing();
+        let pose = model.pose(&model.standing());
         let preset: Value = serde_json::from_str(STANDING).unwrap();
         let normalized = Quat::from_array(floats(&preset["data"]["rightUpperArm"]["rotation"], [0.0; 4]));
-        assert!(pose[2].abs_diff_eq(turn.inverse() * normalized * turn, 1e-5));
+        assert!(pose.rotations[2].abs_diff_eq(turn.inverse() * normalized * turn, 1e-5));
+    }
+
+    #[test]
+    fn a_normalized_hips_position_moves_the_hips_in_model_space() {
+        let mut model = Model::parse(&figure(Version::One)).unwrap();
+        model.nodes[0].translation = Vec3::new(0.0, 0.5, 0.0);
+        assert_eq!(model.rest_hips(), Some(Vec3::new(0.0, 0.5, 0.0)));
+        let pose = model.pose(&Humanoid { rotations: HashMap::new(), hips: Some(Vec3::new(0.1, 0.7, 0.0)) });
+        assert!(pose.translations[1].abs_diff_eq(Vec3::new(0.1, 0.2, 0.0), 1e-6), "the hips' parent offset is taken out");
+        assert!(positions(&model, &pose)[0].abs_diff_eq(Vec3::new(-0.1, 0.7, 0.0), 1e-5));
     }
 
     #[test]
     fn fitting_scales_to_the_height_and_stands_on_the_floor_facing_the_viewer() {
         for version in [Version::Zero, Version::One] {
             let model = Model::parse(&figure(version)).unwrap();
-            let mut posed = model.pose(&model.rest());
-            let fit = posed.fit(0.3);
-            posed.place(&fit, version, -0.17);
-            let (low, high) = posed.bounds();
+            let skinned = model.skinned();
+            let fit = Fit::new(&model, &skinned, 0.3);
+            let rest = model.rest();
+            let placement = fit.placement(&model, &rest, -0.17);
+            let (low, high) = bounds(&skinned.positions(&skinned.palette(&model, &rest, placement)));
             assert!((low.y + 0.17).abs() < 1e-5 && (high.y - 0.13).abs() < 1e-5, "{low} {high}");
-            assert!(posed.vertices[0].normal[2] > 0.0, "a VRM 0 figure faces -Z and is turned toward the viewer ({version:?})");
+            let facing = placement.transform_vector3(Vec3::from(skinned.vertices[0].normal));
+            assert!(facing.z > 0.0, "a VRM 0 figure faces -Z and is turned toward the viewer ({version:?})");
         }
+    }
+
+    #[test]
+    fn feet_are_planted_where_the_rest_pose_stood_them() {
+        let mut builder = Builder::new(serde_json::json!({ "VRMC_vrm": { "humanoid": { "humanBones": { "hips": { "node": 1 }, "leftFoot": { "node": 2 }, "rightFoot": { "node": 3 } } } } }));
+        let position = builder.accessor("VEC3", &[-0.2, 0.0, 0.0, 0.2, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        builder.set("nodes", serde_json::json!([{ "children": [1], "mesh": 0 }, { "translation": [0.0, 0.5, 0.0], "children": [2, 3] }, { "translation": [-0.1, -0.4, 0.0] }, { "translation": [0.1, -0.4, 0.0] }]));
+        builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position } }] }]));
+        let model = Model::parse(&builder.glb()).unwrap();
+        let skinned = model.skinned();
+        let fit = Fit::new(&model, &skinned, 1.0);
+        assert!((fit.ankle - 0.1).abs() < 1e-6);
+        let mut lifted = model.pose(&Humanoid { rotations: HashMap::new(), hips: Some(Vec3::new(0.3, 0.8, 0.2)) });
+        lifted.rotations[1] = Quat::from_rotation_z(0.2);
+        let feet = model.feet(&lifted).unwrap().map(|foot| fit.placement(&model, &lifted, -0.5).transform_point3(foot));
+        assert!(((feet[0].x + feet[1].x) / 2.0).abs() < 1e-5 && ((feet[0].z + feet[1].z) / 2.0).abs() < 1e-5, "the feet are centred: {feet:?}");
+        assert!((feet[0].y.min(feet[1].y) - (-0.5 + 0.1)).abs() < 1e-5, "the lower foot stands at its ankle height: {feet:?}");
+    }
+
+    #[test]
+    fn an_expression_drives_its_morph_targets_and_only_their_vertices_change() {
+        let mut builder = Builder::new(serde_json::json!({ "VRM": { "humanoid": { "humanBones": [] }, "blendShapeMaster": { "blendShapeGroups": [{ "presetName": "blink", "binds": [{ "mesh": 0, "index": 0, "weight": 100 }] }, { "presetName": "a", "isBinary": true, "binds": [{ "mesh": 0, "index": 1, "weight": 50 }] }] } } }));
+        let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        let blink = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0]);
+        let open = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0]);
+        builder.set("nodes", serde_json::json!([{ "mesh": 0 }]));
+        builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position }, "targets": [{ "POSITION": blink }, { "POSITION": open }] }] }]));
+        let model = Model::parse(&builder.glb()).unwrap();
+        let mut skinned = model.skinned();
+        let mut pose = model.rest();
+        model.express(&mut pose, "blink", 0.5);
+        model.express(&mut pose, "a", 0.6);
+        let mut changed = skinned.morph(&pose.weights);
+        changed.sort();
+        assert_eq!(changed, vec![1, 2]);
+        assert_eq!(skinned.vertices[2].position, [0.0, 0.5, 0.0]);
+        assert_eq!(skinned.vertices[1].position, [1.0, 0.25, 0.0], "a binary expression applies fully, at its bind weight");
+        assert!(skinned.morph(&pose.weights).is_empty(), "unchanged weights touch nothing");
+        let rest = model.rest();
+        skinned.morph(&rest.weights);
+        assert_eq!(skinned.vertices[2].position, [0.0, 1.0, 0.0]);
+        assert_eq!(skinned.vertices[1].position, [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn outline_and_depth_write_settings_read_as_three_vrm_reads_them() {
+        let mut builder = Builder::new(serde_json::json!({ "VRM": { "humanoid": { "humanBones": [] }, "materialProperties": [
+            { "shader": "VRM/MToon", "keywordMap": { "_ALPHABLEND_ON": true }, "floatProperties": { "_BlendMode": 3, "_ZWrite": 1, "_OutlineWidthMode": 1, "_OutlineWidth": 0.08, "_OutlineColorMode": 1, "_OutlineLightingMix": 0.5 }, "vectorProperties": {}, "textureProperties": {}, "renderQueue": 2501 },
+            { "shader": "VRM/MToon", "keywordMap": { "_ALPHABLEND_ON": true }, "floatProperties": { "_BlendMode": 2, "_ZWrite": 0, "_OutlineWidthMode": 0, "_OutlineWidth": 0.08 }, "vectorProperties": {}, "textureProperties": {}, "renderQueue": 3000 },
+            { "shader": "VRM/MToon", "keywordMap": { "_ALPHATEST_ON": true }, "floatProperties": { "_BlendMode": 1, "_OutlineWidthMode": 2, "_OutlineWidth": 0.5 }, "vectorProperties": { "_OutlineColor": [1.0, 0.5, 0.0, 1.0] }, "textureProperties": {}, "renderQueue": 2450 }
+        ] } }));
+        let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        builder.set("nodes", serde_json::json!([{ "mesh": 0 }]));
+        builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position }, "material": 0 }] }]));
+        builder.set("materials", serde_json::json!([{}, {}, {}]));
+        let model = Model::parse(&builder.glb()).unwrap();
+        let [zwrite, plain, cutout] = [0, 1, 2].map(|at| model.materials[at].clone());
+        assert!(zwrite.alpha == Alpha::Blend && zwrite.depth_write);
+        assert!(plain.alpha == Alpha::Blend && !plain.depth_write && plain.outline.is_none());
+        let outline = zwrite.outline.unwrap();
+        assert!(outline.width == OutlineWidth::World && (outline.factor - 0.0008).abs() < 1e-7 && outline.lighting_mix == 0.5 && outline.color == [0.0; 3]);
+        let outline = cutout.outline.unwrap();
+        assert!(cutout.depth_write && outline.width == OutlineWidth::Screen && outline.lighting_mix == 0.0);
+        assert!((outline.color[1] - srgb_to_linear(0.5)).abs() < 1e-6, "the v0 outline colour is sRGB");
     }
 
     #[test]
@@ -812,8 +1127,8 @@ pub mod tests {
         builder.set("nodes", serde_json::json!([{ "mesh": 0 }]));
         builder.set("meshes", serde_json::json!([{ "weights": [0.5], "primitives": [{ "attributes": { "POSITION": position }, "targets": [{ "POSITION": target }] }] }]));
         let model = Model::parse(&builder.glb()).unwrap();
-        let posed = model.pose(&model.rest());
-        assert_eq!(posed.vertices[1].position, [1.0, 0.0, 0.0]);
-        assert_eq!(posed.vertices[2].position, [0.0, 1.25, 0.0]);
+        let skinned = model.skinned();
+        assert_eq!(skinned.vertices[1].position, [1.0, 0.0, 0.0]);
+        assert_eq!(skinned.vertices[2].position, [0.0, 1.25, 0.0], "the mesh's default weight applies at load");
     }
 }

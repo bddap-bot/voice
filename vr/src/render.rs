@@ -1,13 +1,16 @@
 use ash::vk;
 use glam::{Mat4, Vec3};
 
-use crate::vrm::{Alpha, Model, Posed, Vertex};
+use std::collections::HashMap;
+
+use crate::vrm::{Alpha, Model, OutlineWidth, Skinned, Vertex};
 use crate::vulkan::{vk_error, Gpu};
 
 pub const FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
 const DEPTH: vk::Format = vk::Format::D32_SFLOAT;
 const RING: usize = 3;
 const NEAR: f32 = 0.01;
+pub const PAGE_HEIGHT: f32 = 2.7;
 const FAR: f32 = 10.0;
 
 const VERTEX_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vertex.spv"));
@@ -17,6 +20,14 @@ const FRAGMENT_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fragmen
 #[derive(Clone, Copy)]
 struct Push {
     view_projection: [f32; 16],
+    material: u32,
+    outline: u32,
+    outline_scale: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MaterialData {
     base: [f32; 4],
     shade: [f32; 3],
     blend: f32,
@@ -24,6 +35,25 @@ struct Push {
     shading_toony: f32,
     cutoff: f32,
     equalization: f32,
+    outline_color: [f32; 3],
+    outline_lighting_mix: f32,
+    outline_width: f32,
+    outline_screen: f32,
+    padding: [f32; 2],
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct Variant {
+    blend: bool,
+    cull: Cull,
+    depth_write: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Cull {
+    None,
+    Back,
+    Front,
 }
 
 pub fn eye_projection(eye: Vec3, half_width: f32, half_height: f32) -> Option<Mat4> {
@@ -60,7 +90,8 @@ struct DrawCall {
     count: u32,
     set: vk::DescriptorSet,
     pipeline: vk::Pipeline,
-    push: Push,
+    material: u32,
+    outline: bool,
 }
 
 type Buffer = (vk::Buffer, vk::DeviceMemory, *mut u8);
@@ -73,15 +104,17 @@ pub struct Renderer {
     render_pass: vk::RenderPass,
     set_layout: vk::DescriptorSetLayout,
     layout: vk::PipelineLayout,
-    pipelines: [[vk::Pipeline; 2]; 2],
+    pipelines: HashMap<Variant, vk::Pipeline>,
     descriptors: vk::DescriptorPool,
     sampler: vk::Sampler,
     textures: Vec<Texture>,
-    material_sets: Vec<vk::DescriptorSet>,
-    vertices: Option<Buffer>,
-    indices: Option<Buffer>,
+    vertices: Buffer,
+    indices: Buffer,
+    palette: Buffer,
+    joints: usize,
+    material_data: Buffer,
     drawn: Vec<DrawCall>,
-    materials: Vec<crate::vrm::Material>,
+    outline_scale: f32,
     next: usize,
     last: Option<usize>,
 }
@@ -95,7 +128,7 @@ fn barrier(image: vk::Image, range: vk::ImageSubresourceRange, from: vk::ImageLa
 }
 
 impl Renderer {
-    pub fn new(gpu: Gpu, eye: [u32; 2], model: &Model) -> Result<Renderer, String> {
+    pub fn new(gpu: Gpu, eye: [u32; 2], model: &Model, skinned: &Skinned, joints: usize, outline_scale: f32) -> Result<Renderer, String> {
         let device = &gpu.device;
         let attachments = [
             vk::AttachmentDescription::default()
@@ -118,10 +151,14 @@ impl Renderer {
         let subpasses = [vk::SubpassDescription::default().pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS).color_attachments(&color_reference).depth_stencil_attachment(&depth_reference)];
         let render_pass = unsafe { device.create_render_pass(&vk::RenderPassCreateInfo::default().attachments(&attachments).subpasses(&subpasses), None) }.map_err(vk_error("vkCreateRenderPass"))?;
 
+        let both = vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
         let bindings = [
             vk::DescriptorSetLayoutBinding::default().binding(0).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(1).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
-            vk::DescriptorSetLayoutBinding::default().binding(2).descriptor_type(vk::DescriptorType::SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default().binding(2).descriptor_type(vk::DescriptorType::SAMPLER).descriptor_count(1).stage_flags(both),
+            vk::DescriptorSetLayoutBinding::default().binding(3).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX),
+            vk::DescriptorSetLayoutBinding::default().binding(4).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX),
+            vk::DescriptorSetLayoutBinding::default().binding(5).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(both),
         ];
         let set_layout = unsafe { device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None) }.map_err(vk_error("vkCreateDescriptorSetLayout"))?;
         let set_layouts = [set_layout];
@@ -141,9 +178,23 @@ impl Renderer {
         }
         .map_err(vk_error("vkCreateSampler"))?;
         let set_count = model.materials.len() as u32;
-        let sizes = [vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: 2 * set_count }, vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLER, descriptor_count: set_count }];
+        let sizes = [
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: 3 * set_count },
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLER, descriptor_count: set_count },
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 2 * set_count },
+        ];
         let descriptors = unsafe { device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(set_count).pool_sizes(&sizes), None) }.map_err(vk_error("vkCreateDescriptorPool"))?;
 
+        let upload = |bytes: &[u8], usage| -> Result<Buffer, String> {
+            let buffer = gpu.host_buffer(bytes.len() as u64, usage)?;
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.2, bytes.len()) };
+            Ok(buffer)
+        };
+        let material_data: Vec<MaterialData> = model.materials.iter().map(material_data).collect();
+        let vertices = upload(bytes_of(&skinned.vertices), vk::BufferUsageFlags::VERTEX_BUFFER)?;
+        let indices = upload(bytes_of(&skinned.indices), vk::BufferUsageFlags::INDEX_BUFFER)?;
+        let palette = gpu.host_buffer((joints.max(1) * std::mem::size_of::<Mat4>()) as u64, vk::BufferUsageFlags::STORAGE_BUFFER)?;
+        let material_buffer = upload(bytes_of(&material_data), vk::BufferUsageFlags::STORAGE_BUFFER)?;
         let mut renderer = Renderer {
             depth: Texture { image: vk::Image::null(), memory: vk::DeviceMemory::null(), view: vk::ImageView::null() },
             gpu,
@@ -152,19 +203,28 @@ impl Renderer {
             render_pass,
             set_layout,
             layout,
-            pipelines: [[vk::Pipeline::null(); 2]; 2],
+            pipelines: HashMap::new(),
             descriptors,
             sampler,
             textures: Vec::new(),
-            material_sets: Vec::new(),
-            vertices: None,
-            indices: None,
+            vertices,
+            indices,
+            palette,
+            joints,
+            material_data: material_buffer,
             drawn: Vec::new(),
-            materials: model.materials.clone(),
+            outline_scale,
             next: 0,
             last: None,
         };
-        renderer.pipelines = renderer.pipelines()?;
+        let variant = |material: &crate::vrm::Material, outline: bool| Variant {
+            blend: material.alpha == Alpha::Blend,
+            cull: if outline { Cull::Front } else if material.double_sided { Cull::None } else { Cull::Back },
+            depth_write: material.depth_write,
+        };
+        let mut variants: Vec<Variant> = model.materials.iter().flat_map(|material| [Some(variant(material, false)), material.outline.as_ref().map(|_| variant(material, true))]).flatten().collect();
+        variants.dedup();
+        renderer.pipelines = renderer.pipelines(&variants)?;
         renderer.depth = renderer.attachment(DEPTH, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::ImageAspectFlags::DEPTH)?;
         for _ in 0..RING {
             let target = renderer.target()?;
@@ -178,22 +238,37 @@ impl Renderer {
         let texture = renderer.texture(1, 1, &[255; 4])?;
         renderer.textures.push(texture);
         let layouts = vec![set_layout; model.materials.len()];
-        renderer.material_sets = unsafe { renderer.gpu.device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(descriptors).set_layouts(&layouts)) }.map_err(vk_error("vkAllocateDescriptorSets"))?;
-        for (material, &set) in model.materials.iter().zip(&renderer.material_sets) {
-            let base = [vk::DescriptorImageInfo::default().image_view(renderer.textures[material.base_image.unwrap_or(white)].view).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
-            let shade = [vk::DescriptorImageInfo::default().image_view(renderer.textures[material.shade_image.unwrap_or(white)].view).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let sets = unsafe { renderer.gpu.device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(descriptors).set_layouts(&layouts)) }.map_err(vk_error("vkAllocateDescriptorSets"))?;
+        for (material, &set) in model.materials.iter().zip(&sets) {
+            let image = |index: Option<usize>| [vk::DescriptorImageInfo::default().image_view(renderer.textures[index.unwrap_or(white)].view).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+            let (base, shade, width) = (image(material.base_image), image(material.shade_image), image(material.outline.as_ref().and_then(|outline| outline.width_image)));
             let sampler = [vk::DescriptorImageInfo::default().sampler(renderer.sampler)];
+            let palette = [vk::DescriptorBufferInfo::default().buffer(renderer.palette.0).range(vk::WHOLE_SIZE)];
+            let materials = [vk::DescriptorBufferInfo::default().buffer(renderer.material_data.0).range(vk::WHOLE_SIZE)];
             let writes = [
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(0).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&base),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(1).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&shade),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(2).descriptor_type(vk::DescriptorType::SAMPLER).image_info(&sampler),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(3).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&width),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(4).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&palette),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(5).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&materials),
             ];
             unsafe { renderer.gpu.device.update_descriptor_sets(&writes, &[]) };
         }
+        renderer.drawn = skinned
+            .draws
+            .iter()
+            .flat_map(|draw| {
+                let material = &model.materials[draw.material];
+                let call = |outline| DrawCall { first: draw.first, count: draw.count, set: sets[draw.material], pipeline: renderer.pipelines[&variant(material, outline)], material: draw.material as u32, outline };
+                [Some(call(false)), material.outline.as_ref().map(|_| call(true))]
+            })
+            .flatten()
+            .collect();
         Ok(renderer)
     }
 
-    fn pipelines(&self) -> Result<[[vk::Pipeline; 2]; 2], String> {
+    fn pipelines(&self, variants: &[Variant]) -> Result<HashMap<Variant, vk::Pipeline>, String> {
         let device = &self.gpu.device;
         let module = |code: &[u8]| {
             let words: Vec<u32> = code.chunks_exact(4).map(|word| u32::from_le_bytes(word.try_into().unwrap())).collect();
@@ -210,6 +285,8 @@ impl Renderer {
             vk::VertexInputAttributeDescription::default().location(0).format(vk::Format::R32G32B32_SFLOAT).offset(0),
             vk::VertexInputAttributeDescription::default().location(1).format(vk::Format::R32G32B32_SFLOAT).offset(12),
             vk::VertexInputAttributeDescription::default().location(2).format(vk::Format::R32G32_SFLOAT).offset(24),
+            vk::VertexInputAttributeDescription::default().location(3).format(vk::Format::R16G16B16A16_UINT).offset(32),
+            vk::VertexInputAttributeDescription::default().location(4).format(vk::Format::R32G32B32A32_SFLOAT).offset(40),
         ];
         let input = vk::PipelineVertexInputStateCreateInfo::default().vertex_binding_descriptions(&vertex_bindings).vertex_attribute_descriptions(&vertex_attributes);
         let assembly = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
@@ -217,14 +294,21 @@ impl Renderer {
         let multisample = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-        let mut pipelines = [[vk::Pipeline::null(); 2]; 2];
-        for blend in [false, true] {
-            for double_sided in [false, true] {
-                let cull = if double_sided { vk::CullModeFlags::NONE } else { vk::CullModeFlags::BACK };
+        let mut pipelines = HashMap::new();
+        for &variant in variants {
+            if pipelines.contains_key(&variant) {
+                continue;
+            }
+            {
+                let cull = match variant.cull {
+                    Cull::None => vk::CullModeFlags::NONE,
+                    Cull::Back => vk::CullModeFlags::BACK,
+                    Cull::Front => vk::CullModeFlags::FRONT,
+                };
                 let raster = vk::PipelineRasterizationStateCreateInfo::default().polygon_mode(vk::PolygonMode::FILL).cull_mode(cull).front_face(vk::FrontFace::COUNTER_CLOCKWISE).line_width(1.0);
-                let depth = vk::PipelineDepthStencilStateCreateInfo::default().depth_test_enable(true).depth_write_enable(!blend).depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
+                let depth = vk::PipelineDepthStencilStateCreateInfo::default().depth_test_enable(true).depth_write_enable(variant.depth_write).depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
                 let attachment = [vk::PipelineColorBlendAttachmentState::default()
-                    .blend_enable(blend)
+                    .blend_enable(variant.blend)
                     .src_color_blend_factor(vk::BlendFactor::ONE)
                     .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
                     .color_blend_op(vk::BlendOp::ADD)
@@ -246,7 +330,7 @@ impl Renderer {
                     .layout(self.layout)
                     .render_pass(self.render_pass);
                 let created = unsafe { device.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None) }.map_err(|(_, error)| format!("vkCreateGraphicsPipelines: {error}"))?;
-                pipelines[blend as usize][double_sided as usize] = created[0];
+                pipelines.insert(variant, created[0]);
             }
         }
         unsafe {
@@ -329,47 +413,14 @@ impl Renderer {
         Ok(Texture { image, memory, view })
     }
 
-    pub fn set_mesh(&mut self, posed: &Posed) -> Result<(), String> {
-        unsafe { self.gpu.device.device_wait_idle() }.map_err(vk_error("vkDeviceWaitIdle"))?;
-        for buffer in [self.vertices.take(), self.indices.take()].into_iter().flatten() {
-            self.gpu.free_buffer(buffer);
+    pub fn update(&mut self, palette: &[Mat4], vertices: &[Vertex], changed: &[u32]) {
+        assert_eq!(palette.len(), self.joints, "the palette has one matrix per joint");
+        let bytes = bytes_of(palette);
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.palette.2, bytes.len()) };
+        let target = self.vertices.2 as *mut Vertex;
+        for &vertex in changed {
+            unsafe { target.add(vertex as usize).write(vertices[vertex as usize]) };
         }
-        let vertex_bytes = std::mem::size_of_val(posed.vertices.as_slice());
-        let vertices = self.gpu.host_buffer(vertex_bytes as u64, vk::BufferUsageFlags::VERTEX_BUFFER)?;
-        unsafe { std::ptr::copy_nonoverlapping(posed.vertices.as_ptr() as *const u8, vertices.2, vertex_bytes) };
-        let index_bytes = std::mem::size_of_val(posed.indices.as_slice());
-        let indices = self.gpu.host_buffer(index_bytes as u64, vk::BufferUsageFlags::INDEX_BUFFER)?;
-        unsafe { std::ptr::copy_nonoverlapping(posed.indices.as_ptr() as *const u8, indices.2, index_bytes) };
-        self.vertices = Some(vertices);
-        self.indices = Some(indices);
-        self.drawn = posed
-            .draws
-            .iter()
-            .map(|draw| {
-                let material = &self.materials[draw.material];
-                let blend = material.alpha == Alpha::Blend;
-                DrawCall {
-                    first: draw.first,
-                    count: draw.count,
-                    set: self.material_sets[draw.material],
-                    pipeline: self.pipelines[blend as usize][material.double_sided as usize],
-                    push: Push {
-                        view_projection: [0.0; 16],
-                        base: material.base,
-                        shade: material.shade,
-                        blend: blend as u8 as f32,
-                        shading_shift: material.shading_shift,
-                        shading_toony: material.shading_toony,
-                        cutoff: match material.alpha {
-                            Alpha::Cutout(cutoff) => cutoff,
-                            _ => 0.0,
-                        },
-                        equalization: material.equalization,
-                    },
-                }
-            })
-            .collect();
-        Ok(())
     }
 
     pub fn render(&mut self, eyes: [Option<Mat4>; 2]) -> Result<openvr_sys::VRVulkanTextureData_t, String> {
@@ -387,16 +438,16 @@ impl Renderer {
                 &vk::RenderPassBeginInfo::default().render_pass(self.render_pass).framebuffer(target.framebuffer).render_area(vk::Rect2D { offset: vk::Offset2D::default(), extent: vk::Extent2D { width: width * 2, height } }).clear_values(&clear),
                 vk::SubpassContents::INLINE,
             );
-            if let (Some(vertices), Some(indices)) = (&self.vertices, &self.indices) {
-                device.cmd_bind_vertex_buffers(target.commands, 0, &[vertices.0], &[0]);
-                device.cmd_bind_index_buffer(target.commands, indices.0, 0, vk::IndexType::UINT32);
+            {
+                device.cmd_bind_vertex_buffers(target.commands, 0, &[self.vertices.0], &[0]);
+                device.cmd_bind_index_buffer(target.commands, self.indices.0, 0, vk::IndexType::UINT32);
                 for (side, view_projection) in eyes.iter().enumerate() {
                     let Some(view_projection) = view_projection else { continue };
                     let x = (side as u32 * width) as f32;
                     device.cmd_set_viewport(target.commands, 0, &[vk::Viewport { x, y: 0.0, width: width as f32, height: height as f32, min_depth: 0.0, max_depth: 1.0 }]);
                     device.cmd_set_scissor(target.commands, 0, &[vk::Rect2D { offset: vk::Offset2D { x: x as i32, y: 0 }, extent: vk::Extent2D { width, height } }]);
                     for drawn in &self.drawn {
-                        let push = Push { view_projection: view_projection.to_cols_array(), ..drawn.push };
+                        let push = Push { view_projection: view_projection.to_cols_array(), material: drawn.material, outline: drawn.outline as u32, outline_scale: self.outline_scale };
                         let bytes = std::slice::from_raw_parts(&push as *const Push as *const u8, std::mem::size_of::<Push>());
                         device.cmd_bind_pipeline(target.commands, vk::PipelineBindPoint::GRAPHICS, drawn.pipeline);
                         device.cmd_bind_descriptor_sets(target.commands, vk::PipelineBindPoint::GRAPHICS, self.layout, 0, &[drawn.set], &[]);
@@ -432,12 +483,37 @@ impl Renderer {
     }
 }
 
+fn bytes_of<T: Copy>(values: &[T]) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(values.as_ptr() as *const u8, std::mem::size_of_val(values)) }
+}
+
+fn material_data(material: &crate::vrm::Material) -> MaterialData {
+    let outline = material.outline.as_ref();
+    MaterialData {
+        base: material.base,
+        shade: material.shade,
+        blend: (material.alpha == Alpha::Blend) as u8 as f32,
+        shading_shift: material.shading_shift,
+        shading_toony: material.shading_toony,
+        cutoff: match material.alpha {
+            Alpha::Cutout(cutoff) => cutoff,
+            _ => 0.0,
+        },
+        equalization: material.equalization,
+        outline_color: outline.map_or([0.0; 3], |outline| outline.color),
+        outline_lighting_mix: outline.map_or(0.0, |outline| outline.lighting_mix),
+        outline_width: outline.map_or(0.0, |outline| outline.factor),
+        outline_screen: outline.is_some_and(|outline| outline.width == OutlineWidth::Screen) as u8 as f32,
+        padding: [0.0; 2],
+    }
+}
+
 impl Drop for Renderer {
     fn drop(&mut self) {
         let device = &self.gpu.device;
         unsafe {
             let _ = device.device_wait_idle();
-            for buffer in [self.vertices.take(), self.indices.take()].into_iter().flatten() {
+            for buffer in [self.vertices, self.indices, self.palette, self.material_data] {
                 self.gpu.free_buffer(buffer);
             }
             for target in &self.targets {
@@ -449,7 +525,7 @@ impl Drop for Renderer {
                 device.destroy_image(texture.image, None);
                 device.free_memory(texture.memory, None);
             }
-            for &pipeline in self.pipelines.iter().flatten() {
+            for &pipeline in self.pipelines.values() {
                 device.destroy_pipeline(pipeline, None);
             }
             device.destroy_sampler(self.sampler, None);
@@ -462,9 +538,12 @@ impl Drop for Renderer {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::vrm::{tests::figure, Version};
+
+    const COVERAGE: f32 = 0.95;
+    const COLOR: f32 = 12.0;
 
     #[test]
     fn the_window_corners_land_on_the_eye_image_corners() {
@@ -479,15 +558,24 @@ mod tests {
         assert!(eye_projection(Vec3::new(0.0, 0.0, 0.01), 0.2, 0.2).is_none(), "an eye at the window draws nothing");
     }
 
+    pub fn draw(model: &Model, pose: &crate::vrm::Pose, eye: [u32; 2], eyes: [Option<Mat4>; 2], shift: Vec3) -> Vec<u8> {
+        draw_at(model, pose, eye, eyes, shift, 0.3, -0.17)
+    }
+
+    fn draw_at(model: &Model, pose: &crate::vrm::Pose, eye: [u32; 2], eyes: [Option<Mat4>; 2], shift: Vec3, height: f32, floor: f32) -> Vec<u8> {
+        let mut skinned = model.skinned();
+        let changed = skinned.morph(&pose.weights);
+        let fit = crate::vrm::Fit::new(model, &skinned, height);
+        let palette = skinned.palette(model, pose, Mat4::from_translation(shift) * fit.placement(model, pose, floor));
+        let mut renderer = Renderer::new(Gpu::new(None).unwrap(), eye, model, &skinned, skinned.joints(), height / PAGE_HEIGHT).unwrap();
+        renderer.update(&palette, &skinned.vertices, &changed);
+        renderer.render(eyes).unwrap();
+        renderer.read().unwrap()
+    }
+
     fn rendered(version: Version, eyes: [Vec3; 2]) -> (Vec<u8>, u32) {
         let model = Model::parse(&figure(version)).unwrap();
-        let mut posed = model.pose(&model.rest());
-        let fit = posed.fit(0.3);
-        posed.place(&fit, version, -0.17);
-        let mut renderer = Renderer::new(Gpu::new(None).unwrap(), [64, 64], &model).unwrap();
-        renderer.set_mesh(&posed).unwrap();
-        renderer.render(eyes.map(|eye| eye_projection(eye, 0.2, 0.2))).unwrap();
-        (renderer.read().unwrap(), 128)
+        (draw(&model, &model.rest(), [64, 64], eyes.map(|eye| eye_projection(eye, 0.2, 0.2)), Vec3::ZERO), 128)
     }
 
     fn pixel(pixels: &[u8], row_length: u32, x: u32, y: u32) -> [u8; 4] {
@@ -531,17 +619,63 @@ mod tests {
         assert!(!left.is_empty() && left.len() == right.len());
         assert_eq!(left, right, "geometry on the window plane has no disparity");
         let model = Model::parse(&figure(Version::One)).unwrap();
-        let mut posed = model.pose(&model.rest());
-        for vertex in &mut posed.vertices {
-            vertex.position[2] += 0.5;
-        }
-        let fit = posed.fit(0.3);
-        posed.place(&fit, Version::One, -0.17);
-        let mut renderer = Renderer::new(Gpu::new(None).unwrap(), [64, 64], &model).unwrap();
-        renderer.set_mesh(&posed).unwrap();
-        renderer.render([Vec3::new(-0.032, 0.0, 0.4), Vec3::new(0.032, 0.0, 0.4)].map(|eye| eye_projection(eye, 0.2, 0.2))).unwrap();
-        let pixels = renderer.read().unwrap();
+        let pixels = draw(&model, &model.rest(), [64, 64], [Vec3::new(-0.032, 0.0, 0.4), Vec3::new(0.032, 0.0, 0.4)].map(|eye| eye_projection(eye, 0.2, 0.2)), Vec3::new(0.0, 0.0, 0.05));
         let [left, right] = [0, 1].map(|eye| covered_columns(&pixels, row, eye, 58));
         assert!(left[0] > right[0], "in front of the window the left eye sees it further right: {left:?} {right:?}");
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Golden {
+        eye: [f32; 3],
+        size: u32,
+        time: f32,
+        quad: f32,
+        floor: f32,
+        height: f32,
+    }
+
+    pub fn golden_render(model: &Model, motion: &[u8]) -> (Vec<u8>, u32) {
+        let golden: Golden = serde_json::from_str(include_str!("../golden/pose.json")).unwrap();
+        let standing = model.standing();
+        let mut clip = crate::motion::Clip::parse(motion, model.version, model.rest_hips()).unwrap();
+        clip.anchor(&standing);
+        let mut animator = crate::motion::Animator::new([("idle".to_owned(), clip)].into(), crate::motion::Random::seeded());
+        animator.update(golden.time);
+        let mut pose = model.pose(&animator.humanoid(&standing, model.rest_hips()));
+        model.express(&mut pose, "blink", 1.0);
+        let eyes = [eye_projection(Vec3::from(golden.eye), golden.quad / 2.0, golden.quad / 2.0), None];
+        let pixels = draw_at(model, &pose, [golden.size; 2], eyes, Vec3::ZERO, golden.height, golden.floor);
+        let row = (golden.size * 8) as usize;
+        (pixels.chunks_exact(row).flat_map(|line| &line[..row / 2]).copied().collect(), golden.size)
+    }
+
+    pub struct Difference {
+        pub coverage: f32,
+        pub color: f32,
+    }
+
+    pub fn difference(native: &[u8], page: &[u8]) -> Difference {
+        let (mut both, mut either, mut error) = (0usize, 0usize, 0f64);
+        for (a, b) in native.chunks_exact(4).zip(page.chunks_exact(4)) {
+            let (in_a, in_b) = (a[3] > 127, b[3] > 127);
+            either += (in_a || in_b) as usize;
+            both += (in_a && in_b) as usize;
+            if in_a || in_b {
+                error += (0..3).map(|channel| (a[channel] as f64 - b[channel] as f64).abs()).sum::<f64>() / 3.0;
+            }
+        }
+        Difference { coverage: both as f32 / either.max(1) as f32, color: (error / either.max(1) as f64) as f32 }
+    }
+
+    #[test]
+    fn the_native_render_of_the_golden_pose_matches_the_page() {
+        let model = Model::parse(include_bytes!("../golden/figure.vrm")).unwrap();
+        let (native, _) = golden_render(&model, include_bytes!("../golden/idle.json"));
+        let mut page = Vec::new();
+        std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&include_bytes!("../golden/page.rgba.gz")[..]), &mut page).unwrap();
+        let difference = difference(&native, &page);
+        eprintln!("golden: silhouette overlap {:.4}, mean colour error {:.2}/255", difference.coverage, difference.color);
+        assert!(difference.coverage >= COVERAGE, "the native silhouette overlaps the page's by {:.4}", difference.coverage);
+        assert!(difference.color <= COLOR, "the native colours differ from the page's by {:.2}/255 on average", difference.color);
     }
 }

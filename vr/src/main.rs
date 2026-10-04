@@ -1,11 +1,13 @@
+mod motion;
 mod openvr;
 mod page;
 mod placement;
 mod vulkan;
 mod vrm;
 mod render;
+mod relay;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -14,8 +16,10 @@ use serde_json::json;
 use openvr::{Runtime, Signal};
 use page::{Frame, Page};
 use placement::{above_hand, desk_spot, Anchor, Hand, Interaction, Pose};
+use motion::{Animator, Clip, Random, IDLES};
+use relay::{Relay, Token};
 use render::{eye_projection, Renderer};
-use vrm::Model;
+use vrm::{Fit, Model};
 
 const EYE: u32 = 768;
 const QUAD: f32 = 0.4;
@@ -42,8 +46,8 @@ fn save(path: &PathBuf, anchor: &Anchor) {
     }
 }
 
-#[derive(Default)]
 struct Meter {
+    labels: [&'static str; 2],
     window: Option<Instant>,
     waits: Vec<Duration>,
     uploads: Vec<Duration>,
@@ -57,6 +61,10 @@ fn summary(samples: &mut [Duration]) -> String {
 }
 
 impl Meter {
+    fn new(first: &'static str, second: &'static str) -> Meter {
+        Meter { labels: [first, second], window: None, waits: Vec::new(), uploads: Vec::new() }
+    }
+
     fn frame(&mut self, wait: Duration, upload: Duration) {
         let now = Instant::now();
         let window = *self.window.get_or_insert(now);
@@ -65,25 +73,52 @@ impl Meter {
         let elapsed = now - window;
         if elapsed >= Duration::from_secs(5) {
             let rate = self.waits.len() as f64 / elapsed.as_secs_f64();
-            eprintln!("overlay {rate:.1} fps; pose→frame {}; upload+submit {}", summary(&mut self.waits), summary(&mut self.uploads));
-            *self = Meter { window: Some(now), ..Meter::default() };
+            let [first, second] = self.labels;
+            eprintln!("overlay {rate:.1} fps; {first} {}; {second} {}", summary(&mut self.waits), summary(&mut self.uploads));
+            *self = Meter { window: Some(now), ..Meter::new(first, second) };
         }
     }
 }
 
-fn native(runtime: &Runtime, puppet: &std::path::Path) -> Result<(), String> {
-    let model = Model::parse(&std::fs::read(puppet).map_err(|error| format!("{}: {error}", puppet.display()))?).map_err(|error| format!("{}: {error}", puppet.display()))?;
-    let fit = model.pose(&model.rest()).fit(HEIGHT);
-    let mut posed = model.pose(&model.standing());
-    posed.place(&fit, model.version, FLOOR);
-    let mut renderer = Renderer::new(vulkan::Gpu::new(Some(runtime))?, [EYE, EYE], &model)?;
-    renderer.set_mesh(&posed)?;
+fn appearance(relay: &mut Relay) -> Result<(Model, HashMap<String, Clip>), String> {
+    let catalog = relay.catalog()?;
+    let avatar = catalog.avatars.iter().find(|avatar| avatar.id == catalog.active).or(catalog.avatars.first()).ok_or("the puppet catalog is empty")?;
+    let model = Model::parse(&relay.puppet(avatar)?).map_err(|error| format!("{}: {error}", avatar.id))?;
+    let standing = model.standing();
+    let mut clips = HashMap::new();
+    for entry in relay.clips()?.iter().filter(|entry| IDLES.contains(&entry.action.as_str())) {
+        if entry.format != "fbx" {
+            eprintln!("{}: {} clips are not played natively", entry.name, entry.format);
+            continue;
+        }
+        let mut clip = Clip::parse(&relay.motion(entry)?, model.version, model.rest_hips()).map_err(|error| format!("{}: {error}", entry.name))?;
+        clip.anchor(&standing);
+        clips.insert(entry.action.clone(), clip);
+    }
+    eprintln!("appearance {} with {} standing idle clips", avatar.id, clips.len());
+    Ok((model, clips))
+}
+
+fn native(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(), String> {
+    let mut relay = Relay::connect(token, &state.join("assets"))?;
+    let (model, clips) = appearance(&mut relay)?;
+    let standing = model.standing();
+    let rest_hips = model.rest_hips();
+    let mut animator = Animator::new(clips, Random::seeded());
+    let mut skinned = model.skinned();
+    let fit = Fit::new(&model, &skinned, HEIGHT);
+    let mut renderer = Renderer::new(vulkan::Gpu::new(Some(runtime))?, [EYE, EYE], &model, &skinned, skinned.joints(), HEIGHT / render::PAGE_HEIGHT)?;
     let mut overlay = runtime.create_overlay("voice.puppet", "Puppet", QUAD)?;
     let eye_offsets = runtime.eye_offsets();
+    let mut meter = Meter::new("frame interval", "animate+draw+submit");
+    let mut last = Instant::now();
     loop {
         if let Some(Signal::Quit) = runtime.poll() {
             return Ok(());
         }
+        let started = Instant::now();
+        let interval = started - last;
+        last = started;
         let poses = runtime.poses(0.0);
         let left = runtime.hands(&poses).into_iter().find(|hand| hand.hand == Hand::Left).zip(runtime.hand_index(Hand::Left));
         let (Some(head), Some((hand, device))) = (runtime.head(&poses), left) else {
@@ -91,11 +126,18 @@ fn native(runtime: &Runtime, puppet: &std::path::Path) -> Result<(), String> {
             std::thread::sleep(Duration::from_millis(100));
             continue;
         };
+        animator.update(interval.as_secs_f32().min(0.05));
+        let mut pose = model.pose(&animator.humanoid(&standing, rest_hips));
+        model.express(&mut pose, "blink", animator.blink());
+        let changed = skinned.morph(&pose.weights);
+        let palette = skinned.palette(&model, &pose, fit.placement(&model, &pose, FLOOR));
+        renderer.update(&palette, &skinned.vertices, &changed);
         let quad = above_hand(&hand.pose, &head, -FLOOR);
         overlay.place_on(device, &hand.pose.inverse().then(&quad));
         let local = quad.inverse();
         let eyes = eye_offsets.map(|eye: Pose| eye_projection(local.apply(head.then(&eye).t).into(), QUAD / 2.0, QUAD / 2.0));
         overlay.submit(&mut renderer.render(eyes)?)?;
+        meter.frame(interval, started.elapsed());
         runtime.wait_frame();
     }
 }
@@ -104,12 +146,12 @@ fn run() -> Result<(), String> {
     let config = directory("XDG_CONFIG_HOME", ".config");
     let state = directory("XDG_STATE_HOME", ".local/state");
     std::fs::create_dir_all(&state).map_err(|error| format!("{}: {error}", state.display()))?;
-    let runtime = Runtime::init()?;
-    if let Some(puppet) = std::env::var_os("VOICE_VR_PUPPET") {
-        return native(&runtime, std::path::Path::new(&puppet));
-    }
     let token_file = config.join("token");
     let token = std::fs::read_to_string(&token_file).map_err(|error| format!("{}: {error}", token_file.display()))?.trim().to_owned();
+    let runtime = Runtime::init()?;
+    if std::env::var_os("VOICE_VR_NATIVE").is_some() {
+        return native(&runtime, &Token::decode(&token)?, &state);
+    }
     let page_address = std::env::var("VOICE_VR_PAGE").unwrap_or_else(|_| PAGE.to_owned());
     let browser = std::env::var("VOICE_VR_BROWSER").unwrap_or_else(|_| "chromium".to_owned());
     let placement_file = state.join("placement.json");
@@ -123,7 +165,7 @@ fn run() -> Result<(), String> {
     let mut anchor = load(&placement_file);
     let started = Instant::now();
     let period = runtime.display_period()?;
-    let mut meter = Meter::default();
+    let mut meter = Meter::new("pose→frame", "upload+submit");
     let mut requested: VecDeque<Instant> = VecDeque::new();
     let mut next_request = Instant::now();
 

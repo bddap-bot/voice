@@ -13,6 +13,10 @@ serde_json = "1"
 libc = "0.2"
 glam = "0.29"
 image-webp = "0.2"
+iroh = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+flate2 = "1"
+base64 = "0.22"
 
 [build-dependencies]
 naga = { version = "26", features = ["wgsl-in", "spv-out"] }

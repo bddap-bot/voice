@@ -125,12 +125,17 @@ export async function send_only(bytes) {
     const id = JSON.parse(frame.slice(frame.indexOf('\\n') + 1)).id;
     deliver(enc.encode('puppet-selected\\n' + JSON.stringify({ id })));
   }
-  else if (frame === 'wake-model' && globalThis.backendWakeModel === 'unreadable') deliver(enc.encode('wake-model-error\\n{"message":"wake model unreadable"}'));
-  else if (frame === 'wake-model' && globalThis.backendWakeModel !== 'unanswered') deliver(enc.encode(globalThis.backendWakeModel === null ? 'wake-model-none' : 'wake-model\\n' + JSON.stringify(globalThis.backendWakeModel ?? testWakeModel)));
+  else if (frame === 'wake-model') {
+    const reply = () => deliver(enc.encode(globalThis.backendWakeModel === 'unreadable' ? 'wake-model-error\\n{"message":"wake model unreadable"}' : globalThis.backendWakeModel === null ? 'wake-model-none' : 'wake-model\\n' + JSON.stringify(globalThis.backendWakeModel ?? testWakeModel)));
+    if (globalThis.backendWakeModel === 'unanswered') globalThis.releaseWakeModel = reply;
+    else reply();
+  }
   else if (frame.startsWith('offer\\n')) {
     const offer = JSON.parse(frame.slice(6));
     globalThis.lastOffer = offer;
-    deliver(enc.encode('answer\\n' + JSON.stringify({ offer_id: offer.id, sdp: 'answer' })));
+    const sendAnswer = () => deliver(enc.encode('answer\\n' + JSON.stringify({ offer_id: offer.id, sdp: 'answer' })));
+    if (globalThis.holdAnswer) globalThis.releaseAnswer = sendAnswer;
+    else sendAnswer();
   }
   else if (frame.startsWith('share\\n')) {
     const metadata = JSON.parse(frame.slice(6, frame.indexOf('\\n', 6)));
@@ -1744,6 +1749,42 @@ for (const [name, served, error] of [
     return { spotter: Boolean(globalThis.testSpotter), errors: [...new Set(errors())], retried };
   `, { setup: `globalThis.backendWakeModel = ${JSON.stringify(served)};` });
   assert.deepEqual(result, { spotter: false, errors: [error], retried: 0 });
+});
+
+const startInFlight = `
+const errors = () => telemetryBatches.flat().filter((event) => event.kind === 'error').map((event) => event.message);
+const within = async (check) => { const end = Date.now() + 1000; while (!check() && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 10)); return Boolean(check()); };
+await sleepNow();
+globalThis.holdAnswer = true;
+document.querySelector('#puppet').click();
+await until(() => globalThis.releaseAnswer);
+const opened = () => within(() => sessionEvents('open').some((event) => event.session_id === lastOffer.id));
+`;
+
+test('a generic error frame fails neither a conversation start nor a wake-model request in flight', async () => {
+  const result = await runWakePage(`${startInFlight}
+    deliverRelay(new TextEncoder().encode('error\\nunrelated failure'));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const status = document.querySelector('#status').textContent;
+    globalThis.backendWakeModel = undefined;
+    releaseWakeModel();
+    releaseAnswer();
+    const started = await opened();
+    await sleepNow();
+    return { status, started, spotter: await within(() => globalThis.testSpotter), errors: errors() };
+  `, { setup: "globalThis.backendWakeModel = 'unanswered';", budget: 8000 });
+  assert.deepEqual(result, { status: 'unrelated failure', started: true, spotter: true, errors: [] });
+});
+
+test('an unreadable wake model fails only the wake-model request while a conversation start is in flight', async () => {
+  const result = await runWakePage(`${startInFlight}
+    globalThis.backendWakeModel = 'unreadable';
+    releaseWakeModel();
+    await within(() => errors().length);
+    releaseAnswer();
+    return { started: await opened(), errors: errors() };
+  `, { setup: "globalThis.backendWakeModel = 'unanswered';", budget: 8000 });
+  assert.deepEqual(result, { started: true, errors: ['wake model unreadable'] });
 });
 
 test('a wake model that arrives after a long wait still starts the spotter', async () => {

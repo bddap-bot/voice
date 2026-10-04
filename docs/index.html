@@ -538,12 +538,7 @@ async function listen(mine) {
           if (result.retryable === false) recordPageError(new Error(result.message));
         }
       }
-      else if (verb === 'error') {
-        answerWaiter?.reject(new Error(body));
-        answerWaiter = null;
-        wakeModelWaiter?.reject(new Error(body));
-        setStatus(body, 'err');
-      }
+      else if (verb === 'error') setStatus(body, 'err');
     }
   } catch (error) {
     if (mine !== generation) return;

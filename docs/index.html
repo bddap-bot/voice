@@ -296,8 +296,10 @@ function setFull(pane) {
   for (const grip of grips) $(grip.dataset.pane).classList.toggle('full', grip.dataset.pane === pane);
 }
 function leaveFull() {
-  if (history.state?.full) history.back();
-  else setFull();
+  setFull();
+  if (!history.state?.full) return;
+  history.replaceState(null, '');
+  history.back();
 }
 function sizePane(grip, size) {
   paneSizes[paneKey(grip)] = Math.round(size);
@@ -314,7 +316,7 @@ function savePanes(grip) {
 }
 applyPanes();
 if (history.state?.full) history.replaceState(null, '');
-addEventListener('popstate', () => setFull());
+addEventListener('popstate', () => { setFull(); if (history.state?.full) history.replaceState(null, ''); });
 stacked.addEventListener('change', applyPanes);
 for (const grip of grips) {
   grip.addEventListener('pointerdown', (event) => {
@@ -347,7 +349,7 @@ for (const grip of grips) {
     savePanes(grip);
   });
   grip.addEventListener('dblclick', () => { delete paneSizes[paneKey(grip)]; leaveFull(); applyPanes(); savePanes(); });
-  $(grip.dataset.pane).addEventListener('click', (event) => { if (fullPane === grip.dataset.pane && !event.target.closest('a')) leaveFull(); });
+  $(grip.dataset.pane).addEventListener('click', (event) => { if (fullPane === grip.dataset.pane && getSelection().isCollapsed && !event.target.closest('a, .chart')) leaveFull(); });
 }
 function savedState(saved) {
   $('entry').classList.toggle('hidden', saved);

@@ -904,6 +904,9 @@ for (const [width, height] of [[1440, 900], [390, 844]]) test(`a full display pa
     outcome.linkStays = await full();
     await evaluate('history.back()');
     outcome.backLeft = await left();
+    await evaluate('history.forward()');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    outcome.forwardState = await evaluate(`JSON.stringify([document.querySelector('#display').classList.contains('full'), history.state])`);
     outcome.escapeEntered = await enter();
     await page('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
     outcome.escapeLeft = await left();
@@ -912,7 +915,7 @@ for (const [width, height] of [[1440, 900], [390, 844]]) test(`a full display pa
     outcome.stillFull = await full();
     return outcome;
   });
-  assert.deepEqual(result, { tapEntered: true, tapLeft: true, linkEntered: true, linkStays: true, backLeft: true, escapeEntered: true, escapeLeft: true, historyGrew: 1, stillFull: false });
+  assert.deepEqual(result, { tapEntered: true, tapLeft: true, linkEntered: true, linkStays: true, backLeft: true, forwardState: '[false,null]', escapeEntered: true, escapeLeft: true, historyGrew: 2, stillFull: false });
 });
 
 for (const stored of ['{', 'null', '{"ledger-w":"wide","display-w":99999}']) test(`stored pane sizes ${stored} neither break the page nor escape the pane limits`, async () => {

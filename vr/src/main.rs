@@ -1,6 +1,7 @@
 mod audio;
 mod board;
 mod conversation;
+mod gaze;
 mod identity;
 mod session;
 mod speaker;
@@ -23,6 +24,7 @@ use std::time::{Duration, Instant};
 use openvr::{Runtime, Signal};
 use board::{Board, Press};
 use placement::{above_hand, below_wrist, local_tip, Hand, Pose};
+use gaze::Gaze;
 use motion::{Animator, Clip, Random, IDLES};
 use gesture::{Recognizer, Templates};
 use relay::{Avatar, Relay, Token};
@@ -76,6 +78,7 @@ struct Puppet {
     fit: Fit,
     standing: Humanoid,
     animator: Animator,
+    gaze: Gaze,
     drawn: Appearance,
 }
 
@@ -100,7 +103,7 @@ fn puppet(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer) -> Result
     let skinned = model.skinned()?;
     let fit = Fit::new(&model, &skinned, HEIGHT);
     let drawn = renderer.appearance(&model, &skinned)?;
-    Ok(Puppet { model, skinned, fit, standing, animator: Animator::new(clips, Random::seeded()), drawn })
+    Ok(Puppet { model, skinned, fit, standing, animator: Animator::new(clips, Random::seeded()), gaze: Gaze::default(), drawn })
 }
 
 /// Loads the picked appearance beside the shown one, then makes it the server's selection, as the page's picker does.
@@ -156,6 +159,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
                 }
                 if verdict.matched && !voice.awake() {
                     voice.summon();
+                    puppet.gaze = Gaze::default();
                     board.reset();
                     meter = Meter::default();
                 }
@@ -213,19 +217,22 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
         if let Some(image) = board.take_image() {
             board_overlay.submit(&mut board_image.upload(&image)?)?;
         }
-        if let Some(idle) = puppet.animator.update(interval.as_secs_f32().min(0.05)) {
+        let delta = interval.as_secs_f32().min(0.05);
+        if let Some(idle) = puppet.animator.update(delta) {
             eprintln!("idle {idle}");
         }
+        let quad = above_hand(&left, &head, -FLOOR);
+        let local = quad.inverse();
         let mut pose = puppet.model.pose(&puppet.animator.humanoid(&puppet.standing, puppet.model.rest_hips()));
+        let worlds = puppet.model.worlds(&pose);
+        let placement = puppet.fit.placement(&puppet.model, &worlds, FLOOR);
+        puppet.gaze.look(&puppet.model, &mut pose, &worlds, placement.inverse().transform_point3(local.apply(head.t).into()), delta);
         puppet.model.express(&mut pose, "blink", puppet.animator.blink());
         puppet.model.express(&mut pose, "aa", voice.mouth());
         let changed = puppet.skinned.morph(&pose.weights);
-        let worlds = puppet.model.worlds(&pose);
-        let palette = puppet.skinned.palette(&worlds, puppet.fit.placement(&puppet.model, &worlds, FLOOR));
+        let palette = puppet.skinned.palette(&puppet.model.worlds(&pose), placement);
         puppet.drawn.update(&palette, &puppet.skinned.vertices, &changed);
-        let quad = above_hand(&left, &head, -FLOOR);
         overlay.place_on(device, &left.inverse().then(&quad));
-        let local = quad.inverse();
         let eyes = eye_offsets.map(|eye: Pose| eye_projection(local.apply(head.then(&eye).t).into(), QUAD / 2.0, QUAD / 2.0));
         overlay.submit(&mut renderer.render(&puppet.drawn, eyes)?)?;
         meter.frame(interval, started.elapsed());

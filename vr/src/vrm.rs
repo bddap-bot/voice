@@ -95,6 +95,31 @@ struct Expression {
     binary: bool,
 }
 
+/// How far a gaze angle (degrees) turns an eye: its bone's degrees, or its expression's weight.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RangeMap {
+    input: f32,
+    output: f32,
+}
+
+impl RangeMap {
+    fn map(&self, degrees: f32) -> f32 {
+        self.output * (degrees / self.input).clamp(0.0, 1.0)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct LookAt {
+    /// Whether the figure has eyes the settings can move.
+    moves: bool,
+    expression: bool,
+    offset: Vec3,
+    inner: RangeMap,
+    outer: RangeMap,
+    down: RangeMap,
+    up: RangeMap,
+}
+
 pub struct Model {
     pub version: Version,
     nodes: Vec<Node>,
@@ -104,6 +129,8 @@ pub struct Model {
     pub images: Vec<Image>,
     humanoid: HashMap<String, usize>,
     expressions: HashMap<String, Expression>,
+    look_at: LookAt,
+    rest_turns: Vec<Quat>,
 }
 
 #[repr(C)]
@@ -205,6 +232,54 @@ fn floats<const N: usize>(value: &Value, fallback: [f32; N]) -> [f32; N] {
 
 fn index(value: &Value) -> Option<usize> {
     value.as_u64().map(|value| value as usize)
+}
+
+fn expression_one(name: &str) -> &str {
+    match name {
+        "a" => "aa",
+        "i" => "ih",
+        "u" => "ou",
+        "e" => "ee",
+        "o" => "oh",
+        "joy" => "happy",
+        "sorrow" => "sad",
+        "fun" => "relaxed",
+        "blink_l" => "blinkLeft",
+        "blink_r" => "blinkRight",
+        "lookleft" => "lookLeft",
+        "lookright" => "lookRight",
+        "lookup" => "lookUp",
+        "lookdown" => "lookDown",
+        name => name,
+    }
+}
+
+/// Read as three-vrm reads it, raising a tiny input to its minimum.
+fn range_map(input: Option<&Value>, output: Option<&Value>, fallback: f32) -> RangeMap {
+    RangeMap { input: input.map_or(90.0, |value| number(value, 90.0)).max(0.01), output: output.map_or(fallback, |value| number(value, fallback)) }
+}
+
+fn look_at(version: Version, extensions: &Value) -> LookAt {
+    match version {
+        Version::One => {
+            let look = &extensions["VRMC_vrm"]["lookAt"];
+            let expression = look["type"].as_str() == Some("expression");
+            let map = |key: &str| range_map(look[key].get("inputMaxValue"), look[key].get("outputScale"), if expression { 1.0 } else { 10.0 });
+            LookAt { moves: look.is_object(), expression, offset: Vec3::from(floats(&look["offsetFromHeadBone"], [0.0, 0.06, 0.0])), inner: map("rangeMapHorizontalInner"), outer: map("rangeMapHorizontalOuter"), down: map("rangeMapVerticalDown"), up: map("rangeMapVerticalUp") }
+        }
+        Version::Zero => {
+            let look = &extensions["VRM"]["firstPerson"];
+            let expression = look["lookAtTypeName"].as_str() == Some("BlendShape");
+            let map = |key: &str| range_map(look[key].get("xRange"), look[key].get("yRange"), if expression { 1.0 } else { 10.0 });
+            let offset = &look["firstPersonBoneOffset"];
+            let offset = if offset.is_object() { Vec3::new(number(&offset["x"], 0.0), number(&offset["y"], 0.06), -number(&offset["z"], 0.0)) } else { Vec3::new(0.0, 0.06, 0.0) };
+            LookAt { moves: look.is_object(), expression, offset, inner: map("lookAtHorizontalInner"), outer: map("lookAtHorizontalOuter"), down: map("lookAtVerticalDown"), up: map("lookAtVerticalUp") }
+        }
+    }
+}
+
+fn rotation(world: &Mat4) -> Quat {
+    world.to_scale_rotation_translation().1
 }
 
 fn bone_one(name: &str) -> String {
@@ -619,14 +694,22 @@ impl Model {
                 for group in extensions["VRM"]["blendShapeMaster"]["blendShapeGroups"].as_array().into_iter().flatten() {
                     let Some(name) = group["presetName"].as_str().filter(|name| !name.is_empty() && *name != "unknown") else { continue };
                     let binds = group["binds"].as_array().unwrap_or(&empty).iter().filter_map(|bind| Some((index(&bind["mesh"])?, index(&bind["index"])?, number(&bind["weight"], 0.0) / 100.0))).collect();
-                    expressions.insert(name.to_owned(), Expression { binds, binary: group["isBinary"].as_bool() == Some(true) });
+                    expressions.insert(expression_one(name).to_owned(), Expression { binds, binary: group["isBinary"].as_bool() == Some(true) });
                 }
             }
         }
         for expression in expressions.values_mut() {
             expression.binds.retain(|&(mesh, target, _)| meshes.get(mesh).is_some_and(|mesh| target < mesh.weights.len()));
         }
-        Ok(Model { version, nodes, meshes, skins, materials, images, humanoid, expressions })
+        let mut look_at = look_at(version, extensions);
+        look_at.moves &= if look_at.expression {
+            ["lookLeft", "lookRight", "lookUp", "lookDown"].iter().any(|name| expressions.get(*name).is_some_and(|expression| !expression.binds.is_empty()))
+        } else {
+            humanoid.contains_key("leftEye") || humanoid.contains_key("rightEye")
+        };
+        let mut model = Model { version, nodes, meshes, skins, materials, images, humanoid, expressions, look_at, rest_turns: Vec::new() };
+        model.rest_turns = model.worlds(&model.rest()).iter().map(rotation).collect();
+        Ok(model)
     }
 
     pub fn worlds(&self, pose: &Pose) -> Vec<Mat4> {
@@ -672,8 +755,7 @@ impl Model {
 
     pub fn pose(&self, humanoid: &Humanoid) -> Pose {
         let mut pose = self.rest();
-        let rest_worlds = self.worlds(&pose);
-        let parent_rotation = |node: usize| self.nodes[node].parent.map_or(Quat::IDENTITY, |parent| rest_worlds[parent].to_scale_rotation_translation().1);
+        let parent_rotation = |node: usize| self.nodes[node].parent.map_or(Quat::IDENTITY, |parent| self.rest_turns[parent]);
         for (name, normalized) in &humanoid.rotations {
             let Some(&node) = self.humanoid.get(name) else { continue };
             let parent = parent_rotation(node);
@@ -691,6 +773,61 @@ impl Model {
         let weight = if expression.binary { if weight > 0.5 { 1.0 } else { 0.0 } } else { weight };
         for &(mesh, target, bind) in &expression.binds {
             pose.weights[mesh][target] += weight * bind;
+        }
+    }
+
+    /// VRM 0 figures face -Z.
+    pub fn facing(&self) -> Quat {
+        match self.version {
+            Version::Zero => Quat::from_rotation_y(std::f32::consts::PI),
+            Version::One => Quat::IDENTITY,
+        }
+    }
+
+    /// Where the eyes look from, and the head's frame (+Z ahead, +Y up, +X to the figure's left), in model space.
+    pub fn face(&self, worlds: &[Mat4]) -> Option<(Vec3, Quat)> {
+        let head = *self.humanoid.get("head")?;
+        Some((worlds[head].transform_point3(self.look_at.offset), rotation(&worlds[head]) * self.rest_turns[head].inverse() * self.facing()))
+    }
+
+    /// The gaze angles, radians, at which the eyes stop following: sideways, up and down.
+    pub fn eye_reach(&self) -> [f32; 3] {
+        let look = &self.look_at;
+        if !look.moves {
+            return [0.0; 3];
+        }
+        let sideways = if look.expression { look.outer.input } else { look.inner.input.min(look.outer.input) };
+        [sideways, look.up.input, look.down.input].map(f32::to_radians)
+    }
+
+    /// Turns the head by `turn` (a model-space rotation), shared between the neck and the head.
+    pub fn turn_head(&self, pose: &mut Pose, worlds: &[Mat4], turn: Quat) {
+        let bones: Vec<usize> = ["neck", "head"].iter().filter_map(|bone| self.humanoid.get(*bone).copied()).collect();
+        let part = Quat::IDENTITY.slerp(turn, 1.0 / bones.len().max(1) as f32);
+        for node in bones {
+            let parent = self.nodes[node].parent.map_or(Quat::IDENTITY, |parent| rotation(&worlds[parent]));
+            pose.rotations[node] = (parent.inverse() * part * parent * pose.rotations[node]).normalize();
+        }
+    }
+
+    /// Turns the eyes `yaw` degrees toward the figure's left and `pitch` degrees up through the look-at range maps, the up map for an upward gaze as the maps are named (three-vrm's bone applier swaps them).
+    pub fn turn_eyes(&self, pose: &mut Pose, yaw: f32, pitch: f32) {
+        let look = &self.look_at;
+        if look.expression {
+            self.express(pose, "lookLeft", look.outer.map(yaw));
+            self.express(pose, "lookRight", look.outer.map(-yaw));
+            self.express(pose, "lookUp", look.up.map(pitch));
+            self.express(pose, "lookDown", look.down.map(-pitch));
+            return;
+        }
+        let vertical = if pitch >= 0.0 { -look.up.map(pitch) } else { look.down.map(-pitch) };
+        for (bone, leftward, rightward) in [("leftEye", look.outer, look.inner), ("rightEye", look.inner, look.outer)] {
+            let Some(&node) = self.humanoid.get(bone) else { continue };
+            let horizontal = if yaw >= 0.0 { leftward.map(yaw) } else { -rightward.map(-yaw) };
+            let turn = Quat::from_rotation_y(horizontal.to_radians()) * Quat::from_rotation_x(vertical.to_radians());
+            let normalized = self.facing() * turn * self.facing().inverse();
+            let parent = self.nodes[node].parent.map_or(Quat::IDENTITY, |parent| self.rest_turns[parent]);
+            pose.rotations[node] = (parent.inverse() * normalized * parent * self.nodes[node].rotation).normalize();
         }
     }
 
@@ -841,11 +978,7 @@ impl Fit {
     }
 
     pub fn placement(&self, model: &Model, worlds: &[Mat4], floor: f32) -> Mat4 {
-        let turn = match model.version {
-            Version::Zero => Quat::from_rotation_y(std::f32::consts::PI),
-            Version::One => Quat::IDENTITY,
-        };
-        let oriented = Mat4::from_quat(turn) * Mat4::from_scale(Vec3::splat(self.scale));
+        let oriented = Mat4::from_quat(model.facing()) * Mat4::from_scale(Vec3::splat(self.scale));
         let shift = match model.feet(worlds) {
             Some(feet) => {
                 let [left, right] = feet.map(|foot| oriented.transform_point3(foot));
@@ -1059,6 +1192,7 @@ pub mod tests {
         let turn = Quat::from_rotation_z(0.5);
         model.nodes[1].rotation = turn;
         model.nodes[0].scale = Vec3::splat(0.01);
+        model.rest_turns = model.worlds(&model.rest()).iter().map(rotation).collect();
         let pose = model.pose(&model.standing());
         let preset: Value = serde_json::from_str(STANDING).unwrap();
         let normalized = Quat::from_array(floats(&preset["data"]["rightUpperArm"]["rotation"], [0.0; 4]));
@@ -1120,7 +1254,7 @@ pub mod tests {
         let mut skinned = model.skinned().unwrap();
         let mut pose = model.rest();
         model.express(&mut pose, "blink", 0.5);
-        model.express(&mut pose, "a", 0.6);
+        model.express(&mut pose, "aa", 0.6);
         let mut changed = skinned.morph(&pose.weights);
         changed.sort();
         assert_eq!(changed, vec![1, 2]);

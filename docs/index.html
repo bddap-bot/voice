@@ -141,7 +141,7 @@ import { Microphone } from './microphone.js';
 import wbgInit, { init as wasmInit, connect, send_only, recv } from './relay/botq_dash_wasm.js';
 import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, SessionClock, TranscriptBatcher, errorEvent, includesPhrase, modelToolFields, formatElapsed, formatStartError, isOfferFor, shareFrame } from './live.js';
 import { PuppetChannel } from './puppet-client.js';
-import { TranscriptActionDriver, webGpuAdapter } from './puppet-drivers.js';
+import { ACTION_INSTRUCTIONS, TranscriptActionDriver, webGpuAdapter } from './puppet-drivers.js';
 import { StageTrace, traceStages } from './stage-trace.js';
 import { LivePlayback } from './live-playback.js';
 import { audioDiagnostics } from './audio-diagnostics.js';
@@ -207,16 +207,15 @@ const VOICEPRINT = `${config.storageKey}.voiceprint`;
 let learning;
 const shareWaiters = new Map();
 function applyTranscriptAction(action, timing) {
-  if (action.kind === 'none') return;
   const pose = puppetRuntime?.poseName ?? null;
-  let outcome = puppetRuntime ? 'played' : 'refused';
+  let outcome = action.kind === 'none' || action.kind === 'unknown' ? 'ignored' : puppetRuntime ? 'played' : 'refused';
   if (outcome === 'played' && action.kind === 'mood') puppetRuntime.mood(action.name);
   else if (outcome === 'played' && action.kind === 'gesture') {
     if (!puppetRuntime.gesture(action.name)) outcome = 'refused';
   }
-  recordSession('transcript-action', JSON.stringify({ source: action.source, sentence: timing.sentence, action: `${action.kind}:${action.name}`, score: action.score, pose, outcome, playAtMinusNow: timing.playAtMinusNow }));
+  recordSession('transcript-action', JSON.stringify({ source: action.source, sentence: timing.sentence, token: timing.token, action: `${action.kind}:${action.name}`, score: action.score, pose, outcome, playAtMinusNow: timing.playAtMinusNow }));
 }
-const actionDriver = new TranscriptActionDriver(applyTranscriptAction);
+const actionDriver = new TranscriptActionDriver(applyTranscriptAction, undefined, undefined, ({ sentence, annotations, classifier }) => recordSession('transcript-action-compare', JSON.stringify({ sentence, annotations: annotations.map(({ kind, name }) => `${kind}:${name}`), classifier: `${classifier.kind}:${classifier.name}`, score: classifier.score })));
 const hubWaiting = new Set();
 const hubReplies = [];
 let hubTurn = null;
@@ -1116,15 +1115,15 @@ function presentTranscript(event) {
     clearTimeout(unanswered);
     stayAwake();
     hubTurn?.spoke();
-    trace.spoke(event.delta ?? '', event.start_ms, event.end_ms);
     const audioNow = $('speaker').currentTime * 1000;
     const delay = Math.max(0, (event.start_ms ?? audioNow) - audioNow);
     stageTrace?.outputTranscript(delay);
     const playAt = performance.now() + delay;
-    puppetRuntime?.speak(event.delta ?? '', playAt);
-    actionDriver.push(event.delta ?? '', playAt);
+    const spoken = actionDriver.push(event.delta ?? '', playAt);
+    trace.spoke(spoken, event.start_ms, event.end_ms);
+    puppetRuntime?.speak(spoken, playAt);
     conversation?.transcript?.add('model', event.delta ?? '');
-    const said = (conversation?.said ?? '') + (event.delta ?? '');
+    const said = (conversation?.said ?? '') + spoken;
     if (conversation) conversation.said = said.slice(-4 * SIGN_OFF.length);
     if (conversation) conversation.replyUnspoken = false;
     if (conversation?.pendingStanding && !conversation.settling) {
@@ -1136,6 +1135,7 @@ function presentTranscript(event) {
 }
 function awaken(channel) {
   channel.send(JSON.stringify({ type: 'session.instructions.append', event_id: 'identity', delegation_id: null, content: IDENTITY }));
+  channel.send(JSON.stringify({ type: 'session.instructions.append', event_id: 'actions', delegation_id: null, content: ACTION_INSTRUCTIONS }));
   channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: 'wake', delegation_id: null, content: WOKEN }));
 }
 function tell(owner, type, event_id, delegation_id, content) {

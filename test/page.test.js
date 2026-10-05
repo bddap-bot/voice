@@ -6,6 +6,7 @@ import { gzipSync } from 'node:zlib';
 import { INACTIVITY_MS, NAME, SIGN_OFF, WAKE_PHRASE } from '../docs/identity.js';
 import { WIDTH, WINDOW } from '../docs/wake.js';
 import { MODEL } from '../docs/speaker.js';
+import { ACTION_INSTRUCTIONS } from '../docs/puppet-drivers.js';
 import { launchChromium, renderDom } from '../scripts/chromium.mjs';
 import { assessSmoke, canvasAspectMatches, clipClearsStage, evidenceRegion, installSmokeMeasurements, smokeLimits, smokeStatusText, smokeViewports } from './smoke-measurements.js';
 
@@ -1783,6 +1784,7 @@ test('the wake phrase carries earlier turns and a completed-sleep marker into on
 Earlier turns are memory, not fresh results. Delegate requests for the hub or a current check again and wait for the new application reply. Relay the user's answer to a hub question; handle a changed subject as a new request.
 
 When the user asks you to sleep or ends the conversation (a goodbye, "that'll be all", or a bedtime hint), finish with "${SIGN_OFF}" without delegating, even if a hub request is pending. Reserve that sentence for signing off: the page detects it in your speech and goes to sleep.` },
+    { type: 'session.instructions.append', delegation_id: null, content: ACTION_INSTRUCTIONS },
     { type: 'session.commentary.append', delegation_id: null, content: `Context: ${NAME} was just woken.` },
   ]);
 });

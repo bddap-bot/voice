@@ -109,16 +109,18 @@ impl Recognizer {
         Recognizer { templates, recent: VecDeque::new(), segment: Segment::Still, last_moving: f64::NEG_INFINITY }
     }
 
+    #[cfg(test)]
     fn held(&self) -> usize {
         self.recent.len() + if let Segment::Moving { trace, .. } = &self.segment { trace.len() } else { 0 }
     }
 
     pub fn push(&mut self, t: f64, head: &Pose, left: Vec3, right: Vec3) -> Option<Verdict> {
+        let mut verdict = None;
         match self.recent.back() {
             Some(&(last, _)) if t <= last => return None,
             Some(&(last, _)) if t - last > STILL => {
                 self.recent.clear();
-                self.segment = Segment::Still;
+                verdict = self.judge();
             }
             _ => {}
         }
@@ -134,9 +136,15 @@ impl Recognizer {
         }
         let settled = t - self.last_moving > STILL;
         let point = head_relative(head, left, right);
-        match &mut self.segment {
-            Segment::Still if moving => self.segment = Segment::Moving { trace: vec![point], end: 1, start: t, peak: speed },
-            Segment::Overlong if settled => self.segment = Segment::Still,
+        let finished = match &mut self.segment {
+            Segment::Still if moving => {
+                self.segment = Segment::Moving { trace: vec![point], end: 1, start: t, peak: speed };
+                false
+            }
+            Segment::Overlong if settled => {
+                self.segment = Segment::Still;
+                false
+            }
             Segment::Moving { trace, end, start, peak } => {
                 trace.push(point);
                 if moving {
@@ -145,22 +153,30 @@ impl Recognizer {
                     if t - *start > LONGEST {
                         self.segment = Segment::Overlong;
                     }
-                } else if settled {
-                    let (duration, peak) = (self.last_moving - *start, *peak);
-                    let trace = resample(&trace[..*end]);
-                    self.segment = Segment::Still;
-                    if duration < SHORTEST {
-                        return None;
-                    }
-                    let distance = self.templates.templates.iter().map(|template| dtw(&trace, template)).fold(f32::INFINITY, f32::min);
-                    let Templates { threshold, peak_speed_min, .. } = self.templates;
-                    let matched = distance <= threshold && peak >= peak_speed_min;
-                    return Some(Verdict { distance, peak, duration, matched, near: !matched && distance <= NEAR * threshold });
                 }
+                settled
             }
-            _ => {}
+            _ => false,
+        };
+        if finished {
+            verdict = self.judge();
         }
-        None
+        verdict
+    }
+
+    fn judge(&mut self) -> Option<Verdict> {
+        let Segment::Moving { trace, end, start, peak } = std::mem::replace(&mut self.segment, Segment::Still) else {
+            return None;
+        };
+        let duration = self.last_moving - start;
+        if duration < SHORTEST {
+            return None;
+        }
+        let trace = resample(&trace[..end]);
+        let distance = self.templates.templates.iter().map(|template| dtw(&trace, template)).fold(f32::INFINITY, f32::min);
+        let Templates { threshold, peak_speed_min, .. } = self.templates;
+        let matched = distance <= threshold && peak >= peak_speed_min;
+        Some(Verdict { distance, peak, duration, matched, near: !matched && distance <= NEAR * threshold })
     }
 }
 
@@ -379,6 +395,14 @@ mod tests {
         let ramp = |delay: usize| -> Vec<Point> { (0..POINTS).map(|k| at(k.saturating_sub(delay).min(16) as f32)).collect() };
         assert_eq!(dtw(&ramp(0), &ramp(BAND - 2)), 0.0);
         assert!(dtw(&ramp(0), &ramp(BAND + 4)) > 0.0);
+    }
+
+    #[test]
+    fn a_gesture_whose_hands_then_drop_out_of_tracking_is_still_judged() {
+        let mut recognizer = Recognizer::new(templates(vec![template(&LOOP)]));
+        let stop = 1.0 + LOOP.seconds + 0.1;
+        let found: Vec<Verdict> = trace(&LOOP, 90.0, IDENTITY).into_iter().filter(|sample| sample.0 < stop || sample.0 > stop + 0.6).filter_map(|(t, head, left, right)| recognizer.push(t, &head, left, right)).collect();
+        assert!(found.len() == 1 && found[0].matched, "{found:?}");
     }
 
     #[test]

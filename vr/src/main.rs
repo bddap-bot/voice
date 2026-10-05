@@ -262,10 +262,55 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
     }
 }
 
+/// Feeds a recording (`t,dev,role,valid,m00..m23,...` rows; roles 0 head, 1 left, 2 right) through the recognizer as the host would.
+fn replay(state: &std::path::Path, recording: &str) -> Result<(), String> {
+    let gesture_file = state.join("gesture.json");
+    let mut recognizer = Recognizer::new(Templates::parse(&std::fs::read(&gesture_file).map_err(|error| format!("{}: {error}", gesture_file.display()))?)?);
+    let text = std::fs::read_to_string(recording).map_err(|error| format!("{recording}: {error}"))?;
+    let mut frame: (f64, [Option<Pose>; 3]) = (f64::NAN, [None; 3]);
+    let mut start = None;
+    let mut verdicts = Vec::new();
+    let mut feed = |(t, poses): (f64, [Option<Pose>; 3]), verdicts: &mut Vec<(f64, gesture::Verdict)>| {
+        if let [Some(head), Some(left), Some(right)] = poses {
+            let t = t - *start.get_or_insert(t);
+            if let Some(verdict) = recognizer.push(t, &head, left.t, right.t) {
+                verdicts.push((t, verdict));
+            }
+        }
+    };
+    for line in text.lines().skip(1) {
+        let fields: Vec<&str> = line.split(',').collect();
+        let number = |i: usize| fields.get(i).and_then(|field| field.parse::<f64>().ok()).ok_or_else(|| format!("{recording}: bad row {line}"));
+        let (t, role) = (number(0)?, number(2)? as usize);
+        if t != frame.0 {
+            feed(std::mem::replace(&mut frame, (t, [None; 3])), &mut verdicts);
+        }
+        if role < 3 && fields.get(3) == Some(&"1") {
+            let mut m = [[0.0; 4]; 3];
+            for (k, value) in m.iter_mut().flatten().enumerate() {
+                *value = number(4 + k)? as f32;
+            }
+            frame.1[role] = Some(Pose::from_m34(&m));
+        }
+    }
+    feed(frame, &mut verdicts);
+    for (t, verdict) in &verdicts {
+        println!("{t:8.2} s  distance {:.3}  peak {:.2} m/s  over {:.2} s{}", verdict.distance, verdict.peak, verdict.duration, if verdict.matched { "  MATCH" } else { "" });
+    }
+    let wakes = verdicts.iter().filter(|(_, verdict)| verdict.matched).count();
+    println!("{} segments judged, {wakes} matches", verdicts.len());
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
     let config = directory("XDG_CONFIG_HOME", ".config");
     let state = directory("XDG_STATE_HOME", ".local/state");
     std::fs::create_dir_all(&state).map_err(|error| format!("{}: {error}", state.display()))?;
+    if let [_, mode, recording] = &std::env::args().collect::<Vec<_>>()[..] {
+        if mode == "replay" {
+            return replay(&state, recording);
+        }
+    }
     let token_file = config.join("token");
     let token = std::fs::read_to_string(&token_file).map_err(|error| format!("{}: {error}", token_file.display()))?.trim().to_owned();
     let runtime = Runtime::init()?;

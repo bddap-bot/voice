@@ -29,6 +29,7 @@ impl Token {
 #[derive(Deserialize)]
 pub struct Avatar {
     pub id: String,
+    pub file: String,
     #[serde(rename = "contentHash")]
     pub content_hash: String,
 }
@@ -143,18 +144,31 @@ impl Relay {
     }
 
     fn request(&mut self, verb: &str) -> Result<Vec<u8>, String> {
-        self.send(verb.as_bytes())?;
+        self.exchange(verb.as_bytes(), verb, verb)
+    }
+
+    fn exchange(&mut self, frame: &[u8], verb: &str, reply_verb: &str) -> Result<Vec<u8>, String> {
+        self.send(frame)?;
         let deadline = Instant::now() + REQUEST_TIMEOUT;
         loop {
             let frame = self.recv(deadline)?;
             let (reply, body) = split(&frame);
-            if reply == verb {
+            if reply == reply_verb {
                 return Ok(body.to_vec());
             }
             if reply == format!("{verb}-error") {
                 return Err(format!("{verb}: {}", message(body)));
             }
         }
+    }
+
+    /// Makes `id` the appearance every client of this server shows, as the page's picker does.
+    pub fn select(&mut self, id: &str) -> Result<(), String> {
+        let reply: Value = serde_json::from_slice(&self.exchange(format!("puppet-select\n{}", json!({ "id": id })).as_bytes(), "puppet-select", "puppet-selected")?).map_err(|_| "puppet-selected is not JSON")?;
+        if reply["id"].as_str() != Some(id) {
+            return Err(format!("puppet-select {id}: the server selected {}", reply["id"]));
+        }
+        Ok(())
     }
 
     pub fn catalog(&mut self) -> Result<Catalog, String> {

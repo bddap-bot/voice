@@ -17,6 +17,7 @@ iroh = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 flate2 = "1"
 base64 = "0.22"
+font8x8 = { version = "0.3", default-features = false }
 
 [build-dependencies]
 naga = { version = "26", features = ["wgsl-in", "spv-out"] }

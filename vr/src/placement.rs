@@ -98,6 +98,26 @@ pub fn above_hand(hand: &Pose, head: &Pose, above_feet: f32) -> Pose {
     upright_facing(add(hand.t, [0.0, LIFT + above_feet, 0.0]), head.t)
 }
 
+/// Toward the elbow from the controller's origin, in the controller's frame.
+const WRIST: Vec3 = [0.0, 0.0, 0.08];
+/// The right controller's touch point ahead of its origin, in its frame.
+pub const TIP: Vec3 = [0.0, 0.0, -0.05];
+
+/// Hanging below the left wrist, its face turned to the eyes.
+pub fn below_wrist(hand: &Pose, head: &Pose, height: f32) -> Pose {
+    let at = sub(hand.apply(WRIST), [0.0, height / 2.0 + LIFT, 0.0]);
+    let toward = sub(head.t, at);
+    let z = if length(toward) < 1e-3 { [0.0, 0.0, 1.0] } else { normalize(toward) };
+    let side = cross(UP, z);
+    let x = if length(side) < 1e-3 { [1.0, 0.0, 0.0] } else { normalize(side) };
+    Pose::from_axes(x, cross(z, x), z, at)
+}
+
+/// Where the right controller's touch point is in the board's frame.
+pub fn local_tip(board: &Pose, right: &Pose) -> Vec3 {
+    board.inverse().apply(right.apply(TIP))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Hand {
     Left,
@@ -296,6 +316,17 @@ mod tests {
         assert!(close(dropped.t, [0.4, 1.1, -0.3]));
         assert!(close(dropped.axis(1), UP));
         assert_eq!(interaction.step(3.5, &Anchor::World(dropped), &dropped, &[still], &head), None, "the releasing hand does not grab it again");
+    }
+
+    #[test]
+    fn below_the_wrist_the_board_hangs_level_and_faces_the_eyes() {
+        let hand = turned(0.7, [0.2, 1.0, -0.3]);
+        let head = turned(0.0, [0.0, 1.6, 0.2]);
+        let board = below_wrist(&hand, &head, 0.2);
+        assert!(board.t[1] < hand.t[1] - 0.1, "below the hand");
+        assert!(close(board.axis(2), normalize(sub(head.t, board.t))), "faces the eyes");
+        assert!(board.axis(0)[1].abs() < 1e-5, "its rows stay level");
+        assert!(board.axis(1)[1] > 0.0, "upright");
     }
 
     #[test]

@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -13,7 +12,6 @@ const SHORTEST: f64 = 0.4;
 const LONGEST: f64 = 10.0;
 const SMOOTHING: f64 = 0.1;
 const NEAR: f32 = 2.0;
-pub const AWAKE_FOR: Duration = Duration::from_secs(30);
 
 pub type Point = [f32; 6];
 
@@ -84,11 +82,6 @@ pub struct Verdict {
     pub duration: f64,
     pub matched: bool,
     pub near: bool,
-}
-
-/// Until the wrist board's Dismiss lands, waking lasts `AWAKE_FOR`; a match while awake changes nothing.
-pub fn wake(awake: Option<Instant>, matched: bool, now: Instant) -> Option<Instant> {
-    awake.filter(|since| now.duration_since(*since) < AWAKE_FOR).or(matched.then_some(now))
 }
 
 enum Segment {
@@ -344,16 +337,6 @@ mod tests {
         assert!(Templates::parse(file(vec![vec![[0.0; 6]; POINTS]]).as_bytes()).is_ok());
         assert!(Templates::parse(file(vec![vec![[0.0; 6]; 16]]).as_bytes()).is_err());
         assert!(Templates::parse(file(vec![]).as_bytes()).is_err());
-    }
-
-    #[test]
-    fn a_match_wakes_only_the_dormant_and_waking_lasts_its_time() {
-        let woken = Instant::now();
-        assert_eq!(wake(None, false, woken), None);
-        assert_eq!(wake(None, true, woken), Some(woken));
-        let later = woken + AWAKE_FOR - Duration::from_millis(1);
-        assert_eq!(wake(Some(woken), true, later), Some(woken));
-        assert_eq!(wake(Some(woken), false, woken + AWAKE_FOR), None);
     }
 
     #[test]

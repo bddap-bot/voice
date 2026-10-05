@@ -1,3 +1,4 @@
+mod board;
 mod gesture;
 mod motion;
 mod openvr;
@@ -10,18 +11,20 @@ mod relay;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
 
 use openvr::{Runtime, Signal};
 use page::{Frame, Page};
-use placement::{above_hand, desk_spot, Anchor, Hand, Interaction, Pose};
+use board::{Board, Press};
+use placement::{above_hand, below_wrist, desk_spot, local_tip, Anchor, Hand, Interaction, Pose};
 use motion::{Animator, Clip, Random, IDLES};
-use gesture::{wake, Recognizer, Templates};
-use relay::{Relay, Token};
-use render::{eye_projection, Renderer};
-use vrm::{Fit, Model};
+use gesture::{Recognizer, Templates};
+use relay::{Avatar, Relay, Token};
+use render::{eye_projection, Appearance, Renderer};
+use vrm::{Fit, Humanoid, Model, Skinned};
 
 const EYE: u32 = 768;
 const QUAD: f32 = 0.4;
@@ -83,9 +86,16 @@ impl Meter {
     }
 }
 
-fn appearance(relay: &mut Relay) -> Result<(Model, HashMap<String, Clip>), String> {
-    let catalog = relay.catalog()?;
-    let avatar = catalog.avatars.iter().find(|avatar| avatar.id == catalog.active).ok_or_else(|| format!("the selected appearance {} is not in the catalog", catalog.active))?;
+struct Puppet {
+    model: Model,
+    skinned: Skinned,
+    fit: Fit,
+    standing: Humanoid,
+    animator: Animator,
+    drawn: Appearance,
+}
+
+fn puppet(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer) -> Result<Puppet, String> {
     let model = Model::parse(&relay.puppet(avatar)?).map_err(|error| format!("{}: {error}", avatar.id))?;
     let standing = model.standing();
     let mut clips = HashMap::new();
@@ -103,26 +113,42 @@ fn appearance(relay: &mut Relay) -> Result<(Model, HashMap<String, Clip>), Strin
         }
     }
     eprintln!("appearance {} with {} standing idle clips", avatar.id, clips.len());
-    Ok((model, clips))
+    let skinned = model.skinned()?;
+    let fit = Fit::new(&model, &skinned, HEIGHT);
+    let drawn = renderer.appearance(&model, &skinned)?;
+    Ok(Puppet { model, skinned, fit, standing, animator: Animator::new(clips, Random::seeded()), drawn })
+}
+
+/// Loads the picked appearance beside the shown one, then makes it the server's selection, as the page's picker does.
+fn switch(token: &Token, cache: &std::path::Path, avatar: &Avatar, renderer: &mut Renderer) -> Result<Puppet, String> {
+    let mut relay = Relay::connect(token, cache)?;
+    let loaded = puppet(&mut relay, avatar, renderer)?;
+    relay.select(&avatar.id)?;
+    Ok(loaded)
 }
 
 fn native(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(), String> {
     let gesture_file = state.join("gesture.json");
     let mut recognizer = Recognizer::new(Templates::parse(&std::fs::read(&gesture_file).map_err(|error| format!("{}: {error}", gesture_file.display()))?)?);
-    let (model, clips) = appearance(&mut Relay::connect(token, &state.join("assets"))?)?;
-    let standing = model.standing();
-    let rest_hips = model.rest_hips();
-    let mut animator = Animator::new(clips, Random::seeded());
-    let mut skinned = model.skinned()?;
-    let fit = Fit::new(&model, &skinned, HEIGHT);
-    let mut renderer = Renderer::new(vulkan::Gpu::new(Some(runtime))?, [EYE, EYE], &model, &skinned, HEIGHT / render::PAGE_HEIGHT)?;
-    let mut overlay = runtime.create_overlay("voice.puppet", "Puppet", QUAD)?;
+    let gpu = Rc::new(vulkan::Gpu::new(Some(runtime))?);
+    let mut renderer = Renderer::new(gpu.clone(), [EYE, EYE], HEIGHT / render::PAGE_HEIGHT)?;
+    let cache = state.join("assets");
+    let mut relay = Relay::connect(token, &cache)?;
+    let catalog = relay.catalog()?;
+    let active = catalog.avatars.iter().position(|avatar| avatar.id == catalog.active).ok_or_else(|| format!("the selected appearance {} is not in the catalog", catalog.active))?;
+    let mut puppet = puppet(&mut relay, &catalog.avatars[active], &mut renderer)?;
+    drop(relay);
+    let names = catalog.avatars.iter().map(|avatar| avatar.file.strip_suffix(".vrm").unwrap_or(&avatar.file).to_owned()).collect();
+    let mut board = Board::new(names, active);
+    let mut board_image = vulkan::Flat::new(gpu, board::PIXELS[0], board::PIXELS[1])?;
+    let mut overlay = runtime.create_overlay("voice.puppet", "Puppet", QUAD, true)?;
+    let mut board_overlay = runtime.create_overlay("voice.board", "Board", board::WIDTH, false)?;
     let eye_offsets = runtime.eye_offsets();
     let labels = ["frame interval", "animate+draw+submit"];
     let mut meter = Meter::new(labels[0], labels[1]);
     let epoch = Instant::now();
     let mut last = epoch;
-    let mut awake: Option<Instant> = None;
+    let mut awake = false;
     eprintln!("dormant");
     loop {
         if let Some(Signal::Quit) = runtime.poll() {
@@ -135,45 +161,75 @@ fn native(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(
         let head = runtime.head(&poses);
         let hands = runtime.hands(&poses);
         let hand = |which| hands.iter().find(|hand| hand.hand == which).map(|hand| hand.pose);
-        if awake.is_some() && wake(awake, false, started).is_none() {
-            awake = None;
-            eprintln!("dormant");
-        }
         if let (Some(head), Some(left), Some(right)) = (head, hand(Hand::Left), hand(Hand::Right)) {
             if let Some(verdict) = recognizer.push((started - epoch).as_secs_f64(), &head, left.t, right.t) {
                 let kind = match (verdict.matched, awake) {
-                    (true, None) => "match, waking",
-                    (true, Some(_)) => "match while awake, ignored",
+                    (true, false) => "match, waking",
+                    (true, true) => "match while awake, ignored",
                     (false, _) => "near miss",
                 };
                 if verdict.matched || verdict.near {
                     eprintln!("gesture {kind}: distance {:.3} peak {:.2} m/s over {:.2} s", verdict.distance, verdict.peak, verdict.duration);
                 }
-                if verdict.matched && awake.is_none() {
-                    awake = wake(None, true, started);
+                if verdict.matched && !awake {
+                    awake = true;
+                    board.reset();
                     meter = Meter::new(labels[0], labels[1]);
                 }
             }
         }
-        let (Some(_), Some(head), Some(hand), Some(device)) = (awake, head, hand(Hand::Left), runtime.hand_index(Hand::Left)) else {
+        let (true, Some(head), Some(left), Some(device)) = (awake, head, hand(Hand::Left), runtime.hand_index(Hand::Left)) else {
             overlay.hide();
+            board_overlay.hide();
+            board.reset();
             std::thread::sleep(DORMANT_POLL);
             continue;
         };
-        if let Some(idle) = animator.update(interval.as_secs_f32().min(0.05)) {
+        let board_pose = below_wrist(&left, &head, board::HEIGHT);
+        board_overlay.place_on(device, &left.inverse().then(&board_pose));
+        match board.touch(hand(Hand::Right).map(|right| local_tip(&board_pose, &right))) {
+            Some(Press::Dismiss) => {
+                eprintln!("dismissed, dormant");
+                awake = false;
+                continue;
+            }
+            Some(Press::Appearance(index)) if index != board.active => {
+                let avatar = &catalog.avatars[index];
+                eprintln!("picked appearance {}", avatar.id);
+                board.pending = Some(index);
+                board.mark();
+                if let Some(image) = board.take_image() {
+                    board_overlay.submit(&mut board_image.upload(&image)?)?;
+                }
+                match switch(token, &cache, avatar, &mut renderer) {
+                    Ok(loaded) => {
+                        puppet = loaded;
+                        board.active = index;
+                    }
+                    Err(error) => eprintln!("appearance {} not shown: {error}", avatar.id),
+                }
+                board.pending = None;
+                board.mark();
+            }
+            _ => {}
+        }
+        if let Some(image) = board.take_image() {
+            board_overlay.submit(&mut board_image.upload(&image)?)?;
+        }
+        if let Some(idle) = puppet.animator.update(interval.as_secs_f32().min(0.05)) {
             eprintln!("idle {idle}");
         }
-        let mut pose = model.pose(&animator.humanoid(&standing, rest_hips));
-        model.express(&mut pose, "blink", animator.blink());
-        let changed = skinned.morph(&pose.weights);
-        let worlds = model.worlds(&pose);
-        let palette = skinned.palette(&worlds, fit.placement(&model, &worlds, FLOOR));
-        renderer.update(&palette, &skinned.vertices, &changed);
-        let quad = above_hand(&hand, &head, -FLOOR);
-        overlay.place_on(device, &hand.inverse().then(&quad));
+        let mut pose = puppet.model.pose(&puppet.animator.humanoid(&puppet.standing, puppet.model.rest_hips()));
+        puppet.model.express(&mut pose, "blink", puppet.animator.blink());
+        let changed = puppet.skinned.morph(&pose.weights);
+        let worlds = puppet.model.worlds(&pose);
+        let palette = puppet.skinned.palette(&worlds, puppet.fit.placement(&puppet.model, &worlds, FLOOR));
+        puppet.drawn.update(&palette, &puppet.skinned.vertices, &changed);
+        let quad = above_hand(&left, &head, -FLOOR);
+        overlay.place_on(device, &left.inverse().then(&quad));
         let local = quad.inverse();
         let eyes = eye_offsets.map(|eye: Pose| eye_projection(local.apply(head.then(&eye).t).into(), QUAD / 2.0, QUAD / 2.0));
-        overlay.submit(&mut renderer.render(eyes)?)?;
+        overlay.submit(&mut renderer.render(&puppet.drawn, eyes)?)?;
         meter.frame(interval, started.elapsed());
         runtime.wait_frame();
     }
@@ -194,7 +250,7 @@ fn run() -> Result<(), String> {
     let placement_file = state.join("placement.json");
 
     let mut uploader = vulkan::Uploader::new(vulkan::Gpu::new(Some(&runtime))?, EYE * 2, EYE)?;
-    let mut overlay = runtime.create_overlay("voice.puppet", "Puppet", QUAD)?;
+    let mut overlay = runtime.create_overlay("voice.puppet", "Puppet", QUAD, true)?;
     let hello = json!({ "type": "hello", "token": token, "eye": [EYE, EYE], "quad": [QUAD, QUAD], "height": HEIGHT, "margin": MARGIN });
     let mut page = Page::open(&browser, &page_address, &state.join("browser"), hello).map_err(|error| format!("{browser}: {error}"))?;
     let eye_offsets = runtime.eye_offsets();

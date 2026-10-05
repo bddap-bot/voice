@@ -120,7 +120,7 @@ impl Runtime {
             .collect()
     }
 
-    pub fn create_overlay(&self, key: &str, name: &str, width: f32) -> Result<Overlay<'_>, String> {
+    pub fn create_overlay(&self, key: &str, name: &str, width: f32, stereo: bool) -> Result<Overlay<'_>, String> {
         let key = CString::new(key).unwrap();
         let name = CString::new(name).unwrap();
         let mut handle = 0;
@@ -128,7 +128,7 @@ impl Runtime {
         if error != 0 {
             return Err(format!("CreateOverlay failed with {error}"));
         }
-        call!(self.overlay, SetOverlayFlag, handle, sys::VROverlayFlags_SideBySide_Parallel, true);
+        call!(self.overlay, SetOverlayFlag, handle, sys::VROverlayFlags_SideBySide_Parallel, stereo);
         call!(self.overlay, SetOverlayFlag, handle, sys::VROverlayFlags_IsPremultiplied, true);
         call!(self.overlay, SetOverlayWidthInMeters, handle, width);
         Ok(Overlay { runtime: self, handle, shown: false })

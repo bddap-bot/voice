@@ -2,6 +2,7 @@ use ash::vk;
 use glam::{Mat4, Vec3};
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::vrm::{Alpha, Model, OutlineWidth, Skinned, Vertex};
 use crate::vulkan::{vk_error, Gpu};
@@ -97,7 +98,7 @@ struct DrawCall {
 type Buffer = (vk::Buffer, vk::DeviceMemory, *mut u8);
 
 pub struct Renderer {
-    gpu: Gpu,
+    gpu: Rc<Gpu>,
     pub eye: [u32; 2],
     targets: Vec<Target>,
     depth: Texture,
@@ -105,8 +106,15 @@ pub struct Renderer {
     set_layout: vk::DescriptorSetLayout,
     layout: vk::PipelineLayout,
     pipelines: HashMap<PipelineKey, vk::Pipeline>,
-    descriptors: vk::DescriptorPool,
     sampler: vk::Sampler,
+    outline_scale: f32,
+    next: usize,
+    last: Option<usize>,
+}
+
+pub struct Appearance {
+    gpu: Rc<Gpu>,
+    descriptors: vk::DescriptorPool,
     textures: Vec<Texture>,
     vertices: Buffer,
     indices: Buffer,
@@ -114,9 +122,6 @@ pub struct Renderer {
     joints: usize,
     materials: Buffer,
     drawn: Vec<DrawCall>,
-    outline_scale: f32,
-    next: usize,
-    last: Option<usize>,
 }
 
 fn color_range(levels: u32) -> vk::ImageSubresourceRange {
@@ -128,8 +133,7 @@ fn barrier(image: vk::Image, range: vk::ImageSubresourceRange, from: vk::ImageLa
 }
 
 impl Renderer {
-    pub fn new(gpu: Gpu, eye: [u32; 2], model: &Model, skinned: &Skinned, outline_scale: f32) -> Result<Renderer, String> {
-        let joints = skinned.joints();
+    pub fn new(gpu: Rc<Gpu>, eye: [u32; 2], outline_scale: f32) -> Result<Renderer, String> {
         let device = &gpu.device;
         let attachments = [
             vk::AttachmentDescription::default()
@@ -178,24 +182,6 @@ impl Renderer {
             )
         }
         .map_err(vk_error("vkCreateSampler"))?;
-        let set_count = model.materials.len() as u32;
-        let sizes = [
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: 3 * set_count },
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLER, descriptor_count: set_count },
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 2 * set_count },
-        ];
-        let descriptors = unsafe { device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(set_count).pool_sizes(&sizes), None) }.map_err(vk_error("vkCreateDescriptorPool"))?;
-
-        let upload = |bytes: &[u8], usage| -> Result<Buffer, String> {
-            let buffer = gpu.host_buffer(bytes.len() as u64, usage)?;
-            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.2, bytes.len()) };
-            Ok(buffer)
-        };
-        let material_data: Vec<MaterialData> = model.materials.iter().map(material_data).collect();
-        let vertices = upload(bytes_of(&skinned.vertices), vk::BufferUsageFlags::VERTEX_BUFFER)?;
-        let indices = upload(bytes_of(&skinned.indices), vk::BufferUsageFlags::INDEX_BUFFER)?;
-        let palette = gpu.host_buffer((joints.max(1) * std::mem::size_of::<Mat4>()) as u64, vk::BufferUsageFlags::STORAGE_BUFFER)?;
-        let material_buffer = upload(bytes_of(&material_data), vk::BufferUsageFlags::STORAGE_BUFFER)?;
         let mut renderer = Renderer {
             depth: Texture { image: vk::Image::null(), memory: vk::DeviceMemory::null(), view: vk::ImageView::null() },
             gpu,
@@ -205,46 +191,69 @@ impl Renderer {
             set_layout,
             layout,
             pipelines: HashMap::new(),
-            descriptors,
             sampler,
-            textures: Vec::new(),
-            vertices,
-            indices,
-            palette,
-            joints,
-            materials: material_buffer,
-            drawn: Vec::new(),
             outline_scale,
             next: 0,
             last: None,
         };
-        let key = |material: &crate::vrm::Material, outline: bool| PipelineKey {
-            blend: material.alpha == Alpha::Blend,
-            cull: if outline { Cull::Front } else if material.double_sided { Cull::None } else { Cull::Back },
-            depth_write: material.depth_write,
-        };
-        let keys: Vec<PipelineKey> = model.materials.iter().flat_map(|material| [Some(key(material, false)), material.outline.as_ref().map(|_| key(material, true))]).flatten().collect();
-        renderer.pipelines = renderer.pipelines(&keys)?;
         renderer.depth = renderer.attachment(DEPTH, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::ImageAspectFlags::DEPTH)?;
         for _ in 0..RING {
             let target = renderer.target()?;
             renderer.targets.push(target);
         }
+        Ok(renderer)
+    }
+
+    pub fn appearance(&mut self, model: &Model, skinned: &Skinned) -> Result<Appearance, String> {
+        let key = |material: &crate::vrm::Material, outline: bool| PipelineKey {
+            blend: material.alpha == Alpha::Blend,
+            cull: if outline { Cull::Front } else if material.double_sided { Cull::None } else { Cull::Back },
+            depth_write: material.depth_write,
+        };
+        let keys: Vec<PipelineKey> = model.materials.iter().flat_map(|material| [Some(key(material, false)), material.outline.as_ref().map(|_| key(material, true))]).flatten().filter(|key| !self.pipelines.contains_key(key)).collect();
+        let created = self.pipelines(&keys)?;
+        self.pipelines.extend(created);
+
+        let gpu = &self.gpu;
+        let device = &gpu.device;
+        let set_count = model.materials.len() as u32;
+        let sizes = [
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: 3 * set_count },
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLER, descriptor_count: set_count },
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 2 * set_count },
+        ];
+        let descriptors = unsafe { device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(set_count).pool_sizes(&sizes), None) }.map_err(vk_error("vkCreateDescriptorPool"))?;
+        let upload = |bytes: &[u8], usage| -> Result<Buffer, String> {
+            let buffer = gpu.host_buffer(bytes.len() as u64, usage)?;
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.2, bytes.len()) };
+            Ok(buffer)
+        };
+        let joints = skinned.joints();
+        let material_data: Vec<MaterialData> = model.materials.iter().map(material_data).collect();
+        let mut appearance = Appearance {
+            gpu: gpu.clone(),
+            descriptors,
+            textures: Vec::new(),
+            vertices: upload(bytes_of(&skinned.vertices), vk::BufferUsageFlags::VERTEX_BUFFER)?,
+            indices: upload(bytes_of(&skinned.indices), vk::BufferUsageFlags::INDEX_BUFFER)?,
+            palette: gpu.host_buffer((joints.max(1) * std::mem::size_of::<Mat4>()) as u64, vk::BufferUsageFlags::STORAGE_BUFFER)?,
+            joints,
+            materials: upload(bytes_of(&material_data), vk::BufferUsageFlags::STORAGE_BUFFER)?,
+            drawn: Vec::new(),
+        };
         for image in &model.images {
-            let texture = renderer.texture(image.width, image.height, &image.rgba)?;
-            renderer.textures.push(texture);
+            appearance.textures.push(texture(gpu, image.width, image.height, &image.rgba)?);
         }
-        let white = renderer.textures.len();
-        let texture = renderer.texture(1, 1, &[255; 4])?;
-        renderer.textures.push(texture);
-        let layouts = vec![set_layout; model.materials.len()];
-        let sets = unsafe { renderer.gpu.device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(descriptors).set_layouts(&layouts)) }.map_err(vk_error("vkAllocateDescriptorSets"))?;
+        let white = appearance.textures.len();
+        appearance.textures.push(texture(gpu, 1, 1, &[255; 4])?);
+        let layouts = vec![self.set_layout; model.materials.len()];
+        let sets = unsafe { device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(descriptors).set_layouts(&layouts)) }.map_err(vk_error("vkAllocateDescriptorSets"))?;
         for (material, &set) in model.materials.iter().zip(&sets) {
-            let image = |index: Option<usize>| [vk::DescriptorImageInfo::default().image_view(renderer.textures[index.unwrap_or(white)].view).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+            let image = |index: Option<usize>| [vk::DescriptorImageInfo::default().image_view(appearance.textures[index.unwrap_or(white)].view).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
             let (base, shade, width) = (image(material.base_image), image(material.shade_image), image(material.outline.as_ref().and_then(|outline| outline.width_image)));
-            let sampler = [vk::DescriptorImageInfo::default().sampler(renderer.sampler)];
-            let palette = [vk::DescriptorBufferInfo::default().buffer(renderer.palette.0).range(vk::WHOLE_SIZE)];
-            let materials = [vk::DescriptorBufferInfo::default().buffer(renderer.materials.0).range(vk::WHOLE_SIZE)];
+            let sampler = [vk::DescriptorImageInfo::default().sampler(self.sampler)];
+            let palette = [vk::DescriptorBufferInfo::default().buffer(appearance.palette.0).range(vk::WHOLE_SIZE)];
+            let materials = [vk::DescriptorBufferInfo::default().buffer(appearance.materials.0).range(vk::WHOLE_SIZE)];
             let writes = [
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(0).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&base),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(1).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&shade),
@@ -253,19 +262,19 @@ impl Renderer {
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(4).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&palette),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(5).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&materials),
             ];
-            unsafe { renderer.gpu.device.update_descriptor_sets(&writes, &[]) };
+            unsafe { device.update_descriptor_sets(&writes, &[]) };
         }
-        renderer.drawn = skinned
+        appearance.drawn = skinned
             .draws
             .iter()
             .flat_map(|draw| {
                 let material = &model.materials[draw.material];
-                let call = |outline| DrawCall { first: draw.first, count: draw.count, set: sets[draw.material], pipeline: renderer.pipelines[&key(material, outline)], material: draw.material as u32, outline };
+                let call = |outline| DrawCall { first: draw.first, count: draw.count, set: sets[draw.material], pipeline: self.pipelines[&key(material, outline)], material: draw.material as u32, outline };
                 [Some(call(false)), material.outline.as_ref().map(|_| call(true))]
             })
             .flatten()
             .collect();
-        Ok(renderer)
+        Ok(appearance)
     }
 
     fn pipelines(&self, keys: &[PipelineKey]) -> Result<HashMap<PipelineKey, vk::Pipeline>, String> {
@@ -368,62 +377,7 @@ impl Renderer {
         Ok(Target { texture, framebuffer, commands, fence })
     }
 
-    fn texture(&self, width: u32, height: u32, rgba: &[u8]) -> Result<Texture, String> {
-        let device = &self.gpu.device;
-        let levels = 32 - width.max(height).leading_zeros();
-        let (image, memory) = self.gpu.image(
-            &vk::ImageCreateInfo::default()
-                .image_type(vk::ImageType::TYPE_2D)
-                .format(FORMAT)
-                .extent(vk::Extent3D { width, height, depth: 1 })
-                .mip_levels(levels)
-                .array_layers(1)
-                .samples(vk::SampleCountFlags::TYPE_1)
-                .tiling(vk::ImageTiling::OPTIMAL)
-                .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::SAMPLED)
-                .initial_layout(vk::ImageLayout::UNDEFINED),
-        )?;
-        let staging = self.gpu.host_buffer(rgba.len() as u64, vk::BufferUsageFlags::TRANSFER_SRC)?;
-        unsafe { std::ptr::copy_nonoverlapping(rgba.as_ptr(), staging.2, rgba.len()) };
-        self.gpu.once(|commands| unsafe {
-            let all = color_range(levels);
-            device.cmd_pipeline_barrier(commands, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[barrier(image, all, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::AccessFlags::empty(), vk::AccessFlags::TRANSFER_WRITE)]);
-            let region = vk::BufferImageCopy::default().image_subresource(vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1)).image_extent(vk::Extent3D { width, height, depth: 1 });
-            device.cmd_copy_buffer_to_image(commands, staging.0, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[region]);
-            let (mut w, mut h) = (width as i32, height as i32);
-            for level in 1..levels {
-                let source = vk::ImageSubresourceRange { base_mip_level: level - 1, level_count: 1, ..color_range(1) };
-                device.cmd_pipeline_barrier(commands, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[barrier(image, source, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::TRANSFER_READ)]);
-                let layers = |mip_level| vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level, base_array_layer: 0, layer_count: 1 };
-                let (next_w, next_h) = ((w / 2).max(1), (h / 2).max(1));
-                let blit = vk::ImageBlit::default()
-                    .src_subresource(layers(level - 1))
-                    .src_offsets([vk::Offset3D::default(), vk::Offset3D { x: w, y: h, z: 1 }])
-                    .dst_subresource(layers(level))
-                    .dst_offsets([vk::Offset3D::default(), vk::Offset3D { x: next_w, y: next_h, z: 1 }]);
-                device.cmd_blit_image(commands, image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[blit], vk::Filter::LINEAR);
-                device.cmd_pipeline_barrier(commands, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::DependencyFlags::empty(), &[], &[], &[barrier(image, source, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::AccessFlags::TRANSFER_READ, vk::AccessFlags::SHADER_READ)]);
-                (w, h) = (next_w, next_h);
-            }
-            let last = vk::ImageSubresourceRange { base_mip_level: levels - 1, level_count: 1, ..color_range(1) };
-            device.cmd_pipeline_barrier(commands, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::DependencyFlags::empty(), &[], &[], &[barrier(image, last, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::SHADER_READ)]);
-        })?;
-        self.gpu.free_buffer(staging);
-        let view = unsafe { device.create_image_view(&vk::ImageViewCreateInfo::default().image(image).view_type(vk::ImageViewType::TYPE_2D).format(FORMAT).subresource_range(color_range(levels)), None) }.map_err(vk_error("vkCreateImageView"))?;
-        Ok(Texture { image, memory, view })
-    }
-
-    pub fn update(&mut self, palette: &[Mat4], vertices: &[Vertex], changed: &[u32]) {
-        assert_eq!(palette.len(), self.joints, "the palette has one matrix per joint");
-        let bytes = bytes_of(palette);
-        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.palette.2, bytes.len()) };
-        let target = self.vertices.2 as *mut Vertex;
-        for &vertex in changed {
-            unsafe { target.add(vertex as usize).write(vertices[vertex as usize]) };
-        }
-    }
-
-    pub fn render(&mut self, eyes: [Option<Mat4>; 2]) -> Result<openvr_sys::VRVulkanTextureData_t, String> {
+    pub fn render(&mut self, appearance: &Appearance, eyes: [Option<Mat4>; 2]) -> Result<openvr_sys::VRVulkanTextureData_t, String> {
         let device = &self.gpu.device;
         let target = &self.targets[self.next];
         unsafe { device.wait_for_fences(&[target.fence], true, u64::MAX) }.map_err(vk_error("vkWaitForFences"))?;
@@ -439,14 +393,14 @@ impl Renderer {
                 vk::SubpassContents::INLINE,
             );
             {
-                device.cmd_bind_vertex_buffers(target.commands, 0, &[self.vertices.0], &[0]);
-                device.cmd_bind_index_buffer(target.commands, self.indices.0, 0, vk::IndexType::UINT32);
+                device.cmd_bind_vertex_buffers(target.commands, 0, &[appearance.vertices.0], &[0]);
+                device.cmd_bind_index_buffer(target.commands, appearance.indices.0, 0, vk::IndexType::UINT32);
                 for (side, view_projection) in eyes.iter().enumerate() {
                     let Some(view_projection) = view_projection else { continue };
                     let x = (side as u32 * width) as f32;
                     device.cmd_set_viewport(target.commands, 0, &[vk::Viewport { x, y: 0.0, width: width as f32, height: height as f32, min_depth: 0.0, max_depth: 1.0 }]);
                     device.cmd_set_scissor(target.commands, 0, &[vk::Rect2D { offset: vk::Offset2D { x: x as i32, y: 0 }, extent: vk::Extent2D { width, height } }]);
-                    for drawn in &self.drawn {
+                    for drawn in &appearance.drawn {
                         let push = Push { view_projection: view_projection.to_cols_array(), material: drawn.material, outline: drawn.outline as u32, outline_scale: self.outline_scale };
                         let bytes = std::slice::from_raw_parts(&push as *const Push as *const u8, std::mem::size_of::<Push>());
                         device.cmd_bind_pipeline(target.commands, vk::PipelineBindPoint::GRAPHICS, drawn.pipeline);
@@ -469,17 +423,8 @@ impl Renderer {
 
     #[cfg(test)]
     pub fn read(&self) -> Result<Vec<u8>, String> {
-        let image = self.targets[self.last.ok_or("nothing rendered")?].texture.image;
         let [width, height] = self.eye;
-        let size = (width * 2 * height * 4) as u64;
-        let buffer = self.gpu.host_buffer(size, vk::BufferUsageFlags::TRANSFER_DST)?;
-        self.gpu.once(|commands| unsafe {
-            let region = vk::BufferImageCopy::default().image_subresource(vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1)).image_extent(vk::Extent3D { width: width * 2, height, depth: 1 });
-            self.gpu.device.cmd_copy_image_to_buffer(commands, image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, buffer.0, &[region]);
-        })?;
-        let pixels = unsafe { std::slice::from_raw_parts(buffer.2, size as usize) }.to_vec();
-        self.gpu.free_buffer(buffer);
-        Ok(pixels)
+        self.gpu.read(self.targets[self.last.ok_or("nothing rendered")?].texture.image, width * 2, height)
     }
 }
 
@@ -508,7 +453,28 @@ fn material_data(material: &crate::vrm::Material) -> MaterialData {
     }
 }
 
-impl Drop for Renderer {
+impl Appearance {
+    pub fn update(&mut self, palette: &[Mat4], vertices: &[Vertex], changed: &[u32]) {
+        assert_eq!(palette.len(), self.joints, "the palette has one matrix per joint");
+        let bytes = bytes_of(palette);
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.palette.2, bytes.len()) };
+        let target = self.vertices.2 as *mut Vertex;
+        for &vertex in changed {
+            unsafe { target.add(vertex as usize).write(vertices[vertex as usize]) };
+        }
+    }
+
+}
+
+fn destroy(device: &ash::Device, texture: &Texture) {
+    unsafe {
+        device.destroy_image_view(texture.view, None);
+        device.destroy_image(texture.image, None);
+        device.free_memory(texture.memory, None);
+    }
+}
+
+impl Drop for Appearance {
     fn drop(&mut self) {
         let device = &self.gpu.device;
         unsafe {
@@ -516,26 +482,81 @@ impl Drop for Renderer {
             for buffer in [self.vertices, self.indices, self.palette, self.materials] {
                 self.gpu.free_buffer(buffer);
             }
+            for texture in &self.textures {
+                destroy(device, texture);
+            }
+            device.destroy_descriptor_pool(self.descriptors, None);
+        }
+    }
+}
+
+impl Drop for Renderer {
+    fn drop(&mut self) {
+        let device = &self.gpu.device;
+        unsafe {
+            let _ = device.device_wait_idle();
             for target in &self.targets {
                 device.destroy_fence(target.fence, None);
                 device.destroy_framebuffer(target.framebuffer, None);
+                destroy(device, &target.texture);
             }
-            for texture in self.textures.iter().chain(self.targets.iter().map(|target| &target.texture)).chain([&self.depth]) {
-                device.destroy_image_view(texture.view, None);
-                device.destroy_image(texture.image, None);
-                device.free_memory(texture.memory, None);
-            }
+            destroy(device, &self.depth);
             for &pipeline in self.pipelines.values() {
                 device.destroy_pipeline(pipeline, None);
             }
             device.destroy_sampler(self.sampler, None);
-            device.destroy_descriptor_pool(self.descriptors, None);
             device.destroy_pipeline_layout(self.layout, None);
             device.destroy_descriptor_set_layout(self.set_layout, None);
             device.destroy_render_pass(self.render_pass, None);
         }
     }
 }
+
+fn texture(gpu: &Gpu, width: u32, height: u32, rgba: &[u8]) -> Result<Texture, String> {
+let device = &gpu.device;
+    let levels = 32 - width.max(height).leading_zeros();
+    let (image, memory) = gpu.image(
+        &vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(FORMAT)
+            .extent(vk::Extent3D { width, height, depth: 1 })
+            .mip_levels(levels)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::SAMPLED)
+            .initial_layout(vk::ImageLayout::UNDEFINED),
+    )?;
+    let staging = gpu.host_buffer(rgba.len() as u64, vk::BufferUsageFlags::TRANSFER_SRC)?;
+    unsafe { std::ptr::copy_nonoverlapping(rgba.as_ptr(), staging.2, rgba.len()) };
+    gpu.once(|commands| unsafe {
+        let all = color_range(levels);
+        device.cmd_pipeline_barrier(commands, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[barrier(image, all, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::AccessFlags::empty(), vk::AccessFlags::TRANSFER_WRITE)]);
+        let region = vk::BufferImageCopy::default().image_subresource(vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1)).image_extent(vk::Extent3D { width, height, depth: 1 });
+        device.cmd_copy_buffer_to_image(commands, staging.0, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[region]);
+        let (mut w, mut h) = (width as i32, height as i32);
+        for level in 1..levels {
+            let source = vk::ImageSubresourceRange { base_mip_level: level - 1, level_count: 1, ..color_range(1) };
+            device.cmd_pipeline_barrier(commands, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[barrier(image, source, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::TRANSFER_READ)]);
+            let layers = |mip_level| vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level, base_array_layer: 0, layer_count: 1 };
+            let (next_w, next_h) = ((w / 2).max(1), (h / 2).max(1));
+            let blit = vk::ImageBlit::default()
+                .src_subresource(layers(level - 1))
+                .src_offsets([vk::Offset3D::default(), vk::Offset3D { x: w, y: h, z: 1 }])
+                .dst_subresource(layers(level))
+                .dst_offsets([vk::Offset3D::default(), vk::Offset3D { x: next_w, y: next_h, z: 1 }]);
+            device.cmd_blit_image(commands, image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[blit], vk::Filter::LINEAR);
+            device.cmd_pipeline_barrier(commands, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::DependencyFlags::empty(), &[], &[], &[barrier(image, source, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::AccessFlags::TRANSFER_READ, vk::AccessFlags::SHADER_READ)]);
+            (w, h) = (next_w, next_h);
+        }
+        let last = vk::ImageSubresourceRange { base_mip_level: levels - 1, level_count: 1, ..color_range(1) };
+        device.cmd_pipeline_barrier(commands, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::DependencyFlags::empty(), &[], &[], &[barrier(image, last, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::SHADER_READ)]);
+    })?;
+    gpu.free_buffer(staging);
+    let view = unsafe { device.create_image_view(&vk::ImageViewCreateInfo::default().image(image).view_type(vk::ImageViewType::TYPE_2D).format(FORMAT).subresource_range(color_range(levels)), None) }.map_err(vk_error("vkCreateImageView"))?;
+    Ok(Texture { image, memory, view })
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -568,9 +589,10 @@ mod tests {
         let fit = crate::vrm::Fit::new(model, &skinned, height);
         let worlds = model.worlds(pose);
         let palette = skinned.palette(&worlds, Mat4::from_translation(shift) * fit.placement(model, &worlds, floor));
-        let mut renderer = Renderer::new(Gpu::new(None).unwrap(), eye, model, &skinned, height / PAGE_HEIGHT).unwrap();
-        renderer.update(&palette, &skinned.vertices, &changed);
-        renderer.render(eyes).unwrap();
+        let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), eye, height / PAGE_HEIGHT).unwrap();
+        let mut appearance = renderer.appearance(model, &skinned).unwrap();
+        appearance.update(&palette, &skinned.vertices, &changed);
+        renderer.render(&appearance, eyes).unwrap();
         renderer.read().unwrap()
     }
 
@@ -645,6 +667,40 @@ mod tests {
         let pixels = draw(&model, &model.rest(), [32, 32], [eye_projection(Vec3::new(0.0, 0.0, 0.4), 0.2, 0.2), None], Vec3::ZERO);
         let center = pixel(&pixels, 64, 16, 16);
         assert!(center[0] > 100 && center[2] == 0, "only the near surface shows: {center:?}");
+    }
+
+    fn plain(color: [f32; 4]) -> Model {
+        let mut builder = crate::vrm::tests::Builder::new(serde_json::json!({ "VRMC_vrm": { "humanoid": { "humanBones": {} } } }));
+        let position = builder.accessor("VEC3", &[-1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, -1.0, 1.0, 0.0]);
+        let normal = builder.accessor("VEC3", &[0.0, 0.0, 1.0].repeat(4));
+        let indices = builder.indices(&[0, 1, 2, 0, 2, 3]);
+        builder.set("nodes", serde_json::json!([{ "mesh": 0 }]));
+        builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position, "NORMAL": normal }, "indices": indices, "material": 0 }] }]));
+        builder.set("materials", serde_json::json!([{ "pbrMetallicRoughness": { "baseColorFactor": color }, "extensions": { "VRMC_materials_mtoon": {} } }]));
+        Model::parse(&builder.glb()).unwrap()
+    }
+
+    #[test]
+    fn a_new_appearance_draws_in_place_on_the_same_device() {
+        let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [32, 32], crate::HEIGHT / PAGE_HEIGHT).unwrap();
+        let eyes = [eye_projection(Vec3::new(0.0, 0.0, 0.4), 0.2, 0.2), None];
+        let mut centre = |model: &Model, appearance: &mut Option<Appearance>| {
+            let skinned = model.skinned().unwrap();
+            let fit = crate::vrm::Fit::new(model, &skinned, crate::HEIGHT);
+            let worlds = model.worlds(&model.rest());
+            let loaded = renderer.appearance(model, &skinned).unwrap();
+            let shown = appearance.insert(loaded);
+            shown.update(&skinned.palette(&worlds, fit.placement(model, &worlds, crate::FLOOR)), &skinned.vertices, &[]);
+            renderer.render(shown, eyes).unwrap();
+            pixel(&renderer.read().unwrap(), 64, 16, 16)
+        };
+        let mut shown = None;
+        let red = centre(&plain([1.0, 0.0, 0.0, 1.0]), &mut shown);
+        assert!(red[0] > 100 && red[2] == 0 && red[3] == 255, "{red:?}");
+        let blue = centre(&plain([0.0, 0.0, 1.0, 1.0]), &mut shown);
+        assert!(blue[2] > 100 && blue[0] == 0 && blue[3] == 255, "{blue:?}");
+        let red = centre(&plain([1.0, 0.0, 0.0, 1.0]), &mut shown);
+        assert!(red[0] > 100 && red[2] == 0, "and back: {red:?}");
     }
 
     #[derive(serde::Deserialize)]

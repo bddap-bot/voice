@@ -15,7 +15,7 @@ pub const TURN_QUIET: Duration = Duration::from_millis(1500);
 const FAILED: &str = "The hub request failed.";
 const ASLEEP: &str = "Live is asleep";
 const NO_DISPLAY: &str = "the VR overlay shows no display";
-const SPOKEN_NO_DISPLAY: &str = "the VR overlay spoke the commentary but shows no display";
+const SPOKEN_NO_DISPLAY: &str = "the VR overlay shows no display; the commentary went to Live";
 
 #[derive(Debug, PartialEq)]
 pub enum Command {

@@ -125,9 +125,6 @@ impl Voice {
             awake.session.listen_for_quiet();
         }
         awake.hub.step(&mut self.trace, Instant::now(), awake.session.quiet(hub::TURN_QUIET));
-        if awake.hub.take_listen() {
-            awake.session.listen_for_quiet();
-        }
         for command in awake.hub.drain() {
             awake.session.send(command);
         }

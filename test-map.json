@@ -77,10 +77,10 @@
         "docs/puppet-drivers.js"
       ],
       "tests": [
+        "npm run build",
         "node test/action-evaluation.js",
         "node --test --test-name-pattern='display pipe tables' test/page.test.js",
         "npm test",
-        "npm run build",
         "npm run smoke:ci"
       ],
       "why": "Classifier changes must pass real-model embedding invariance and action evaluation as well as browser coverage."
@@ -90,9 +90,9 @@
         "docs/poses/standing.json"
       ],
       "tests": [
+        "npm run build",
         "node --test --test-name-pattern='display pipe tables' test/page.test.js",
         "npm test",
-        "npm run build",
         "npm run smoke:ci",
         "nix-build vr/default.nix --no-out-link",
         "nix-build vr/default.nix -A bundle --no-out-link",
@@ -105,10 +105,10 @@
         "docs/speaker.js"
       ],
       "tests": [
+        "npm run build",
         "node scripts/vr-speaker-golden.mjs && git diff --exit-code vr/golden/speaker.json",
         "node --test --test-name-pattern='display pipe tables' test/page.test.js",
         "npm test",
-        "npm run build",
         "npm run smoke:ci",
         "nix-build vr/default.nix --no-out-link",
         "nix-build vr/default.nix -A bundle --no-out-link",
@@ -134,12 +134,13 @@
         "package.json",
         "package-lock.json",
         ".github/workflows/smoke.yml",
+        ".github/workflows/pages.yml",
         "DESIGN.md"
       ],
       "tests": [
+        "npm run build",
         "node --test --test-name-pattern='display pipe tables' test/page.test.js",
         "npm test",
-        "npm run build",
         "npm run smoke:ci"
       ],
       "why": "browser assets, build inputs, smoke measurements, baseline, and gate configuration must pass the same browser smoke as CI; display coverage includes table rows, inline links, and pipes inside code"

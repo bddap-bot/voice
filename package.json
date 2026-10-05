@@ -3,11 +3,16 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
+    "presmoke": "npm run build",
     "smoke": "node scripts/smoke.mjs",
+    "pretest": "npm run build",
     "test": "node --test test/*.test.js",
     "smoke:ci": "npm run smoke -- --output smoke-artifacts --baseline test/smoke-baseline.json",
+    "predev": "npm run build",
     "dev": "node scripts/dev.mjs",
+    "presmoke:wake-replies": "npm run build",
     "smoke:wake-replies": "node scripts/wake-reply-smoke.mjs",
+    "presmoke:delegated-reply": "npm run build",
     "smoke:delegated-reply": "node scripts/delegated-reply-smoke.mjs"
   },
   "dependencies": {

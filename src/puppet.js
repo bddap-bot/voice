@@ -214,10 +214,7 @@ export class PuppetRuntime {
       throw error;
     }
     const ankleHeight = await stage('fit', () => fitScene(vrm));
-    if (this.vrm) {
-      this.idleRoot.remove(this.vrm.scene);
-      VRMUtils.deepDispose(this.vrm.scene);
-    }
+    this.clear();
     this.vrm = vrm;
     this.ankleHeight = ankleHeight;
     if (vrm.lookAt) vrm.lookAt.target = this.gazeTarget;
@@ -267,6 +264,8 @@ export class PuppetRuntime {
   }
   clear() {
     if (!this.vrm) return;
+    for (const clip of this.clips.values()) this.mixer.existingAction(clip, this.vrm.scene)?.stop();
+    this.mixer.uncacheRoot(this.vrm.scene);
     this.idleRoot.remove(this.vrm.scene);
     VRMUtils.deepDispose(this.vrm.scene);
     this.vrm = null;

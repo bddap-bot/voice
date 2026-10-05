@@ -614,3 +614,31 @@ test('model reload drops clip and queued gestures and resumes idle rotation', as
     assert.ok(Number.isFinite(runtime.nextIdleAt));
   }
 });
+
+test('a replaced puppet leaves no actions or bindings in the shared mixer', () => {
+  const idleRoot = new THREE.Group();
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+    idleRoot, mixer: new THREE.AnimationMixer(idleRoot), clips: new Map(), handovers: new Map(),
+  });
+  const track = (name) => new THREE.AnimationClip(name, 1, [new THREE.VectorKeyframeTrack('.position', [0, 1], [0, 0, 0, 0, 1, 0])]);
+  runtime.mixer.clipAction(track('base')).play();
+  for (let puppet = 0; puppet < 4; puppet++) {
+    runtime.clear();
+    const scene = new THREE.Group();
+    idleRoot.add(scene);
+    runtime.vrm = { scene };
+    runtime.clips = new Map(['idle', 'wave'].map((name) => {
+      const clip = track(name);
+      clip.userData.action = name;
+      return [name, clip];
+    }));
+    runtime.clipAction = null;
+    runtime.playClip('idle', 'idle');
+    runtime.mixer.update(0.1);
+    runtime.playClip('wave', 'idle');
+    runtime.mixer.update(0.1);
+  }
+  assert.equal(runtime.mixer.stats.actions.inUse, 3);
+  assert.equal(runtime.mixer.stats.bindings.inUse, 2);
+  assert.equal(runtime.mixer.stats.controlInterpolants.inUse, 2);
+});

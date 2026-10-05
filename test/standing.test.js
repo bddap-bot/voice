@@ -88,8 +88,9 @@ test('an avatar loads and renders Standing before any clip exists', async () => 
   globalThis.ProgressEvent ??= class { constructor(type, values) { Object.assign(this, { type }, values); } };
   let renders = 0;
   let finishes = 0;
+  const idleRoot = new THREE.Group();
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
-    poseName: 'sit', clips: new Map(), idleRoot: new THREE.Group(), gazeTarget: new THREE.Object3D(),
+    poseName: 'sit', clips: new Map(), idleRoot, mixer: new THREE.AnimationMixer(idleRoot), gazeTarget: new THREE.Object3D(),
     renderer: { render: () => renders++, getContext: () => ({ finish: () => finishes++ }) },
   });
   const stages = [];

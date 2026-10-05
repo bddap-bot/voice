@@ -1360,7 +1360,7 @@ test('a delegation appends nothing until its hub reply, which reaches Live as co
   const { stdout, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {
   const pause = () => new Promise((resolve) => setTimeout(resolve, 30));
-  const told = () => sentLiveEvents.filter(({ type, event_id }) => type.endsWith('.append') && !['identity', 'wake'].includes(event_id)).map(({ type, event_id, delegation_id, content }) => [type, event_id, delegation_id, content]);
+  const told = () => sentLiveEvents.filter(({ type, event_id }) => type.endsWith('.append') && !['identity', 'actions', 'wake'].includes(event_id)).map(({ type, event_id, delegation_id, content }) => [type, event_id, delegation_id, content]);
   hear('How many jobs are queued?');
   delegateTurn('slow');
   await pause();
@@ -1956,7 +1956,7 @@ test('the model speaking the sign-off ends the session once speech goes quiet an
       rewoken: await (async () => { testSpotter.heard({ wake: 0.9 }); await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true'); return true; })(),
     };
   `);
-  assert.deepEqual(result, { speaking: 'true', sleeps: ['sign-off'], delegates: 0, live: ['identity', 'wake'], puppet: ['asleep', true], microphone: { enabled: true, button: false }, rewoken: true });
+  assert.deepEqual(result, { speaking: 'true', sleeps: ['sign-off'], delegates: 0, live: ['identity', 'actions', 'wake'], puppet: ['asleep', true], microphone: { enabled: true, button: false }, rewoken: true });
 });
 
 test('a goodbye from the user or a partial sign-off keeps the session open', async () => {
@@ -2528,7 +2528,7 @@ test('a woken session receives only the fresh hub reply', async () => {
     await until(() => count('delegate') > 0);
     replyFromHub('fresh', 'fresh', ['The test beacon is violet.']);
     await until(() => sentLiveEvents.some((event) => event.event_id === 'hub_fresh'));
-    return { sent: delegateFrames.at(-1).text, context: lastOffer.context, appended: sentLiveEvents.filter((event) => event.type.endsWith('.append') && !['identity', 'wake'].includes(event.event_id)).map((event) => event.event_id), reply: sentLiveEvents.find((event) => event.event_id === 'hub_fresh') };
+    return { sent: delegateFrames.at(-1).text, context: lastOffer.context, appended: sentLiveEvents.filter((event) => event.type.endsWith('.append') && !['identity', 'actions', 'wake'].includes(event.event_id)).map((event) => event.event_id), reply: sentLiveEvents.find((event) => event.event_id === 'hub_fresh') };
   `);
   assert.equal(result.sent, 'Check the test beacon.');
   assert.ok(result.context.some((turn) => turn.text.includes('amber')));

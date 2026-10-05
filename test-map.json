@@ -24,6 +24,17 @@
     },
     {
       "paths": [
+        "scripts/vr-speaker-golden.mjs"
+      ],
+      "tests": [
+        "node --check scripts/vr-speaker-golden.mjs",
+        "node scripts/vr-speaker-golden.mjs && git diff --exit-code vr/golden/speaker.json",
+        "nix-build vr/default.nix --no-out-link"
+      ],
+      "why": "the script writes the page speaker filter's golden that the overlay host's build compares its own features, detections and gate decisions against"
+    },
+    {
+      "paths": [
         "android/**"
       ],
       "tests": [
@@ -88,6 +99,22 @@
         "nix-build vr/default.nix -A simulatedController --no-out-link"
       ],
       "why": "the rest pose is read by the page and compiled into the native overlay host"
+    },
+    {
+      "paths": [
+        "docs/speaker.js"
+      ],
+      "tests": [
+        "node scripts/vr-speaker-golden.mjs && git diff --exit-code vr/golden/speaker.json",
+        "node --test --test-name-pattern='display pipe tables' test/page.test.js",
+        "npm test",
+        "npm run build",
+        "npm run smoke:ci",
+        "nix-build vr/default.nix --no-out-link",
+        "nix-build vr/default.nix -A bundle --no-out-link",
+        "nix-build vr/default.nix -A simulatedController --no-out-link"
+      ],
+      "why": "the speaker filter is run by the page and read by the native overlay host, which parses its constants, pins its model and compares against its golden"
     },
     {
       "paths": [

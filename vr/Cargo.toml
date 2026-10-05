@@ -23,6 +23,8 @@ opus = "0.4"
 pulseaudio = "0.3"
 futures = "0.3"
 fastrand = "2"
+tract-onnx = "0.21"
+sha2 = "0.10"
 
 [build-dependencies]
 naga = { version = "26", features = ["wgsl-in", "spv-out"] }

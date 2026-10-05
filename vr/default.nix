@@ -1,11 +1,26 @@
 { pkgs ? import <nixpkgs> { } }:
 let
+  pinned = builtins.match ".*url: '([^']+)',[[:space:]]*sha256: '([0-9a-f]+)'.*" (builtins.readFile ../docs/speaker.js);
+  speakerModel = pkgs.fetchurl { url = builtins.elemAt pinned 0; sha256 = builtins.elemAt pinned 1; };
+  # Real recordings of three speakers from the model authors' examples (Apache-2.0), at the capture rate.
+  speech = pkgs.runCommand "voice-vr-speech" { nativeBuildInputs = [ pkgs.sox ]; } (''
+    mkdir $out
+  '' + pkgs.lib.concatStrings (pkgs.lib.mapAttrsToList (name: { path, sha256 }: ''
+    sox ${pkgs.fetchurl { url = "https://raw.githubusercontent.com/csukuangfj/sr-data/92b4978ba6b4358e95be385e51e86ece86524d33/${path}"; inherit sha256; }} -r 48000 -e floating-point -b 32 -c 1 -t raw $out/${name}.f32
+  '') {
+    leijun-sr-1 = { path = "enroll/leijun-sr-1.wav"; sha256 = "160a3d9bf5dd5038da8191b4430e1f3f751461613ae9489401b6b35a61b488ad"; };
+    leijun-sr-2 = { path = "enroll/leijun-sr-2.wav"; sha256 = "37a759c036f2520d143708dfe46d45901b38a0a6e621b52d6f1aef2c000d7fe0"; };
+    leijun-test-sr-1 = { path = "test/leijun-test-sr-1.wav"; sha256 = "36cda04ee4d10e38095de73b77c99e8e7c54347232967a9cde4cf54f7d496bab"; };
+    leijun-test-sr-2 = { path = "test/leijun-test-sr-2.wav"; sha256 = "84b85e7413b5348303a95bd78813e4d669b4dc70fa5a99990b9860ca6fda91e8"; };
+    fangjun-test-sr-1 = { path = "test/fangjun-test-sr-1.wav"; sha256 = "9175e523081bf6a630ce72a55b05f92148eaafaf58cbbbe743686cd81c50848e"; };
+    speaker2_a_en = { path = "test/3d-speaker/speaker2_a_en_16k.wav"; sha256 = "a723c134978a17fe12ca2374d0281a8003a56fa44ff9d2249a08791714983362"; };
+  }));
   host = target: target.rustPlatform.buildRustPackage {
     pname = "voice-vr";
     version = "0.1.0";
     src = pkgs.lib.fileset.toSource {
       root = ./..;
-      fileset = pkgs.lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./build.rs ./src ./shaders ./golden ../docs/poses/standing.json ../docs/identity.js ../docs/live.js ../test/fixtures/delegated-reply-capture.json ];
+      fileset = pkgs.lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./build.rs ./src ./shaders ./golden ../docs/poses/standing.json ../docs/identity.js ../docs/live.js ../docs/speaker.js ../test/fixtures/delegated-reply-capture.json ];
     };
     cargoRoot = "vr";
     buildAndTestSubdir = "vr";
@@ -15,6 +30,7 @@ let
     preCheck = ''
       export LD_LIBRARY_PATH=${pkgs.vulkan-loader}/lib
       export VK_ICD_FILENAMES=${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.${pkgs.stdenv.hostPlatform.parsed.cpu.name}.json
+      export VOICE_VR_SPEAKER_MODEL=${speakerModel} VOICE_VR_SPEECH=${speech}
     '';
   };
   native = host pkgs;
@@ -23,8 +39,9 @@ let
   # The newest glibc the standalone headset's SteamOS ships; the bundle runs on the system's own loader and libraries.
   deviceGlibc = "2.39";
   bundle = pkgs.runCommand "voice-vr-aarch64-bundle" { nativeBuildInputs = [ pkgs.patchelf pkgs.binutils pkgs.nukeReferences ]; allowedReferences = [ ]; } ''
-    mkdir -p $out/bin
+    mkdir -p $out/bin $out/share
     install -m755 ${aarch64}/bin/voice-vr $out/bin/voice-vr-host
+    install -m644 ${speakerModel} $out/share/speaker.onnx
     patchelf --set-interpreter /lib/ld-linux-aarch64.so.1 --remove-rpath $out/bin/voice-vr-host
     nuke-refs $out/bin/voice-vr-host
 
@@ -46,6 +63,7 @@ let
     #!/bin/sh
     here=$(dirname "$(readlink -f "$0")")
     export VOICE_VR_BROWSER="''${VOICE_VR_BROWSER:-$here/chromium}"
+    export VOICE_VR_SPEAKER_MODEL="''${VOICE_VR_SPEAKER_MODEL:-$here/../share/speaker.onnx}"
     exec "$here/voice-vr-host" "$@"
     EOF
     # The Flatpak's sandboxed zygote is spawned through flatpak-portal, outside --die-with-parent, and would outlive the host.
@@ -60,7 +78,8 @@ in
 pkgs.runCommand "voice-vr-${native.version}" { nativeBuildInputs = [ pkgs.makeWrapper ]; passthru = { inherit bundle; simulatedController = import ./simulated { inherit pkgs; }; }; } ''
   makeWrapper ${native}/bin/voice-vr $out/bin/voice-vr \
     --prefix LD_LIBRARY_PATH : ${runtimeLibraries} \
-    --set-default VOICE_VR_BROWSER ${pkgs.chromium}/bin/chromium
+    --set-default VOICE_VR_BROWSER ${pkgs.chromium}/bin/chromium \
+    --set-default VOICE_VR_SPEAKER_MODEL ${speakerModel}
   mkdir -p $out/share/voice-vr
   substitute ${./voice-vr.vrmanifest} $out/share/voice-vr/voice-vr.vrmanifest --subst-var out
 ''

@@ -3,6 +3,7 @@ mod board;
 mod conversation;
 mod identity;
 mod session;
+mod speaker;
 mod voice;
 mod gesture;
 mod hub;
@@ -155,7 +156,7 @@ fn native(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(
     let mut meter = Meter::new(labels[0], labels[1]);
     let epoch = Instant::now();
     let mut last = epoch;
-    let mut voice = Voice::new(token.clone(), cache.clone());
+    let mut voice = Voice::new(token.clone(), cache.clone(), state.join("voiceprint.json"));
     eprintln!("dormant");
     loop {
         if let Some(Signal::Quit) = runtime.poll() {
@@ -208,6 +209,8 @@ fn native(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(
                 voice.reset();
                 continue;
             }
+            Some(Press::VoiceId) => voice.toggle_voice_id(),
+            Some(Press::Learn) => voice.toggle_learning(),
             Some(Press::Appearance(index)) if index != board.active => {
                 let avatar = &catalog.avatars[index];
                 eprintln!("picked appearance {}", avatar.id);
@@ -227,6 +230,10 @@ fn native(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(
                 board.mark();
             }
             _ => {}
+        }
+        if board.voice != voice.voice_id() {
+            board.voice = voice.voice_id();
+            board.mark();
         }
         if let Some(image) = board.take_image() {
             board_overlay.submit(&mut board_image.upload(&image)?)?;

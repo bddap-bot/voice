@@ -16,6 +16,7 @@ use crate::conversation::Wake;
 use crate::identity::identity;
 use crate::hub::Command;
 use crate::relay::{message, split, Relay, Token};
+use crate::speaker::{Ear, Hearing};
 
 const FRAME: usize = RATE as usize / 50;
 const TICK: Duration = Duration::from_millis(20);
@@ -48,13 +49,13 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn open(token: &Token, cache: &Path, wake: Wake, muted: bool) -> Session {
+    pub fn open(token: &Token, cache: &Path, wake: Wake, muted: bool, hearing: Arc<Mutex<Hearing>>) -> Session {
         let stop = Arc::new(AtomicBool::new(false));
         let muted = Arc::new(AtomicBool::new(muted));
         let (event_sender, events) = mpsc::channel();
         let (commands, command_receiver) = mpsc::channel();
         let played = Arc::new(Mutex::new(PlaybackBuffer::default()));
-        let link = Link { token: token.clone(), cache: cache.to_owned(), stop: stop.clone(), muted: muted.clone(), events: event_sender.clone(), commands: command_receiver, played: played.clone() };
+        let link = Link { token: token.clone(), cache: cache.to_owned(), stop: stop.clone(), muted: muted.clone(), events: event_sender.clone(), commands: command_receiver, played: played.clone(), hearing };
         std::thread::spawn(move || {
             let reason = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| link.run(wake))) {
                 Ok(Ok(reason) | Err(reason)) => reason,
@@ -105,6 +106,7 @@ struct Link {
     events: mpsc::Sender<Event>,
     commands: mpsc::Receiver<Command>,
     played: Arc<Mutex<PlaybackBuffer>>,
+    hearing: Arc<Mutex<Hearing>>,
 }
 
 fn offer_id() -> String {
@@ -206,6 +208,7 @@ impl Link {
         let mut packet = vec![0u8; 4000];
         let mut decoded = vec![0f32; 5760];
         let mut buffer = vec![0u8; 2000];
+        let mut ear = Ear::new(self.hearing.clone());
         loop {
             let timeout = loop {
                 match rtc.poll_output().map_err(|error| format!("peer connection: {error}"))? {
@@ -271,6 +274,9 @@ impl Link {
                 return Err("Live session timed out".into());
             }
             self.follow_mute(audio, capturing)?;
+            if !*capturing {
+                ear.reset();
+            }
             loop {
                 match frames.try_recv() {
                     Ok(Err(error)) => return Ok(format!("the relay closed: {error}")),
@@ -318,6 +324,9 @@ impl Link {
                             *slot = sample;
                         }
                     }
+                }
+                if *capturing {
+                    ear.hear(&mut frame);
                 }
                 let length = encoder.encode_float(&frame, &mut packet).map_err(|error| format!("opus encode: {error}"))?;
                 rtp_time += FRAME as u64;

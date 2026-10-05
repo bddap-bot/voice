@@ -1,15 +1,16 @@
 use font8x8::legacy::BASIC_LEGACY;
 
 use crate::placement::Vec3;
+use crate::voice::VoiceId;
 
 pub const WIDTH: f32 = 0.2;
 const PIXELS_PER_METRE: f32 = 2000.0;
 const ROW: f32 = 0.022;
 const GAP: f32 = 0.004;
 const NAMES: usize = 5;
-/// Dismiss, the microphone and reset, the names, and the page arrows.
-const ROWS: usize = NAMES + 3;
-const FIRST_NAME: usize = 2;
+/// Dismiss, the microphone and reset, Voice ID, Learn my voice, the names, and the page arrows.
+const ROWS: usize = NAMES + 5;
+const FIRST_NAME: usize = 4;
 pub const HEIGHT: f32 = ROWS as f32 * ROW + (ROWS + 1) as f32 * GAP;
 pub const PIXELS: [u32; 2] = [(WIDTH * PIXELS_PER_METRE) as u32, (HEIGHT * PIXELS_PER_METRE) as u32];
 const GLYPH_SCALE: u32 = 2;
@@ -32,6 +33,8 @@ pub enum Press {
     Dismiss,
     Mute,
     Reset,
+    VoiceId,
+    Learn,
     Appearance(usize),
 }
 
@@ -59,6 +62,7 @@ pub struct Board {
     pub active: usize,
     pub pending: Option<usize>,
     pub muted: bool,
+    pub voice: VoiceId,
     page: usize,
     armed: bool,
     dirty: bool,
@@ -71,7 +75,7 @@ fn row(index: usize, left: f32, right: f32) -> [f32; 4] {
 
 impl Board {
     pub fn new(names: Vec<String>, active: usize) -> Board {
-        let mut board = Board { names, active, pending: None, muted: false, page: 0, armed: false, dirty: true };
+        let mut board = Board { names, active, pending: None, muted: false, voice: VoiceId::default(), page: 0, armed: false, dirty: true };
         board.reset();
         board
     }
@@ -94,7 +98,11 @@ impl Board {
             Button { action: Action::Press(Press::Dismiss), rect: row(0, left, right) },
             Button { action: Action::Press(Press::Mute), rect: row(1, left, left + half) },
             Button { action: Action::Press(Press::Reset), rect: row(1, right - half, right) },
+            Button { action: Action::Press(Press::Learn), rect: row(3, left, right) },
         ];
+        if self.voice.stored {
+            buttons.push(Button { action: Action::Press(Press::VoiceId), rect: row(2, left, right) });
+        }
         let first = self.page * NAMES;
         for (slot, index) in (first..self.names.len().min(first + NAMES)).enumerate() {
             buttons.push(Button { action: Action::Press(Press::Appearance(index)), rect: row(FIRST_NAME + slot, left, right) });
@@ -153,6 +161,13 @@ impl Board {
                 Action::Press(Press::Mute) if self.muted => (MUTED, "Unmute mic".to_owned()),
                 Action::Press(Press::Mute) => (BUTTON, "Mute mic".to_owned()),
                 Action::Press(Press::Reset) => (BUTTON, "Reset".to_owned()),
+                Action::Press(Press::VoiceId) if self.voice.off => (BUTTON, "Voice ID off".to_owned()),
+                Action::Press(Press::VoiceId) => (ACTIVE, "Voice ID on".to_owned()),
+                Action::Press(Press::Learn) => match self.voice.learning {
+                    Some(progress) => (PENDING, format!("Stop learning ({}%)", (progress * 100.0).round())),
+                    None if self.voice.stored => (BUTTON, "Forget my voice".to_owned()),
+                    None => (BUTTON, "Learn my voice".to_owned()),
+                },
                 Action::Press(Press::Appearance(index)) => (
                     if self.pending == Some(index) {
                         PENDING
@@ -238,8 +253,12 @@ mod tests {
         (0..count).map(|index| format!("Avatar {index}")).collect()
     }
 
+    fn rect_of(board: &Board, action: Action) -> [f32; 4] {
+        board.buttons().into_iter().find(|button| button.action == action).unwrap().rect
+    }
+
     fn centre(board: &Board, action: Action) -> [f32; 2] {
-        let [left, bottom, right, top] = board.buttons().into_iter().find(|button| button.action == action).unwrap().rect;
+        let [left, bottom, right, top] = rect_of(board, action);
         [(left + right) / 2.0, (bottom + top) / 2.0]
     }
 
@@ -435,26 +454,69 @@ mod tests {
         assert_eq!(corner(Action::Press(Press::Reset)), BUTTON);
         assert_eq!(pixel(0.0, -HEIGHT / 2.0 + 0.001)[3], BACKGROUND[3]);
         for index in 0..3 {
-            let [left, bottom, right, top] = board.buttons()[index + FIRST_NAME + 1].rect;
+            let [left, bottom, right, top] = rect_of(&board, Action::Press(Press::Appearance(index)));
             let inked = (0..100).flat_map(|i| (0..20).map(move |j| (left + (right - left) * i as f32 / 100.0, bottom + (top - bottom) * j as f32 / 20.0))).filter(|&(x, y)| pixel(x, y) == INK).count();
             assert!(inked > 0, "appearance {index} carries a label");
         }
         board.pending = Some(2);
         board.mark();
         let image = board.take_image().unwrap();
-        let [left, _, _, top] = board.buttons()[FIRST_NAME + 3].rect;
+        let [left, _, _, top] = rect_of(&board, Action::Press(Press::Appearance(2)));
         let at = ((((HEIGHT / 2.0 - top + 0.001) * PIXELS_PER_METRE) as u32 * PIXELS[0] + ((left + 0.001 + WIDTH / 2.0) * PIXELS_PER_METRE) as u32) * 4) as usize;
         assert_eq!(image[at..at + 4], PENDING);
         let inked = |image: &[u8], [left, top, right, bottom]: [u32; 4]| (top..bottom).flat_map(|y| (left..right).map(move |x| ((y * PIXELS[0] + x) * 4) as usize)).filter(|&at| image[at..at + 4] == INK).count();
-        let mute = pixels(board.buttons()[1].rect);
+        let mute = pixels(rect_of(&board, Action::Press(Press::Mute)));
         let unmuted = inked(&image, mute);
         board.muted = true;
         board.mark();
         let image = board.take_image().unwrap();
-        let [left, _, _, top] = board.buttons()[1].rect;
+        let [left, _, _, top] = rect_of(&board, Action::Press(Press::Mute));
         let at = ((((HEIGHT / 2.0 - top + 0.001) * PIXELS_PER_METRE) as u32 * PIXELS[0] + ((left + 0.001 + WIDTH / 2.0) * PIXELS_PER_METRE) as u32) * 4) as usize;
         assert_eq!(image[at..at + 4], MUTED);
         assert_ne!(inked(&image, mute), unmuted, "the label says Unmute mic");
+    }
+
+    #[test]
+    fn voice_id_shows_only_with_a_voiceprint_and_each_voice_button_presses_once() {
+        let mut board = Board::new(names(3), 0);
+        let has = |board: &Board, press| board.buttons().iter().any(|button| button.action == Action::Press(press));
+        assert!(!has(&board, Press::VoiceId) && has(&board, Press::Learn));
+        board.voice = VoiceId { stored: true, off: false, learning: None };
+        for press in [Press::VoiceId, Press::Learn] {
+            assert_eq!(poke_on(&mut board, Action::Press(press), 0.0), [press]);
+        }
+        let rect = |press| rect_of(&board, Action::Press(press));
+        assert!(rect(Press::Mute)[1] > rect(Press::VoiceId)[3] && rect(Press::VoiceId)[1] > rect(Press::Learn)[3] && rect(Press::Learn)[1] > rect(Press::Appearance(0))[3]);
+    }
+
+    #[test]
+    fn the_voice_buttons_say_what_a_press_will_do() {
+        let ink = |voice: VoiceId, press| {
+            let mut board = Board::new(names(3), 0);
+            board.voice = voice;
+            let image = board.take_image().unwrap();
+            let [left, top, right, bottom] = pixels(rect_of(&board, Action::Press(press)));
+            let fill = <[u8; 4]>::try_from(&image[((top * PIXELS[0] + left) * 4) as usize..][..4]).unwrap();
+            let inked: Vec<bool> = (top..bottom).flat_map(|y| (left..right).map(move |x| ((y * PIXELS[0] + x) * 4) as usize)).map(|at| image[at..at + 4] == INK).collect();
+            (fill, inked)
+        };
+        let none = VoiceId::default();
+        let stored = VoiceId { stored: true, ..none };
+        let off = VoiceId { off: true, ..stored };
+        let learning = VoiceId { learning: Some(0.42), ..none };
+        assert_eq!(ink(stored, Press::VoiceId).0, ACTIVE);
+        assert_eq!(ink(off, Press::VoiceId).0, BUTTON);
+        assert_ne!(ink(stored, Press::VoiceId).1, ink(off, Press::VoiceId).1, "Voice ID on, Voice ID off");
+        assert_eq!(ink(learning, Press::Learn).0, PENDING);
+        let labels = [ink(none, Press::Learn).1, ink(stored, Press::Learn).1, ink(learning, Press::Learn).1, ink(VoiceId { learning: Some(0.5), ..none }, Press::Learn).1];
+        for (index, label) in labels.iter().enumerate() {
+            assert!(label.iter().any(|&inked| inked));
+            assert!(labels[index + 1..].iter().all(|other| other != label), "Learn my voice, Forget my voice, and the progress each differ");
+        }
+        let mut board = Board::new(names(3), 0);
+        board.voice = learning;
+        let [left, _, right, _] = pixels(rect_of(&board, Action::Press(Press::Learn)));
+        assert!((right - left - 2 * PADDING) / (8 * GLYPH_SCALE) >= "Stop learning (100%)".len() as u32, "the longest label fits");
     }
 
     #[test]

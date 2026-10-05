@@ -5,7 +5,7 @@ let
     version = "0.1.0";
     src = pkgs.lib.fileset.toSource {
       root = ./..;
-      fileset = pkgs.lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./build.rs ./src ./shaders ./golden ../docs/poses/standing.json ];
+      fileset = pkgs.lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./build.rs ./src ./shaders ./golden ../docs/poses/standing.json ../docs/identity.js ../docs/live.js ];
     };
     cargoRoot = "vr";
     buildAndTestSubdir = "vr";

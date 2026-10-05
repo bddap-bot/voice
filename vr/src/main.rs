@@ -1,4 +1,9 @@
+mod audio;
 mod board;
+mod conversation;
+mod identity;
+mod session;
+mod voice;
 mod gesture;
 mod motion;
 mod openvr;
@@ -23,6 +28,7 @@ use placement::{above_hand, below_wrist, desk_spot, local_tip, Anchor, Hand, Int
 use motion::{Animator, Clip, Random, IDLES};
 use gesture::{Recognizer, Templates};
 use relay::{Avatar, Relay, Token};
+use voice::Voice;
 use render::{eye_projection, Appearance, Renderer};
 use vrm::{Fit, Humanoid, Model, Skinned};
 
@@ -148,7 +154,7 @@ fn native(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(
     let mut meter = Meter::new(labels[0], labels[1]);
     let epoch = Instant::now();
     let mut last = epoch;
-    let mut awake = false;
+    let mut voice = Voice::new(token.clone(), cache.clone());
     eprintln!("dormant");
     loop {
         if let Some(Signal::Quit) = runtime.poll() {
@@ -163,7 +169,7 @@ fn native(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(
         let hand = |which| hands.iter().find(|hand| hand.hand == which).map(|hand| hand.pose);
         if let (Some(head), Some(left), Some(right)) = (head, hand(Hand::Left), hand(Hand::Right)) {
             if let Some(verdict) = recognizer.push((started - epoch).as_secs_f64(), &head, left.t, right.t) {
-                let kind = match (verdict.matched, awake) {
+                let kind = match (verdict.matched, voice.awake()) {
                     (true, false) => "match, waking",
                     (true, true) => "match while awake, ignored",
                     (false, _) => "near miss",
@@ -171,14 +177,15 @@ fn native(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(
                 if verdict.matched || verdict.near {
                     eprintln!("gesture {kind}: distance {:.3} peak {:.2} m/s over {:.2} s", verdict.distance, verdict.peak, verdict.duration);
                 }
-                if verdict.matched && !awake {
-                    awake = true;
+                if verdict.matched && !voice.awake() {
+                    voice.summon();
                     board.reset();
                     meter = Meter::new(labels[0], labels[1]);
                 }
             }
         }
-        let (true, Some(head), Some(left), Some(device)) = (awake, head, hand(Hand::Left), runtime.hand_index(Hand::Left)) else {
+        voice.step();
+        let (true, Some(head), Some(left), Some(device)) = (voice.awake(), head, hand(Hand::Left), runtime.hand_index(Hand::Left)) else {
             overlay.hide();
             board_overlay.hide();
             board.reset();
@@ -189,8 +196,15 @@ fn native(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(
         board_overlay.place_on(device, &left.inverse().then(&board_pose));
         match board.touch(hand(Hand::Right).map(|right| local_tip(&board_pose, &right))) {
             Some(Press::Dismiss) => {
-                eprintln!("dismissed, dormant");
-                awake = false;
+                voice.dismiss("dismissed");
+                continue;
+            }
+            Some(Press::Mute) => {
+                board.muted = voice.toggle_mute();
+                board.mark();
+            }
+            Some(Press::Reset) => {
+                voice.reset();
                 continue;
             }
             Some(Press::Appearance(index)) if index != board.active => {
@@ -221,6 +235,7 @@ fn native(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(
         }
         let mut pose = puppet.model.pose(&puppet.animator.humanoid(&puppet.standing, puppet.model.rest_hips()));
         puppet.model.express(&mut pose, "blink", puppet.animator.blink());
+        puppet.model.express(&mut pose, "aa", voice.mouth());
         let changed = puppet.skinned.morph(&pose.weights);
         let worlds = puppet.model.worlds(&pose);
         let palette = puppet.skinned.palette(&worlds, puppet.fit.placement(&puppet.model, &worlds, FLOOR));

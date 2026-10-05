@@ -147,7 +147,7 @@ import { LivePlayback } from './live-playback.js';
 import { audioDiagnostics } from './audio-diagnostics.js';
 audioDiagnostics();
 import { PuppetRuntime, SEAT_CLIPS, connectVrHost } from './puppet.js';
-import { INACTIVITY_MS, NAME, SIGN_OFF, WAKE_PHRASE } from './identity.js';
+import { IDENTITY, INACTIVITY_MS, SIGN_OFF, WAKE_PHRASE, WOKEN } from './identity.js';
 import { loadHead, startWakeSpotter } from './wake.js';
 import { MODEL, learnVoice, prepareSpeaker, startSpeakerGate } from './speaker.js';
 import { disposeRenderer, renderChart, renderMath, renderMermaid } from './lib/render.js';
@@ -1138,12 +1138,8 @@ function presentTranscript(event) {
     if (includesPhrase(said, SIGN_OFF)) fallAsleep();
 }
 function awaken(channel) {
-  channel.send(JSON.stringify({ type: 'session.instructions.append', event_id: 'identity', delegation_id: null, content: `You are ${NAME}, the voice conversation partner. Prefer concise, natural replies, with detail when it helps.
-
-Earlier turns are memory, not fresh results. Delegate requests for the hub or a current check again and wait for the new application reply. Relay the user's answer to a hub question; handle a changed subject as a new request.
-
-When the user asks you to sleep or ends the conversation (a goodbye, "that'll be all", or a bedtime hint), finish with "${SIGN_OFF}" without delegating, even if a hub request is pending. Reserve that sentence for signing off: the page detects it in your speech and goes to sleep.` }));
-  channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: 'wake', delegation_id: null, content: `Context: ${NAME} was just woken.` }));
+  channel.send(JSON.stringify({ type: 'session.instructions.append', event_id: 'identity', delegation_id: null, content: IDENTITY }));
+  channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: 'wake', delegation_id: null, content: WOKEN }));
 }
 function tell(owner, type, event_id, delegation_id, content) {
   if (owner?.channel?.readyState === 'open') owner.channel.send(JSON.stringify({ type, event_id, delegation_id, content }));

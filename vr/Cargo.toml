@@ -18,6 +18,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 flate2 = "1"
 base64 = "0.22"
 font8x8 = { version = "0.3", default-features = false }
+str0m = { version = "0.24", default-features = false, features = ["rust-crypto"] }
+opus = "0.4"
+pulseaudio = "0.3"
+futures = "0.3"
+fastrand = "2"
 
 [build-dependencies]
 naga = { version = "26", features = ["wgsl-in", "spv-out"] }

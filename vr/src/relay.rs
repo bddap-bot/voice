@@ -1,5 +1,6 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -11,8 +12,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_FRAME: usize = 32 << 20;
 const MAX_ASSET: usize = 256 << 20;
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Token {
     endpoint_id: String,
     relay_url: Option<String>,
@@ -67,20 +69,32 @@ struct Start {
 
 pub struct Relay {
     runtime: tokio::runtime::Runtime,
-    _endpoint: iroh::Endpoint,
-    _connection: iroh::endpoint::Connection,
+    endpoint: iroh::Endpoint,
+    connection: iroh::endpoint::Connection,
     send: iroh::endpoint::SendStream,
-    recv: iroh::endpoint::RecvStream,
+    recv: Option<iroh::endpoint::RecvStream>,
     cache: PathBuf,
     broken: bool,
 }
 
-fn split(frame: &[u8]) -> (&str, &[u8]) {
+async fn read_frame(recv: &mut iroh::endpoint::RecvStream) -> Result<Vec<u8>, String> {
+    let mut length = [0u8; 4];
+    recv.read_exact(&mut length).await.map_err(|error| format!("relay read: {error}"))?;
+    let length = u32::from_le_bytes(length) as usize;
+    if length > MAX_FRAME {
+        return Err(format!("relay frame of {length} bytes"));
+    }
+    let mut frame = vec![0u8; length];
+    recv.read_exact(&mut frame).await.map_err(|error| format!("relay read: {error}"))?;
+    Ok(frame)
+}
+
+pub fn split(frame: &[u8]) -> (&str, &[u8]) {
     let end = frame.iter().position(|&byte| byte == b'\n').unwrap_or(frame.len());
     (std::str::from_utf8(&frame[..end]).unwrap_or(""), frame.get(end + 1..).unwrap_or(&[]))
 }
 
-fn message(body: &[u8]) -> String {
+pub fn message(body: &[u8]) -> String {
     serde_json::from_slice::<Value>(body).ok().and_then(|value| value["message"].as_str().map(str::to_owned)).unwrap_or_else(|| String::from_utf8_lossy(body).into_owned())
 }
 
@@ -100,7 +114,7 @@ impl Relay {
         })?;
         let cache = cache.join(&token.endpoint_id);
         std::fs::create_dir_all(&cache).map_err(|error| format!("{}: {error}", cache.display()))?;
-        let mut relay = Relay { runtime, _endpoint: endpoint, _connection: connection, send, recv, cache, broken: false };
+        let mut relay = Relay { runtime, endpoint, connection, send, recv: Some(recv), cache, broken: false };
         relay.send(json!({ "auth": token.secret }).to_string().as_bytes())?;
         let reply: Value = serde_json::from_slice(&relay.recv(Instant::now() + REQUEST_TIMEOUT)?).map_err(|_| "authentication reply is not JSON")?;
         if reply["ok"].as_bool() != Some(true) {
@@ -120,27 +134,42 @@ impl Relay {
     }
 
     fn recv(&mut self, deadline: Instant) -> Result<Vec<u8>, String> {
-        if self.broken {
+        let Some(recv) = self.recv.as_mut().filter(|_| !self.broken) else {
             return Err("the relay stream lost its framing".into());
-        }
-        let recv = &mut self.recv;
-        let frame = self.runtime.block_on(async {
-            tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), async {
-                let mut length = [0u8; 4];
-                recv.read_exact(&mut length).await.map_err(|error| format!("relay read: {error}"))?;
-                let length = u32::from_le_bytes(length) as usize;
-                if length > MAX_FRAME {
-                    return Err(format!("relay frame of {length} bytes"));
-                }
-                let mut frame = vec![0u8; length];
-                recv.read_exact(&mut frame).await.map_err(|error| format!("relay read: {error}"))?;
-                Ok(frame)
-            })
-            .await
-            .map_err(|_| "the relay went quiet".to_owned())?
-        });
+        };
+        let frame = self.runtime.block_on(async { tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), read_frame(recv)).await.map_err(|_| "the relay went quiet".to_owned())? });
         self.broken = frame.is_err();
         frame
+    }
+
+    /// Hands every later frame to a channel that a waiting reader can give up on at any moment; the channel closes when the stream ends.
+    pub fn listen(&mut self) -> mpsc::Receiver<Result<Vec<u8>, String>> {
+        let (sender, receiver) = mpsc::channel();
+        if let Some(mut recv) = self.recv.take() {
+            self.runtime.spawn(async move {
+                loop {
+                    let frame = read_frame(&mut recv).await;
+                    let failed = frame.is_err();
+                    if sender.send(frame).is_err() || failed {
+                        break;
+                    }
+                }
+            });
+        }
+        receiver
+    }
+
+    /// Sends `verb`, with a JSON body when there is one.
+    pub fn post(&mut self, verb: &str, body: Option<&Value>) -> Result<(), String> {
+        match body {
+            Some(body) => self.send(format!("{verb}\n{body}").as_bytes()),
+            None => self.send(verb.as_bytes()),
+        }
+    }
+
+    /// Ends this connection's session, drops its pending requests, and deletes the standing instructions, as the page's Reset does.
+    pub fn forget(&mut self) -> Result<(), String> {
+        self.exchange(b"forget", "forget", "forget-ok").map(drop)
     }
 
     fn request(&mut self, verb: &str) -> Result<Vec<u8>, String> {
@@ -253,6 +282,20 @@ impl Relay {
                 _ => {}
             }
         }
+    }
+}
+
+impl Drop for Relay {
+    /// Delivers what was sent, then closes the connection, so the server ends this connection's session now rather than at an idle timeout.
+    fn drop(&mut self) {
+        let (send, connection, endpoint) = (&mut self.send, &self.connection, &self.endpoint);
+        self.runtime.block_on(async {
+            if send.finish().is_ok() {
+                let _ = tokio::time::timeout(CLOSE_TIMEOUT, send.stopped()).await;
+            }
+            connection.close(iroh::endpoint::VarInt::from_u32(0), b"done");
+            let _ = tokio::time::timeout(CLOSE_TIMEOUT, endpoint.close()).await;
+        });
     }
 }
 

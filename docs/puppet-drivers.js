@@ -187,6 +187,13 @@ export class TranscriptActionDriver {
       if (epoch === this.epoch) this.compare({ sentence: text, annotations, classifier: choice });
     }, () => {});
   }
+  endTurn() {
+    const text = this.pending;
+    this.pending = '';
+    this.held = '';
+    if (this.annotations.length && text.trim()) return this.sentence(text);
+    this.annotations = [];
+  }
   dispatch(text, playAt = this.now()) {
     return this.run(async () => ({ ...await this.classifier.classify(text), source: 'classifier' }), playAt, { sentence: text });
   }

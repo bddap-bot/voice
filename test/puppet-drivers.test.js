@@ -114,6 +114,22 @@ test('unknown bracketed tokens are stripped and logged without displacing the cl
   assert.deepEqual(applied, [['bracket', 'unknown', 'tongue-click', 'tongue click'], ['classifier', 'mood', 'amused', undefined]]);
 });
 
+test('the end of a turn compares its unpunctuated annotated tail and leaves nothing for the next turn', async () => {
+  const applied = [];
+  const compared = [];
+  const classifier = { classify: async (text) => ({ kind: 'mood', name: text === 'Sure thing' ? 'pleased' : 'sad' }) };
+  const driver = new TranscriptActionDriver((action) => applied.push([action.source, action.name]), classifier, { minimumMs: 0, schedule: (apply) => apply() }, (comparison) => compared.push([comparison.sentence, comparison.classifier.name]));
+  driver.push('[nod] Sure thing');
+  driver.endTurn();
+  driver.push('Fine. [shrug] [wav');
+  driver.endTurn();
+  driver.push('Next one.');
+  await driver.tail;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(compared, [['Sure thing', 'pleased']]);
+  assert.deepEqual(applied, [['bracket', 'nod'], ['classifier', 'sad'], ['bracket', 'shrug'], ['classifier', 'sad']]);
+});
+
 test('an unclosed bracket longer than any token is spoken text', () => {
   const driver = new TranscriptActionDriver(() => {}, { classify: async () => ({ kind: 'none', name: 'neutral' }) });
   assert.equal(driver.push('A [b'), 'A ');

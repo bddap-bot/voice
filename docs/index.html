@@ -1090,6 +1090,7 @@ function onLiveEvent(message, source) {
     stayAwake();
     trace.heard(event.delta ?? '', Date.now(), event.start_ms);
     conversation?.transcript?.add('user', event.delta ?? '');
+    actionDriver.endTurn();
     if (/[\p{L}\p{N}]/u.test(event.delta ?? '')) {
       clearTimeout(unanswered);
       if (hubWaiting.size && !conversation?.sleeping) unanswered = setTimeout(() => handOff(`turn_${crypto.randomUUID()}`), UNANSWERED_MS);

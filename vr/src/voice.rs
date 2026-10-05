@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use crate::audio;
 use crate::conversation::Trace;
+use crate::hub::{self, Hub};
 use crate::identity::{identity, includes_phrase};
 use crate::relay::{Relay, Token};
 use crate::session::{self, Session};
@@ -20,6 +21,7 @@ struct Awake {
     signing_off: bool,
     activity: Instant,
     mouth: f32,
+    hub: Hub,
 }
 
 /// The conversation side of the overlay: awake exactly while a session is open or opening.
@@ -43,7 +45,7 @@ impl Voice {
     pub fn summon(&mut self) {
         eprintln!("summoned, opening the session");
         let session = Session::open(&self.token, &self.cache, self.trace.wake(Instant::now()), self.muted);
-        self.awake = Some(Awake { session, opened: false, said: String::new(), signing_off: false, activity: Instant::now(), mouth: 0.0 });
+        self.awake = Some(Awake { session, opened: false, said: String::new(), signing_off: false, activity: Instant::now(), mouth: 0.0, hub: Hub::default() });
     }
 
     /// Ends the session and releases the microphone; an opened session becomes memory for the next.
@@ -90,12 +92,14 @@ impl Voice {
                 }
                 session::Event::Heard(delta) => {
                     eprintln!("heard {delta:?}");
-                    self.trace.heard(&delta);
+                    self.trace.heard(&delta, Instant::now());
+                    awake.hub.heard(&delta, Instant::now());
                     awake.activity = Instant::now();
                 }
                 session::Event::Spoke(delta) => {
                     eprintln!("spoke {delta:?}");
                     self.trace.spoke(&delta);
+                    awake.hub.spoke();
                     awake.activity = Instant::now();
                     awake.said.push_str(&delta);
                     let keep = 4 * sign_off.len();
@@ -105,14 +109,26 @@ impl Voice {
                     if !awake.signing_off && includes_phrase(&awake.said, sign_off) {
                         eprintln!("sign-off heard");
                         awake.signing_off = true;
+                        awake.hub.sleep();
                         awake.session.listen_for_quiet();
                     }
                 }
+                session::Event::Delegated(id) => awake.hub.delegated(id.as_deref(), &mut self.trace, Instant::now()),
+                session::Event::Hub(body) => awake.hub.reply(&body, &mut self.trace, Instant::now()),
+                session::Event::HubError { id, message } => awake.hub.failed(&id, &message),
+                session::Event::Usage(ratio) => awake.hub.usage(ratio),
                 session::Event::Closed(reason) => {
                     ended = Some(format!("session closed: {reason}"));
                     break;
                 }
             }
+        }
+        for out in awake.hub.drain() {
+            awake.session.send(out);
+        }
+        awake.hub.step(&mut self.trace, Instant::now(), awake.session.quiet(hub::TURN_QUIET));
+        for out in awake.hub.drain() {
+            awake.session.send(out);
         }
         if ended.is_none() && awake.signing_off && awake.session.quiet(SIGN_OFF_QUIET) {
             ended = Some("signed off".into());

@@ -5,6 +5,7 @@ mod identity;
 mod session;
 mod voice;
 mod gesture;
+mod hub;
 mod motion;
 mod openvr;
 mod page;

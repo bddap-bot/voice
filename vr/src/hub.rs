@@ -437,7 +437,9 @@ mod tests {
         f.hear("Stop there.");
         f.wait(Duration::from_secs(30), true);
         assert_eq!(f.told().len(), 4, "slide three was dropped by the barge-in");
-        assert_eq!(f.frames("hub-ack").iter().map(|ack| ack["stamp"].as_str().unwrap().to_owned()).collect::<Vec<_>>(), ["o1", "o2", "o3", "o4"]);
+        f.reply(reply("later", "o5", &["Later answer."]));
+        assert_eq!(f.told()[4..], [commentary(Value::Null, "Later answer.")]);
+        assert_eq!(f.frames("hub-ack").iter().map(|ack| ack["stamp"].as_str().unwrap().to_owned()).collect::<Vec<_>>(), ["o1", "o2", "o3", "o4", "o5"]);
     }
 
     #[test]
@@ -512,6 +514,17 @@ mod tests {
         f.reply(json!({ "id": "late", "stamp": "late_stamp", "first": true, "commentary": ["Too late."], "instructions": ["Ignored."] }));
         assert!(f.told().is_empty());
         assert_eq!(f.frames("hub-ack"), [json!({ "id": "late", "stamp": "late_stamp", "unspoken": ASLEEP })]);
+    }
+
+    #[test]
+    fn after_the_sign_off_an_ignored_turn_is_not_forwarded() {
+        let mut f = Fixture::new();
+        f.hear("Check the printer.");
+        f.delegate("printer");
+        f.hub.sleep();
+        f.hear(" Goodbye.");
+        f.wait(Duration::from_secs(4), false);
+        assert_eq!(f.frames("delegate").len(), 1);
     }
 
     #[test]

@@ -14,14 +14,13 @@ const TURN_START: Duration = Duration::from_secs(20);
 pub const TURN_QUIET: Duration = Duration::from_millis(1500);
 const FAILED: &str = "The hub request failed.";
 const ASLEEP: &str = "Live is asleep";
-const NO_DISPLAY: &str = "the VR overlay shows no display; it stays on the page";
+const NO_DISPLAY: &str = "the VR overlay shows no display";
+const SPOKEN_NO_DISPLAY: &str = "the VR overlay spoke the commentary but shows no display";
 
-/// What the hub state asks of the session.
 #[derive(Debug, PartialEq)]
-pub enum Out {
+pub enum Command {
     Frame(&'static str, Value),
     Tell(Value),
-    ListenForQuiet,
 }
 
 #[derive(Deserialize, Debug)]
@@ -32,29 +31,38 @@ struct Reply {
     first: bool,
     commentary: Vec<String>,
     instructions: Vec<String>,
-    #[serde(default)]
-    display: Option<Value>,
+    display: Option<serde::de::IgnoredAny>,
 }
 
-struct Turn {
-    started: bool,
-    deadline: Instant,
+enum Turn {
+    /// The model has until then to start speaking the reply.
+    Awaiting(Instant),
+    Speaking,
+}
+
+/// Standing instructions not yet appended; `Settling` waits for quiet after the model spoke.
+#[derive(Default)]
+enum Standing {
+    #[default]
+    None,
+    Waiting(Vec<String>),
+    Settling(Vec<String>),
 }
 
 /// The page's delegation and hub-reply handling for one session: `delegate`, `hub`, `hub-error` and the order replies and standing instructions reach Live.
 #[derive(Default)]
 pub struct Hub {
-    out: Vec<Out>,
+    out: Vec<Command>,
+    listen: bool,
     waiting: HashSet<String>,
     /// Delegations Live itself created this session; a reply to one carries its id.
     owned: HashSet<String>,
     replies: VecDeque<Reply>,
     turn: Option<Turn>,
     unanswered: Option<Instant>,
-    pending_standing: Option<Vec<String>>,
-    standing: Option<Vec<String>>,
+    pending_standing: Standing,
+    standing: Vec<String>,
     reply_unspoken: bool,
-    settling: bool,
     over_context: bool,
     sleeping: bool,
 }
@@ -67,8 +75,8 @@ fn stamp() -> String {
     format!("{:016x}{:016x}", fastrand::u64(..), fastrand::u64(..))
 }
 
-fn tell(kind: &str, event_id: String, delegation_id: Option<&str>, content: &str) -> Out {
-    Out::Tell(json!({ "type": kind, "event_id": event_id, "delegation_id": delegation_id, "content": content }))
+fn tell(kind: &str, event_id: String, delegation_id: Option<&str>, content: &str) -> Command {
+    Command::Tell(json!({ "type": kind, "event_id": event_id, "delegation_id": delegation_id, "content": content }))
 }
 
 fn part_id(prefix: &str, stamp: &str, index: usize) -> String {
@@ -80,13 +88,20 @@ fn part_id(prefix: &str, stamp: &str, index: usize) -> String {
 }
 
 impl Hub {
-    pub fn drain(&mut self) -> Vec<Out> {
+    pub fn drain(&mut self) -> Vec<Command> {
         std::mem::take(&mut self.out)
     }
 
-    /// The model wants something the hub must answer.
-    pub fn delegated(&mut self, id: Option<&str>, trace: &mut Trace, now: Instant) {
-        let Some(id) = id else { return };
+    /// Whether a wait for quiet started since the last call; the caller restarts playback's silence count, as the page's `quiet()` does.
+    pub fn take_listen(&mut self) -> bool {
+        std::mem::take(&mut self.listen)
+    }
+
+    pub fn sleeping(&self) -> bool {
+        self.sleeping
+    }
+
+    pub fn delegated(&mut self, id: &str, trace: &mut Trace, now: Instant) {
         self.owned.insert(id.to_owned());
         self.hand_off(id, trace, now);
     }
@@ -99,7 +114,7 @@ impl Hub {
         if delegation.text.is_empty() {
             return self.failed(id, "no transcript before the delegation");
         }
-        self.out.push(Out::Frame("delegate", json!({ "id": id, "text": delegation.text, "context": delegation.context, "duration_ms": delegation.duration_ms })));
+        self.out.push(Command::Frame("delegate", json!({ "id": id, "text": delegation.text, "context": delegation.context, "duration_ms": delegation.duration_ms })));
     }
 
     pub fn failed(&mut self, id: &str, message: &str) {
@@ -112,7 +127,7 @@ impl Hub {
     }
 
     pub fn heard(&mut self, delta: &str, now: Instant) {
-        if self.turn.as_ref().is_some_and(|turn| turn.started) {
+        if matches!(self.turn, Some(Turn::Speaking)) {
             self.interrupt("barge-in");
         }
         if has_word(delta) {
@@ -122,16 +137,15 @@ impl Hub {
 
     pub fn spoke(&mut self) {
         self.unanswered = None;
-        if let Some(turn) = &mut self.turn {
-            if !turn.started {
-                turn.started = true;
-                self.out.push(Out::ListenForQuiet);
-            }
+        if matches!(self.turn, Some(Turn::Awaiting(_))) {
+            self.turn = Some(Turn::Speaking);
+            self.listen = true;
         }
         self.reply_unspoken = false;
-        if self.pending_standing.is_some() && !self.settling {
-            self.settling = true;
-            self.out.push(Out::ListenForQuiet);
+        if let Standing::Waiting(instructions) = &mut self.pending_standing {
+            let instructions = std::mem::take(instructions);
+            self.pending_standing = Standing::Settling(instructions);
+            self.listen = true;
         }
     }
 
@@ -148,17 +162,18 @@ impl Hub {
             Err(error) => return eprintln!("hub reply unreadable: {error}"),
         };
         eprintln!("hub reply {} ({}): {:?}{}", reply.id, reply.stamp, reply.commentary, if reply.instructions.is_empty() { "" } else { " with instructions" });
-        let unspoken = if !reply.commentary.is_empty() && self.sleeping {
-            Some(ASLEEP)
-        } else {
-            reply.display.is_some().then_some(NO_DISPLAY)
+        let unspoken = match (reply.commentary.is_empty(), reply.display.is_some()) {
+            (false, _) if self.sleeping => Some(ASLEEP),
+            (true, true) => Some(NO_DISPLAY),
+            (false, true) => Some(SPOKEN_NO_DISPLAY),
+            (_, false) => None,
         };
         let mut ack = json!({ "id": reply.id, "stamp": reply.stamp });
         if let Some(unspoken) = unspoken {
             ack["unspoken"] = unspoken.into();
         }
         let instructions = reply.instructions.clone();
-        if reply.first && self.turn.is_some() && instructions.is_empty() && self.pending_standing.is_none() {
+        if reply.first && self.turn.is_some() && instructions.is_empty() && matches!(self.pending_standing, Standing::None) {
             self.present(reply, trace);
         } else {
             self.replies.push_back(reply);
@@ -167,7 +182,7 @@ impl Hub {
         if !instructions.is_empty() {
             self.stand_by(instructions);
         }
-        self.out.push(Out::Frame("hub-ack", ack));
+        self.out.push(Command::Frame("hub-ack", ack));
     }
 
     /// Appends a reply's commentary; true when Live was told something to speak.
@@ -194,7 +209,7 @@ impl Hub {
             return;
         }
         while let Some(reply) = self.replies.pop_front() {
-            self.turn = Some(Turn { started: false, deadline: now + TURN_START });
+            self.turn = Some(Turn::Awaiting(now + TURN_START));
             if self.present(reply, trace) {
                 return;
             }
@@ -207,30 +222,33 @@ impl Hub {
         if self.sleeping {
             return;
         }
-        self.pending_standing = Some(instructions);
+        self.pending_standing = match self.pending_standing {
+            Standing::Settling(_) => Standing::Settling(instructions),
+            _ => Standing::Waiting(instructions),
+        };
         self.apply_standing();
     }
 
     fn apply_standing(&mut self) {
-        if self.pending_standing.is_none() || self.sleeping || self.reply_unspoken || self.settling || self.turn.is_some() || !self.replies.is_empty() {
+        if self.sleeping || self.reply_unspoken || self.turn.is_some() || !self.replies.is_empty() {
             return;
         }
-        let instructions = self.pending_standing.take().unwrap();
+        let Standing::Waiting(instructions) = &mut self.pending_standing else { return };
+        let instructions = std::mem::take(instructions);
+        self.pending_standing = Standing::None;
         let stamp = stamp();
         for (index, content) in instructions.iter().enumerate() {
             self.out.push(tell("session.instructions.append", part_id("standing", &stamp, index), None, content));
         }
         eprintln!("standing instructions applied");
-        self.standing = Some(instructions);
+        self.standing = instructions;
     }
 
     /// Past nine tenths of the context window the model may lose the standing instructions, so they go in again.
     pub fn usage(&mut self, ratio: f64) {
         let over = ratio > 0.9;
-        if over && !self.over_context && self.pending_standing.is_none() {
-            if let Some(standing) = self.standing.clone() {
-                self.stand_by(standing);
-            }
+        if over && !self.over_context && matches!(self.pending_standing, Standing::None) && !self.standing.is_empty() {
+            self.stand_by(self.standing.clone());
         }
         self.over_context = over;
     }
@@ -243,14 +261,20 @@ impl Hub {
         self.apply_standing();
     }
 
-    /// Advances the waits: `quiet` is whether playback has been quiet for `TURN_QUIET` since the last `ListenForQuiet`.
+    /// Advances the waits: `quiet` is whether playback has been quiet for `TURN_QUIET` since the last `take_listen`.
     pub fn step(&mut self, trace: &mut Trace, now: Instant, quiet: bool) {
-        if quiet && self.settling {
-            self.settling = false;
-            self.apply_standing();
+        if quiet {
+            if let Standing::Settling(instructions) = &mut self.pending_standing {
+                let instructions = std::mem::take(instructions);
+                self.pending_standing = Standing::Waiting(instructions);
+                self.apply_standing();
+            }
         }
         if let Some(turn) = &self.turn {
-            if if turn.started { quiet } else { now >= turn.deadline } {
+            if match turn {
+                Turn::Awaiting(deadline) => now >= *deadline,
+                Turn::Speaking => quiet,
+            } {
                 self.turn = None;
                 self.play(trace, now);
             }
@@ -269,15 +293,17 @@ mod tests {
         hub: Hub,
         trace: Trace,
         now: Instant,
-        out: Vec<Out>,
+        out: Vec<Command>,
+        listens: usize,
     }
 
     impl Fixture {
         fn new() -> Fixture {
-            Fixture { hub: Hub::default(), trace: Trace::default(), now: Instant::now(), out: Vec::new() }
+            Fixture { hub: Hub::default(), trace: Trace::default(), now: Instant::now(), out: Vec::new(), listens: 0 }
         }
         fn collect(&mut self) {
             self.out.extend(self.hub.drain());
+            self.listens += usize::from(self.hub.take_listen());
         }
         fn hear(&mut self, delta: &str) {
             self.trace.heard(delta, self.now);
@@ -290,7 +316,7 @@ mod tests {
             self.collect();
         }
         fn delegate(&mut self, id: &str) {
-            self.hub.delegated(Some(id), &mut self.trace, self.now);
+            self.hub.delegated(id, &mut self.trace, self.now);
             self.collect();
         }
         fn reply(&mut self, value: Value) {
@@ -304,20 +330,20 @@ mod tests {
         }
         fn frames(&self, verb: &str) -> Vec<Value> {
             self.out.iter().filter_map(|out| match out {
-                Out::Frame(name, body) if *name == verb => Some(body.clone()),
+                Command::Frame(name, body) if *name == verb => Some(body.clone()),
                 _ => None,
             }).collect()
         }
         /// (channel, delegation_id, content) of every append.
         fn told(&self) -> Vec<(String, Value, String)> {
             self.out.iter().filter_map(|out| match out {
-                Out::Tell(event) => Some((event["type"].as_str().unwrap().split('.').nth(1).unwrap().to_owned(), event["delegation_id"].clone(), event["content"].as_str().unwrap().to_owned())),
+                Command::Tell(event) => Some((event["type"].as_str().unwrap().split('.').nth(1).unwrap().to_owned(), event["delegation_id"].clone(), event["content"].as_str().unwrap().to_owned())),
                 _ => None,
             }).collect()
         }
         fn event_ids(&self) -> Vec<String> {
             self.out.iter().filter_map(|out| match out {
-                Out::Tell(event) => Some(event["event_id"].as_str().unwrap().to_owned()),
+                Command::Tell(event) => Some(event["event_id"].as_str().unwrap().to_owned()),
                 _ => None,
             }).collect()
         }
@@ -360,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn a_display_only_push_says_nothing_and_a_display_is_acknowledged_unspoken() {
+    fn a_display_only_push_says_nothing_and_a_display_is_reported_as_not_shown() {
         let mut f = Fixture::new();
         f.hear("How many jobs are queued?");
         f.delegate("slow");
@@ -370,9 +396,7 @@ mod tests {
         f.reply(json!({ "id": "slow", "stamp": "reply_1", "commentary": ["Four jobs are queued."], "instructions": [], "display": { "markdown": "chart" } }));
         assert_eq!(f.told(), [commentary(json!("slow"), "Four jobs are queued.")]);
         assert!(f.hub.waiting.is_empty());
-        let acks = f.frames("hub-ack");
-        assert_eq!(acks.len(), 2);
-        assert!(acks.iter().all(|ack| ack["unspoken"] == NO_DISPLAY));
+        assert_eq!(f.frames("hub-ack").iter().map(|ack| ack["unspoken"].clone()).collect::<Vec<_>>(), [json!(NO_DISPLAY), json!(SPOKEN_NO_DISPLAY)]);
     }
 
     #[test]
@@ -387,8 +411,6 @@ mod tests {
         assert_eq!(f.event_ids(), ["hub_error_lost", "hub_error_empty"]);
         assert_eq!(f.told(), [commentary(json!("lost"), FAILED), commentary(json!("empty"), FAILED)]);
         assert_eq!(f.frames("delegate").len(), 1);
-        f.hub.delegated(None, &mut f.trace, f.now);
-        assert!(f.hub.drain().is_empty());
     }
 
     #[test]
@@ -406,7 +428,7 @@ mod tests {
         assert_eq!(f.told().len(), 3, "quiet before the model speaks does not end the turn");
         f.hear(" about the garden.");
         f.speak("First part.");
-        assert_eq!(f.out.iter().filter(|out| **out == Out::ListenForQuiet).count(), 1);
+        assert_eq!(f.listens, 1);
         f.wait(Duration::from_millis(100), false);
         assert_eq!(f.told().len(), 3);
         f.wait(Duration::from_millis(100), true);

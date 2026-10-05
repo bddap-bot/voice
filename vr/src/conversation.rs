@@ -46,13 +46,10 @@ pub struct Delegation {
 pub struct Trace {
     turns: Vec<Turn>,
     sleeps: Vec<(usize, Instant)>,
-    /// The first turn heard since the last delegation or sleep; user turns from here on are the next delegation's text.
-    pending: usize,
+    /// The turn count at the last delegation or sleep; user turns from here on are the next delegation's text, and the next turn of either speaker starts fresh.
+    pending_from: usize,
     heard_at: Option<Instant>,
-    /// The page's delegation entry: the next turn of either speaker starts fresh.
-    split: bool,
-    /// The page's `forceNewSpeech` after a hub reply.
-    split_speech: bool,
+    force_new_speech: bool,
 }
 
 fn elapsed(duration: Duration) -> String {
@@ -77,12 +74,9 @@ fn bounded_text(parts: &[&str], maximum: usize) -> String {
 }
 
 impl Trace {
-    fn at_sleep(&self) -> bool {
-        self.sleeps.last().is_some_and(|&(index, _)| index == self.turns.len())
-    }
-
     fn add(&mut self, speaker: Speaker, delta: &str) {
-        let fresh = self.at_sleep() || std::mem::take(&mut self.split) || speaker == Speaker::Live && std::mem::take(&mut self.split_speech);
+        let new_speech = speaker == Speaker::Live && std::mem::take(&mut self.force_new_speech);
+        let fresh = new_speech || self.pending_from == self.turns.len();
         match self.turns.last_mut() {
             Some(turn) if turn.speaker == speaker && !fresh => turn.text.push_str(delta),
             _ => self.turns.push(Turn { speaker, text: delta.to_owned() }),
@@ -100,31 +94,30 @@ impl Trace {
 
     pub fn slept(&mut self, now: Instant) {
         self.sleeps.push((self.turns.len(), now));
-        self.pending = self.turns.len();
+        self.pending_from = self.turns.len();
         self.heard_at = None;
     }
 
     fn is_pending(&self, index: usize) -> bool {
-        index >= self.pending && self.turns[index].speaker == Speaker::User
+        index >= self.pending_from && self.turns[index].speaker == Speaker::User
     }
 
     /// The user's words since the last delegation, and up to twenty turns before them.
     pub fn delegated(&mut self, now: Instant) -> Delegation {
-        let heard: Vec<&str> = (self.pending..self.turns.len()).filter(|&index| self.is_pending(index)).map(|index| self.turns[index].text.trim()).filter(|text| !text.is_empty()).collect();
+        let heard: Vec<&str> = (self.pending_from..self.turns.len()).filter(|&index| self.is_pending(index)).map(|index| self.turns[index].text.trim()).filter(|text| !text.is_empty()).collect();
         let text = bounded_text(&heard, MAX_CONTEXT);
-        let visible: Vec<Turn> = (0..self.turns.len()).filter(|&index| !self.is_pending(index)).map(|index| self.turns[index].clone()).collect();
-        let mut context = visible[visible.len().saturating_sub(20)..].to_vec();
+        let visible: Vec<usize> = (0..self.turns.len()).filter(|&index| !self.is_pending(index)).collect();
+        let mut context: Vec<Turn> = visible[visible.len().saturating_sub(20)..].iter().map(|&index| self.turns[index].clone()).collect();
         while !context.is_empty() && serde_json::to_string(&context).unwrap().len() > MAX_CONTEXT {
             context.remove(0);
         }
         let duration_ms = self.heard_at.take().map_or(0, |at| now.saturating_duration_since(at).as_millis() as u64);
-        self.pending = self.turns.len();
-        self.split = true;
+        self.pending_from = self.turns.len();
         Delegation { text, context, duration_ms }
     }
 
     pub fn hub_replied(&mut self) {
-        self.split_speech = true;
+        self.force_new_speech = true;
     }
 
     pub fn wake(&self, now: Instant) -> Wake {
@@ -284,6 +277,22 @@ mod tests {
         trace.hub_replied();
         trace.heard("b", start);
         assert_eq!(trace.turns.iter().map(|turn| turn.text.as_str()).collect::<Vec<_>>(), ["Checking.", "Four jobs.", "ab"]);
+    }
+
+    #[test]
+    fn a_boundary_splits_only_the_turn_after_it() {
+        let start = Instant::now();
+        let mut trace = Trace::default();
+        trace.heard("one", start);
+        trace.delegated(start);
+        trace.slept(start);
+        trace.heard("Hel", start);
+        trace.heard("lo", start);
+        trace.hub_replied();
+        trace.delegated(start);
+        trace.spoke("a");
+        trace.spoke("b");
+        assert_eq!(trace.turns.iter().map(|turn| turn.text.as_str()).collect::<Vec<_>>(), ["one", "Hello", "ab"]);
     }
 
     #[test]

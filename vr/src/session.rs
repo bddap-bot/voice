@@ -14,7 +14,7 @@ use str0m::{Candidate, Event as RtcEvent, IceConnectionState, Input, Output, Rtc
 use crate::audio::{Audio, PlaybackBuffer, RATE};
 use crate::conversation::Wake;
 use crate::identity::identity;
-use crate::hub::Out;
+use crate::hub::Command;
 use crate::relay::{message, split, Relay, Token};
 
 const FRAME: usize = RATE as usize / 50;
@@ -31,13 +31,10 @@ pub enum Event {
     Open,
     Heard(String),
     Spoke(String),
-    /// The model delegated; the id is absent when the event names none.
-    Delegated(Option<String>),
-    /// A `hub` frame's body.
+    Delegated(String),
     Hub(Vec<u8>),
     HubError { id: String, message: String },
-    /// The share of the context window used.
-    Usage(f64),
+    ContextUsage(f64),
     Closed(String),
 }
 
@@ -46,7 +43,7 @@ pub struct Session {
     stop: Arc<AtomicBool>,
     muted: Arc<AtomicBool>,
     events: mpsc::Receiver<Event>,
-    commands: mpsc::Sender<Out>,
+    commands: mpsc::Sender<Command>,
     played: Arc<Mutex<PlaybackBuffer>>,
 }
 
@@ -68,13 +65,8 @@ impl Session {
         Session { stop, muted, events, commands, played }
     }
 
-    /// A relay frame or a Live event to send; quiet requests are not the link's.
-    pub fn send(&self, out: Out) {
-        if out == Out::ListenForQuiet {
-            self.listen_for_quiet();
-        } else {
-            let _ = self.commands.send(out);
-        }
+    pub fn send(&self, command: Command) {
+        let _ = self.commands.send(command);
     }
 
     pub fn events(&self) -> Vec<Event> {
@@ -111,7 +103,7 @@ struct Link {
     stop: Arc<AtomicBool>,
     muted: Arc<AtomicBool>,
     events: mpsc::Sender<Event>,
-    commands: mpsc::Receiver<Out>,
+    commands: mpsc::Receiver<Command>,
     played: Arc<Mutex<PlaybackBuffer>>,
 }
 
@@ -253,11 +245,13 @@ impl Link {
                                     let _ = self.events.send(Event::Spoke(event["delta"].as_str().unwrap_or("").to_owned()));
                                 }
                                 "session.delegation.created" => {
-                                    let _ = self.events.send(Event::Delegated(event["delegation"]["id"].as_str().map(str::to_owned)));
+                                    if let Some(id) = event["delegation"]["id"].as_str() {
+                                        let _ = self.events.send(Event::Delegated(id.to_owned()));
+                                    }
                                 }
                                 "session.usage.updated" => {
                                     if let Some(ratio) = event["context_window"]["usage_ratio"].as_f64() {
-                                        let _ = self.events.send(Event::Usage(ratio));
+                                        let _ = self.events.send(Event::ContextUsage(ratio));
                                     }
                                 }
                                 "session.closed" => return Ok("Session ended".into()),
@@ -288,26 +282,27 @@ impl Link {
                         }
                         ("hub-error", body) => {
                             let value: Value = serde_json::from_slice(body).unwrap_or_default();
-                            let _ = self.events.send(Event::HubError { id: value["id"].as_str().unwrap_or("").to_owned(), message: message(body) });
+                            if let Some(id) = value["id"].as_str() {
+                                let _ = self.events.send(Event::HubError { id: id.to_owned(), message: message(body) });
+                            }
                         }
                         _ => {}
                     },
                 }
             }
-            for out in self.commands.try_iter() {
-                match out {
-                    Out::Frame(verb, body) => {
+            for command in self.commands.try_iter() {
+                match command {
+                    Command::Frame(verb, body) => {
                         if let Err(error) = relay.post(verb, Some(&body)) {
                             return Ok(format!("the relay closed: {error}"));
                         }
                     }
-                    Out::Tell(event) => match rtc.channel(channel).filter(|_| open) {
+                    Command::Tell(event) => match rtc.channel(channel).filter(|_| open) {
                         Some(mut channel) => {
                             channel.write(false, event.to_string().as_bytes()).map_err(|error| format!("event channel: {error}"))?;
                         }
                         None => eprintln!("not told, the event channel is not open: {}", event["event_id"]),
                     },
-                    Out::ListenForQuiet => {}
                 }
             }
             let now = Instant::now();

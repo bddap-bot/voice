@@ -18,7 +18,6 @@ struct Awake {
     session: Session,
     opened: bool,
     said: String,
-    signing_off: bool,
     activity: Instant,
     mouth: f32,
     hub: Hub,
@@ -45,7 +44,7 @@ impl Voice {
     pub fn summon(&mut self) {
         eprintln!("summoned, opening the session");
         let session = Session::open(&self.token, &self.cache, self.trace.wake(Instant::now()), self.muted);
-        self.awake = Some(Awake { session, opened: false, said: String::new(), signing_off: false, activity: Instant::now(), mouth: 0.0, hub: Hub::default() });
+        self.awake = Some(Awake { session, opened: false, said: String::new(), activity: Instant::now(), mouth: 0.0, hub: Hub::default() });
     }
 
     /// Ends the session and releases the microphone; an opened session becomes memory for the next.
@@ -106,31 +105,33 @@ impl Voice {
                     if let Some((cut, _)) = awake.said.char_indices().find(|&(at, _)| awake.said.len() - at <= keep) {
                         awake.said.drain(..cut);
                     }
-                    if !awake.signing_off && includes_phrase(&awake.said, sign_off) {
+                    if !awake.hub.sleeping() && includes_phrase(&awake.said, sign_off) {
                         eprintln!("sign-off heard");
-                        awake.signing_off = true;
                         awake.hub.sleep();
                         awake.session.listen_for_quiet();
                     }
                 }
-                session::Event::Delegated(id) => awake.hub.delegated(id.as_deref(), &mut self.trace, Instant::now()),
+                session::Event::Delegated(id) => awake.hub.delegated(&id, &mut self.trace, Instant::now()),
                 session::Event::Hub(body) => awake.hub.reply(&body, &mut self.trace, Instant::now()),
                 session::Event::HubError { id, message } => awake.hub.failed(&id, &message),
-                session::Event::Usage(ratio) => awake.hub.usage(ratio),
+                session::Event::ContextUsage(ratio) => awake.hub.usage(ratio),
                 session::Event::Closed(reason) => {
                     ended = Some(format!("session closed: {reason}"));
                     break;
                 }
             }
         }
-        for out in awake.hub.drain() {
-            awake.session.send(out);
+        if awake.hub.take_listen() {
+            awake.session.listen_for_quiet();
         }
         awake.hub.step(&mut self.trace, Instant::now(), awake.session.quiet(hub::TURN_QUIET));
-        for out in awake.hub.drain() {
-            awake.session.send(out);
+        if awake.hub.take_listen() {
+            awake.session.listen_for_quiet();
         }
-        if ended.is_none() && awake.signing_off && awake.session.quiet(SIGN_OFF_QUIET) {
+        for command in awake.hub.drain() {
+            awake.session.send(command);
+        }
+        if ended.is_none() && awake.hub.sleeping() && awake.session.quiet(SIGN_OFF_QUIET) {
             ended = Some("signed off".into());
         }
         if ended.is_none() && awake.opened && awake.activity.elapsed() >= identity().inactivity {

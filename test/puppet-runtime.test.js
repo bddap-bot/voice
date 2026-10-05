@@ -642,3 +642,40 @@ test('a replaced puppet leaves no actions or bindings in the shared mixer', () =
   assert.equal(runtime.mixer.stats.bindings.inUse, 2);
   assert.equal(runtime.mixer.stats.controlInterpolants.inUse, 2);
 });
+
+test('each animation event reports the weights its frame rendered across a gesture handover', () => {
+  const scene = new THREE.Group();
+  const hips = new THREE.Bone();
+  scene.add(hips);
+  const clip = (name, y) => {
+    const value = new THREE.AnimationClip(name, 0.3, [new THREE.NumberKeyframeTrack(`${hips.uuid}.position[y]`, [0], [y])]);
+    value.userData.action = name;
+    return [name, value];
+  };
+  const events = [];
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+    vrm: { scene, humanoid: { getRawBoneNode: () => hips }, update() {} },
+    mixer: new THREE.AnimationMixer(scene),
+    clips: new Map([clip('idle', 1), clip('nod', 0)]),
+    poseName: 'stand', idleClip: 'idle', nextIdleAt: Infinity,
+    clock: { getDelta: () => 1 / 60 },
+    renderer: { render() {} },
+    plantFeet() {}, updateFace() {},
+    onAnimation: (state) => events.push(state),
+  });
+  runtime.playClip('idle', 'idle');
+  runtime.gesture('nod');
+  const frame = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = () => 1;
+  try {
+    for (let step = 0; step < 90; step++) runtime.animate(step * 1000 / 60);
+  } finally { globalThis.requestAnimationFrame = frame; }
+  assert.equal(runtime.clipAction.getClip().name, 'idle', 'the nod must have handed over to idle');
+  assert.ok(events.length > 10);
+  for (const { clips, hip_height } of events) {
+    const total = clips.reduce((sum, { weight }) => sum + weight, 0);
+    const idle = clips.find(({ name }) => name === 'idle')?.weight ?? 0;
+    assert.ok(Math.abs(total - 1) < 1e-3, `weights ${JSON.stringify(clips)} must sum to the rendered blend`);
+    assert.ok(Math.abs(hip_height - idle) < 1e-3, `reported ${JSON.stringify(clips)} but rendered hip height ${hip_height}`);
+  }
+});

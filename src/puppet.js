@@ -521,8 +521,8 @@ export class PuppetRuntime {
   }
   animate(now = performance.now()) {
     const delta = Math.min(this.clock.getDelta(), 0.05);
-    this.updateBasePose(delta);
     this.updatePose(now);
+    this.updateBasePose(delta);
     this.updateFace(now);
     if (this.vrm) this.plantFeet();
     this.vrm?.update(delta);

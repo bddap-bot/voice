@@ -16,6 +16,7 @@ mod vulkan;
 mod vrm;
 mod render;
 mod relay;
+mod reveal;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -29,6 +30,7 @@ use gaze::Gaze;
 use motion::{Animator, Clip, Random, IDLES};
 use gesture::{Recognizer, Templates};
 use relay::{Avatar, Relay, Token};
+use reveal::Reveal;
 use voice::Voice;
 use render::{eye_projection, Appearance, Renderer};
 use vrm::{Fit, Humanoid, Model, Skinned};
@@ -125,10 +127,11 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
     let catalog = relay.catalog()?;
     let active = catalog.avatars.iter().position(|avatar| avatar.id == catalog.active).ok_or_else(|| format!("the selected appearance {} is not in the catalog", catalog.active))?;
     let mut puppet = puppet(&mut relay, &catalog.avatars[active], &mut renderer)?;
-    let previews = preview::spawn(relay, catalog.avatars.clone());
+    let mut previews = None;
     let mut board = Board::new(catalog.avatars.len(), active);
-    let [board_width, board_height] = board.pixels();
-    let mut board_image = vulkan::Flat::new(gpu, board_width, board_height)?;
+    let mut reveal = Reveal::new(FLOOR, HEIGHT);
+    let mut board_size = board.pixels();
+    let mut board_image = vulkan::Flat::new(gpu.clone(), board_size[0], board_size[1])?;
     let mut overlay = runtime.create_overlay("voice.puppet", "Puppet", QUAD, true)?;
     let mut board_overlay = runtime.create_overlay("voice.board", "Board", board::WIDTH, false)?;
     let eye_offsets = runtime.eye_offsets();
@@ -141,7 +144,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
         if let Some(Signal::Quit) = runtime.poll() {
             return Ok(());
         }
-        for (index, image) in previews.try_iter() {
+        for (index, image) in previews.iter().flat_map(|previews: &std::sync::mpsc::Receiver<_>| previews.try_iter()) {
             board.preview(index, image);
         }
         let started = Instant::now();
@@ -174,9 +177,25 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
             overlay.hide();
             board_overlay.hide();
             board.reset();
+            reveal.reset();
             std::thread::sleep(DORMANT_POLL);
             continue;
         };
+        let quad = above_hand(&left, &head, -FLOOR);
+        if !board.library() && reveal.hold(started, hand(Hand::Right).map(|right| local_tip(&quad, &right))) {
+            eprintln!("appearance library revealed");
+            board.reveal();
+            if previews.is_none() {
+                match Relay::connect(token, &cache) {
+                    Ok(relay) => previews = Some(preview::spawn(relay, catalog.avatars.clone())),
+                    Err(error) => eprintln!("previews: {error}"),
+                }
+            }
+        }
+        if board.pixels() != board_size {
+            board_size = board.pixels();
+            board_image = vulkan::Flat::new(gpu.clone(), board_size[0], board_size[1])?;
+        }
         let board_pose = below_wrist(&left, &head, board.height());
         board_overlay.place_on(device, &left.inverse().then(&board_pose));
         match board.touch(hand(Hand::Right).map(|right| local_tip(&board_pose, &right))) {
@@ -225,7 +244,6 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
         if let Some(idle) = puppet.animator.update(delta) {
             eprintln!("idle {idle}");
         }
-        let quad = above_hand(&left, &head, -FLOOR);
         let local = quad.inverse();
         let mut pose = puppet.model.pose(&puppet.animator.humanoid(&puppet.standing, puppet.model.rest_hips()));
         let worlds = puppet.model.worlds(&pose);

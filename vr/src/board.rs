@@ -54,7 +54,7 @@ impl Button {
 
 pub struct Board {
     previews: Vec<Option<Vec<u8>>>,
-    height: f32,
+    library: bool,
     pub active: usize,
     pub pending: Option<usize>,
     pub muted: bool,
@@ -65,15 +65,24 @@ pub struct Board {
 
 impl Board {
     pub fn new(appearances: usize, active: usize) -> Board {
-        let lines = appearances.div_ceil(COLUMNS);
-        let height = ROWS as f32 * ROW + lines as f32 * CELL + (ROWS + lines + 1) as f32 * GAP;
-        Board { previews: vec![None; appearances], height, active, pending: None, muted: false, voice: VoiceId::default(), armed: false, dirty: true }
+        Board { previews: vec![None; appearances], library: false, active, pending: None, muted: false, voice: VoiceId::default(), armed: false, dirty: true }
     }
 
-    /// As summoned: a hand already at the board must withdraw before it presses.
+    /// As summoned: a hand already at the board must withdraw before it presses, and the appearance library is hidden.
     pub fn reset(&mut self) {
         self.armed = false;
+        self.library = false;
         self.dirty = true;
+    }
+
+    /// Shows the appearance library below the buttons, growing the board downward.
+    pub fn reveal(&mut self) {
+        self.library = true;
+        self.dirty = true;
+    }
+
+    pub fn library(&self) -> bool {
+        self.library
     }
 
     /// The appearance's preview, `PREVIEW` pixels square, premultiplied RGBA, top row first.
@@ -84,7 +93,8 @@ impl Board {
     }
 
     pub fn height(&self) -> f32 {
-        self.height
+        let lines = if self.library { self.previews.len().div_ceil(COLUMNS) } else { 0 };
+        ROWS as f32 * ROW + lines as f32 * CELL + (ROWS + lines + 1) as f32 * GAP
     }
 
     pub fn pixels(&self) -> [u32; 2] {
@@ -114,7 +124,8 @@ impl Board {
         if self.voice.stored {
             buttons.push(Button { press: Press::VoiceId, rect: self.row(2, left, right) });
         }
-        buttons.extend((0..self.previews.len()).map(|index| Button { press: Press::Appearance(index), rect: self.cell(index) }));
+        let shown = if self.library { self.previews.len() } else { 0 };
+        buttons.extend((0..shown).map(|index| Button { press: Press::Appearance(index), rect: self.cell(index) }));
         buttons
     }
 
@@ -308,6 +319,7 @@ mod tests {
     #[test]
     fn touching_each_button_fires_its_action_exactly_once() {
         let mut board = Board::new(3, 0);
+        board.reveal();
         for button in board.buttons() {
             for depth in [0.0, 0.01, 0.03, 0.2] {
                 assert_eq!(poke_on(&mut board, button.press, depth), [button.press], "{:?} pressed {depth} m deep", button.press);
@@ -326,6 +338,7 @@ mod tests {
         let left = Pose { r: [[yaw.cos(), pitch.sin() * yaw.sin(), pitch.cos() * yaw.sin()], [0.0, pitch.cos(), -pitch.sin()], [-yaw.sin(), pitch.sin() * yaw.cos(), pitch.cos() * yaw.cos()]], t: [-0.2, 1.1, -0.35] };
         let head = Pose { r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], t: [0.0, 1.6, 0.0] };
         let mut board = Board::new(36, 0);
+        board.reveal();
         let pose = below_wrist(&left, &head, board.height());
         let tip = |right: &Pose| local_tip(&pose, right);
         for z in [0.05, 0.015] {
@@ -375,6 +388,7 @@ mod tests {
     #[test]
     fn sliding_across_buttons_while_touching_fires_only_the_first() {
         let mut board = Board::new(3, 0);
+        board.reveal();
         let [x, top] = centre(&board, Press::Dismiss);
         let [_, bottom] = centre(&board, Press::Appearance(0));
         board.touch(Some([x, top, 0.1]));
@@ -417,6 +431,7 @@ mod tests {
     fn every_appearance_has_its_own_cell_on_the_board_at_once() {
         for count in [1, COLUMNS - 1, COLUMNS, COLUMNS + 1, 36, 37] {
             let mut board = Board::new(count, 0);
+            board.reveal();
             let half = [WIDTH / 2.0, board.height() / 2.0];
             let cells: Vec<[f32; 4]> = (0..count).map(|index| rect_of(&board, Press::Appearance(index))).collect();
             for (index, &[left, bottom, right, top]) in cells.iter().enumerate() {
@@ -435,6 +450,7 @@ mod tests {
     #[test]
     fn each_cell_shows_its_preview_framed_in_the_cell_highlight() {
         let mut board = Board::new(3, 1);
+        board.reveal();
         let opaque: Vec<u8> = (0..PREVIEW * PREVIEW).flat_map(|_| [200, 10, 90, 255]).collect();
         let half: Vec<u8> = (0..PREVIEW * PREVIEW).flat_map(|texel| if texel % PREVIEW < PREVIEW / 2 { [0, 0, 0, 0] } else { [100, 0, 0, 128] }).collect();
         board.preview(0, opaque);
@@ -484,6 +500,7 @@ mod tests {
     #[test]
     fn voice_id_shows_only_with_a_voiceprint_and_each_voice_button_presses_once() {
         let mut board = Board::new(3, 0);
+        board.reveal();
         let has = |board: &Board, press| board.buttons().iter().any(|button| button.press == press);
         assert!(!has(&board, Press::VoiceId) && has(&board, Press::Learn));
         board.voice = VoiceId { stored: true, off: false, learning: None };
@@ -525,11 +542,27 @@ mod tests {
 
     #[test]
     fn the_microphone_and_reset_share_a_row_without_overlapping() {
-        let board = Board::new(3, 0);
+        let mut board = Board::new(3, 0);
+        board.reveal();
         let rect = |press| rect_of(&board, press);
         let ([_, mute_bottom, mute_right, mute_top], [reset_left, reset_bottom, _, reset_top]) = (rect(Press::Mute), rect(Press::Reset));
         assert!(mute_right < reset_left);
         assert_eq!((mute_bottom, mute_top), (reset_bottom, reset_top));
         assert!(rect(Press::Dismiss)[1] > mute_top && mute_bottom > rect(Press::Appearance(0))[3]);
+    }
+
+    #[test]
+    fn the_library_is_hidden_until_revealed_and_hides_again_on_summon() {
+        let mut board = Board::new(36, 0);
+        let appearances = |board: &Board| board.buttons().iter().filter(|button| matches!(button.press, Press::Appearance(_))).count();
+        let hidden = board.height();
+        assert_eq!(appearances(&board), 0);
+        assert_eq!(board.take_image().unwrap().len(), (board.pixels()[0] * board.pixels()[1] * 4) as usize);
+        board.reveal();
+        assert_eq!(appearances(&board), 36);
+        assert!(board.height() > hidden && board.take_image().is_some(), "the board grows to hold it");
+        assert!(board.take_image().is_none());
+        board.reset();
+        assert_eq!((appearances(&board), board.height()), (0, hidden));
     }
 }

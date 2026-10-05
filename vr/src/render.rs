@@ -421,7 +421,6 @@ impl Renderer {
         Ok(self.gpu.texture_data(target.texture.image, width * 2, height, FORMAT))
     }
 
-    #[cfg(test)]
     pub fn read(&self) -> Result<Vec<u8>, String> {
         let [width, height] = self.eye;
         self.gpu.read(self.targets[self.last.ok_or("nothing rendered")?].texture.image, width * 2, height)
@@ -669,17 +668,6 @@ mod tests {
         assert!(center[0] > 100 && center[2] == 0, "only the near surface shows: {center:?}");
     }
 
-    fn plain(color: [f32; 4]) -> Model {
-        let mut builder = crate::vrm::tests::Builder::new(serde_json::json!({ "VRMC_vrm": { "humanoid": { "humanBones": {} } } }));
-        let position = builder.accessor("VEC3", &[-1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, -1.0, 1.0, 0.0]);
-        let normal = builder.accessor("VEC3", &[0.0, 0.0, 1.0].repeat(4));
-        let indices = builder.indices(&[0, 1, 2, 0, 2, 3]);
-        builder.set("nodes", serde_json::json!([{ "mesh": 0 }]));
-        builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position, "NORMAL": normal }, "indices": indices, "material": 0 }] }]));
-        builder.set("materials", serde_json::json!([{ "pbrMetallicRoughness": { "baseColorFactor": color }, "extensions": { "VRMC_materials_mtoon": {} } }]));
-        Model::parse(&builder.glb()).unwrap()
-    }
-
     #[test]
     fn a_new_appearance_draws_in_place_on_the_same_device() {
         let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [32, 32], crate::HEIGHT / PAGE_HEIGHT).unwrap();
@@ -695,11 +683,11 @@ mod tests {
             pixel(&renderer.read().unwrap(), 64, 16, 16)
         };
         let mut shown = None;
-        let red = centre(&plain([1.0, 0.0, 0.0, 1.0]), &mut shown);
+        let red = centre(&crate::vrm::tests::plain([1.0, 0.0, 0.0, 1.0]), &mut shown);
         assert!(red[0] > 100 && red[2] == 0 && red[3] == 255, "{red:?}");
-        let blue = centre(&plain([0.0, 0.0, 1.0, 1.0]), &mut shown);
+        let blue = centre(&crate::vrm::tests::plain([0.0, 0.0, 1.0, 1.0]), &mut shown);
         assert!(blue[2] > 100 && blue[0] == 0 && blue[3] == 255, "{blue:?}");
-        let red = centre(&plain([1.0, 0.0, 0.0, 1.0]), &mut shown);
+        let red = centre(&crate::vrm::tests::plain([1.0, 0.0, 0.0, 1.0]), &mut shown);
         assert!(red[0] > 100 && red[2] == 0, "and back: {red:?}");
     }
 

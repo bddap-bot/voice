@@ -1078,6 +1078,17 @@ pub mod tests {
         [[230, 40, 40, 255], [40, 200, 60, 255], [40, 60, 230, 255], [240, 240, 240, 200]].concat()
     }
 
+    pub fn plain(color: [f32; 4]) -> Model {
+        let mut builder = Builder::new(serde_json::json!({ "VRMC_vrm": { "humanoid": { "humanBones": {} } } }));
+        let position = builder.accessor("VEC3", &[-1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, -1.0, 1.0, 0.0]);
+        let normal = builder.accessor("VEC3", &[0.0, 0.0, 1.0].repeat(4));
+        let indices = builder.indices(&[0, 1, 2, 0, 2, 3]);
+        builder.set("nodes", serde_json::json!([{ "mesh": 0 }]));
+        builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position, "NORMAL": normal }, "indices": indices, "material": 0 }] }]));
+        builder.set("materials", serde_json::json!([{ "pbrMetallicRoughness": { "baseColorFactor": color }, "extensions": { "VRMC_materials_mtoon": {} } }]));
+        Model::parse(&builder.glb()).unwrap()
+    }
+
     pub fn figure(version: Version) -> Vec<u8> {
         let mut builder = Builder::new(match version {
             Version::One => serde_json::json!({ "VRMC_vrm": { "humanoid": { "humanBones": { "hips": { "node": 1 }, "rightUpperArm": { "node": 2 } } } } }),

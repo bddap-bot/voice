@@ -7,12 +7,13 @@ pub const WIDTH: f32 = 0.2;
 const PIXELS_PER_METRE: f32 = 2000.0;
 const ROW: f32 = 0.022;
 const GAP: f32 = 0.004;
-const NAMES: usize = 5;
-/// Dismiss, the microphone and reset, Voice ID, Learn my voice, the names, and the page arrows.
-const ROWS: usize = NAMES + 5;
-const FIRST_NAME: usize = 4;
-pub const HEIGHT: f32 = ROWS as f32 * ROW + (ROWS + 1) as f32 * GAP;
-pub const PIXELS: [u32; 2] = [(WIDTH * PIXELS_PER_METRE) as u32, (HEIGHT * PIXELS_PER_METRE) as u32];
+/// Dismiss, the microphone and reset, Voice ID, and Learn my voice.
+const ROWS: usize = 4;
+const COLUMNS: usize = 6;
+const CELL: f32 = (WIDTH - (COLUMNS + 1) as f32 * GAP) / COLUMNS as f32;
+/// The highlight showing around a preview.
+const BORDER: u32 = 4;
+pub const PREVIEW: u32 = (CELL * PIXELS_PER_METRE) as u32 - 2 * BORDER;
 const GLYPH_SCALE: u32 = 2;
 const PADDING: u32 = 8;
 
@@ -38,14 +39,8 @@ pub enum Press {
     Appearance(usize),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Action {
-    Press(Press),
-    Page(isize),
-}
-
 struct Button {
-    action: Action,
+    press: Press,
     /// Left, bottom, right, top, in metres from the board's centre.
     rect: [f32; 4],
 }
@@ -58,60 +53,68 @@ impl Button {
 }
 
 pub struct Board {
-    names: Vec<String>,
+    previews: Vec<Option<Vec<u8>>>,
+    height: f32,
     pub active: usize,
     pub pending: Option<usize>,
     pub muted: bool,
     pub voice: VoiceId,
-    page: usize,
     armed: bool,
     dirty: bool,
 }
 
-fn row(index: usize, left: f32, right: f32) -> [f32; 4] {
-    let top = HEIGHT / 2.0 - GAP - index as f32 * (ROW + GAP);
-    [left, top - ROW, right, top]
-}
-
 impl Board {
-    pub fn new(names: Vec<String>, active: usize) -> Board {
-        let mut board = Board { names, active, pending: None, muted: false, voice: VoiceId::default(), page: 0, armed: false, dirty: true };
-        board.reset();
-        board
+    pub fn new(appearances: usize, active: usize) -> Board {
+        let lines = appearances.div_ceil(COLUMNS);
+        let height = ROWS as f32 * ROW + lines as f32 * CELL + (ROWS + lines + 1) as f32 * GAP;
+        Board { previews: vec![None; appearances], height, active, pending: None, muted: false, voice: VoiceId::default(), armed: false, dirty: true }
     }
 
-    /// As summoned: showing the active appearance's page, and a hand already at the board must withdraw before it presses.
+    /// As summoned: a hand already at the board must withdraw before it presses.
     pub fn reset(&mut self) {
-        self.page = self.active / NAMES;
         self.armed = false;
         self.dirty = true;
     }
 
-    fn pages(&self) -> usize {
-        self.names.len().div_ceil(NAMES).max(1)
+    /// The appearance's preview, `PREVIEW` pixels square, premultiplied RGBA, top row first.
+    pub fn preview(&mut self, index: usize, rgba: Vec<u8>) {
+        assert_eq!(rgba.len(), (PREVIEW * PREVIEW * 4) as usize, "one RGBA texel per preview pixel");
+        self.previews[index] = Some(rgba);
+        self.dirty = true;
+    }
+
+    pub fn height(&self) -> f32 {
+        self.height
+    }
+
+    pub fn pixels(&self) -> [u32; 2] {
+        [(WIDTH * PIXELS_PER_METRE).round() as u32, (self.height() * PIXELS_PER_METRE).round() as u32]
+    }
+
+    fn row(&self, index: usize, left: f32, right: f32) -> [f32; 4] {
+        let top = self.height() / 2.0 - GAP - index as f32 * (ROW + GAP);
+        [left, top - ROW, right, top]
+    }
+
+    fn cell(&self, index: usize) -> [f32; 4] {
+        let top = self.height() / 2.0 - GAP - ROWS as f32 * (ROW + GAP) - (index / COLUMNS) as f32 * (CELL + GAP);
+        let left = -WIDTH / 2.0 + GAP + (index % COLUMNS) as f32 * (CELL + GAP);
+        [left, top - CELL, left + CELL, top]
     }
 
     fn buttons(&self) -> Vec<Button> {
         let (left, right) = (-WIDTH / 2.0 + GAP, WIDTH / 2.0 - GAP);
         let half = (right - left - GAP) / 2.0;
         let mut buttons = vec![
-            Button { action: Action::Press(Press::Dismiss), rect: row(0, left, right) },
-            Button { action: Action::Press(Press::Mute), rect: row(1, left, left + half) },
-            Button { action: Action::Press(Press::Reset), rect: row(1, right - half, right) },
-            Button { action: Action::Press(Press::Learn), rect: row(3, left, right) },
+            Button { press: Press::Dismiss, rect: self.row(0, left, right) },
+            Button { press: Press::Mute, rect: self.row(1, left, left + half) },
+            Button { press: Press::Reset, rect: self.row(1, right - half, right) },
+            Button { press: Press::Learn, rect: self.row(3, left, right) },
         ];
         if self.voice.stored {
-            buttons.push(Button { action: Action::Press(Press::VoiceId), rect: row(2, left, right) });
+            buttons.push(Button { press: Press::VoiceId, rect: self.row(2, left, right) });
         }
-        let first = self.page * NAMES;
-        for (slot, index) in (first..self.names.len().min(first + NAMES)).enumerate() {
-            buttons.push(Button { action: Action::Press(Press::Appearance(index)), rect: row(FIRST_NAME + slot, left, right) });
-        }
-        if self.pages() > 1 {
-            let arrow = (right - left - 2.0 * GAP) / 3.0;
-            buttons.push(Button { action: Action::Page(-1), rect: row(FIRST_NAME + NAMES, left, left + arrow) });
-            buttons.push(Button { action: Action::Page(1), rect: row(FIRST_NAME + NAMES, right - arrow, right) });
-        }
+        buttons.extend((0..self.previews.len()).map(|index| Button { press: Press::Appearance(index), rect: self.cell(index) }));
         buttons
     }
 
@@ -131,14 +134,7 @@ impl Board {
             return None;
         }
         self.armed = false;
-        match self.buttons().into_iter().find(|button| button.contains(x, y))?.action {
-            Action::Press(press) => Some(press),
-            Action::Page(step) => {
-                self.page = (self.page as isize + step).rem_euclid(self.pages() as isize) as usize;
-                self.dirty = true;
-                None
-            }
-        }
+        Some(self.buttons().into_iter().find(|button| button.contains(x, y))?.press)
     }
 
     pub fn mark(&mut self) {
@@ -151,51 +147,54 @@ impl Board {
     }
 
     fn image(&self) -> Vec<u8> {
-        let [width, height] = PIXELS;
+        let [width, height] = self.pixels();
         let mut image = Canvas { pixels: vec![0; (width * height * 4) as usize], width };
         image.fill([0, 0, width, height], BACKGROUND);
         for button in self.buttons() {
-            let area = pixels(button.rect);
-            let (fill, label) = match button.action {
-                Action::Press(Press::Dismiss) => (DISMISS, "Dismiss".to_owned()),
-                Action::Press(Press::Mute) if self.muted => (MUTED, "Unmute mic".to_owned()),
-                Action::Press(Press::Mute) => (BUTTON, "Mute mic".to_owned()),
-                Action::Press(Press::Reset) => (BUTTON, "Reset".to_owned()),
-                Action::Press(Press::VoiceId) if self.voice.off => (BUTTON, "Voice ID off".to_owned()),
-                Action::Press(Press::VoiceId) => (ACTIVE, "Voice ID on".to_owned()),
-                Action::Press(Press::Learn) => match self.voice.learning {
+            let area = self.area(button.rect);
+            let (fill, label) = match button.press {
+                Press::Dismiss => (DISMISS, "Dismiss".to_owned()),
+                Press::Mute if self.muted => (MUTED, "Unmute mic".to_owned()),
+                Press::Mute => (BUTTON, "Mute mic".to_owned()),
+                Press::Reset => (BUTTON, "Reset".to_owned()),
+                Press::VoiceId if self.voice.off => (BUTTON, "Voice ID off".to_owned()),
+                Press::VoiceId => (ACTIVE, "Voice ID on".to_owned()),
+                Press::Learn => match self.voice.learning {
                     Some(progress) => (PENDING, format!("Stop learning ({}%)", (progress * 100.0).round())),
                     None if self.voice.stored => (BUTTON, "Forget my voice".to_owned()),
                     None => (BUTTON, "Learn my voice".to_owned()),
                 },
-                Action::Press(Press::Appearance(index)) => (
-                    if self.pending == Some(index) {
+                Press::Appearance(index) => {
+                    let fill = if self.pending == Some(index) {
                         PENDING
                     } else if index == self.active {
                         ACTIVE
                     } else {
                         BUTTON
-                    },
-                    self.names[index].clone(),
-                ),
-                Action::Page(-1) => (BUTTON, "<".to_owned()),
-                Action::Page(_) => (BUTTON, ">".to_owned()),
+                    };
+                    image.fill(area, fill);
+                    let [left, top, right, bottom] = area;
+                    let corner = [left + (right - left - PREVIEW) / 2, top + (bottom - top - PREVIEW) / 2];
+                    image.fill([corner[0], corner[1], corner[0] + PREVIEW, corner[1] + PREVIEW], BUTTON);
+                    if let Some(preview) = &self.previews[index] {
+                        image.over(corner, PREVIEW, preview);
+                    }
+                    continue;
+                }
             };
             image.fill(area, fill);
             image.label(area, &label);
         }
-        if self.pages() > 1 {
-            image.label(pixels(row(FIRST_NAME + NAMES, -WIDTH / 2.0, WIDTH / 2.0)), &format!("{}/{}", self.page + 1, self.pages()));
-        }
         image.pixels
     }
-}
 
-/// Metres from the board's centre to left, top, right, bottom pixels.
-fn pixels([left, bottom, right, top]: [f32; 4]) -> [u32; 4] {
-    let x = |x: f32| ((x + WIDTH / 2.0) * PIXELS_PER_METRE).round() as u32;
-    let y = |y: f32| ((HEIGHT / 2.0 - y) * PIXELS_PER_METRE).round() as u32;
-    [x(left), y(top), x(right), y(bottom)]
+    /// Metres from the board's centre to left, top, right, bottom pixels.
+    fn area(&self, [left, bottom, right, top]: [f32; 4]) -> [u32; 4] {
+        let height = self.height();
+        let x = |x: f32| ((x + WIDTH / 2.0) * PIXELS_PER_METRE).round() as u32;
+        let y = |y: f32| ((height / 2.0 - y) * PIXELS_PER_METRE).round() as u32;
+        [x(left), y(top), x(right), y(bottom)]
+    }
 }
 
 struct Canvas {
@@ -212,6 +211,20 @@ impl Canvas {
                 let at = ((y * self.width + x) * 4) as usize;
                 self.pixels[at..at + 3].copy_from_slice(&premultiplied);
                 self.pixels[at + 3] = color[3];
+            }
+        }
+    }
+
+    /// A premultiplied square image drawn over the canvas with its top left corner at `at`.
+    fn over(&mut self, [x0, y0]: [u32; 2], size: u32, rgba: &[u8]) {
+        for y in 0..size {
+            for x in 0..size {
+                let from = ((y * size + x) * 4) as usize;
+                let to = (((y0 + y) * self.width + x0 + x) * 4) as usize;
+                let keep = 255 - rgba[from + 3] as u32;
+                for channel in 0..4 {
+                    self.pixels[to + channel] = (rgba[from + channel] as u32 + self.pixels[to + channel] as u32 * keep / 255).min(255) as u8;
+                }
             }
         }
     }
@@ -249,16 +262,12 @@ mod tests {
     use super::*;
     use crate::placement::{below_wrist, local_tip, Pose, TIP};
 
-    fn names(count: usize) -> Vec<String> {
-        (0..count).map(|index| format!("Avatar {index}")).collect()
+    fn rect_of(board: &Board, press: Press) -> [f32; 4] {
+        board.buttons().into_iter().find(|button| button.press == press).unwrap().rect
     }
 
-    fn rect_of(board: &Board, action: Action) -> [f32; 4] {
-        board.buttons().into_iter().find(|button| button.action == action).unwrap().rect
-    }
-
-    fn centre(board: &Board, action: Action) -> [f32; 2] {
-        let [left, bottom, right, top] = rect_of(board, action);
+    fn centre(board: &Board, press: Press) -> [f32; 2] {
+        let [left, bottom, right, top] = rect_of(board, press);
         [(left + right) / 2.0, (bottom + top) / 2.0]
     }
 
@@ -280,18 +289,28 @@ mod tests {
         presses
     }
 
-    fn poke_on(board: &mut Board, action: Action, depth: f32) -> Vec<Press> {
-        let at = centre(board, action);
+    fn poke_on(board: &mut Board, press: Press, depth: f32) -> Vec<Press> {
+        let at = centre(board, press);
         poke(board, at, depth)
+    }
+
+    fn pixel(board: &Board, image: &[u8], x: f32, y: f32) -> [u8; 4] {
+        let [column, line, _, _] = board.area([x, y, x, y]);
+        let at = ((line * board.pixels()[0] + column) * 4) as usize;
+        image[at..at + 4].try_into().unwrap()
+    }
+
+    fn inked(board: &Board, image: &[u8], [left, top, right, bottom]: [u32; 4]) -> Vec<bool> {
+        let width = board.pixels()[0];
+        (top..bottom).flat_map(|y| (left..right).map(move |x| ((y * width + x) * 4) as usize)).map(|at| image[at..at + 4] == INK).collect()
     }
 
     #[test]
     fn touching_each_button_fires_its_action_exactly_once() {
-        let mut board = Board::new(names(3), 0);
+        let mut board = Board::new(3, 0);
         for button in board.buttons() {
-            let Action::Press(expected) = button.action else { unreachable!("one page has no arrows") };
             for depth in [0.0, 0.01, 0.03, 0.2] {
-                assert_eq!(poke_on(&mut board, button.action, depth), [expected], "{expected:?} pressed {depth} m deep");
+                assert_eq!(poke_on(&mut board, button.press, depth), [button.press], "{:?} pressed {depth} m deep", button.press);
             }
         }
     }
@@ -306,12 +325,12 @@ mod tests {
         let (yaw, pitch) = (0.6f32, -0.4f32);
         let left = Pose { r: [[yaw.cos(), pitch.sin() * yaw.sin(), pitch.cos() * yaw.sin()], [0.0, pitch.cos(), -pitch.sin()], [-yaw.sin(), pitch.sin() * yaw.cos(), pitch.cos() * yaw.cos()]], t: [-0.2, 1.1, -0.35] };
         let head = Pose { r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], t: [0.0, 1.6, 0.0] };
-        let pose = below_wrist(&left, &head, HEIGHT);
-        let mut board = Board::new(names(3 * NAMES), 0);
+        let mut board = Board::new(36, 0);
+        let pose = below_wrist(&left, &head, board.height());
         let tip = |right: &Pose| local_tip(&pose, right);
         for z in [0.05, 0.015] {
             for step in 0..=100 {
-                for y in [-0.08, 0.0, 0.08] {
+                for y in [-0.12, -0.08, 0.0, 0.08, 0.12] {
                     let right = right_controller(&pose, [-WIDTH + step as f32 * WIDTH / 50.0, y], z);
                     assert_eq!(board.touch(Some(tip(&right))), None);
                 }
@@ -324,18 +343,13 @@ mod tests {
             for step in (0..=60).chain((0..=60).rev()) {
                 presses.extend(board.touch(Some(tip(&right_controller(&pose, centre, 0.1 - step as f32 * 0.002)))));
             }
-            let expected = match button.action {
-                Action::Press(press) => vec![press],
-                Action::Page(_) => vec![],
-            };
-            assert_eq!(presses, expected, "{:?}", button.action);
+            assert_eq!(presses, [button.press]);
         }
-        assert_eq!(board.page, 0, "one press forward and one back");
     }
 
     #[test]
     fn passing_near_without_touching_fires_nothing() {
-        let mut board = Board::new(names(12), 0);
+        let mut board = Board::new(12, 0);
         for z in [0.05, 0.02, 0.012] {
             for step in 0..=200 {
                 let x = -WIDTH + step as f32 * WIDTH / 100.0;
@@ -344,13 +358,12 @@ mod tests {
                 }
             }
         }
-        assert_eq!(board.page, 0);
     }
 
     #[test]
     fn a_touch_from_behind_or_beside_the_board_fires_nothing() {
-        let mut board = Board::new(names(3), 0);
-        let [x, y] = centre(&board, Action::Press(Press::Dismiss));
+        let mut board = Board::new(3, 0);
+        let [x, y] = centre(&board, Press::Dismiss);
         for z in [-0.2, -0.05, -0.02, 0.0] {
             assert_eq!(board.touch(Some([x, y, z])), None);
         }
@@ -361,9 +374,9 @@ mod tests {
 
     #[test]
     fn sliding_across_buttons_while_touching_fires_only_the_first() {
-        let mut board = Board::new(names(3), 0);
-        let [x, top] = centre(&board, Action::Press(Press::Dismiss));
-        let [_, bottom] = centre(&board, Action::Press(Press::Appearance(2)));
+        let mut board = Board::new(3, 0);
+        let [x, top] = centre(&board, Press::Dismiss);
+        let [_, bottom] = centre(&board, Press::Appearance(0));
         board.touch(Some([x, top, 0.1]));
         let mut presses = Vec::new();
         for step in 0..=50 {
@@ -374,8 +387,8 @@ mod tests {
 
     #[test]
     fn a_tip_trembling_at_the_face_presses_once() {
-        let mut board = Board::new(names(3), 0);
-        let [x, y] = centre(&board, Action::Press(Press::Dismiss));
+        let mut board = Board::new(3, 0);
+        let [x, y] = centre(&board, Press::Dismiss);
         board.touch(Some([x, y, 0.1]));
         let presses: Vec<Press> = (0..40).filter_map(|step| board.touch(Some([x, y, if step % 2 == 0 { 0.005 } else { 0.018 }]))).collect();
         assert_eq!(presses, [Press::Dismiss]);
@@ -383,8 +396,8 @@ mod tests {
 
     #[test]
     fn a_right_controller_reappearing_at_the_face_presses_nothing() {
-        let mut board = Board::new(names(3), 0);
-        let [x, y] = centre(&board, Action::Press(Press::Dismiss));
+        let mut board = Board::new(3, 0);
+        let [x, y] = centre(&board, Press::Dismiss);
         board.touch(Some([x, y, 0.1]));
         assert_eq!(board.touch(None), None);
         assert_eq!(board.touch(Some([x, y, 0.0])), None);
@@ -392,8 +405,8 @@ mod tests {
 
     #[test]
     fn summoning_with_the_hand_already_on_the_board_needs_a_fresh_touch() {
-        let mut board = Board::new(names(3), 0);
-        let [x, y] = centre(&board, Action::Press(Press::Dismiss));
+        let mut board = Board::new(3, 0);
+        let [x, y] = centre(&board, Press::Dismiss);
         board.touch(Some([x, y, 0.1]));
         board.reset();
         assert_eq!(board.touch(Some([x, y, 0.0])), None);
@@ -401,104 +414,95 @@ mod tests {
     }
 
     #[test]
-    fn the_arrows_page_through_every_appearance_once_per_touch() {
-        let count = 2 * NAMES + 2;
-        let mut board = Board::new(names(count), 0);
-        let mut seen = Vec::new();
-        for _ in 0..board.pages() {
-            for slot in 0..NAMES {
-                let action = board.buttons().into_iter().filter(|button| matches!(button.action, Action::Press(Press::Appearance(_)))).nth(slot).map(|button| button.action);
-                if let Some(action) = action {
-                    seen.extend(poke_on(&mut board, action, 0.0));
+    fn every_appearance_has_its_own_cell_on_the_board_at_once() {
+        for count in [1, COLUMNS - 1, COLUMNS, COLUMNS + 1, 36, 37] {
+            let mut board = Board::new(count, 0);
+            let half = [WIDTH / 2.0, board.height() / 2.0];
+            let cells: Vec<[f32; 4]> = (0..count).map(|index| rect_of(&board, Press::Appearance(index))).collect();
+            for (index, &[left, bottom, right, top]) in cells.iter().enumerate() {
+                assert!(left >= -half[0] && right <= half[0] && bottom >= -half[1] && top <= half[1], "cell {index} of {count} lies on the board");
+                assert!((right - left - (top - bottom)).abs() < 1e-6, "square");
+                assert!(top < rect_of(&board, Press::Learn)[1], "below the buttons");
+                for other in &cells[index + 1..] {
+                    assert!(other[0] > right || other[2] < left || other[1] > top || other[3] < bottom, "cells {index} and another of {count} overlap");
                 }
             }
-            assert!(poke_on(&mut board, Action::Page(1), 0.0).is_empty());
+            let presses: Vec<Press> = (0..count).flat_map(|index| poke_on(&mut board, Press::Appearance(index), 0.0)).collect();
+            assert_eq!(presses, (0..count).map(Press::Appearance).collect::<Vec<_>>());
         }
-        assert_eq!(seen, (0..count).map(Press::Appearance).collect::<Vec<_>>());
-        assert_eq!(board.page, 0, "paging wraps around");
-        poke_on(&mut board, Action::Page(-1), 0.0);
-        assert_eq!(board.page, 2);
     }
 
     #[test]
-    fn a_single_page_shows_no_arrows() {
-        let board = Board::new(names(NAMES), 0);
-        assert!(board.buttons().iter().all(|button| !matches!(button.action, Action::Page(_))));
-    }
-
-    #[test]
-    fn summoning_shows_the_page_of_the_active_appearance() {
-        let board = Board::new(names(3 * NAMES), NAMES + 1);
-        assert_eq!(board.page, 1);
-    }
-
-    #[test]
-    fn the_image_draws_each_button_with_its_label_and_the_active_one_highlighted() {
-        let mut board = Board::new(vec!["A".into(), "Bee".into(), "x".repeat(80)], 1);
-        let image = board.take_image().unwrap();
-        assert_eq!(image.len(), (PIXELS[0] * PIXELS[1] * 4) as usize);
-        assert!(board.take_image().is_none(), "unchanged");
-        let pixel = |x: f32, y: f32| {
-            let (column, line) = (((x + WIDTH / 2.0) * PIXELS_PER_METRE) as u32, ((HEIGHT / 2.0 - y) * PIXELS_PER_METRE) as u32);
-            let at = ((line * PIXELS[0] + column) * 4) as usize;
-            <[u8; 4]>::try_from(&image[at..at + 4]).unwrap()
-        };
-        let corner = |action| {
-            let [left, _, _, top] = board.buttons().into_iter().find(|button| button.action == action).unwrap().rect;
-            pixel(left + 0.001, top - 0.001)
-        };
-        assert_eq!(corner(Action::Press(Press::Dismiss)), DISMISS);
-        assert_eq!(corner(Action::Press(Press::Appearance(0))), BUTTON);
-        assert_eq!(corner(Action::Press(Press::Appearance(1))), ACTIVE);
-        assert_eq!(corner(Action::Press(Press::Mute)), BUTTON);
-        assert_eq!(corner(Action::Press(Press::Reset)), BUTTON);
-        assert_eq!(pixel(0.0, -HEIGHT / 2.0 + 0.001)[3], BACKGROUND[3]);
-        for index in 0..3 {
-            let [left, bottom, right, top] = rect_of(&board, Action::Press(Press::Appearance(index)));
-            let inked = (0..100).flat_map(|i| (0..20).map(move |j| (left + (right - left) * i as f32 / 100.0, bottom + (top - bottom) * j as f32 / 20.0))).filter(|&(x, y)| pixel(x, y) == INK).count();
-            assert!(inked > 0, "appearance {index} carries a label");
-        }
+    fn each_cell_shows_its_preview_framed_in_the_cell_highlight() {
+        let mut board = Board::new(3, 1);
+        let opaque: Vec<u8> = (0..PREVIEW * PREVIEW).flat_map(|_| [200, 10, 90, 255]).collect();
+        let half: Vec<u8> = (0..PREVIEW * PREVIEW).flat_map(|texel| if texel % PREVIEW < PREVIEW / 2 { [0, 0, 0, 0] } else { [100, 0, 0, 128] }).collect();
+        board.preview(0, opaque);
+        board.preview(1, half);
         board.pending = Some(2);
-        board.mark();
         let image = board.take_image().unwrap();
-        let [left, _, _, top] = rect_of(&board, Action::Press(Press::Appearance(2)));
-        let at = ((((HEIGHT / 2.0 - top + 0.001) * PIXELS_PER_METRE) as u32 * PIXELS[0] + ((left + 0.001 + WIDTH / 2.0) * PIXELS_PER_METRE) as u32) * 4) as usize;
-        assert_eq!(image[at..at + 4], PENDING);
-        let inked = |image: &[u8], [left, top, right, bottom]: [u32; 4]| (top..bottom).flat_map(|y| (left..right).map(move |x| ((y * PIXELS[0] + x) * 4) as usize)).filter(|&at| image[at..at + 4] == INK).count();
-        let mute = pixels(rect_of(&board, Action::Press(Press::Mute)));
-        let unmuted = inked(&image, mute);
+        let at = |index, u: f32, v: f32| {
+            let [left, bottom, right, top] = rect_of(&board, Press::Appearance(index));
+            pixel(&board, &image, left + (right - left) * u, top - (top - bottom) * v)
+        };
+        assert_eq!(at(0, 0.5, 0.5), [200, 10, 90, 255], "the preview");
+        assert_eq!(at(0, 0.02, 0.5), BUTTON, "framed");
+        assert_eq!(at(1, 0.02, 0.5), ACTIVE, "the shown appearance's frame");
+        assert_eq!(at(1, 0.3, 0.5), BUTTON, "a transparent texel shows the cell");
+        assert_eq!(at(1, 0.7, 0.5), [0, 1, 2, 3].map(|channel| ([100, 0, 0, 128][channel] + BUTTON[channel] as u32 * 127 / 255) as u8), "a translucent one blends over it");
+        assert_eq!(at(2, 0.02, 0.5), PENDING, "the picked appearance's frame");
+        assert_eq!(at(2, 0.5, 0.5), BUTTON, "loading, with no preview yet");
+    }
+
+    #[test]
+    fn the_image_draws_each_button_with_its_label() {
+        let mut board = Board::new(3, 1);
+        let image = board.take_image().unwrap();
+        let [width, height] = board.pixels();
+        assert_eq!(image.len(), (width * height * 4) as usize);
+        assert!(board.take_image().is_none(), "unchanged");
+        let corner = |board: &Board, image: &[u8], press| {
+            let [left, _, _, top] = rect_of(board, press);
+            pixel(board, image, left + 0.001, top - 0.001)
+        };
+        assert_eq!(corner(&board, &image, Press::Dismiss), DISMISS);
+        assert_eq!(corner(&board, &image, Press::Mute), BUTTON);
+        assert_eq!(corner(&board, &image, Press::Reset), BUTTON);
+        assert_eq!(pixel(&board, &image, 0.0, -board.height() / 2.0 + 0.001)[3], BACKGROUND[3]);
+        for press in [Press::Dismiss, Press::Mute, Press::Reset, Press::Learn] {
+            assert!(inked(&board, &image, board.area(rect_of(&board, press))).iter().any(|&inked| inked), "{press:?} carries a label");
+        }
+        let mute = board.area(rect_of(&board, Press::Mute));
+        let unmuted = inked(&board, &image, mute);
         board.muted = true;
         board.mark();
         let image = board.take_image().unwrap();
-        let [left, _, _, top] = rect_of(&board, Action::Press(Press::Mute));
-        let at = ((((HEIGHT / 2.0 - top + 0.001) * PIXELS_PER_METRE) as u32 * PIXELS[0] + ((left + 0.001 + WIDTH / 2.0) * PIXELS_PER_METRE) as u32) * 4) as usize;
-        assert_eq!(image[at..at + 4], MUTED);
-        assert_ne!(inked(&image, mute), unmuted, "the label says Unmute mic");
+        assert_eq!(corner(&board, &image, Press::Mute), MUTED);
+        assert_ne!(inked(&board, &image, mute), unmuted, "the label says Unmute mic");
     }
 
     #[test]
     fn voice_id_shows_only_with_a_voiceprint_and_each_voice_button_presses_once() {
-        let mut board = Board::new(names(3), 0);
-        let has = |board: &Board, press| board.buttons().iter().any(|button| button.action == Action::Press(press));
+        let mut board = Board::new(3, 0);
+        let has = |board: &Board, press| board.buttons().iter().any(|button| button.press == press);
         assert!(!has(&board, Press::VoiceId) && has(&board, Press::Learn));
         board.voice = VoiceId { stored: true, off: false, learning: None };
         for press in [Press::VoiceId, Press::Learn] {
-            assert_eq!(poke_on(&mut board, Action::Press(press), 0.0), [press]);
+            assert_eq!(poke_on(&mut board, press, 0.0), [press]);
         }
-        let rect = |press| rect_of(&board, Action::Press(press));
+        let rect = |press| rect_of(&board, press);
         assert!(rect(Press::Mute)[1] > rect(Press::VoiceId)[3] && rect(Press::VoiceId)[1] > rect(Press::Learn)[3] && rect(Press::Learn)[1] > rect(Press::Appearance(0))[3]);
     }
 
     #[test]
     fn the_voice_buttons_say_what_a_press_will_do() {
         let ink = |voice: VoiceId, press| {
-            let mut board = Board::new(names(3), 0);
+            let mut board = Board::new(3, 0);
             board.voice = voice;
             let image = board.take_image().unwrap();
-            let [left, top, right, bottom] = pixels(rect_of(&board, Action::Press(press)));
-            let fill = <[u8; 4]>::try_from(&image[((top * PIXELS[0] + left) * 4) as usize..][..4]).unwrap();
-            let inked: Vec<bool> = (top..bottom).flat_map(|y| (left..right).map(move |x| ((y * PIXELS[0] + x) * 4) as usize)).map(|at| image[at..at + 4] == INK).collect();
-            (fill, inked)
+            let area = board.area(rect_of(&board, press));
+            let fill = <[u8; 4]>::try_from(&image[((area[1] * board.pixels()[0] + area[0]) * 4) as usize..][..4]).unwrap();
+            (fill, inked(&board, &image, area))
         };
         let none = VoiceId::default();
         let stored = VoiceId { stored: true, ..none };
@@ -513,16 +517,16 @@ mod tests {
             assert!(label.iter().any(|&inked| inked));
             assert!(labels[index + 1..].iter().all(|other| other != label), "Learn my voice, Forget my voice, and the progress each differ");
         }
-        let mut board = Board::new(names(3), 0);
+        let mut board = Board::new(3, 0);
         board.voice = learning;
-        let [left, _, right, _] = pixels(rect_of(&board, Action::Press(Press::Learn)));
+        let [left, _, right, _] = board.area(rect_of(&board, Press::Learn));
         assert!((right - left - 2 * PADDING) / (8 * GLYPH_SCALE) >= "Stop learning (100%)".len() as u32, "the longest label fits");
     }
 
     #[test]
     fn the_microphone_and_reset_share_a_row_without_overlapping() {
-        let board = Board::new(names(3), 0);
-        let rect = |press| board.buttons().into_iter().find(|button| button.action == Action::Press(press)).unwrap().rect;
+        let board = Board::new(3, 0);
+        let rect = |press| rect_of(&board, press);
         let ([_, mute_bottom, mute_right, mute_top], [reset_left, reset_bottom, _, reset_top]) = (rect(Press::Mute), rect(Press::Reset));
         assert!(mute_right < reset_left);
         assert_eq!((mute_bottom, mute_top), (reset_bottom, reset_top));

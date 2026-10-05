@@ -1,5 +1,6 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -28,10 +29,9 @@ impl Token {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Avatar {
     pub id: String,
-    pub file: String,
     #[serde(rename = "contentHash")]
     pub content_hash: String,
 }
@@ -267,7 +267,9 @@ impl Relay {
                     if bytes.len() != start.original_size {
                         return Err(format!("{kind} {id}: invalid decompressed size"));
                     }
-                    let temporary = cached.with_extension(format!("{extension}.tmp"));
+                    // The preview thread and a picked appearance can fetch the same asset at once.
+                    static WRITES: AtomicU64 = AtomicU64::new(0);
+                    let temporary = cached.with_extension(format!("{extension}.{}-{}.tmp", std::process::id(), WRITES.fetch_add(1, Ordering::Relaxed)));
                     if let Err(error) = std::fs::write(&temporary, &bytes).and_then(|()| std::fs::rename(&temporary, &cached)) {
                         eprintln!("{} not cached: {error}", cached.display());
                     }

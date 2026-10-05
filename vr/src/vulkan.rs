@@ -94,7 +94,6 @@ impl Gpu {
         Ok(())
     }
 
-    #[cfg(test)]
     pub fn read(&self, image: vk::Image, width: u32, height: u32) -> Result<Vec<u8>, String> {
         let size = (width * height * 4) as u64;
         let buffer = self.host_buffer(size, vk::BufferUsageFlags::TRANSFER_DST)?;

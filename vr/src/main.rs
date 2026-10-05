@@ -11,6 +11,7 @@ mod hub;
 mod motion;
 mod openvr;
 mod placement;
+mod preview;
 mod vulkan;
 mod vrm;
 mod render;
@@ -124,10 +125,10 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
     let catalog = relay.catalog()?;
     let active = catalog.avatars.iter().position(|avatar| avatar.id == catalog.active).ok_or_else(|| format!("the selected appearance {} is not in the catalog", catalog.active))?;
     let mut puppet = puppet(&mut relay, &catalog.avatars[active], &mut renderer)?;
-    drop(relay);
-    let names = catalog.avatars.iter().map(|avatar| avatar.file.strip_suffix(".vrm").unwrap_or(&avatar.file).to_owned()).collect();
-    let mut board = Board::new(names, active);
-    let mut board_image = vulkan::Flat::new(gpu, board::PIXELS[0], board::PIXELS[1])?;
+    let previews = preview::spawn(relay, catalog.avatars.clone());
+    let mut board = Board::new(catalog.avatars.len(), active);
+    let [board_width, board_height] = board.pixels();
+    let mut board_image = vulkan::Flat::new(gpu, board_width, board_height)?;
     let mut overlay = runtime.create_overlay("voice.puppet", "Puppet", QUAD, true)?;
     let mut board_overlay = runtime.create_overlay("voice.board", "Board", board::WIDTH, false)?;
     let eye_offsets = runtime.eye_offsets();
@@ -139,6 +140,9 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
     loop {
         if let Some(Signal::Quit) = runtime.poll() {
             return Ok(());
+        }
+        for (index, image) in previews.try_iter() {
+            board.preview(index, image);
         }
         let started = Instant::now();
         let interval = started - last;
@@ -173,7 +177,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
             std::thread::sleep(DORMANT_POLL);
             continue;
         };
-        let board_pose = below_wrist(&left, &head, board::HEIGHT);
+        let board_pose = below_wrist(&left, &head, board.height());
         board_overlay.place_on(device, &left.inverse().then(&board_pose));
         match board.touch(hand(Hand::Right).map(|right| local_tip(&board_pose, &right))) {
             Some(Press::Dismiss) => {

@@ -5,20 +5,9 @@ use std::ffi::CString;
 use std::rc::Rc;
 
 use crate::openvr::Runtime;
-use crate::page::Frame;
 
 const FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
 const RING: usize = 3;
-
-struct Slot {
-    image: vk::Image,
-    image_memory: vk::DeviceMemory,
-    staging: vk::Buffer,
-    staging_memory: vk::DeviceMemory,
-    mapped: *mut u8,
-    commands: vk::CommandBuffer,
-    fence: vk::Fence,
-}
 
 pub struct Gpu {
     _entry: ash::Entry,
@@ -208,104 +197,6 @@ impl Drop for Flat {
             for &(image, memory) in &self.images {
                 self.gpu.device.destroy_image(image, None);
                 self.gpu.device.free_memory(memory, None);
-            }
-        }
-    }
-}
-
-pub struct Uploader {
-    gpu: Gpu,
-    slots: Vec<Slot>,
-    next: usize,
-    pub width: u32,
-    pub height: u32,
-}
-
-impl Uploader {
-    pub fn new(gpu: Gpu, width: u32, height: u32) -> Result<Uploader, String> {
-        let mut uploader = Uploader { gpu, slots: Vec::new(), next: 0, width, height };
-        for _ in 0..RING {
-            let slot = uploader.slot()?;
-            uploader.slots.push(slot);
-        }
-        Ok(uploader)
-    }
-
-    fn slot(&self) -> Result<Slot, String> {
-        let device = &self.gpu.device;
-        let (image, image_memory) = self.gpu.image(
-            &vk::ImageCreateInfo::default()
-                .image_type(vk::ImageType::TYPE_2D)
-                .format(FORMAT)
-                .extent(vk::Extent3D { width: self.width, height: self.height, depth: 1 })
-                .mip_levels(1)
-                .array_layers(1)
-                .samples(vk::SampleCountFlags::TYPE_1)
-                .tiling(vk::ImageTiling::OPTIMAL)
-                .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::SAMPLED)
-                .initial_layout(vk::ImageLayout::UNDEFINED),
-        )?;
-        let (staging, staging_memory, mapped) = self.gpu.host_buffer((self.width * self.height * 4) as u64, vk::BufferUsageFlags::TRANSFER_SRC)?;
-        let commands = unsafe { device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(self.gpu.pool).command_buffer_count(1)) }.map_err(vk_error("vkAllocateCommandBuffers"))?[0];
-        let fence = unsafe { device.create_fence(&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None) }.map_err(vk_error("vkCreateFence"))?;
-        Ok(Slot { image, image_memory, staging, staging_memory, mapped, commands, fence })
-    }
-
-    pub fn upload(&mut self, frame: &Frame) -> Result<sys::VRVulkanTextureData_t, String> {
-        let row = (frame.width * 4) as usize;
-        let slot = &self.slots[self.next];
-        self.next = (self.next + 1) % RING;
-        let device = &self.gpu.device;
-        unsafe { device.wait_for_fences(&[slot.fence], true, u64::MAX) }.map_err(vk_error("vkWaitForFences"))?;
-        unsafe { device.reset_fences(&[slot.fence]) }.map_err(vk_error("vkResetFences"))?;
-        let staging = unsafe { std::slice::from_raw_parts_mut(slot.mapped, frame.pixels.len()) };
-        let eye_bytes = frame.pixels.len() / 2;
-        if row > 0 {
-            for (target, source) in staging.chunks_exact_mut(eye_bytes).zip(frame.pixels.chunks_exact(eye_bytes)) {
-                for (target, source) in target.chunks_exact_mut(row).zip(source.chunks_exact(row).rev()) {
-                    target.copy_from_slice(source);
-                }
-            }
-        }
-        let range = vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::COLOR).level_count(1).layer_count(1);
-        let barrier = |from, to, src, dst| vk::ImageMemoryBarrier::default().old_layout(from).new_layout(to).src_access_mask(src).dst_access_mask(dst).image(slot.image).subresource_range(range);
-        unsafe {
-            device.reset_command_buffer(slot.commands, vk::CommandBufferResetFlags::empty()).map_err(vk_error("vkResetCommandBuffer"))?;
-            device.begin_command_buffer(slot.commands, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).map_err(vk_error("vkBeginCommandBuffer"))?;
-            device.cmd_pipeline_barrier(slot.commands, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[barrier(vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::AccessFlags::empty(), vk::AccessFlags::TRANSFER_WRITE)]);
-            device.cmd_clear_color_image(slot.commands, slot.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &vk::ClearColorValue { float32: [0.0; 4] }, &[range]);
-            if row > 0 {
-                device.cmd_pipeline_barrier(slot.commands, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[barrier(vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::TRANSFER_WRITE)]);
-                let top = (self.height - frame.y - frame.height) as i32;
-                let regions = [0, 1].map(|eye| {
-                    vk::BufferImageCopy::default()
-                        .buffer_offset((eye * eye_bytes) as u64)
-                        .image_subresource(vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1))
-                        .image_offset(vk::Offset3D { x: (eye as u32 * self.width / 2 + frame.x) as i32, y: top, z: 0 })
-                        .image_extent(vk::Extent3D { width: frame.width, height: frame.height, depth: 1 })
-                });
-                device.cmd_copy_buffer_to_image(slot.commands, slot.staging, slot.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &regions);
-            }
-            device.cmd_pipeline_barrier(slot.commands, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::BOTTOM_OF_PIPE, vk::DependencyFlags::empty(), &[], &[], &[barrier(vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::empty())]);
-            device.end_command_buffer(slot.commands).map_err(vk_error("vkEndCommandBuffer"))?;
-            let buffers = [slot.commands];
-            device.queue_submit(self.gpu.queue, &[vk::SubmitInfo::default().command_buffers(&buffers)], slot.fence).map_err(vk_error("vkQueueSubmit"))?;
-            device.wait_for_fences(&[slot.fence], true, u64::MAX).map_err(vk_error("vkWaitForFences"))?;
-        }
-        Ok(self.gpu.texture_data(slot.image, self.width, self.height, FORMAT))
-    }
-}
-
-impl Drop for Uploader {
-    fn drop(&mut self) {
-        let device = &self.gpu.device;
-        unsafe {
-            let _ = device.device_wait_idle();
-            for slot in &self.slots {
-                device.destroy_fence(slot.fence, None);
-                self.gpu.free_buffer((slot.staging, slot.staging_memory, slot.mapped));
-                device.destroy_image(slot.image, None);
-                device.free_memory(slot.image_memory, None);
             }
         }
     }

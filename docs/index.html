@@ -146,7 +146,7 @@ import { StageTrace, traceStages } from './stage-trace.js';
 import { LivePlayback } from './live-playback.js';
 import { audioDiagnostics } from './audio-diagnostics.js';
 audioDiagnostics();
-import { PuppetRuntime, SEAT_CLIPS, connectVrHost } from './puppet.js';
+import { PuppetRuntime } from './puppet.js';
 import { IDENTITY, INACTIVITY_MS, SIGN_OFF, WAKE_PHRASE, WOKEN } from './identity.js';
 import { loadHead, startWakeSpotter } from './wake.js';
 import { MODEL, learnVoice, prepareSpeaker, startSpeakerGate } from './speaker.js';
@@ -491,11 +491,8 @@ const restored = JSON.parse(sessionStorage.getItem(PAGE_KEY));
 let trace = new ConversationTrace(render, restored?.trace);
 if (restored?.awake) trace.slept(restored.at);
 render(trace.entries);
-const vrParam = new URLSearchParams(location.search).get('vr');
-const vrHost = vrParam ? await connectVrHost(vrParam, { onTap: () => $('puppet').click() }) : null;
-if (vrHost) config.token = vrHost.token;
 try {
-  puppetRuntime = new PuppetRuntime($('puppet'), undefined, vrHost?.view);
+  puppetRuntime = new PuppetRuntime($('puppet'));
   puppetRuntime.onAnimation = (state) => recordSession('animation', JSON.stringify(state));
   puppetRuntime.pause();
 } catch (error) {
@@ -1487,11 +1484,7 @@ async function loadPuppet(id, epoch, request, stage) {
 function clipMotions() {
   const motions = puppetMotions ??= puppetChannel.clips().then(async (catalog) => {
     const clips = [];
-    if (vrHost) for (const [action, name] of [['sit', 'sit-floor-down.vrma'], ['sit-idle', 'sit-floor.vrma'], ['stand', 'sit-floor-up.vrma']]) clips.push({ action, name, format: 'vrma', data: await fetch(`poses/${name}`).then((response) => {
-      if (!response.ok) throw new Error(`${name} unavailable: ${response.status}`);
-      return response.arrayBuffer();
-    }) });
-    for (const entry of catalog.clips) if (!vrHost || !SEAT_CLIPS.has(entry.action)) clips.push(entry.format === 'fbx' ? { ...entry, format: 'motion', data: JSON.parse(dec.decode(await puppetChannel.motionBytes(entry))) } : { ...entry, data: await puppetChannel.clipBytes(entry) });
+    for (const entry of catalog.clips) clips.push(entry.format === 'fbx' ? { ...entry, format: 'motion', data: JSON.parse(dec.decode(await puppetChannel.motionBytes(entry))) } : { ...entry, data: await puppetChannel.clipBytes(entry) });
     return clips;
   });
   motions.catch(() => { if (puppetMotions === motions) puppetMotions = undefined; });

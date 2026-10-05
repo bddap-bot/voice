@@ -62,23 +62,16 @@ let
     cat > $out/bin/voice-vr <<'EOF'
     #!/bin/sh
     here=$(dirname "$(readlink -f "$0")")
-    export VOICE_VR_BROWSER="''${VOICE_VR_BROWSER:-$here/chromium}"
     export VOICE_VR_SPEAKER_MODEL="''${VOICE_VR_SPEAKER_MODEL:-$here/../share/speaker.onnx}"
     exec "$here/voice-vr-host" "$@"
     EOF
-    # The Flatpak's sandboxed zygote is spawned through flatpak-portal, outside --die-with-parent, and would outlive the host.
-    cat > $out/bin/chromium <<'EOF'
-    #!/bin/sh
-    exec flatpak run --die-with-parent org.chromium.Chromium --no-zygote --no-sandbox "$@"
-    EOF
-    chmod 755 $out/bin/voice-vr $out/bin/chromium
+    chmod 755 $out/bin/voice-vr
     substitute ${./voice-vr.vrmanifest} $out/voice-vr.vrmanifest --replace-fail '"binary_path_linux": "@out@/bin/voice-vr"' '"binary_path_linux_arm": "bin/voice-vr"'
   '';
 in
 pkgs.runCommand "voice-vr-${native.version}" { nativeBuildInputs = [ pkgs.makeWrapper ]; passthru = { inherit bundle; simulatedController = import ./simulated { inherit pkgs; }; }; } ''
   makeWrapper ${native}/bin/voice-vr $out/bin/voice-vr \
     --prefix LD_LIBRARY_PATH : ${runtimeLibraries} \
-    --set-default VOICE_VR_BROWSER ${pkgs.chromium}/bin/chromium \
     --set-default VOICE_VR_SPEAKER_MODEL ${speakerModel}
   mkdir -p $out/share/voice-vr
   substitute ${./voice-vr.vrmanifest} $out/share/voice-vr/voice-vr.vrmanifest --subst-var out

@@ -5,14 +5,11 @@ import { VRMAnimationLoaderPlugin, createVRMAnimationClip } from '@pixiv/three-v
 
 import { standingPose, anchorStandingIdle } from './standing.js';
 
-export { connectVrHost } from './vr.js';
-
 const VISEMES = ['aa', 'ih', 'ou', 'ee', 'oh'];
 const MOOD_EXPRESSIONS = ['happy', 'angry', 'sad', 'relaxed', 'surprised'];
 
 const CLIP_GESTURES = new Set(['nod', 'shrug', 'think', 'wave', 'no', 'laugh', 'clap', 'bow', 'thumbs-up', 'stretch', 'look-around']);
 const IDLE_CLIPS = { stand: ['idle', 'idle-2', 'idle-3'], sit: ['sit-idle', 'sit-idle-2'] };
-export const SEAT_CLIPS = new Set(['sit', 'stand', ...IDLE_CLIPS.sit]);
 
 const GAZE_POINTS = {
   camera: [0, 1.25, 6.4],
@@ -130,10 +127,9 @@ function fitScene(vrm) {
 }
 
 export class PuppetRuntime {
-  constructor(canvas, renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true }), view = null) {
+  constructor(canvas, renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true })) {
     this.canvas = canvas;
     this.renderer = renderer;
-    this.view = view;
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.scene = new THREE.Scene();
@@ -164,10 +160,9 @@ export class PuppetRuntime {
     this.clock = new THREE.Clock();
     this.poseName = 'sit';
     this.head = null;
-    this.viewer = new THREE.Vector3().fromArray(GAZE_POINTS.camera);
     this.saccade = new THREE.Vector3();
     this.gazeTarget = new THREE.Object3D();
-    this.gazeTarget.position.copy(this.viewer);
+    this.gazeTarget.position.fromArray(GAZE_POINTS.camera);
     this.scene.add(this.gazeTarget);
     this.gazePoint = this.gazeTarget.position.clone();
     this.gazeDestination = this.gazePoint.clone();
@@ -187,18 +182,15 @@ export class PuppetRuntime {
     this.waitingForHub = false;
     this.resize = new ResizeObserver(() => this.fit());
     this.resize.observe(canvas);
-    view?.attach(this.renderer);
     this.fit();
     this.animate = this.animate.bind(this);
     this.frame = 0;
     this.start();
   }
   start() {
-    if (this.view) this.view.onPose = this.animate;
-    else if (!this.frame) this.frame = requestAnimationFrame(this.animate);
+    if (!this.frame) this.frame = requestAnimationFrame(this.animate);
   }
   pause() {
-    if (this.view) this.view.onPose = null;
     cancelAnimationFrame(this.frame);
     this.frame = 0;
   }
@@ -334,7 +326,6 @@ export class PuppetRuntime {
     await audio?.context.close().catch(() => {});
   }
   fit() {
-    if (this.view) return;
     const width = Math.max(1, this.canvas.clientWidth);
     const height = Math.max(1, this.canvas.clientHeight);
     this.renderer.setSize(width, height, false);
@@ -473,13 +464,12 @@ export class PuppetRuntime {
       this.gazeMode = 'camera';
       this.nextSaccade = now;
     }
-    if (this.view?.viewer) this.viewer.copy(this.view.viewer);
     if (this.gazeMode === 'camera') {
       if (now >= this.nextSaccade) {
         this.saccade.set((Math.random() - 0.5) * 0.24, (Math.random() - 0.5) * 0.12, 0);
         this.nextSaccade = now + 1800 + Math.random() * 3200;
       }
-      this.gazeDestination.copy(this.viewer).add(this.saccade);
+      this.gazeDestination.fromArray(GAZE_POINTS.camera).add(this.saccade);
     } else if (this.gazeMode !== 'camera') this.gazeDestination.fromArray(GAZE_POINTS[this.gazeMode]);
     this.gazePoint.lerp(this.gazeDestination, 0.08);
     this.gazeTarget.position.copy(this.gazePoint);
@@ -538,9 +528,8 @@ export class PuppetRuntime {
     if (this.vrm) this.plantFeet();
     this.vrm?.update(delta);
     this.recordAnimation();
-    if (this.vrm && this.view) this.view.render(this.renderer, this.scene);
-    else if (this.vrm) this.renderer.render(this.scene, this.camera);
-    if (!this.view) this.frame = requestAnimationFrame(this.animate);
+    if (this.vrm) this.renderer.render(this.scene, this.camera);
+    this.frame = requestAnimationFrame(this.animate);
   }
   dispose() {
     this.pause();

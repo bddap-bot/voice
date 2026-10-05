@@ -235,9 +235,13 @@ async function pageRender(vrm, motion) {
           camera.updateMatrixWorld();
           camera.projectionMatrix.makePerspective((left - ex) * scale, (right - ex) * scale, (top - ey) * scale, (bottom - ey) * scale, near, 200);
           camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
-          const view = { onPose: null, viewer: null, attach(target) { target.setPixelRatio(1); target.setSize(size, size, false); target.setClearColor(0x000000, 0); }, render(target, world) { target.render(world, camera); } };
-          const runtime = new PuppetRuntime(canvas, renderer, view);
+          const runtime = new PuppetRuntime(canvas, renderer);
           runtime.pause();
+          runtime.resize.disconnect();
+          renderer.setPixelRatio(1);
+          renderer.setSize(size, size, false);
+          renderer.setClearColor(0x000000, 0);
+          runtime.camera = camera;
           const bytes = Uint8Array.from(atob(vrm), (char) => char.charCodeAt(0)).buffer;
           if (!await runtime.load(bytes)) throw new Error('figure did not load');
           runtime.vrm.lookAt = null;

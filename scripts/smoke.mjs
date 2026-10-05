@@ -60,8 +60,6 @@ export async function send_only(bytes) {
 }`;
 
 const neutralSilhouettePuppet = `
-export const SEAT_CLIPS = new Set();
-export function connectVrHost() { throw new Error('no vr host in the smoke'); }
 export class PuppetRuntime {
   constructor(canvas) { this.canvas=canvas; this.poseName='sit'; globalThis.__smokeRuntime=this; }
   async load(bytes, valid, beforeCommit, stage) { await stage('select', beforeCommit); this.draw(false); return valid(); }
@@ -90,7 +88,7 @@ async function makeServer() {
   } else {
     const { stdout } = await execute('voice-web', ['token']);
     token = stdout.trim();
-    index = index.replace('puppetRuntime = new PuppetRuntime($(\'puppet\'), undefined, vrHost?.view);', "puppetRuntime = new PuppetRuntime($('puppet'), undefined, vrHost?.view); globalThis.__smokeRuntime = puppetRuntime;");
+    index = index.replace('puppetRuntime = new PuppetRuntime($(\'puppet\'));', "puppetRuntime = new PuppetRuntime($('puppet')); globalThis.__smokeRuntime = puppetRuntime;");
   }
   if (deployed) return { url: 'https://bddap-bot.github.io/voice/', token, close() {} };
   index = index.replace('</head>', `<script>localStorage.setItem('voice.token', ${JSON.stringify(token)});</script></head>`);

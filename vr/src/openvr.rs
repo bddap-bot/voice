@@ -72,24 +72,15 @@ impl Runtime {
         None
     }
 
-    pub fn poses(&self, ahead: f32) -> Vec<sys::TrackedDevicePose_t> {
+    pub fn poses(&self) -> Vec<sys::TrackedDevicePose_t> {
         let mut poses: Vec<sys::TrackedDevicePose_t> = vec![unsafe { std::mem::zeroed() }; sys::k_unMaxTrackedDeviceCount as usize];
-        call!(self.system, GetDeviceToAbsoluteTrackingPose, sys::ETrackingUniverseOrigin_TrackingUniverseStanding, ahead, poses.as_mut_ptr(), poses.len() as u32);
+        call!(self.system, GetDeviceToAbsoluteTrackingPose, sys::ETrackingUniverseOrigin_TrackingUniverseStanding, 0.0, poses.as_mut_ptr(), poses.len() as u32);
         poses
     }
 
     pub fn head(&self, poses: &[sys::TrackedDevicePose_t]) -> Option<Pose> {
         let head = &poses[sys::k_unTrackedDeviceIndex_Hmd as usize];
         head.bPoseIsValid.then(|| Pose::from_m34(&head.mDeviceToAbsoluteTracking.m))
-    }
-
-    pub fn display_period(&self) -> Result<std::time::Duration, String> {
-        let mut error = 0;
-        let hertz = call!(self.system, GetFloatTrackedDeviceProperty, sys::k_unTrackedDeviceIndex_Hmd as u32, sys::ETrackedDeviceProperty_Prop_DisplayFrequency_Float, &mut error);
-        if error != 0 || hertz <= 0.0 {
-            return Err(format!("display frequency {hertz} (error {error})"));
-        }
-        Ok(std::time::Duration::from_secs_f32(1.0 / hertz))
     }
 
     pub fn wait_frame(&self) {
@@ -114,8 +105,7 @@ impl Runtime {
             .into_iter()
             .filter_map(|hand| {
                 let pose = &poses[self.hand_index(hand)? as usize];
-                let v = pose.vVelocity.v;
-                pose.bPoseIsValid.then(|| HandPose { hand, pose: Pose::from_m34(&pose.mDeviceToAbsoluteTracking.m), speed: (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt() })
+                pose.bPoseIsValid.then(|| HandPose { hand, pose: Pose::from_m34(&pose.mDeviceToAbsoluteTracking.m) })
             })
             .collect()
     }
@@ -152,11 +142,6 @@ pub struct Overlay<'a> {
 }
 
 impl Overlay<'_> {
-    pub fn place_world(&self, pose: &Pose) {
-        let mut matrix = sys::HmdMatrix34_t { m: pose.to_m34() };
-        call!(self.runtime.overlay, SetOverlayTransformAbsolute, self.handle, sys::ETrackingUniverseOrigin_TrackingUniverseStanding, &mut matrix);
-    }
-
     pub fn place_on(&self, device: u32, offset: &Pose) {
         let mut matrix = sys::HmdMatrix34_t { m: offset.to_m34() };
         call!(self.runtime.overlay, SetOverlayTransformTrackedDeviceRelative, self.handle, device, &mut matrix);

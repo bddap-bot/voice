@@ -1,3 +1,4 @@
+mod gesture;
 mod motion;
 mod openvr;
 mod page;
@@ -17,6 +18,7 @@ use openvr::{Runtime, Signal};
 use page::{Frame, Page};
 use placement::{above_hand, desk_spot, Anchor, Hand, Interaction, Pose};
 use motion::{Animator, Clip, Random, IDLES};
+use gesture::{wake, Recognizer, Templates};
 use relay::{Relay, Token};
 use render::{eye_projection, Renderer};
 use vrm::{Fit, Model};
@@ -30,6 +32,7 @@ const PAGE: &str = "https://bddap-bot.github.io/voice/";
 const HEAD_AHEAD: f32 = 0.04;
 const REQUEST_LOST: Duration = Duration::from_millis(100);
 const IN_FLIGHT: usize = 3;
+const DORMANT_POLL: Duration = Duration::from_micros(11_111);
 
 fn directory(variable: &str, fallback: &str) -> PathBuf {
     std::env::var_os(variable).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").expect("HOME")).join(fallback)).join("voice-vr")
@@ -104,6 +107,8 @@ fn appearance(relay: &mut Relay) -> Result<(Model, HashMap<String, Clip>), Strin
 }
 
 fn native(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(), String> {
+    let gesture_file = state.join("gesture.json");
+    let mut recognizer = Recognizer::new(Templates::parse(&std::fs::read(&gesture_file).map_err(|error| format!("{}: {error}", gesture_file.display()))?)?);
     let (model, clips) = appearance(&mut Relay::connect(token, &state.join("assets"))?)?;
     let standing = model.standing();
     let rest_hips = model.rest_hips();
@@ -113,8 +118,12 @@ fn native(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(
     let mut renderer = Renderer::new(vulkan::Gpu::new(Some(runtime))?, [EYE, EYE], &model, &skinned, HEIGHT / render::PAGE_HEIGHT)?;
     let mut overlay = runtime.create_overlay("voice.puppet", "Puppet", QUAD)?;
     let eye_offsets = runtime.eye_offsets();
-    let mut meter = Meter::new("frame interval", "animate+draw+submit");
-    let mut last = Instant::now();
+    let labels = ["frame interval", "animate+draw+submit"];
+    let mut meter = Meter::new(labels[0], labels[1]);
+    let epoch = Instant::now();
+    let mut last = epoch;
+    let mut awake: Option<Instant> = None;
+    eprintln!("dormant");
     loop {
         if let Some(Signal::Quit) = runtime.poll() {
             return Ok(());
@@ -123,10 +132,32 @@ fn native(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(
         let interval = started - last;
         last = started;
         let poses = runtime.poses(0.0);
-        let left = runtime.hands(&poses).into_iter().find(|hand| hand.hand == Hand::Left).zip(runtime.hand_index(Hand::Left));
-        let (Some(head), Some((hand, device))) = (runtime.head(&poses), left) else {
+        let head = runtime.head(&poses);
+        let hands = runtime.hands(&poses);
+        let hand = |which| hands.iter().find(|hand| hand.hand == which).map(|hand| hand.pose);
+        if awake.is_some() && wake(awake, false, started).is_none() {
+            awake = None;
+            eprintln!("dormant");
+        }
+        if let (Some(head), Some(left), Some(right)) = (head, hand(Hand::Left), hand(Hand::Right)) {
+            if let Some(verdict) = recognizer.push((started - epoch).as_secs_f64(), &head, left.t, right.t) {
+                let kind = match (verdict.matched, awake) {
+                    (true, None) => "match, waking",
+                    (true, Some(_)) => "match while awake, ignored",
+                    (false, _) => "near miss",
+                };
+                if verdict.matched || verdict.near {
+                    eprintln!("gesture {kind}: distance {:.3} peak {:.2} m/s over {:.2} s", verdict.distance, verdict.peak, verdict.duration);
+                }
+                if verdict.matched && awake.is_none() {
+                    awake = wake(None, true, started);
+                    meter = Meter::new(labels[0], labels[1]);
+                }
+            }
+        }
+        let (Some(_), Some(head), Some(hand), Some(device)) = (awake, head, hand(Hand::Left), runtime.hand_index(Hand::Left)) else {
             overlay.hide();
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(DORMANT_POLL);
             continue;
         };
         if let Some(idle) = animator.update(interval.as_secs_f32().min(0.05)) {
@@ -138,8 +169,8 @@ fn native(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(
         let worlds = model.worlds(&pose);
         let palette = skinned.palette(&worlds, fit.placement(&model, &worlds, FLOOR));
         renderer.update(&palette, &skinned.vertices, &changed);
-        let quad = above_hand(&hand.pose, &head, -FLOOR);
-        overlay.place_on(device, &hand.pose.inverse().then(&quad));
+        let quad = above_hand(&hand, &head, -FLOOR);
+        overlay.place_on(device, &hand.inverse().then(&quad));
         let local = quad.inverse();
         let eyes = eye_offsets.map(|eye: Pose| eye_projection(local.apply(head.then(&eye).t).into(), QUAD / 2.0, QUAD / 2.0));
         overlay.submit(&mut renderer.render(eyes)?)?;

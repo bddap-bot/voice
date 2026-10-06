@@ -150,6 +150,16 @@
     },
     {
       "paths": [
+        "scripts/speaker-print.mjs"
+      ],
+      "tests": [
+        "node --check scripts/speaker-print.mjs",
+        "node --test test/speaker.test.js"
+      ],
+      "why": "the script builds a voiceprint file from recordings; the speaker tests cover the choice of the voice it keeps"
+    },
+    {
+      "paths": [
         "docs/**",
         "src/**",
         "scripts/build.mjs",

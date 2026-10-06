@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { WeSpeakerFeatureExtractor } from '@huggingface/transformers';
-import { CHUNK, GATE, GrantedAudio, HOP, OFFSET, RATE, SpeakerEnrollment, SpeakerFrames, SpeakerGate, SpeechDetector, fbank } from '../docs/speaker.js';
+import { CHUNK, GATE, GrantedAudio, HOP, OFFSET, RATE, SpeakerEnrollment, SpeakerFrames, SpeakerGate, SpeechDetector, fbank, similarity } from '../docs/speaker.js';
+import { dominantVoice } from '../scripts/speaker-print.mjs';
 
 const OWNER_HZ = 300;
 const OTHER_HZ = 2500;
@@ -232,4 +233,17 @@ test('enrollment averages only windows that are mostly speech', async () => {
   assert.equal(result.progress, 1);
   assert.deepEqual([...result.voiceprint], [1, 0]);
   assert.deepEqual(seen, [GATE.window, GATE.window, GATE.window]);
+});
+
+test('a print from many recordings follows the voice most recordings share, not the longest recording', () => {
+  const voice = (angle, spread) => (index) => { const turn = angle + spread * Math.sin(index * 12.9898); return Float32Array.from([Math.cos(turn), Math.sin(turn)]); };
+  const user = voice(0, 0.1);
+  const television = voice(2, 0.1);
+  const recordings = [
+    ...Array.from({ length: 4 }, (_, recording) => [...Array.from({ length: 6 }, (_, index) => user(recording * 10 + index)), television(recording)]),
+    Array.from({ length: 60 }, (_, index) => television(100 + index)),
+  ];
+  const { print, windows, recordings: voiced } = dominantVoice(recordings);
+  assert.ok(similarity(print, [1, 0]) > 0.99 && similarity(print, [Math.cos(2), Math.sin(2)]) < 0, `print ${[...print]}`);
+  assert.deepEqual([windows, voiced], [24, 4]);
 });

@@ -7,7 +7,7 @@ export const MODEL = {
   sha256: 'c59158379255ad66e161679cca6af8d52d51e389e3224ab7d7a7baae295c2db5',
 };
 export const GATE = {
-  threshold: 0.5,
+  threshold: 0.4,
   preroll: 25,
   tail: 15,
   shortest: 40,

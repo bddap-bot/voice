@@ -842,7 +842,7 @@ mod tests {
         let page = page();
         assert_eq!((page.rate, page.hop, page.chunk, page.offset, page.onset, page.windows), (16000, 160, 1280, 60, 4, 12));
         assert_eq!((page.frame, page.fft, page.bins, page.ring), (400, 512, 80, 600));
-        assert_eq!((page.threshold, page.preroll, page.tail, page.shortest, page.every, page.window, page.longest), (0.5, 25, 15, 40, 100, 150, 300));
+        assert_eq!((page.threshold, page.preroll, page.tail, page.shortest, page.every, page.window, page.longest), (0.4, 25, 15, 40, 100, 150, 300));
         assert!(SOURCE.contains(&format!("sha256: '{}'", page.sha256)) && page.sha256.len() == 64);
         assert_eq!(DECIMATION * page.rate, crate::audio::RATE as usize);
     }

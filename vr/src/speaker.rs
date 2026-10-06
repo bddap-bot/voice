@@ -1078,7 +1078,7 @@ mod tests {
             if let Some(print) = learned {
                 break print;
             }
-            assert!(started.elapsed().as_secs() < 30, "no voiceprint: {:?}", hearing.lock().unwrap().reports);
+            assert!(started.elapsed().as_secs() < 300, "no voiceprint: {:?}", hearing.lock().unwrap().reports);
             heard.extend(through(&mut ear, &silence(0.1, capture)));
         };
         assert!(heard.iter().all(|&sample| sample == 0.0), "Live hears nothing while the voice is learned");

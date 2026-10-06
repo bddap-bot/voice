@@ -82,7 +82,7 @@ const STAND: Vec3 = [0.0, 0.03, 0.02];
 const BELOW: f32 = 0.07;
 /// The board's edge nearest the elbow, in the controller's frame.
 const NEAR_EDGE: f32 = 0.08;
-/// The right controller's touch point ahead of its origin, in its frame.
+/// The right controller's touch point ahead of its origin, in its frame, for a controller whose render model has no tip.
 pub const TIP: Vec3 = [0.0, 0.0, -0.05];
 
 /// The avatar's frame (feet at the origin, y up, z its facing) standing on the controller and turning with it.
@@ -105,8 +105,12 @@ pub fn facing(at: Vec3, viewer: Vec3) -> Pose {
 }
 
 /// Where the right controller's touch point is in the board's frame.
-pub fn local_tip(board: &Pose, right: &Pose) -> Vec3 {
-    board.inverse().apply(right.apply(TIP))
+pub fn local_tip(board: &Pose, right: &Pose, tip: Vec3) -> Vec3 {
+    board.inverse().apply(right.apply(tip))
+}
+
+pub fn marker(board: &Pose, right: &Pose, at: Vec3) -> Pose {
+    right.inverse().then(&Pose { r: board.r, t: board.apply(at) })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

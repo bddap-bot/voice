@@ -1,12 +1,13 @@
 use openvr_sys as sys;
 use std::ffi::{CStr, CString};
 
-use crate::placement::{Hand, HandPose, Pose};
+use crate::placement::{Hand, HandPose, Pose, Vec3};
 
 pub struct Runtime {
     system: &'static sys::VR_IVRSystem_FnTable,
     overlay: &'static sys::VR_IVROverlay_FnTable,
     compositor: &'static sys::VR_IVRCompositor_FnTable,
+    render_models: &'static sys::VR_IVRRenderModels_FnTable,
 }
 
 fn table<T>(version: &[u8]) -> Result<&'static T, String> {
@@ -40,7 +41,7 @@ impl Runtime {
         if error != 0 {
             return Err(init_error(error));
         }
-        Ok(Runtime { system: table(sys::IVRSystem_Version)?, overlay: table(sys::IVROverlay_Version)?, compositor: table(sys::IVRCompositor_Version)? })
+        Ok(Runtime { system: table(sys::IVRSystem_Version)?, overlay: table(sys::IVROverlay_Version)?, compositor: table(sys::IVRCompositor_Version)?, render_models: table(sys::IVRRenderModels_Version)? })
     }
 
     pub fn instance_extensions(&self) -> Vec<CString> {
@@ -100,6 +101,35 @@ impl Runtime {
         (index < sys::k_unMaxTrackedDeviceCount as u32).then_some(index)
     }
 
+    pub fn tip(&self, device: u32) -> Result<Vec3, String> {
+        let mut buffer = vec![0 as std::os::raw::c_char; 256];
+        let mut error = 0;
+        call!(self.system, GetStringTrackedDeviceProperty, device, sys::ETrackedDeviceProperty_Prop_RenderModelName_String, buffer.as_mut_ptr(), buffer.len() as u32, &mut error);
+        if error != 0 {
+            return Err(format!("device {device} has no render model name (property error {error})"));
+        }
+        let model = unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_owned();
+        let tip = CString::new("tip").unwrap();
+        let mut controller: sys::VRControllerState_t = unsafe { std::mem::zeroed() };
+        let mut mode: sys::RenderModel_ControllerMode_State_t = unsafe { std::mem::zeroed() };
+        let mut state: sys::RenderModel_ComponentState_t = unsafe { std::mem::zeroed() };
+        if call!(self.render_models, GetComponentState, model.as_ptr() as *mut _, tip.as_ptr() as *mut _, &mut controller, &mut mode, &mut state) {
+            return Ok(Pose::from_m34(&state.mTrackingToComponentLocal.m).t);
+        }
+        let components: Vec<String> = (0..call!(self.render_models, GetComponentCount, model.as_ptr() as *mut _))
+            .map(|index| {
+                let mut name = vec![0 as std::os::raw::c_char; 128];
+                call!(self.render_models, GetComponentName, model.as_ptr() as *mut _, index, name.as_mut_ptr(), name.len() as u32);
+                unsafe { CStr::from_ptr(name.as_ptr()) }.to_string_lossy().into_owned()
+            })
+            .collect();
+        Err(format!("render model {model:?} has no tip component; it has [{}]", components.join(", ")))
+    }
+
+    pub fn pulse(&self, device: u32) {
+        call!(self.system, TriggerHapticPulse, device, 0, 3000);
+    }
+
     pub fn hands(&self, poses: &[sys::TrackedDevicePose_t]) -> Vec<HandPose> {
         [Hand::Left, Hand::Right]
             .into_iter()
@@ -147,17 +177,24 @@ impl Overlay<'_> {
         call!(self.runtime.overlay, SetOverlayTransformTrackedDeviceRelative, self.handle, device, &mut matrix);
     }
 
-    pub fn submit(&mut self, texture: &mut sys::VRVulkanTextureData_t) -> Result<(), String> {
+    pub fn above_others(&self) {
+        call!(self.runtime.overlay, SetOverlaySortOrder, self.handle, 1);
+    }
+
+    pub fn texture(&self, texture: &mut sys::VRVulkanTextureData_t) -> Result<(), String> {
         let mut texture = sys::Texture_t { handle: texture as *mut _ as *mut std::ffi::c_void, eType: sys::ETextureType_TextureType_Vulkan, eColorSpace: sys::EColorSpace_ColorSpace_Auto };
         let error = call!(self.runtime.overlay, SetOverlayTexture, self.handle, &mut texture);
         if error != 0 {
             return Err(format!("SetOverlayTexture failed with {error}"));
         }
+        Ok(())
+    }
+
+    pub fn show(&mut self) {
         if !self.shown {
             call!(self.runtime.overlay, ShowOverlay, self.handle);
             self.shown = true;
         }
-        Ok(())
     }
 
     pub fn hide(&mut self) {

@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use openvr::{Runtime, Signal};
 use board::{Board, Press};
-use placement::{facing, local_tip, on_controller, under_controller, Hand, Pose};
+use placement::{facing, local_tip, marker, on_controller, under_controller, Hand, Pose, Vec3, TIP};
 use gaze::Gaze;
 use motion::{Animator, Clip, Random, IDLES};
 use gesture::{Recognizer, Templates};
@@ -134,10 +134,16 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
     let mut board_image = vulkan::Flat::new(gpu.clone(), board_size[0], board_size[1])?;
     let mut overlay = runtime.create_overlay("voice.puppet", "Puppet", QUAD, true)?;
     let mut board_overlay = runtime.create_overlay("voice.board", "Board", board::WIDTH, false)?;
+    let mut marker_overlay = runtime.create_overlay("voice.marker", "Fingertip", board::MARKER_WIDTH, false)?;
+    marker_overlay.above_others();
+    let mut marker_texture = vulkan::Flat::new(gpu.clone(), board::MARKER_PIXELS, board::MARKER_PIXELS)?;
+    marker_overlay.texture(&mut marker_texture.upload(&board::marker_image())?)?;
     let eye_offsets = runtime.eye_offsets();
     let mut meter = Meter::default();
     let epoch = Instant::now();
     let mut last = epoch;
+    let mut pressing: Option<(u32, Vec3)> = None;
+    let mut calibration = (epoch, String::new());
     let mut voice = Voice::new(token.clone(), cache.clone(), state.join("voiceprint.json"));
     eprintln!("dormant");
     loop {
@@ -176,14 +182,31 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
         let (true, Some(head), Some(left), Some(device)) = (voice.awake(), head, hand(Hand::Left), runtime.hand_index(Hand::Left)) else {
             overlay.hide();
             board_overlay.hide();
+            marker_overlay.hide();
             board.reset();
             reveal.reset();
             std::thread::sleep(DORMANT_POLL);
             continue;
         };
+        let right_device = runtime.hand_index(Hand::Right);
+        if let Some(device) = right_device.filter(|&device| pressing.map_or(true, |(known, _)| known != device) && started >= calibration.0) {
+            calibration.0 = started + Duration::from_secs(1);
+            match runtime.tip(device) {
+                Ok(tip) => {
+                    eprintln!("pressing point {tip:?} on device {device}");
+                    pressing = Some((device, tip));
+                }
+                Err(error) if error != calibration.1 => {
+                    eprintln!("pressing point: {error}; the default until it reports one");
+                    calibration.1 = error;
+                }
+                Err(_) => {}
+            }
+        }
+        let tip = pressing.filter(|&(known, _)| Some(known) == right_device).map_or(TIP, |(_, tip)| tip);
         let stand = on_controller(&left);
         let quad = facing(stand.apply([0.0, -FLOOR, 0.0]), head.t);
-        if !board.library() && reveal.hold(started, hand(Hand::Right).map(|right| local_tip(&stand, &right))) {
+        if !board.library() && reveal.hold(started, hand(Hand::Right).map(|right| local_tip(&stand, &right, tip))) {
             eprintln!("appearance library revealed");
             board.reveal();
             if previews.is_none() {
@@ -200,7 +223,22 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
         let mount = under_controller(board.height());
         let board_pose = left.then(&mount);
         board_overlay.place_on(device, &mount);
-        match board.touch(hand(Hand::Right).map(|right| local_tip(&board_pose, &right))) {
+        let right = hand(Hand::Right).zip(right_device);
+        let touch = board.touch(right.map(|(right, _)| local_tip(&board_pose, &right, tip)));
+        if let Some([x, y]) = touch.crossing {
+            eprintln!("board crossed at ({x:.3}, {y:.3}) m: {}", touch.press.map_or("none".to_owned(), |press| format!("{press:?}")));
+        }
+        match (touch.marker, right) {
+            (Some(at), Some((right, right_device))) => {
+                marker_overlay.place_on(right_device, &marker(&board_pose, &right, at));
+                marker_overlay.show();
+            }
+            _ => marker_overlay.hide(),
+        }
+        if let (Some(_), Some((_, right_device))) = (touch.press, right) {
+            runtime.pulse(right_device);
+        }
+        match touch.press {
             Some(Press::Dismiss) => {
                 voice.dismiss("dismissed");
                 continue;
@@ -221,7 +259,8 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
                 board.pending = Some(index);
                 board.mark();
                 if let Some(image) = board.take_image() {
-                    board_overlay.submit(&mut board_image.upload(&image)?)?;
+                    board_overlay.texture(&mut board_image.upload(&image)?)?;
+                    board_overlay.show();
                 }
                 match switch(token, &cache, avatar, &mut renderer) {
                     Ok(loaded) => {
@@ -240,7 +279,8 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
             board.mark();
         }
         if let Some(image) = board.take_image() {
-            board_overlay.submit(&mut board_image.upload(&image)?)?;
+            board_overlay.texture(&mut board_image.upload(&image)?)?;
+            board_overlay.show();
         }
         let delta = interval.as_secs_f32().min(0.05);
         if let Some(idle) = puppet.animator.update(delta) {
@@ -258,7 +298,8 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
         puppet.drawn.update(&palette, &puppet.skinned.vertices, &changed);
         overlay.place_on(device, &left.inverse().then(&quad));
         let eyes = eye_offsets.map(|eye: Pose| eye_projection(local.apply(head.then(&eye).t).into(), QUAD / 2.0, QUAD / 2.0));
-        overlay.submit(&mut renderer.render(&puppet.drawn, eyes)?)?;
+        overlay.texture(&mut renderer.render(&puppet.drawn, eyes)?)?;
+        overlay.show();
         meter.frame(interval, started.elapsed());
         runtime.wait_frame();
     }

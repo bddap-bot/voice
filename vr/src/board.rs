@@ -20,6 +20,9 @@ const PADDING: u32 = 8;
 /// Touch depths along the board's normal, positive toward the viewer.
 const CONTACT: f32 = 0.01;
 const RELEASE: f32 = 0.02;
+const NEAR: f32 = 0.1;
+pub const MARKER_WIDTH: f32 = 0.008;
+pub const MARKER_PIXELS: u32 = 32;
 
 const BACKGROUND: [u8; 4] = [18, 18, 22, 210];
 const BUTTON: [u8; 4] = [58, 58, 68, 255];
@@ -28,6 +31,7 @@ const PENDING: [u8; 4] = [150, 110, 30, 255];
 const DISMISS: [u8; 4] = [150, 42, 42, 255];
 const MUTED: [u8; 4] = [140, 47, 57, 255];
 const INK: [u8; 4] = [240, 240, 240, 255];
+const HOVER: [u8; 4] = [255, 214, 90, 255];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Press {
@@ -52,6 +56,14 @@ impl Button {
     }
 }
 
+/// The marker is the tip held at the face once through it, shown only over the board.
+pub struct Touch {
+    /// Where the tip crossed the face from in front, on or beside a button.
+    pub crossing: Option<[f32; 2]>,
+    pub press: Option<Press>,
+    pub marker: Option<Vec3>,
+}
+
 pub struct Board {
     previews: Vec<Option<Vec<u8>>>,
     library: bool,
@@ -60,17 +72,19 @@ pub struct Board {
     pub muted: bool,
     pub voice: VoiceId,
     armed: bool,
+    hover: Option<Press>,
     dirty: bool,
 }
 
 impl Board {
     pub fn new(appearances: usize, active: usize) -> Board {
-        Board { previews: vec![None; appearances], library: false, active, pending: None, muted: false, voice: VoiceId::default(), armed: false, dirty: true }
+        Board { previews: vec![None; appearances], library: false, active, pending: None, muted: false, voice: VoiceId::default(), armed: false, hover: None, dirty: true }
     }
 
     /// As summoned: a hand already at the board must withdraw before it presses, and the appearance library is hidden.
     pub fn reset(&mut self) {
         self.armed = false;
+        self.hover = None;
         self.library = false;
         self.dirty = true;
     }
@@ -132,7 +146,24 @@ impl Board {
     /// The right controller's touch point in the board's frame (x right, y up, z toward the viewer), or None while untracked.
     /// A press is the tip crossing the board's face from in front; it fires once, and the next needs the tip drawn back.
     /// Crossing the face's plane beside the board disarms it too, so sliding on from the edge presses nothing.
-    pub fn touch(&mut self, tip: Option<Vec3>) -> Option<Press> {
+    pub fn touch(&mut self, tip: Option<Vec3>) -> Touch {
+        let crossing = self.contact(tip);
+        let press = crossing.and_then(|[x, y]| self.under(x, y));
+        let [half_width, half_height] = [WIDTH / 2.0, self.height() / 2.0];
+        let marker = tip.filter(|&[x, y, z]| x.abs() <= half_width && y.abs() <= half_height && z <= NEAR).map(|[x, y, z]| [x, y, z.max(0.0)]);
+        let hover = marker.filter(|_| self.armed).and_then(|[x, y, _]| self.under(x, y));
+        if hover != self.hover {
+            self.hover = hover;
+            self.dirty = true;
+        }
+        Touch { crossing, press, marker }
+    }
+
+    fn under(&self, x: f32, y: f32) -> Option<Press> {
+        Some(self.buttons().into_iter().find(|button| button.contains(x, y))?.press)
+    }
+
+    fn contact(&mut self, tip: Option<Vec3>) -> Option<[f32; 2]> {
         let Some([x, y, z]) = tip else {
             self.armed = false;
             return None;
@@ -145,7 +176,7 @@ impl Board {
             return None;
         }
         self.armed = false;
-        Some(self.buttons().into_iter().find(|button| button.contains(x, y))?.press)
+        Some([x, y])
     }
 
     pub fn mark(&mut self) {
@@ -196,6 +227,9 @@ impl Board {
             image.fill(area, fill);
             image.label(area, &label);
         }
+        if let Some(button) = self.buttons().into_iter().find(|button| Some(button.press) == self.hover) {
+            image.outline(self.area(button.rect), BORDER, HOVER);
+        }
         image.pixels
     }
 
@@ -206,6 +240,22 @@ impl Board {
         let y = |y: f32| ((height / 2.0 - y) * PIXELS_PER_METRE).round() as u32;
         [x(left), y(top), x(right), y(bottom)]
     }
+}
+
+pub fn marker_image() -> Vec<u8> {
+    let centre = MARKER_PIXELS as f32 / 2.0;
+    let mut image = Canvas { pixels: vec![0; (MARKER_PIXELS * MARKER_PIXELS * 4) as usize], width: MARKER_PIXELS };
+    for y in 0..MARKER_PIXELS {
+        for x in 0..MARKER_PIXELS {
+            let distance = (x as f32 + 0.5 - centre).hypot(y as f32 + 0.5 - centre);
+            if distance <= centre * 0.6 {
+                image.fill([x, y, x + 1, y + 1], INK);
+            } else if distance <= centre {
+                image.fill([x, y, x + 1, y + 1], BACKGROUND);
+            }
+        }
+    }
+    image.pixels
 }
 
 struct Canvas {
@@ -224,6 +274,13 @@ impl Canvas {
                 self.pixels[at + 3] = color[3];
             }
         }
+    }
+
+    fn outline(&mut self, [left, top, right, bottom]: [u32; 4], width: u32, color: [u8; 4]) {
+        self.fill([left, top, right, top + width], color);
+        self.fill([left, bottom - width, right, bottom], color);
+        self.fill([left, top, left + width, bottom], color);
+        self.fill([right - width, top, right, bottom], color);
     }
 
     /// A premultiplied square image drawn over the canvas with its top left corner at `at`.
@@ -271,7 +328,7 @@ impl Canvas {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::placement::{local_tip, under_controller, Pose, TIP};
+    use crate::placement::{length, local_tip, marker, sub, under_controller, Pose, TIP};
 
     fn rect_of(board: &Board, press: Press) -> [f32; 4] {
         board.buttons().into_iter().find(|button| button.press == press).unwrap().rect
@@ -295,7 +352,7 @@ mod tests {
         steps.extend(steps.clone().into_iter().rev());
         for (step, z) in steps.into_iter().enumerate() {
             let jitter = if step % 2 == 0 { 0.002 } else { -0.002 };
-            presses.extend(board.touch(Some([x + jitter, y - jitter, z])));
+            presses.extend(board.touch(Some([x + jitter, y - jitter, z])).press);
         }
         presses
     }
@@ -340,12 +397,12 @@ mod tests {
         let mut board = Board::new(36, 0);
         board.reveal();
         let pose = over.then(&under_controller(board.height()));
-        let tip = |right: &Pose| local_tip(&pose, right);
+        let tip = |right: &Pose| local_tip(&pose, right, TIP);
         for z in [0.05, 0.015] {
             for step in 0..=100 {
                 for y in [-0.12, -0.08, 0.0, 0.08, 0.12] {
                     let right = right_controller(&pose, [-WIDTH + step as f32 * WIDTH / 50.0, y], z);
-                    assert_eq!(board.touch(Some(tip(&right))), None);
+                    assert_eq!(board.touch(Some(tip(&right))).press, None);
                 }
             }
         }
@@ -354,10 +411,109 @@ mod tests {
             let centre = [(left + right) / 2.0, (bottom + top) / 2.0];
             let mut presses = Vec::new();
             for step in (0..=60).chain((0..=60).rev()) {
-                presses.extend(board.touch(Some(tip(&right_controller(&pose, centre, 0.1 - step as f32 * 0.002)))));
+                presses.extend(board.touch(Some(tip(&right_controller(&pose, centre, 0.1 - step as f32 * 0.002)))).press);
             }
             assert_eq!(presses, [button.press]);
         }
+    }
+
+    #[test]
+    fn with_a_simulated_right_controller_the_marker_sits_at_the_hit_test_point_and_each_touch_presses_once() {
+        let left = Pose { r: [[0.8, 0.0, 0.6], [0.0, 1.0, 0.0], [-0.6, 0.0, 0.8]], t: [-0.2, 1.1, -0.35] };
+        const PRESSING: Vec3 = [0.004, -0.021, -0.012];
+        let mut board = Board::new(12, 0);
+        board.reveal();
+        let pose = left.then(&under_controller(board.height()));
+        for button in board.buttons() {
+            let [left, bottom, right, top] = button.rect;
+            let centre = [(left + right) / 2.0, (bottom + top) / 2.0];
+            let mut presses = Vec::new();
+            for step in (0..=70).chain((0..=70).rev()) {
+                let tilted = pose.then(&Pose { r: [[0.6, 0.0, 0.8], [0.0, 1.0, 0.0], [-0.8, 0.0, 0.6]], t: [0.0; 3] });
+                let controller = Pose { r: tilted.r, t: sub(pose.apply([centre[0], centre[1], 0.09 - step as f32 * 0.002]), tilted.rotate(PRESSING)) };
+                let tip = local_tip(&pose, &controller, PRESSING);
+                let touch = board.touch(Some(tip));
+                let (press, at) = (touch.press, touch.marker.expect("shown over the board"));
+                assert!(length(sub(at, [tip[0], tip[1], tip[2].max(0.0)])) < 1e-5, "{at:?} for {tip:?}");
+                let shown = controller.then(&marker(&pose, &controller, at));
+                assert!(length(sub(shown.t, pose.apply(at))) < 1e-5, "drawn where the board says");
+                assert!((0..3).all(|axis| length(sub(shown.axis(axis), pose.axis(axis))) < 1e-5), "facing as the board does");
+                if tip[2] >= 0.0 {
+                    assert!(length(sub(shown.t, controller.apply(PRESSING))) < 1e-5, "at the controller's touch point");
+                }
+                if let Some(press) = press {
+                    assert!(button.contains(at[0], at[1]), "{press:?} pressed under the marker");
+                    presses.push(press);
+                }
+            }
+            assert_eq!(presses, [button.press]);
+        }
+    }
+
+    #[test]
+    fn a_point_presses_a_button_exactly_where_that_button_is_drawn() {
+        let mut board = Board::new(12, 0);
+        board.reveal();
+        let image = board.take_image().unwrap();
+        let [width, height] = board.pixels();
+        let edge = 1.0 / PIXELS_PER_METRE;
+        for line in 0..height {
+            for column in 0..width {
+                let x = (column as f32 + 0.5) / PIXELS_PER_METRE - WIDTH / 2.0;
+                let y = board.height() / 2.0 - (line as f32 + 0.5) / PIXELS_PER_METRE;
+                let near_an_edge = board.buttons().iter().any(|button| button.rect.iter().enumerate().any(|(side, &bound)| ((if side % 2 == 0 { x } else { y }) - bound).abs() < edge));
+                if near_an_edge {
+                    continue;
+                }
+                let drawn = image[((line * width + column) * 4 + 3) as usize] != BACKGROUND[3];
+                assert_eq!(board.under(x, y).is_some(), drawn, "({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn hover_follows_the_tip_across_button_bounds_and_clears_on_the_press() {
+        let mut board = Board::new(3, 0);
+        let [_, y] = centre(&board, Press::Mute);
+        board.touch(Some([0.0, y, 0.1]));
+        let mut seen = vec![board.hover];
+        for step in 0..=100 {
+            board.touch(Some([-WIDTH / 2.0 + step as f32 * WIDTH / 100.0, y, 0.03]));
+            if seen.last() != Some(&board.hover) {
+                seen.push(board.hover);
+            }
+        }
+        assert_eq!(seen, [None, Some(Press::Mute), None, Some(Press::Reset), None]);
+        let [x, y] = centre(&board, Press::Reset);
+        board.touch(Some([x, y, 0.03]));
+        board.take_image();
+        assert_eq!(board.touch(Some([x, y, 0.0])).press, Some(Press::Reset));
+        assert_eq!(board.hover, None, "pressed; the next press needs the tip drawn back");
+        board.touch(Some([x, y, 0.03]));
+        assert_eq!(board.hover, Some(Press::Reset));
+        let image = board.take_image().expect("redrawn for the hover");
+        let [left, _, _, top] = rect_of(&board, Press::Reset);
+        assert_eq!(pixel(&board, &image, left + 0.0005, top - 0.0005), HOVER);
+        let [left, _, _, top] = rect_of(&board, Press::Mute);
+        assert_eq!(pixel(&board, &image, left + 0.0005, top - 0.0005), BUTTON);
+        board.touch(Some([x, y, 0.031]));
+        assert!(board.take_image().is_none(), "moving within a button redraws nothing");
+    }
+
+    #[test]
+    fn the_marker_shows_only_over_the_board_and_near_or_through_its_face() {
+        let mut board = Board::new(3, 0);
+        let [x, y] = centre(&board, Press::Dismiss);
+        for tip in [None, Some([x, y, 0.2]), Some([WIDTH, y, 0.0]), Some([x, board.height(), 0.0])] {
+            assert_eq!(board.touch(tip).marker, None, "{tip:?}");
+        }
+        for z in [-0.05, -0.3] {
+            assert_eq!(board.touch(Some([x, y, z])).marker, Some([x, y, 0.0]), "held at the face once through it");
+        }
+        let image = marker_image();
+        let at = |x: u32, y: u32| <[u8; 4]>::try_from(&image[((y * MARKER_PIXELS + x) * 4) as usize..][..4]).unwrap();
+        let middle = MARKER_PIXELS / 2;
+        assert_eq!((at(middle, middle), at(1, middle)[3], at(0, 0)[3]), (INK, BACKGROUND[3], 0), "a light dot ringed dark on a clear square");
     }
 
     #[test]
@@ -367,7 +523,7 @@ mod tests {
             for step in 0..=200 {
                 let x = -WIDTH + step as f32 * WIDTH / 100.0;
                 for y in [-0.06, 0.0, 0.07] {
-                    assert_eq!(board.touch(Some([x, y, z])), None, "({x}, {y}, {z})");
+                    assert_eq!(board.touch(Some([x, y, z])).press, None, "({x}, {y}, {z})");
                 }
             }
         }
@@ -378,11 +534,12 @@ mod tests {
         let mut board = Board::new(3, 0);
         let [x, y] = centre(&board, Press::Dismiss);
         for z in [-0.2, -0.05, -0.02, 0.0] {
-            assert_eq!(board.touch(Some([x, y, z])), None);
+            assert_eq!(board.touch(Some([x, y, z])).press, None);
         }
         board.touch(Some([x, y, 0.1]));
-        assert_eq!(board.touch(Some([WIDTH, y, 0.0])), None, "beside the board");
-        assert_eq!(board.touch(Some([x, y, 0.0])), None, "slid onto it while already in contact");
+        let beside = board.touch(Some([WIDTH, y, 0.0]));
+        assert_eq!((beside.crossing, beside.press), (Some([WIDTH, y]), None), "a crossing beside the board, reported for the log");
+        assert_eq!(board.touch(Some([x, y, 0.0])).press, None, "slid onto it while already in contact");
     }
 
     #[test]
@@ -394,7 +551,7 @@ mod tests {
         board.touch(Some([x, top, 0.1]));
         let mut presses = Vec::new();
         for step in 0..=50 {
-            presses.extend(board.touch(Some([x, top + (bottom - top) * step as f32 / 50.0, 0.0])));
+            presses.extend(board.touch(Some([x, top + (bottom - top) * step as f32 / 50.0, 0.0])).press);
         }
         assert_eq!(presses, [Press::Dismiss]);
     }
@@ -404,7 +561,7 @@ mod tests {
         let mut board = Board::new(3, 0);
         let [x, y] = centre(&board, Press::Dismiss);
         board.touch(Some([x, y, 0.1]));
-        let presses: Vec<Press> = (0..40).filter_map(|step| board.touch(Some([x, y, if step % 2 == 0 { 0.005 } else { 0.018 }]))).collect();
+        let presses: Vec<Press> = (0..40).filter_map(|step| board.touch(Some([x, y, if step % 2 == 0 { 0.005 } else { 0.018 }])).press).collect();
         assert_eq!(presses, [Press::Dismiss]);
     }
 
@@ -413,8 +570,8 @@ mod tests {
         let mut board = Board::new(3, 0);
         let [x, y] = centre(&board, Press::Dismiss);
         board.touch(Some([x, y, 0.1]));
-        assert_eq!(board.touch(None), None);
-        assert_eq!(board.touch(Some([x, y, 0.0])), None);
+        assert_eq!(board.touch(None).press, None);
+        assert_eq!(board.touch(Some([x, y, 0.0])).press, None);
     }
 
     #[test]
@@ -423,7 +580,7 @@ mod tests {
         let [x, y] = centre(&board, Press::Dismiss);
         board.touch(Some([x, y, 0.1]));
         board.reset();
-        assert_eq!(board.touch(Some([x, y, 0.0])), None);
+        assert_eq!(board.touch(Some([x, y, 0.0])).press, None);
         assert_eq!(poke(&mut board, [x, y], 0.0), [Press::Dismiss]);
     }
 

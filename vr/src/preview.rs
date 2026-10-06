@@ -137,7 +137,7 @@ mod tests {
         for step in (0..=60).chain((0..=60).rev()) {
             let tip = pose.apply(on_face(0.1 - step as f32 * 0.002));
             let right = Pose { r: pose.r, t: crate::placement::sub(tip, pose.rotate(TIP)) };
-            presses.extend(board.touch(Some(local_tip(&pose, &right))));
+            presses.extend(board.touch(Some(local_tip(&pose, &right, TIP))).press);
         }
         assert_eq!(presses, [Press::Appearance(1)]);
     }

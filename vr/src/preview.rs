@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn a_simulated_right_controller_touching_the_blue_preview_picks_blue() {
         use crate::board::{Board, Press};
-        use crate::placement::{below_wrist, local_tip, Pose, TIP};
+        use crate::placement::{local_tip, under_controller, Pose, TIP};
         let mut previews = renderer(Rc::new(Gpu::new(None).unwrap())).unwrap();
         let models = [plain([1.0, 0.0, 0.0, 1.0]), plain([0.0, 0.0, 1.0, 1.0]), plain([0.0, 1.0, 0.0, 1.0])];
         let mut board = Board::new(models.len(), 0);
@@ -123,9 +123,8 @@ mod tests {
             board.preview(index, render(&mut previews, model).unwrap());
         }
         let image = board.take_image().unwrap();
-        let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-        let (left, head) = (Pose { r: identity, t: [-0.2, 1.1, -0.35] }, Pose { r: identity, t: [0.0, 1.6, 0.0] });
-        let pose = below_wrist(&left, &head, board.height());
+        let over = Pose { r: [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]], t: [-0.2, 1.1, -0.35] };
+        let pose = over.then(&under_controller(board.height()));
         let [width, height] = board.pixels();
         let found = (0..height).flat_map(|y| (0..width).map(move |x| (x, y))).find(|&(x, y)| {
             let at = ((y * width + x) * 4) as usize;

@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use openvr::{Runtime, Signal};
 use board::{Board, Press};
-use placement::{above_hand, below_wrist, local_tip, Hand, Pose};
+use placement::{facing, local_tip, on_controller, under_controller, Hand, Pose};
 use gaze::Gaze;
 use motion::{Animator, Clip, Random, IDLES};
 use gesture::{Recognizer, Templates};
@@ -129,7 +129,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
     let mut puppet = puppet(&mut relay, &catalog.avatars[active], &mut renderer)?;
     let mut previews = None;
     let mut board = Board::new(catalog.avatars.len(), active);
-    let mut reveal = Reveal::new(FLOOR, HEIGHT);
+    let mut reveal = Reveal::new(HEIGHT);
     let mut board_size = board.pixels();
     let mut board_image = vulkan::Flat::new(gpu.clone(), board_size[0], board_size[1])?;
     let mut overlay = runtime.create_overlay("voice.puppet", "Puppet", QUAD, true)?;
@@ -181,8 +181,9 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
             std::thread::sleep(DORMANT_POLL);
             continue;
         };
-        let quad = above_hand(&left, &head, -FLOOR);
-        if !board.library() && reveal.hold(started, hand(Hand::Right).map(|right| local_tip(&quad, &right))) {
+        let stand = on_controller(&left);
+        let quad = facing(stand.apply([0.0, -FLOOR, 0.0]), head.t);
+        if !board.library() && reveal.hold(started, hand(Hand::Right).map(|right| local_tip(&stand, &right))) {
             eprintln!("appearance library revealed");
             board.reveal();
             if previews.is_none() {
@@ -196,8 +197,9 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
             board_size = board.pixels();
             board_image = vulkan::Flat::new(gpu.clone(), board_size[0], board_size[1])?;
         }
-        let board_pose = below_wrist(&left, &head, board.height());
-        board_overlay.place_on(device, &left.inverse().then(&board_pose));
+        let mount = under_controller(board.height());
+        let board_pose = left.then(&mount);
+        board_overlay.place_on(device, &mount);
         match board.touch(hand(Hand::Right).map(|right| local_tip(&board_pose, &right))) {
             Some(Press::Dismiss) => {
                 voice.dismiss("dismissed");
@@ -247,12 +249,12 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
         let local = quad.inverse();
         let mut pose = puppet.model.pose(&puppet.animator.humanoid(&puppet.standing, puppet.model.rest_hips()));
         let worlds = puppet.model.worlds(&pose);
-        let placement = puppet.fit.placement(&puppet.model, &worlds, FLOOR);
-        puppet.gaze.look(&puppet.model, &mut pose, &worlds, placement.inverse().transform_point3(local.apply(head.t).into()), delta);
+        let placement = puppet.fit.placement(&puppet.model, &worlds, 0.0);
+        puppet.gaze.look(&puppet.model, &mut pose, &worlds, placement.inverse().transform_point3(stand.inverse().apply(head.t).into()), delta);
         puppet.model.express(&mut pose, "blink", puppet.animator.blink());
         puppet.model.express(&mut pose, "aa", voice.mouth());
         let changed = puppet.skinned.morph(&pose.weights);
-        let palette = puppet.skinned.palette(&puppet.model.worlds(&pose), placement);
+        let palette = puppet.skinned.palette(&puppet.model.worlds(&pose), local.then(&stand).mat4() * placement);
         puppet.drawn.update(&palette, &puppet.skinned.vertices, &changed);
         overlay.place_on(device, &left.inverse().then(&quad));
         let eyes = eye_offsets.map(|eye: Pose| eye_projection(local.apply(head.then(&eye).t).into(), QUAD / 2.0, QUAD / 2.0));

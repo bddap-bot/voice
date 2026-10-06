@@ -271,7 +271,7 @@ impl Canvas {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::placement::{below_wrist, local_tip, Pose, TIP};
+    use crate::placement::{local_tip, under_controller, Pose, TIP};
 
     fn rect_of(board: &Board, press: Press) -> [f32; 4] {
         board.buttons().into_iter().find(|button| button.press == press).unwrap().rect
@@ -333,13 +333,13 @@ mod tests {
     }
 
     #[test]
-    fn a_simulated_right_controller_presses_each_button_on_the_wrist_once_and_passing_near_presses_nothing() {
+    fn a_simulated_right_controller_presses_each_button_on_the_turned_over_board_once_and_passing_near_presses_nothing() {
         let (yaw, pitch) = (0.6f32, -0.4f32);
         let left = Pose { r: [[yaw.cos(), pitch.sin() * yaw.sin(), pitch.cos() * yaw.sin()], [0.0, pitch.cos(), -pitch.sin()], [-yaw.sin(), pitch.sin() * yaw.cos(), pitch.cos() * yaw.cos()]], t: [-0.2, 1.1, -0.35] };
-        let head = Pose { r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], t: [0.0, 1.6, 0.0] };
+        let over = left.then(&Pose { r: [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]], t: [0.0; 3] });
         let mut board = Board::new(36, 0);
         board.reveal();
-        let pose = below_wrist(&left, &head, board.height());
+        let pose = over.then(&under_controller(board.height()));
         let tip = |right: &Pose| local_tip(&pose, right);
         for z in [0.05, 0.015] {
             for step in 0..=100 {

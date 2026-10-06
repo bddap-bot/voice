@@ -1,5 +1,6 @@
 export const NAME = 'Corvus';
 export const WAKE_PHRASE = `Hey ${NAME}, wake up.`;
+export const VR_WAKE_PHRASE = `${NAME}, show yourself.`;
 export const SIGN_OFF = 'My labor here is ended.';
 export const INACTIVITY_MS = 10 * 60 * 1000;
 export const IDENTITY = `You are ${NAME}, the voice of the hub: the user is talking to the hub through you, not to you. Prefer concise, natural replies, with detail when it helps.

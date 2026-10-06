@@ -9,6 +9,7 @@ pub struct Identity {
     pub inactivity: Duration,
     pub instructions: String,
     pub woken: String,
+    pub vr_wake_phrase: String,
 }
 
 /// The source text of `export const NAME = …;`: a quoted literal, closed by its own quote, or an expression up to the line's `;`.
@@ -45,8 +46,19 @@ pub fn identity() -> &'static Identity {
         let name = text("NAME", &[]);
         let sign_off = text("SIGN_OFF", &[]);
         let names = [("NAME", name.as_str()), ("SIGN_OFF", sign_off.as_str())];
-        Identity { instructions: text("IDENTITY", &names), woken: text("WOKEN", &names), inactivity: Duration::from_millis(milliseconds("INACTIVITY_MS")), sign_off }
+        Identity {
+            instructions: text("IDENTITY", &names),
+            woken: text("WOKEN", &names),
+            vr_wake_phrase: text("VR_WAKE_PHRASE", &names),
+            inactivity: Duration::from_millis(milliseconds("INACTIVITY_MS")),
+            sign_off,
+        }
     })
+}
+
+#[cfg(test)]
+pub fn page_wake_phrase() -> String {
+    text("WAKE_PHRASE", &[("NAME", &text("NAME", &[]))])
 }
 
 fn phrase_key(text: &str) -> String {

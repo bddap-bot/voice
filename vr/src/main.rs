@@ -18,6 +18,7 @@ mod vrm;
 mod render;
 mod relay;
 mod reveal;
+mod wake;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -43,6 +44,7 @@ const HEIGHT: f32 = 0.3;
 const MARGIN: f32 = 0.03;
 const FLOOR: f32 = -QUAD / 2.0 + MARGIN;
 const DORMANT_POLL: Duration = Duration::from_micros(11_111);
+const SPOTTER_RETRY: Duration = Duration::from_secs(10);
 
 fn directory(variable: &str, fallback: &str) -> PathBuf {
     std::env::var_os(variable).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").expect("HOME")).join(fallback)).join("voice-vr")
@@ -147,6 +149,16 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
     let mut pressing: Option<(u32, Vec3)> = None;
     let mut calibration = (epoch, String::new());
     let mut voice = Voice::new(token.clone(), cache.clone(), state.join("voiceprint.json"));
+    let wake_file = state.join("wake.json");
+    let wake_head = match std::fs::read(&wake_file).map_err(|error| format!("{}: {error}", wake_file.display())).and_then(|bytes| wake::Head::parse(&bytes, wake::phrase())) {
+        Ok(head) => Some(std::sync::Arc::new(head)),
+        Err(error) => {
+            eprintln!("no wake word, the gesture alone wakes: {error}");
+            None
+        }
+    };
+    let mut spotter: Option<wake::Spotter> = None;
+    let mut spotter_retry = epoch;
     eprintln!("dormant");
     loop {
         if let Some(Signal::Quit) = runtime.poll() {
@@ -162,6 +174,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
         let head = runtime.head(&poses);
         let hands = runtime.hands(&poses);
         let hand = |which| hands.iter().find(|hand| hand.hand == which).map(|hand| hand.pose);
+        let mut summoned = false;
         if let (Some(head), Some(left), Some(right)) = (head, hand(Hand::Left), hand(Hand::Right)) {
             if let Some(verdict) = recognizer.push((started - epoch).as_secs_f64(), &head, left.t, right.t) {
                 let kind = match (verdict.matched, voice.awake()) {
@@ -172,13 +185,38 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
                 if verdict.matched || verdict.near {
                     eprintln!("gesture {kind}: distance {:.3} peak {:.2} m/s over {:.2} s", verdict.distance, verdict.peak, verdict.duration);
                 }
-                if verdict.matched && !voice.awake() {
-                    voice.summon();
-                    puppet.gaze = Gaze::default();
-                    board.reset();
-                    meter = Meter::default();
+                summoned |= verdict.matched && !voice.awake();
+            }
+        }
+        match &wake_head {
+            Some(model) if !voice.awake() && !voice.muted() => {
+                if spotter.is_none() && started >= spotter_retry {
+                    eprintln!("listening for {:?}", wake::phrase());
+                    spotter = Some(wake::Spotter::start(model.clone()));
                 }
             }
+            _ => spotter = None,
+        }
+        while let Some(heard) = spotter.as_ref().and_then(wake::Spotter::heard) {
+            match heard {
+                Ok(wake::Heard::Wake(score)) => {
+                    eprintln!("wake word heard: score {score:.3}, waking");
+                    summoned = true;
+                }
+                Ok(wake::Heard::Miss(peak)) => eprintln!("wake word near miss: peak {peak:.3}"),
+                Err(error) => {
+                    eprintln!("wake spotter: {error}");
+                    spotter = None;
+                    spotter_retry = started + SPOTTER_RETRY;
+                }
+            }
+        }
+        if summoned {
+            spotter = None;
+            voice.summon();
+            puppet.gaze = Gaze::default();
+            board.reset();
+            meter = Meter::default();
         }
         voice.step();
         let (true, Some(head), Some(left), Some(device)) = (voice.awake(), head, hand(Hand::Left), runtime.hand_index(Hand::Left)) else {

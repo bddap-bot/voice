@@ -20,7 +20,7 @@ let
     version = "0.1.0";
     src = pkgs.lib.fileset.toSource {
       root = ./..;
-      fileset = pkgs.lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./build.rs ./src ./shaders ./golden ../docs/poses/standing.json ../docs/identity.js ../docs/live.js ../docs/speaker.js ../test/fixtures/delegated-reply-capture.json ];
+      fileset = pkgs.lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./build.rs ./src ./shaders ./golden ../docs/poses/standing.json ../docs/identity.js ../docs/live.js ../docs/speaker.js ../docs/wake/melspectrogram.onnx ../docs/wake/embedding_model.onnx ../scripts/wake-demo.json ../test/fixtures/delegated-reply-capture.json ];
     };
     cargoRoot = "vr";
     buildAndTestSubdir = "vr";

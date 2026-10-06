@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ort from 'onnxruntime-node';
-import { NAME, WAKE_PHRASE } from '../docs/identity.js';
+import { NAME, VR_WAKE_PHRASE, WAKE_PHRASE } from '../docs/identity.js';
 import { CHUNK, RATE, WIDTH, WINDOW, WakeDecision, headScore, wakeFeatures } from '../docs/wake.js';
 
 const root = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -543,6 +543,10 @@ function variants(phrase) {
   return [...out];
 }
 
+function otherPhrases(phrase) {
+  return [WAKE_PHRASE, VR_WAKE_PHRASE].filter((other) => other !== phrase);
+}
+
 function clipStream(key, clip, spans, rng, babble = null, speed = null) {
   return { key: babble ? [...key, babble.label] : key, speed, label: key.filter((part) => part !== null && part !== 'synthetic').join(' '), spans: spans.map((span) => ({ start: span.start + PRE, end: span.end + PRE })), audio: async () => placed(babble ? augmented(clip, rng, babble) : clip, rng) };
 }
@@ -552,7 +556,7 @@ async function spoken(voice, speed, texts, speaker = null) {
 }
 
 async function synthetic(phrase) {
-  const negatives = (sentences) => [...NEAR_MISS, ...variants(phrase), ...sentences];
+  const negatives = (sentences) => [...NEAR_MISS, ...variants(phrase), ...otherPhrases(phrase), ...sentences];
   const trainVoices = VOICES.filter((voice) => !HELD_OUT.has(voice) && !VALIDATION.has(voice));
   const heldVoices = VOICES.filter((voice) => HELD_OUT.has(voice));
   const speakers = (voice, keep) => Array.from({ length: SPEAKERS[voice] }, (_, speaker) => speaker).filter(keep);
@@ -617,7 +621,7 @@ async function train({ phrase, corpus, acavMegabytes, out }) {
       add('eval', heldOutVoice, clipStream([...key, 'clean'], item.clip, spans, random(key), null, item.speed));
       add('eval', `${heldOutVoice} in noise and rooms`, clipStream([...key, 'held-out noise'], item.clip, spans, random([...key, 'held-out noise']), heldBabble, item.speed));
     }
-    else add('evalNegative', variants(phrase).includes(item.text) ? 'variants of the phrase, held-out voices' : 'Harvard and near-miss sentences, held-out voices', clipStream([...key, 'clean'], item.clip, [], random(key)));
+    else add('evalNegative', otherPhrases(phrase).includes(item.text) ? 'the other wake phrase, held-out voices' : variants(phrase).includes(item.text) ? 'variants of the phrase, held-out voices' : 'Harvard and near-miss sentences, held-out voices', clipStream([...key, 'clean'], item.clip, [], random(key)));
   }
   for (const [index, rms] of [0, 1e-5, 3e-4, 3e-3, 3e-2, 1e-1].entries()) {
     for (const color of ['white', 'pink', 'brown']) {
@@ -708,7 +712,10 @@ export async function ingest(directory, { corpus, phrase, ordinary }) {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const [command, ...args] = process.argv.slice(2);
   const option = (name) => { const at = args.indexOf(name); return at >= 0 ? args[at + 1] : undefined; };
-  if (command === 'train') await train({ phrase: option('--phrase') ?? WAKE_PHRASE, corpus: option('--corpus'), acavMegabytes: Number(option('--acav') ?? 0), out: path.resolve(option('--out') ?? path.join(root, 'scripts/wake-demo.json')) });
-  else if (command === 'ingest') await ingest(args[0], { corpus: option('--corpus'), phrase: option('--phrase'), ordinary: args.includes('--ordinary') });
+  if (command === 'train') {
+    const phrase = option('--phrase') ?? WAKE_PHRASE;
+    if (phrase !== WAKE_PHRASE && !option('--out')) throw new Error('the demo model is for the page phrase; give another phrase its own --out');
+    await train({ phrase, corpus: option('--corpus'), acavMegabytes: Number(option('--acav') ?? 0), out: path.resolve(option('--out') ?? path.join(root, 'scripts/wake-demo.json')) });
+  } else if (command === 'ingest') await ingest(args[0], { corpus: option('--corpus'), phrase: option('--phrase'), ordinary: args.includes('--ordinary') });
   else throw new Error('usage: node scripts/wake.mjs train [--phrase <text>] [--corpus <dir>] [--acav <megabytes>] [--out <file>] | ingest <clips> --corpus <dir> (--phrase <text> | --ordinary)');
 }

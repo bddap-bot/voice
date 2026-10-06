@@ -126,6 +126,10 @@ impl Voice {
         self.awake.is_some()
     }
 
+    pub fn muted(&self) -> bool {
+        self.muted
+    }
+
     pub fn summon(&mut self) {
         eprintln!("summoned, opening the session");
         let session = Session::open(&self.token, &self.cache, self.trace.wake(Instant::now()), self.muted, self.hearing.clone());

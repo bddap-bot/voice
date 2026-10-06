@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -623,10 +624,13 @@ impl Hearing {
 }
 
 /// The page's speaker worker: a thread running the gate or the enrollment over chunks at the filter's rate, one model run at a time.
-fn worker(mode: &Mode) -> (mpsc::Sender<Vec<f32>>, mpsc::Receiver<Report>) {
+/// The count of chunks it has finished lets tests pace frames by work done rather than by the host's clock.
+fn worker(mode: &Mode) -> (mpsc::Sender<Vec<f32>>, mpsc::Receiver<Report>, Arc<AtomicUsize>) {
     let (chunks, received) = mpsc::channel::<Vec<f32>>();
     let (send, heard) = mpsc::channel();
+    let digested = Arc::new(AtomicUsize::new(0));
     let mode = mode.clone();
+    let counted = digested.clone();
     std::thread::spawn(move || {
         let model = match model() {
             Ok(model) => model,
@@ -637,24 +641,27 @@ fn worker(mode: &Mode) -> (mpsc::Sender<Vec<f32>>, mpsc::Receiver<Report>) {
             Mode::Filter(print) => {
                 let mut gate = Gate::new(print.to_vec());
                 received.iter().try_for_each(|mut chunk| {
-                    chunk.extend(received.try_iter().flatten());
-                    gate.push(&chunk, &mut embed, &mut |event| drop(send.send(event)))
+                    let mut taken = 1;
+                    chunk.extend(received.try_iter().inspect(|_| taken += 1).flatten());
+                    gate.push(&chunk, &mut embed, &mut |event| drop(send.send(event)))?;
+                    counted.fetch_add(taken, Ordering::Release);
+                    Ok(())
                 })
             }
             Mode::Learn => {
                 let mut enrollment = Enrollment::new(page().windows);
                 let mut reported = 0.0;
                 received.iter().try_for_each(|chunk| {
-                    if reported >= 1.0 {
-                        return Ok(());
+                    if reported < 1.0 {
+                        let (progress, learned) = enrollment.push(&chunk, &mut embed)?;
+                        match learned {
+                            Some(print) => drop(send.send(Report::Learned(print))),
+                            None if progress > reported => drop(send.send(Report::Progress(progress))),
+                            None => {}
+                        }
+                        reported = progress;
                     }
-                    let (progress, learned) = enrollment.push(&chunk, &mut embed)?;
-                    match learned {
-                        Some(print) => drop(send.send(Report::Learned(print))),
-                        None if progress > reported => drop(send.send(Report::Progress(progress))),
-                        None => {}
-                    }
-                    reported = progress;
+                    counted.fetch_add(1, Ordering::Release);
                     Ok(())
                 })
             }
@@ -664,7 +671,7 @@ fn worker(mode: &Mode) -> (mpsc::Sender<Vec<f32>>, mpsc::Receiver<Report>) {
             let _ = send.send(Report::Error(error));
         }
     });
-    (chunks, heard)
+    (chunks, heard, digested)
 }
 
 struct Running {
@@ -674,6 +681,10 @@ struct Running {
     chunk: Vec<f32>,
     granted: GrantedAudio,
     failed: bool,
+    #[cfg(test)]
+    sent: usize,
+    #[cfg(test)]
+    digested: Arc<AtomicUsize>,
 }
 
 /// The session side of the filter: what Live hears of each captured frame.
@@ -699,9 +710,21 @@ impl Ear {
             return;
         }
         if self.running.as_ref().is_none_or(|(generation, ..)| *generation != hearing.generation) {
-            let (chunks, heard) = worker(&hearing.mode);
+            let (chunks, heard, _digested) = worker(&hearing.mode);
             let granted = GrantedAudio::new(10 * crate::audio::RATE as usize);
-            self.running = Some((hearing.generation, hearing.mode.clone(), Running { chunks, heard, decimator: Decimator::new(), chunk: Vec::new(), granted, failed: false }));
+            let running = Running {
+                chunks,
+                heard,
+                decimator: Decimator::new(),
+                chunk: Vec::new(),
+                granted,
+                failed: false,
+                #[cfg(test)]
+                sent: 0,
+                #[cfg(test)]
+                digested: _digested,
+            };
+            self.running = Some((hearing.generation, hearing.mode.clone(), running));
         }
         let (_, mode, running) = self.running.as_mut().unwrap();
         let mut decimated = Vec::new();
@@ -709,6 +732,10 @@ impl Ear {
         running.chunk.extend(decimated);
         if running.chunk.len() >= page().chunk {
             let _ = running.chunks.send(std::mem::take(&mut running.chunk));
+            #[cfg(test)]
+            {
+                running.sent += 1;
+            }
         }
         running.granted.write(frame);
         for event in running.heard.try_iter() {
@@ -730,6 +757,16 @@ impl Ear {
             Mode::Filter(_) if running.failed => {}
             Mode::Filter(_) => running.granted.read(frame),
             _ => frame.fill(0.0),
+        }
+    }
+
+    /// Blocks until the worker has finished every chunk sent so far, or has stopped.
+    #[cfg(test)]
+    pub fn settle(&self) {
+        if let Some((_, _, running)) = &self.running {
+            while running.digested.load(Ordering::Acquire) < running.sent && Arc::strong_count(&running.digested) > 1 {
+                std::thread::yield_now();
+            }
         }
     }
 }
@@ -1038,16 +1075,15 @@ mod tests {
         std::fs::read(format!("{directory}/{name}.f32")).unwrap().chunks_exact(4).map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap())).collect()
     }
 
-    /// The session's path: 20 ms frames through the ear in real time, as the capture delivers them.
+    /// The session's path: 20 ms frames through the ear, each after the worker has finished what the last one sent, as an idle host keeps up.
     fn through(ear: &mut Ear, audio: &[f32]) -> Vec<f32> {
         let frame = crate::audio::RATE as usize / 50;
-        let started = Instant::now();
         let mut out = Vec::with_capacity(audio.len());
-        for (index, chunk) in audio.chunks(frame).enumerate() {
+        for chunk in audio.chunks(frame) {
             let mut samples = chunk.to_vec();
             ear.hear(&mut samples);
+            ear.settle();
             out.extend(samples);
-            std::thread::sleep((started + std::time::Duration::from_millis(20 * (index as u64 + 1))).saturating_duration_since(Instant::now()));
         }
         out
     }
@@ -1072,15 +1108,9 @@ mod tests {
             enrollment.extend(silence(0.5, capture));
         }
         let mut heard = through(&mut ear, &enrollment);
-        let started = Instant::now();
-        let print = loop {
-            let learned = hearing.lock().unwrap().reports.iter().find_map(|report| if let Report::Learned(print) = report { Some(print.clone()) } else { None });
-            if let Some(print) = learned {
-                break print;
-            }
-            assert!(started.elapsed().as_secs() < 300, "no voiceprint: {:?}", hearing.lock().unwrap().reports);
-            heard.extend(through(&mut ear, &silence(0.1, capture)));
-        };
+        heard.extend(through(&mut ear, &silence(0.1, capture)));
+        let learned = hearing.lock().unwrap().reports.iter().find_map(|report| if let Report::Learned(print) = report { Some(print.clone()) } else { None });
+        let print = learned.unwrap_or_else(|| panic!("no voiceprint: {:?}", hearing.lock().unwrap().reports));
         assert!(heard.iter().all(|&sample| sample == 0.0), "Live hears nothing while the voice is learned");
         let progress: Vec<f32> = hearing.lock().unwrap().reports.iter().filter_map(|report| if let Report::Progress(progress) = report { Some(*progress) } else { None }).collect();
         assert!(progress.windows(2).all(|pair| pair[0] < pair[1]) && progress.len() == page().windows - 1, "{progress:?}");

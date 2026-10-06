@@ -36,6 +36,7 @@ use relay::{Avatar, Relay, Token};
 use reveal::Reveal;
 use voice::Voice;
 use render::{eye_projection, Appearance, Renderer};
+use vrm::spring::Springs;
 use vrm::{Fit, Humanoid, Model, Skinned};
 
 const EYE: u32 = 768;
@@ -86,6 +87,7 @@ struct Puppet {
     standing: Humanoid,
     animator: Animator,
     gaze: Gaze,
+    springs: Springs,
     drawn: Appearance,
 }
 
@@ -110,7 +112,7 @@ fn puppet(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer) -> Result
     let skinned = model.skinned()?;
     let fit = Fit::new(&model, &skinned, HEIGHT);
     let drawn = renderer.appearance(&model, &skinned)?;
-    Ok(Puppet { model, skinned, fit, standing, animator: Animator::new(clips, Random::seeded()), gaze: Gaze::default(), drawn })
+    Ok(Puppet { model, skinned, fit, standing, animator: Animator::new(clips, Random::seeded()), gaze: Gaze::default(), springs: Springs::default(), drawn })
 }
 
 /// Loads the picked appearance beside the shown one, then records it as the overlay's own choice.
@@ -225,6 +227,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
             marker_overlay.hide();
             board.reset();
             reveal.reset();
+            puppet.springs.reset();
             std::thread::sleep(DORMANT_POLL);
             continue;
         };
@@ -333,6 +336,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
         puppet.gaze.look(&puppet.model, &mut pose, &worlds, placement.inverse().transform_point3(stand.inverse().apply(head.t).into()), delta);
         puppet.model.express(&mut pose, "blink", puppet.animator.blink());
         puppet.model.express(&mut pose, "aa", voice.mouth());
+        puppet.springs.step(&puppet.model, &mut pose, stand.mat4() * placement, delta);
         let changed = puppet.skinned.morph(&pose.weights);
         let palette = puppet.skinned.palette(&puppet.model.worlds(&pose), local.then(&stand).mat4() * placement);
         puppet.drawn.update(&palette, &puppet.skinned.vertices, &changed);

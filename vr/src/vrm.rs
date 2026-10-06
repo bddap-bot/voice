@@ -3,6 +3,10 @@ use std::collections::HashMap;
 use glam::{Mat4, Quat, Vec2, Vec3};
 use serde_json::Value;
 
+pub mod spring;
+
+use spring::Rig;
+
 const STANDING: &str = include_str!("../../docs/poses/standing.json");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,6 +135,7 @@ pub struct Model {
     expressions: HashMap<String, Expression>,
     look_at: LookAt,
     rest_turns: Vec<Quat>,
+    rig: Rig,
 }
 
 #[repr(C)]
@@ -529,8 +534,10 @@ impl Model {
                 Node { parent: None, translation, rotation, scale, mesh: index(&node["mesh"]), skin: index(&node["skin"]) }
             })
             .collect();
+        let mut children = vec![Vec::new(); nodes.len()];
         for (parent, node) in list("nodes").iter().enumerate() {
             for child in node["children"].as_array().unwrap_or(&empty).iter().filter_map(index) {
+                children[parent].push(child);
                 let node = nodes.get_mut(child).ok_or("child node out of range")?;
                 if node.parent.replace(parent).is_some() {
                     return Err("a node has two parents".into());
@@ -707,7 +714,8 @@ impl Model {
         } else {
             humanoid.contains_key("leftEye") || humanoid.contains_key("rightEye")
         };
-        let mut model = Model { version, nodes, meshes, skins, materials, images, humanoid, expressions, look_at, rest_turns: Vec::new() };
+        let rig = Rig::parse(version, extensions, &nodes, &children);
+        let mut model = Model { version, nodes, meshes, skins, materials, images, humanoid, expressions, look_at, rest_turns: Vec::new(), rig };
         model.rest_turns = model.worlds(&model.rest()).iter().map(rotation).collect();
         Ok(model)
     }
@@ -718,12 +726,16 @@ impl Model {
             if let Some(world) = worlds[node] {
                 return world;
             }
-            let local = Mat4::from_scale_rotation_translation(model.nodes[node].scale, pose.rotations[node], pose.translations[node]);
+            let local = model.local(pose, node);
             let world = model.nodes[node].parent.map_or(local, |parent| resolve(model, pose, worlds, parent) * local);
             worlds[node] = Some(world);
             world
         }
         (0..self.nodes.len()).map(|node| resolve(self, pose, &mut worlds, node)).collect()
+    }
+
+    fn local(&self, pose: &Pose, node: usize) -> Mat4 {
+        Mat4::from_scale_rotation_translation(self.nodes[node].scale, pose.rotations[node], pose.translations[node])
     }
 
     pub fn rest(&self) -> Pose {

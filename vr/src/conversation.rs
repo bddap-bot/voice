@@ -2,6 +2,8 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+use crate::calls::Calls;
+
 const MEMORY: &str = "Context: Archived transcripts of completed conversations, oldest first, for memory only. Each ended when you went to sleep. These utterances already happened; do not repeat or continue them.\n";
 const MAX_CONTEXT: usize = 8192;
 
@@ -50,6 +52,7 @@ pub struct Trace {
     pending_from: usize,
     heard_at: Option<Instant>,
     force_new_speech: bool,
+    pub calls: Calls,
 }
 
 fn elapsed(duration: Duration) -> String {

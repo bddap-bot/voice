@@ -129,18 +129,20 @@ impl Hub {
     fn hand_off(&mut self, id: &str, trace: &mut Trace, now: Instant) {
         self.unanswered = None;
         let delegation = trace.delegated(now);
+        trace.calls.asked(id, &delegation.text);
         self.waiting.insert(id.to_owned());
         eprintln!("delegating {id}: {:?}", delegation.text);
         if delegation.text.is_empty() {
-            return self.failed(id, "no transcript before the delegation");
+            return self.failed(id, "no transcript before the delegation", trace);
         }
         self.out.push(Command::Frame("delegate", json!({ "id": id, "text": delegation.text, "context": delegation.context, "duration_ms": delegation.duration_ms })));
     }
 
-    pub fn failed(&mut self, id: &str, message: &str) {
+    pub fn failed(&mut self, id: &str, message: &str, trace: &mut Trace) {
         if !self.waiting.remove(id) {
             return;
         }
+        trace.calls.failed(id);
         eprintln!("hub request {id} failed: {message}");
         let owned = self.owned.contains(id).then_some(id);
         self.out.push(tell("session.commentary.append", format!("hub_error_{id}"), owned, FAILED));
@@ -185,6 +187,7 @@ impl Hub {
             Err(error) => return eprintln!("hub reply unreadable: {error}"),
         };
         eprintln!("hub reply {} ({}): {:?}{}", reply.id, reply.stamp, reply.commentary, if reply.instructions.is_empty() { "" } else { " with instructions" });
+        trace.calls.replied(&reply.id, &reply.commentary);
         if let Some(shown) = reply.display.take() {
             self.display = Some(Display { markdown: shown.markdown, link: shown.link, image: (shown.image.is_some() && !image.is_empty()).then(|| image.to_vec()) });
         }
@@ -309,6 +312,7 @@ impl Hub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::calls::State;
 
     struct Fixture {
         hub: Hub,
@@ -404,6 +408,12 @@ mod tests {
         assert_eq!(f.event_ids(), ["hub_mix", "hub_mix_1", "hub_share_1"]);
         assert_eq!(f.told(), [commentary(json!("item_exact"), "Two jobs need attention."), commentary(json!("item_exact"), "Both are on the display."), commentary(Value::Null, "The link is the release notes.")]);
         assert_eq!(f.frames("hub-ack"), [json!({ "id": "item_exact", "stamp": "mix" }), json!({ "id": "share_1", "stamp": "share_1" })]);
+        let calls: Vec<_> = f.trace.calls.iter().map(|call| (call.request.as_str(), call.state, call.replies.join(" "))).collect();
+        assert_eq!(calls, [
+            ("", State::Replied, "The link is the release notes.".into()),
+            ("What's in the build queue right now?", State::Replied, "Two jobs need attention. Both are on the display.".into()),
+            ("Hello there.", State::Waiting, String::new()),
+        ]);
     }
 
     #[test]
@@ -432,13 +442,15 @@ mod tests {
         let mut f = Fixture::new();
         f.hear("Is the printer busy?");
         f.delegate("lost");
-        f.hub.failed("lost", "delegation queue is full");
-        f.hub.failed("lost", "again");
+        f.hub.failed("lost", "delegation queue is full", &mut f.trace);
+        f.hub.failed("lost", "again", &mut f.trace);
         f.delegate("empty");
         f.collect();
         assert_eq!(f.event_ids(), ["hub_error_lost", "hub_error_empty"]);
         assert_eq!(f.told(), [commentary(json!("lost"), FAILED), commentary(json!("empty"), FAILED)]);
         assert_eq!(f.frames("delegate").len(), 1);
+        let calls: Vec<_> = f.trace.calls.iter().map(|call| (call.request.clone(), call.state)).collect();
+        assert_eq!(calls, [(String::new(), State::Failed), ("Is the printer busy?".into(), State::Failed)]);
     }
 
     #[test]

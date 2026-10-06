@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::audio;
+use crate::calls::Calls;
 use crate::conversation::Trace;
 use crate::hub::{self, Hub};
 use crate::identity::{identity, includes_phrase};
@@ -122,6 +123,10 @@ impl Voice {
         }
     }
 
+    pub fn calls(&self) -> &Calls {
+        &self.trace.calls
+    }
+
     pub fn awake(&self) -> bool {
         self.awake.is_some()
     }
@@ -213,7 +218,7 @@ impl Voice {
                 }
                 session::Event::Delegated(id) => awake.hub.delegated(&id, &mut self.trace, Instant::now()),
                 session::Event::Hub(body) => awake.hub.reply(&body, &mut self.trace, Instant::now()),
-                session::Event::HubError { id, message } => awake.hub.failed(&id, &message),
+                session::Event::HubError { id, message } => awake.hub.failed(&id, &message, &mut self.trace),
                 session::Event::ContextUsage(ratio) => awake.hub.usage(ratio),
                 session::Event::Closed(reason) => {
                     ended = Some(format!("session closed: {reason}"));

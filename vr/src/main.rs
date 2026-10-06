@@ -1,5 +1,6 @@
 mod audio;
 mod board;
+mod calls;
 mod chosen;
 mod conversation;
 mod gaze;
@@ -312,6 +313,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
             }
             Some(Press::VoiceId) => voice.toggle_voice_id(),
             Some(Press::Learn) => voice.toggle_learning(),
+            Some(Press::Calls) => board.toggle_log(),
             Some(Press::Appearance(index)) if index != board.active => {
                 let avatar = &catalog.avatars[index];
                 eprintln!("picked appearance {}", avatar.id);
@@ -332,6 +334,10 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
                 board.mark();
             }
             _ => {}
+        }
+        if board.calls != *voice.calls() {
+            board.calls = voice.calls().clone();
+            board.mark();
         }
         if board.voice != voice.voice_id() {
             board.voice = voice.voice_id();

@@ -1,5 +1,6 @@
 use font8x8::legacy::BASIC_LEGACY;
 
+use crate::calls::{Calls, State};
 use crate::placement::Vec3;
 use crate::voice::VoiceId;
 
@@ -7,8 +8,8 @@ pub const WIDTH: f32 = 0.2;
 const PIXELS_PER_METRE: f32 = 2000.0;
 const ROW: f32 = 0.022;
 const GAP: f32 = 0.004;
-/// Dismiss, the microphone and reset, Voice ID, and Learn my voice.
-const ROWS: usize = 4;
+/// Dismiss, the microphone and reset, Voice ID, Learn my voice, and the hub calls.
+const ROWS: usize = 5;
 const COLUMNS: usize = 6;
 const CELL: f32 = (WIDTH - (COLUMNS + 1) as f32 * GAP) / COLUMNS as f32;
 /// The highlight showing around a preview.
@@ -16,6 +17,11 @@ const BORDER: u32 = 4;
 pub const PREVIEW: u32 = (CELL * PIXELS_PER_METRE) as u32 - 2 * BORDER;
 const GLYPH_SCALE: u32 = 2;
 const PADDING: u32 = 8;
+/// The hub calls' text is drawn at the font's own size.
+const LINE: u32 = 10;
+const STRIPE: u32 = 4;
+const REQUEST_LINES: usize = 2;
+const REPLY_LINES: usize = 3;
 
 /// Touch depths along the board's normal, positive toward the viewer.
 const CONTACT: f32 = 0.01;
@@ -32,6 +38,7 @@ const DISMISS: [u8; 4] = [150, 42, 42, 255];
 const MUTED: [u8; 4] = [140, 47, 57, 255];
 const INK: [u8; 4] = [240, 240, 240, 255];
 const HOVER: [u8; 4] = [255, 214, 90, 255];
+const REPLY_INK: [u8; 4] = [170, 200, 240, 255];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Press {
@@ -40,6 +47,7 @@ pub enum Press {
     Reset,
     VoiceId,
     Learn,
+    Calls,
     Appearance(usize),
 }
 
@@ -67,6 +75,8 @@ pub struct Touch {
 pub struct Board {
     previews: Vec<Option<Vec<u8>>>,
     library: bool,
+    log: bool,
+    pub calls: Calls,
     pub active: usize,
     pub pending: Option<usize>,
     pub muted: bool,
@@ -78,7 +88,7 @@ pub struct Board {
 
 impl Board {
     pub fn new(appearances: usize, active: usize) -> Board {
-        Board { previews: vec![None; appearances], library: false, active, pending: None, muted: false, voice: VoiceId::default(), armed: false, hover: None, dirty: true }
+        Board { previews: vec![None; appearances], library: false, log: false, calls: Calls::default(), active, pending: None, muted: false, voice: VoiceId::default(), armed: false, hover: None, dirty: true }
     }
 
     /// As summoned: a hand already at the board must withdraw before it presses, and the appearance library is hidden.
@@ -86,6 +96,7 @@ impl Board {
         self.armed = false;
         self.hover = None;
         self.library = false;
+        self.log = false;
         self.dirty = true;
     }
 
@@ -99,6 +110,36 @@ impl Board {
         self.library
     }
 
+    /// Shows or hides the recent hub calls below the buttons.
+    pub fn toggle_log(&mut self) {
+        self.log = !self.log;
+        self.dirty = true;
+    }
+
+    /// Each line of the shown hub calls with its ink and the call's state, newest call first.
+    fn log_lines(&self) -> Vec<(String, [u8; 4], State)> {
+        if !self.log {
+            return Vec::new();
+        }
+        let fits = ((WIDTH * PIXELS_PER_METRE) as u32 - 2 * PADDING - 2 * STRIPE) as usize / 8;
+        let mut lines = Vec::new();
+        for (index, call) in self.calls.iter().enumerate() {
+            if index > 0 {
+                lines.push((String::new(), INK, call.state));
+            }
+            lines.extend(wrap(&call.request, fits, REQUEST_LINES).into_iter().map(|line| (line, INK, call.state)));
+            lines.extend(wrap(&call.replies.join(" "), fits, REPLY_LINES).into_iter().map(|line| (line, REPLY_INK, call.state)));
+        }
+        lines
+    }
+
+    fn log_height(&self) -> f32 {
+        if !self.log {
+            return 0.0;
+        }
+        (self.log_lines().len() as u32 * LINE + 2 * PADDING) as f32 / PIXELS_PER_METRE + GAP
+    }
+
     /// The appearance's preview, `PREVIEW` pixels square, premultiplied RGBA, top row first.
     pub fn preview(&mut self, index: usize, rgba: Vec<u8>) {
         assert_eq!(rgba.len(), (PREVIEW * PREVIEW * 4) as usize, "one RGBA texel per preview pixel");
@@ -108,7 +149,7 @@ impl Board {
 
     pub fn height(&self) -> f32 {
         let lines = if self.library { self.previews.len().div_ceil(COLUMNS) } else { 0 };
-        ROWS as f32 * ROW + lines as f32 * CELL + (ROWS + lines + 1) as f32 * GAP
+        ROWS as f32 * ROW + self.log_height() + lines as f32 * CELL + (ROWS + lines + 1) as f32 * GAP
     }
 
     pub fn pixels(&self) -> [u32; 2] {
@@ -121,7 +162,7 @@ impl Board {
     }
 
     fn cell(&self, index: usize) -> [f32; 4] {
-        let top = self.height() / 2.0 - GAP - ROWS as f32 * (ROW + GAP) - (index / COLUMNS) as f32 * (CELL + GAP);
+        let top = self.height() / 2.0 - GAP - ROWS as f32 * (ROW + GAP) - self.log_height() - (index / COLUMNS) as f32 * (CELL + GAP);
         let left = -WIDTH / 2.0 + GAP + (index % COLUMNS) as f32 * (CELL + GAP);
         [left, top - CELL, left + CELL, top]
     }
@@ -134,6 +175,7 @@ impl Board {
             Button { press: Press::Mute, rect: self.row(1, left, left + half) },
             Button { press: Press::Reset, rect: self.row(1, right - half, right) },
             Button { press: Press::Learn, rect: self.row(3, left, right) },
+            Button { press: Press::Calls, rect: self.row(4, left, right) },
         ];
         if self.voice.stored {
             buttons.push(Button { press: Press::VoiceId, rect: self.row(2, left, right) });
@@ -205,6 +247,7 @@ impl Board {
                     None if self.voice.stored => (BUTTON, "Forget my voice".to_owned()),
                     None => (BUTTON, "Learn my voice".to_owned()),
                 },
+                Press::Calls => (if self.log { ACTIVE } else { BUTTON }, "Hub calls".to_owned()),
                 Press::Appearance(index) => {
                     let fill = if self.pending == Some(index) {
                         PENDING
@@ -225,6 +268,21 @@ impl Board {
             };
             image.fill(area, fill);
             image.label(area, &label);
+        }
+        let [left, _, _, bottom] = self.area(self.row(ROWS - 1, -WIDTH / 2.0 + GAP, WIDTH / 2.0 - GAP));
+        let first = bottom + (GAP * PIXELS_PER_METRE) as u32 + PADDING;
+        for (index, (line, ink, state)) in self.log_lines().into_iter().enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+            let y = first + index as u32 * LINE;
+            let mark = match state {
+                State::Waiting => PENDING,
+                State::Replied => ACTIVE,
+                State::Failed => DISMISS,
+            };
+            image.fill([left, y, left + STRIPE, y + LINE], mark);
+            image.text([left + 2 * STRIPE, y + (LINE - 8) / 2], &line.chars().collect::<Vec<_>>(), 1, ink);
         }
         if let Some(button) = self.buttons().into_iter().find(|button| Some(button.press) == self.hover) {
             image.outline(self.area(button.rect), BORDER, HOVER);
@@ -336,6 +394,39 @@ impl Canvas {
     }
 }
 
+/// Words wrapped to lines of at most `width` characters, the last of `most` cut short with "..".
+fn wrap(text: &str, width: usize, most: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        let mut word: Vec<char> = word.chars().collect();
+        while !word.is_empty() {
+            let line = match lines.last_mut() {
+                Some(line) if line.chars().count() + 1 + word.len().min(width) <= width => {
+                    line.push(' ');
+                    line
+                }
+                _ => {
+                    lines.push(String::new());
+                    lines.last_mut().unwrap()
+                }
+            };
+            let take = word.len().min(width - line.chars().count());
+            line.extend(word.drain(..take));
+        }
+    }
+    if lines.len() > most {
+        lines.truncate(most);
+        let last = lines.last_mut().unwrap();
+        let mut characters: Vec<char> = last.chars().collect();
+        characters.truncate(width - 2);
+        while characters.last() == Some(&' ') {
+            characters.pop();
+        }
+        *last = characters.into_iter().chain(['.', '.']).collect();
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,6 +468,13 @@ mod tests {
         let [column, line, _, _] = board.area([x, y, x, y]);
         let at = ((line * board.pixels()[0] + column) * 4) as usize;
         image[at..at + 4].try_into().unwrap()
+    }
+
+    const BACKGROUND_PREMULTIPLIED: [u8; 4] = [(18 * 210 / 255) as u8, (18 * 210 / 255) as u8, (22 * 210 / 255) as u8, 210];
+
+    fn corner_of(board: &Board, image: &[u8], press: Press) -> [u8; 4] {
+        let [left, _, _, top] = rect_of(board, press);
+        pixel(board, image, left + 0.001, top - 0.001)
     }
 
     fn inked(board: &Board, image: &[u8], [left, top, right, bottom]: [u32; 4]) -> Vec<bool> {
@@ -717,6 +815,62 @@ mod tests {
         assert!(mute_right < reset_left);
         assert_eq!((mute_bottom, mute_top), (reset_bottom, reset_top));
         assert!(rect(Press::Dismiss)[1] > mute_top && mute_bottom > rect(Press::Appearance(0))[3]);
+    }
+
+    fn calls(requests: &[(&str, &[&str], bool)]) -> Calls {
+        let mut calls = Calls::default();
+        for (index, (request, replies, failed)) in requests.iter().enumerate().rev() {
+            let id = index.to_string();
+            calls.asked(&id, request);
+            calls.replied(&id, &replies.iter().map(|reply| reply.to_string()).collect::<Vec<_>>());
+            if *failed {
+                calls.failed(&id);
+            }
+        }
+        calls
+    }
+
+    #[test]
+    fn hub_calls_show_below_the_buttons_and_above_the_library_marked_by_state_and_hide_again() {
+        let mut board = Board::new(6, 0);
+        board.reveal();
+        board.calls = calls(&[("What is queued right now on every lane of the build queue, and which are stalled?", &[], false), ("Is the printer busy?", &["It is idle.", "The bed is clear."], false), ("Lost one", &[], true)]);
+        let closed = board.height();
+        let cell = rect_of(&board, Press::Appearance(0));
+        assert_eq!(poke_on(&mut board, Press::Calls, 0.0), [Press::Calls]);
+        board.toggle_log();
+        let lines = board.log_lines();
+        assert_eq!(lines.iter().map(|(line, _, _)| line.as_str()).collect::<Vec<_>>(), [
+            "What is queued right now on every lane of the",
+            "build queue, and which are stalled?",
+            "",
+            "Is the printer busy?",
+            "It is idle. The bed is clear.",
+            "",
+            "Lost one",
+        ]);
+        assert!(board.height() > closed && rect_of(&board, Press::Appearance(0))[3] < cell[3], "the board grows and the library moves down");
+        let image = board.take_image().unwrap();
+        let [left, _, _, bottom] = board.area(rect_of(&board, Press::Calls));
+        assert_eq!(corner_of(&board, &image, Press::Calls), ACTIVE);
+        let first = bottom + (GAP * PIXELS_PER_METRE) as u32 + PADDING;
+        let stripe = |line: u32| <[u8; 4]>::try_from(&image[(((first + line * LINE + LINE / 2) * board.pixels()[0] + left + 1) * 4) as usize..][..4]).unwrap();
+        assert_eq!([stripe(0), stripe(1), stripe(2), stripe(3), stripe(4), stripe(6)], [PENDING, PENDING, BACKGROUND_PREMULTIPLIED, ACTIVE, ACTIVE, DISMISS]);
+        let width = board.pixels()[0];
+        let row_inked = |line: u32, ink: [u8; 4]| (first + line * LINE..first + (line + 1) * LINE).any(|y| (left..width).any(|x| image[((y * width + x) * 4) as usize..][..4] == ink));
+        assert!(row_inked(0, INK) && row_inked(4, REPLY_INK) && !row_inked(2, INK));
+        let [_, cell_top, _, _] = board.area(rect_of(&board, Press::Appearance(0)));
+        assert!(first + lines.len() as u32 * LINE <= cell_top, "the log ends above the library");
+        board.reset();
+        assert!(board.log_lines().is_empty());
+    }
+
+    #[test]
+    fn wrapping_breaks_between_words_splits_long_words_and_cuts_the_last_line() {
+        assert_eq!(wrap("  one two  three ", 7, 3), ["one two", "three"]);
+        assert_eq!(wrap("abcdefghij", 4, 3), ["abcd", "efgh", "ij"]);
+        assert_eq!(wrap("aa bb cc dd ee", 5, 2), ["aa bb", "cc.."]);
+        assert!(wrap("", 5, 2).is_empty());
     }
 
     #[test]

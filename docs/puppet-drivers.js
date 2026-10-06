@@ -84,7 +84,7 @@ export function independentEmbedder(extractor) {
 }
 
 export async function browserEmbedder() {
-  const { env, pipeline } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.3');
+  const { env, pipeline } = await import('./lib/transformers.js');
   env.allowLocalModels = false;
   const adapter = await webGpuAdapter();
   const extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { dtype: 'q8', device: adapter ? 'webgpu' : 'wasm' });

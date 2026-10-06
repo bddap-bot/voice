@@ -81,21 +81,27 @@ const cache=new Map();Object.defineProperty(globalThis,'caches',{value:{open:asy
 async function makeServer() {
   if (development) return serveDevelopment({ port: 0 });
   let index = await readFile(path.join(root, 'docs/index.html'), 'utf8');
+  let main = await readFile(path.join(root, 'docs/main.js'), 'utf8');
+  let mocks = '';
   let token;
   if (mode === 'public') {
-    index = index.replace('./relay/botq_dash_wasm.js', '/smoke-wasm.js').replace('./puppet.js', '/smoke-puppet.js').replace('</head>', `<script>${browserMocks}</script></head>`);
+    main = main.replace('./relay/botq_dash_wasm.js', '/smoke-wasm.js').replace('./puppet.js', '/smoke-puppet.js');
+    mocks = browserMocks;
     token = Buffer.from(JSON.stringify({ endpoint_id: 'smoke', secret: 'smoke' })).toString('base64url');
   } else {
     const { stdout } = await execute('voice-web', ['token']);
     token = stdout.trim();
-    index = index.replace('puppetRuntime = new PuppetRuntime($(\'puppet\'));', "puppetRuntime = new PuppetRuntime($('puppet')); globalThis.__smokeRuntime = puppetRuntime;");
+    main = main.replace('puppetRuntime = new PuppetRuntime($(\'puppet\'));', "puppetRuntime = new PuppetRuntime($('puppet')); globalThis.__smokeRuntime = puppetRuntime;");
   }
   if (deployed) return { url: 'https://bddap-bot.github.io/voice/', token, close() {} };
-  index = index.replace('</head>', `<script>localStorage.setItem('voice.token', ${JSON.stringify(token)});</script></head>`);
+  mocks += `localStorage.setItem('voice.token', ${JSON.stringify(token)});`;
+  index = index.replace('</head>', '<script src="/smoke-mocks.js"></script></head>');
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, 'http://localhost');
     if (url.pathname === '/smoke-wasm.js') return response.writeHead(200, { 'content-type': 'text/javascript' }).end(mockWasm);
     if (url.pathname === '/smoke-puppet.js') return response.writeHead(200, { 'content-type': 'text/javascript' }).end(neutralSilhouettePuppet);
+    if (url.pathname === '/smoke-mocks.js') return response.writeHead(200, { 'content-type': 'text/javascript' }).end(mocks);
+    if (url.pathname === '/main.js') return response.writeHead(200, { 'content-type': 'text/javascript' }).end(main);
     const relative = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
     try { const body = relative === 'index.html' ? index : await readFile(path.join(root, 'docs', relative)); response.writeHead(200, { 'content-type': relative.endsWith('.js') ? 'text/javascript' : relative.endsWith('.html') ? 'text/html' : relative.endsWith('.wasm') ? 'application/wasm' : 'application/octet-stream' }).end(body); } catch { response.writeHead(404).end(); }
   });

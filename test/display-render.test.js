@@ -17,11 +17,12 @@ test('the initial page bundle references the renderers only through lazy imports
   assert.equal(lazy.length, 3, entry);
   for (const name of lazy) assert.match(name, /-[A-Z0-9]{8}\.js$/);
   assert.ok(entry.length < 4096, `render.js is ${entry.length} bytes`);
-  const files = await readdir(new URL('../docs/lib', import.meta.url));
-  for (const file of files.filter((name) => name !== 'render.js')) assert.match(file, /-[A-Z0-9]{8}\.(js|css|woff2)$/);
+  const entries = ['render.js', 'ort.js', 'transformers.js'];
+  const files = (await readdir(new URL('../docs/lib', import.meta.url))).filter((name) => !entries.includes(name));
+  for (const file of files) assert.match(file, /-[A-Z0-9]{8}\.(js|css|woff2|wasm)$/);
   const worker = await readFile(new URL('../docs/sw.js', import.meta.url), 'utf8');
   const hashed = new RegExp(/const HASHED = \/(.*)\/;/.exec(worker)[1]);
-  assert.ok(files.filter((name) => name !== 'render.js').every((name) => hashed.test(`/lib/${name}`)));
-  assert.equal(hashed.test('/lib/render.js'), false);
+  assert.ok(files.every((name) => hashed.test(`/lib/${name}`)));
+  for (const name of entries) assert.equal(hashed.test(`/lib/${name}`), false);
   assert.equal(hashed.test('/index.html'), false);
 });

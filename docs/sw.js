@@ -1,6 +1,6 @@
-const CACHE = 'voice-shell-v12';
-const SHELL = ['.', 'index.html', 'live.js', 'config.js', 'puppet-client.js', 'puppet-drivers.js', 'puppet.js', 'lib/render.js', 'manifest.webmanifest', 'icons/icon.svg'];
-const HASHED = /\/lib\/[^/]+-[A-Z0-9]{8}\.(js|css|woff2)$/;
+const CACHE = 'voice-shell-v13';
+const SHELL = ['.', 'index.html', 'main.js', 'live.js', 'config.js', 'puppet-client.js', 'puppet-drivers.js', 'puppet.js', 'lib/render.js', 'manifest.webmanifest', 'icons/icon.svg'];
+const HASHED = /\/lib\/[^/]+-[A-Z0-9]{8}\.(js|css|woff2|wasm)$/;
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL.map((path) => new Request(path, { cache: 'no-cache' })))).then(() => self.skipWaiting()));

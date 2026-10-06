@@ -29,7 +29,7 @@ export async function runRig({ outDir, speech, page, extra = {} }, scenario) {
   const t0 = Date.now();
   const now = () => Date.now() - t0;
   const say = (...parts) => console.log(`${(now() / 1000).toFixed(1).padStart(7)} ${parts.join(' ')}`);
-  const relayModule = /import wbgInit,.*?from '([^']+)'/.exec(await readFile(path.join(root, 'docs/index.html'), 'utf8'))?.[1];
+  const relayModule = /import wbgInit,.*?from '([^']+)'/.exec(await readFile(path.join(root, 'docs/main.js'), 'utf8'))?.[1];
   if (!relayModule) throw new Error('page relay module was not found');
   const relayFixture = await readFile(path.join(root, 'test/fixtures/wake-reply/botq_dash_wasm.js'));
   const commit = execFileSync('git', ['describe', '--always', '--dirty', '--exclude=*', '--abbrev=40'], { cwd: root }).toString().trim();

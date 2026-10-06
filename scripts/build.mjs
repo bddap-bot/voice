@@ -21,10 +21,12 @@ const katexCss = basename(Object.keys(css.metafile.outputs).find((name) => name.
 
 await build({
   ...shared,
-  entryPoints: ['src/render.js'],
+  entryPoints: ['src/render.js', 'src/ort.js', 'src/transformers.js'],
   outdir: 'docs/lib',
   splitting: true,
   chunkNames: '[name]-[hash]',
+  assetNames: '[name]-[hash]',
+  loader: { '.wasm': 'file' },
   alias: { katex: './node_modules/katex/dist/katex.mjs' },
   define: { KATEX_CSS: JSON.stringify(katexCss) },
 });

@@ -17,7 +17,7 @@ test('private smoke uses the same authenticated relay transport as the page', as
 });
 
 test('connection errors identify transport, authentication transport, and token rejection', async () => {
-  const source = await readFile(new URL('../docs/index.html', import.meta.url), 'utf8');
+  const source = await readFile(new URL('../docs/main.js', import.meta.url), 'utf8');
   const dial = source.slice(source.indexOf('async function dial()'), source.indexOf('function waitForAnswer'));
   assert.match(dial, /relay transport failed:/);
   assert.match(dial, /authentication transport failed:/);
@@ -310,9 +310,11 @@ async function dumpDom(url, args, budget) {
 
 async function pageServer(testSetup) {
   const index = (await readFile(new URL('../docs/index.html', import.meta.url), 'utf8'))
+    .replace('</head>', '<script src="/test-setup.js"></script></head>');
+  const setup = `${browserSetup}${testSetup}`;
+  const main = (await readFile(new URL('../docs/main.js', import.meta.url), 'utf8'))
     .replace('./relay/botq_dash_wasm.js', '/botq_dash_wasm.js')
-    .replace('./puppet.js', '/fake-puppet.js')
-    .replace('</head>', () => `<script>${browserSetup}${testSetup}</script></head>`);
+    .replace('./puppet.js', '/fake-puppet.js');
   const live = await readFile(new URL('../docs/live.js', import.meta.url));
   const puppetClient = await readFile(new URL('../docs/puppet-client.js', import.meta.url));
   const puppetDrivers = await readFile(new URL('../docs/puppet-drivers.js', import.meta.url));
@@ -323,7 +325,7 @@ async function pageServer(testSetup) {
     requests.push(path);
     if (path === '/panel-link-destination') { destinations++; destinationArrived(); response.writeHead(200, { 'content-type': 'text/html', 'cache-control': 'no-store' }); response.end('<!doctype html><script>window.close()</script>'); return; }
     if (path === '/panel-links-loaded') { while (destinations < Number(searchParams.get('count'))) await new Promise((resolve) => { destinationArrived = resolve; }); response.end(); return; }
-    const served = path === '/botq_dash_wasm.js' ? mockWasm : path === '/fake-puppet.js' ? fakePuppet : path === '/puppet-client.js' ? puppetClient : path === '/puppet-drivers.js' ? puppetDrivers : path === '/live.js' ? live : path === '/' ? index : await readFile(new URL(`../docs${path}`, import.meta.url)).catch(() => null);
+    const served = path === '/test-setup.js' ? setup : path === '/main.js' ? main : path === '/botq_dash_wasm.js' ? mockWasm : path === '/fake-puppet.js' ? fakePuppet : path === '/puppet-client.js' ? puppetClient : path === '/puppet-drivers.js' ? puppetDrivers : path === '/live.js' ? live : path === '/' ? index : await readFile(new URL(`../docs${path}`, import.meta.url)).catch(() => null);
     if (served === null) { response.writeHead(404); response.end(); return; }
     response.writeHead(200, { 'content-type': path.endsWith('.js') ? 'text/javascript' : path.endsWith('.css') ? 'text/css' : path.endsWith('.woff2') ? 'font/woff2' : 'text/html' });
     response.end(served);

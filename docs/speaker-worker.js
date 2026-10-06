@@ -1,7 +1,6 @@
-import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.wasm.min.mjs';
+import * as ort from './lib/ort.js';
 import { MODEL, SpeakerEnrollment, SpeakerGate } from './speaker.js';
 
-ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
 let loading;
 let current;
 let listener;

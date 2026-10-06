@@ -40,7 +40,7 @@ test('localhost serves the same bundle with private uncached config', async () =
 });
 
 test('page uses config for startup, manual connect, storage and service worker', async () => {
-  const page = await readFile(new URL('../docs/index.html', import.meta.url), 'utf8');
+  const page = await readFile(new URL('../docs/main.js', import.meta.url), 'utf8');
   assert.match(page, /const KEY = config.storageKey/);
   assert.match(page, /new PuppetChannel\(sendFrame, caches, .*config.transferTimeout\)/);
   assert.match(page, /async function start\(raw\) \{\s+raw = configuredToken\(config, raw\)/);

@@ -91,6 +91,7 @@ function run(command, args, input = '') {
     child.stderr.on('data', (data) => { errors += data; });
     child.on('error', (error) => reject(error.code === 'ENOENT' ? new Error(`${command} is required on PATH`) : error));
     child.on('close', (code) => code === 0 ? resolve({ stdout: Buffer.concat(output), stderr: errors }) : reject(new Error(`${command} ${args.join(' ')} exited ${code}: ${errors.slice(-2000)}`)));
+    child.stdin.on('error', () => {});
     child.stdin.end(input);
   });
 }

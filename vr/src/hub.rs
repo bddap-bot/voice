@@ -14,8 +14,6 @@ const TURN_START: Duration = Duration::from_secs(20);
 pub const TURN_QUIET: Duration = Duration::from_millis(1500);
 const FAILED: &str = "The hub request failed.";
 const ASLEEP: &str = "Live is asleep";
-const NO_DISPLAY: &str = "the VR overlay shows no display";
-const SPOKEN_NO_DISPLAY: &str = "the VR overlay shows no display; the commentary went to Live";
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
@@ -31,7 +29,23 @@ struct Reply {
     first: bool,
     commentary: Vec<String>,
     instructions: Vec<String>,
-    display: Option<serde::de::IgnoredAny>,
+    display: Option<Shown>,
+}
+
+#[derive(Deserialize, Debug)]
+struct Shown {
+    markdown: Option<String>,
+    link: Option<String>,
+    image: Option<serde::de::IgnoredAny>,
+}
+
+/// What a hub reply asks to show, as the page's display card does.
+#[derive(Debug, Default, PartialEq)]
+pub struct Display {
+    pub markdown: Option<String>,
+    pub link: Option<String>,
+    /// The encoded PNG, JPEG, GIF or WebP.
+    pub image: Option<Vec<u8>>,
 }
 
 enum Turn {
@@ -65,6 +79,7 @@ pub struct Hub {
     reply_unspoken: bool,
     over_context: bool,
     sleeping: bool,
+    display: Option<Display>,
 }
 
 fn has_word(text: &str) -> bool {
@@ -95,6 +110,11 @@ impl Hub {
     /// Whether a wait for quiet started since the last call; the caller restarts playback's silence count, as the page's `quiet()` does.
     pub fn take_listen(&mut self) -> bool {
         std::mem::take(&mut self.listen)
+    }
+
+    /// The newest display a reply carried, once.
+    pub fn take_display(&mut self) -> Option<Display> {
+        self.display.take()
     }
 
     pub fn sleeping(&self) -> bool {
@@ -156,18 +176,19 @@ impl Hub {
 
     /// A `hub` frame's body: one JSON line, then any display image.
     pub fn reply(&mut self, body: &[u8], trace: &mut Trace, now: Instant) {
-        let line = body.split(|&byte| byte == b'\n').next().unwrap_or_default();
-        let reply: Reply = match serde_json::from_slice(line) {
+        let (line, image) = match body.iter().position(|&byte| byte == b'\n') {
+            Some(end) => (&body[..end], &body[end + 1..]),
+            None => (body, &[][..]),
+        };
+        let mut reply: Reply = match serde_json::from_slice(line) {
             Ok(reply) => reply,
             Err(error) => return eprintln!("hub reply unreadable: {error}"),
         };
         eprintln!("hub reply {} ({}): {:?}{}", reply.id, reply.stamp, reply.commentary, if reply.instructions.is_empty() { "" } else { " with instructions" });
-        let unspoken = match (reply.commentary.is_empty(), reply.display.is_some()) {
-            (false, _) if self.sleeping => Some(ASLEEP),
-            (true, true) => Some(NO_DISPLAY),
-            (false, true) => Some(SPOKEN_NO_DISPLAY),
-            (_, false) => None,
-        };
+        if let Some(shown) = reply.display.take() {
+            self.display = Some(Display { markdown: shown.markdown, link: shown.link, image: (shown.image.is_some() && !image.is_empty()).then(|| image.to_vec()) });
+        }
+        let unspoken = (!reply.commentary.is_empty() && self.sleeping).then_some(ASLEEP);
         let mut ack = json!({ "id": reply.id, "stamp": reply.stamp });
         if let Some(unspoken) = unspoken {
             ack["unspoken"] = unspoken.into();
@@ -386,17 +407,24 @@ mod tests {
     }
 
     #[test]
-    fn a_display_only_push_says_nothing_and_a_display_is_reported_as_not_shown() {
+    fn a_display_only_push_says_nothing_and_each_display_is_kept_for_the_panel_with_its_image() {
         let mut f = Fixture::new();
         f.hear("How many jobs are queued?");
         f.delegate("slow");
         f.reply(json!({ "id": "slow", "stamp": "push_1", "commentary": [], "instructions": [], "display": { "markdown": "chart" } }));
         assert!(f.told().is_empty());
         assert!(f.hub.waiting.contains("slow"));
-        f.reply(json!({ "id": "slow", "stamp": "reply_1", "commentary": ["Four jobs are queued."], "instructions": [], "display": { "markdown": "chart" } }));
+        assert_eq!(f.hub.take_display(), Some(Display { markdown: Some("chart".into()), link: None, image: None }));
+        assert_eq!(f.hub.take_display(), None);
+        let line = json!({ "id": "slow", "stamp": "reply_1", "commentary": ["Four jobs are queued."], "instructions": [], "display": { "link": "https://example.com/q", "image": { "mime": "image/png" } } });
+        let mut body = format!("{line}\n").into_bytes();
+        body.extend([0x89, b'P', b'N', b'G', b'\n', 0]);
+        f.hub.reply(&body, &mut f.trace, f.now);
+        f.collect();
         assert_eq!(f.told(), [commentary(json!("slow"), "Four jobs are queued.")]);
         assert!(f.hub.waiting.is_empty());
-        assert_eq!(f.frames("hub-ack").iter().map(|ack| ack["unspoken"].clone()).collect::<Vec<_>>(), [json!(NO_DISPLAY), json!(SPOKEN_NO_DISPLAY)]);
+        assert_eq!(f.hub.take_display(), Some(Display { markdown: None, link: Some("https://example.com/q".into()), image: Some(vec![0x89, b'P', b'N', b'G', b'\n', 0]) }));
+        assert!(f.frames("hub-ack").iter().all(|ack| ack.get("unspoken").is_none()));
     }
 
     #[test]

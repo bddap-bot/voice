@@ -130,6 +130,11 @@ impl Voice {
         self.muted
     }
 
+    /// The newest display a hub reply carried this session, once.
+    pub fn take_display(&mut self) -> Option<hub::Display> {
+        self.awake.as_mut()?.hub.take_display()
+    }
+
     pub fn summon(&mut self) {
         eprintln!("summoned, opening the session");
         let session = Session::open(&self.token, &self.cache, self.trace.wake(Instant::now()), self.muted, self.hearing.clone());

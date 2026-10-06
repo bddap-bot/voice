@@ -190,8 +190,7 @@ impl Board {
 
     fn image(&self) -> Vec<u8> {
         let [width, height] = self.pixels();
-        let mut image = Canvas { pixels: vec![0; (width * height * 4) as usize], width };
-        image.fill([0, 0, width, height], BACKGROUND);
+        let mut image = Canvas::new(width, height, BACKGROUND);
         for button in self.buttons() {
             let area = self.area(button.rect);
             let (fill, label) = match button.press {
@@ -219,7 +218,7 @@ impl Board {
                     let corner = [left + (right - left - PREVIEW) / 2, top + (bottom - top - PREVIEW) / 2];
                     image.fill([corner[0], corner[1], corner[0] + PREVIEW, corner[1] + PREVIEW], BUTTON);
                     if let Some(preview) = &self.previews[index] {
-                        image.over(corner, PREVIEW, preview);
+                        image.over(corner, [PREVIEW, PREVIEW], preview);
                     }
                     continue;
                 }
@@ -258,13 +257,19 @@ pub fn marker_image() -> Vec<u8> {
     image.pixels
 }
 
-struct Canvas {
-    pixels: Vec<u8>,
-    width: u32,
+pub struct Canvas {
+    pub pixels: Vec<u8>,
+    pub width: u32,
 }
 
 impl Canvas {
-    fn fill(&mut self, [left, top, right, bottom]: [u32; 4], color: [u8; 4]) {
+    pub fn new(width: u32, height: u32, color: [u8; 4]) -> Canvas {
+        let mut canvas = Canvas { pixels: vec![0; (width * height * 4) as usize], width };
+        canvas.fill([0, 0, width, height], color);
+        canvas
+    }
+
+    pub fn fill(&mut self, [left, top, right, bottom]: [u32; 4], color: [u8; 4]) {
         let alpha = color[3] as u32;
         let premultiplied = [0, 1, 2].map(|channel| (color[channel] as u32 * alpha / 255) as u8);
         for y in top..bottom {
@@ -283,11 +288,11 @@ impl Canvas {
         self.fill([right - width, top, right, bottom], color);
     }
 
-    /// A premultiplied square image drawn over the canvas with its top left corner at `at`.
-    fn over(&mut self, [x0, y0]: [u32; 2], size: u32, rgba: &[u8]) {
-        for y in 0..size {
-            for x in 0..size {
-                let from = ((y * size + x) * 4) as usize;
+    /// A premultiplied image drawn over the canvas with its top left corner at `at`.
+    pub fn over(&mut self, [x0, y0]: [u32; 2], [width, height]: [u32; 2], rgba: &[u8]) {
+        for y in 0..height {
+            for x in 0..width {
+                let from = ((y * width + x) * 4) as usize;
                 let to = (((y0 + y) * self.width + x0 + x) * 4) as usize;
                 let keep = 255 - rgba[from + 3] as u32;
                 for channel in 0..4 {
@@ -311,13 +316,19 @@ impl Canvas {
         }
         let x0 = left + (right - left - characters.len() as u32 * glyph) / 2;
         let y0 = top + (bottom - top).saturating_sub(glyph) / 2;
-        for (index, character) in characters.into_iter().enumerate() {
-            for (line, bits) in BASIC_LEGACY[character as usize].iter().enumerate() {
+        self.text([x0, y0], &characters, GLYPH_SCALE, INK);
+    }
+
+    /// ASCII glyphs `scale` canvas pixels per font pixel, the first glyph's top left corner at `at`.
+    pub fn text(&mut self, [x0, y0]: [u32; 2], characters: &[char], scale: u32, ink: [u8; 4]) {
+        for (index, &character) in characters.iter().enumerate() {
+            let Some(bits) = BASIC_LEGACY.get(character as usize) else { continue };
+            for (line, bits) in bits.iter().enumerate() {
                 for column in 0..8 {
                     if bits >> column & 1 == 1 {
-                        let x = x0 + index as u32 * glyph + column * GLYPH_SCALE;
-                        let y = y0 + line as u32 * GLYPH_SCALE;
-                        self.fill([x, y, x + GLYPH_SCALE, y + GLYPH_SCALE], INK);
+                        let x = x0 + (index as u32 * 8 + column) * scale;
+                        let y = y0 + line as u32 * scale;
+                        self.fill([x, y, x + scale, y + scale], ink);
                     }
                 }
             }

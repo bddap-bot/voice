@@ -82,6 +82,8 @@ const STAND: Vec3 = [0.0, 0.03, 0.02];
 const BELOW: f32 = 0.07;
 /// The board's edge nearest the elbow, in the controller's frame.
 const NEAR_EDGE: f32 = 0.08;
+/// Between the board and the display panel beside it.
+const SIDE_GAP: f32 = 0.01;
 /// The right controller's touch point ahead of its origin, in its frame, for a controller whose render model has no tip.
 pub const TIP: Vec3 = [0.0, 0.0, -0.05];
 
@@ -93,6 +95,11 @@ pub fn on_controller(hand: &Pose) -> Pose {
 /// The board under the controller, its face toward the floor while the controller is held upright: turned over, it reads with its top away from the elbow.
 pub fn under_controller(height: f32) -> Pose {
     Pose::from_axes([-1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, -1.0, 0.0], [0.0, -BELOW, NEAR_EDGE - height / 2.0])
+}
+
+/// A panel of `size` metres to the right of a board of `board_size`, in its plane, their near edges level.
+pub fn beside(board: &Pose, [board_width, board_height]: [f32; 2], [width, height]: [f32; 2]) -> Pose {
+    board.then(&Pose { r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], t: [(board_width + width) / 2.0 + SIDE_GAP, (height - board_height) / 2.0, 0.0] })
 }
 
 /// A window centred on `at` square to the line from `viewer`.
@@ -178,6 +185,19 @@ mod tests {
         assert!(close(board.axis(0), [1.0, 0.0, 0.0]), "its rows run to the right");
         assert!(close(board.axis(1), [0.0, 0.0, -1.0]), "its top away from the elbow");
         assert!(close(board.apply([0.0, -height / 2.0, 0.0]), over.apply([0.0, -BELOW, NEAR_EDGE])), "a taller board grows away from the elbow");
+    }
+
+    #[test]
+    fn the_panel_lies_right_of_the_turned_over_board_in_its_plane_and_near_edge() {
+        let over = rolled(std::f32::consts::PI, [0.0, 1.0, -0.3]);
+        let (board_size, size) = ([0.2, 0.15], [0.3, 0.25]);
+        let mount = under_controller(board_size[1]);
+        let board = over.then(&mount);
+        let panel = over.then(&beside(&mount, board_size, size));
+        assert_eq!(panel.r, board.r, "turns with the board");
+        let near = |pose: &Pose, [width, height]: [f32; 2]| pose.apply([-width / 2.0, -height / 2.0, 0.0]);
+        let gap = sub(near(&panel, size), board.apply([board_size[0] / 2.0, -board_size[1] / 2.0, 0.0]));
+        assert!(close(gap, [SIDE_GAP, 0.0, 0.0]), "a gap to the right, near edges level: {gap:?}");
     }
 
     #[test]

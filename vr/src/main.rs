@@ -11,6 +11,7 @@ mod gesture;
 mod hub;
 mod motion;
 mod openvr;
+mod panel;
 mod placement;
 mod preview;
 mod vulkan;
@@ -28,7 +29,7 @@ use std::time::{Duration, Instant};
 use openvr::{Runtime, Signal};
 use board::{Board, Press};
 use chosen::Chosen;
-use placement::{facing, local_tip, marker, on_controller, under_controller, Hand, Pose, Vec3, TIP};
+use placement::{beside, facing, local_tip, marker, on_controller, under_controller, Hand, Pose, Vec3, TIP};
 use gaze::Gaze;
 use motion::{Animator, Clip, Random, IDLES};
 use gesture::{Recognizer, Templates};
@@ -144,6 +145,8 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
     marker_overlay.above_others();
     let mut marker_texture = vulkan::Flat::new(gpu.clone(), board::MARKER_PIXELS, board::MARKER_PIXELS)?;
     marker_overlay.texture(&mut marker_texture.upload(&board::marker_image())?)?;
+    let mut display_overlay = runtime.create_overlay("voice.display", "Display", panel::WIDTH, false)?;
+    let mut display: Option<([f32; 2], vulkan::Flat)> = None;
     let eye_offsets = runtime.eye_offsets();
     let mut meter = Meter::default();
     let epoch = Instant::now();
@@ -218,6 +221,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
             voice.summon();
             puppet.gaze = Gaze::default();
             board.reset();
+            display = None;
             meter = Meter::default();
         }
         voice.step();
@@ -225,6 +229,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
             overlay.hide();
             board_overlay.hide();
             marker_overlay.hide();
+            display_overlay.hide();
             board.reset();
             reveal.reset();
             puppet.springs.reset();
@@ -266,6 +271,17 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
         let mount = under_controller(board.height());
         let board_pose = left.then(&mount);
         board_overlay.place_on(device, &mount);
+        let fresh = voice.take_display().map(|shown| panel::draw(&shown));
+        if let Some(picture) = &fresh {
+            display = Some((picture.size(), vulkan::Flat::new(gpu.clone(), picture.width, picture.height)?));
+        }
+        if let Some((size, image)) = &mut display {
+            display_overlay.place_on(device, &beside(&mount, [board::WIDTH, board.height()], *size));
+            if let Some(picture) = fresh {
+                display_overlay.texture(&mut image.upload(&picture.rgba)?)?;
+                display_overlay.show();
+            }
+        }
         let right = hand(Hand::Right).zip(right_device);
         let touch = board.touch(right.map(|(right, _)| local_tip(&board_pose, &right, tip)));
         if let Some([x, y]) = touch.crossing {

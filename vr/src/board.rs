@@ -838,6 +838,7 @@ mod tests {
         let closed = board.height();
         let cell = rect_of(&board, Press::Appearance(0));
         assert_eq!(poke_on(&mut board, Press::Calls, 0.0), [Press::Calls]);
+        board.touch(None);
         board.toggle_log();
         let lines = board.log_lines();
         assert_eq!(lines.iter().map(|(line, _, _)| line.as_str()).collect::<Vec<_>>(), [

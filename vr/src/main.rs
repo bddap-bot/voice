@@ -1,5 +1,6 @@
 mod audio;
 mod board;
+mod chosen;
 mod conversation;
 mod gaze;
 mod identity;
@@ -25,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use openvr::{Runtime, Signal};
 use board::{Board, Press};
+use chosen::Chosen;
 use placement::{facing, local_tip, marker, on_controller, under_controller, Hand, Pose, Vec3, TIP};
 use gaze::Gaze;
 use motion::{Animator, Clip, Random, IDLES};
@@ -109,11 +111,10 @@ fn puppet(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer) -> Result
     Ok(Puppet { model, skinned, fit, standing, animator: Animator::new(clips, Random::seeded()), gaze: Gaze::default(), drawn })
 }
 
-/// Loads the picked appearance beside the shown one, then makes it the server's selection, as the page's picker does.
-fn switch(token: &Token, cache: &std::path::Path, avatar: &Avatar, renderer: &mut Renderer) -> Result<Puppet, String> {
-    let mut relay = Relay::connect(token, cache)?;
-    let loaded = puppet(&mut relay, avatar, renderer)?;
-    relay.select(&avatar.id)?;
+/// Loads the picked appearance beside the shown one, then records it as the overlay's own choice.
+fn switch(token: &Token, cache: &std::path::Path, chosen: &Chosen, avatar: &Avatar, renderer: &mut Renderer) -> Result<Puppet, String> {
+    let loaded = puppet(&mut Relay::connect(token, cache)?, avatar, renderer)?;
+    chosen.write(&avatar.id)?;
     Ok(loaded)
 }
 
@@ -125,7 +126,8 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
     let cache = state.join("assets");
     let mut relay = Relay::connect(token, &cache)?;
     let catalog = relay.catalog()?;
-    let active = catalog.avatars.iter().position(|avatar| avatar.id == catalog.active).ok_or_else(|| format!("the selected appearance {} is not in the catalog", catalog.active))?;
+    let chosen = Chosen::beside(&cache);
+    let active = chosen.read(&catalog.avatars)?;
     let mut puppet = puppet(&mut relay, &catalog.avatars[active], &mut renderer)?;
     let mut previews = None;
     let mut board = Board::new(catalog.avatars.len(), active);
@@ -262,7 +264,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
                     board_overlay.texture(&mut board_image.upload(&image)?)?;
                     board_overlay.show();
                 }
-                match switch(token, &cache, avatar, &mut renderer) {
+                match switch(token, &cache, &chosen, avatar, &mut renderer) {
                     Ok(loaded) => {
                         puppet = loaded;
                         board.active = index;

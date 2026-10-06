@@ -38,7 +38,6 @@ pub struct Avatar {
 
 #[derive(Deserialize)]
 pub struct Catalog {
-    pub active: String,
     pub avatars: Vec<Avatar>,
 }
 
@@ -189,15 +188,6 @@ impl Relay {
                 return Err(format!("{verb}: {}", message(body)));
             }
         }
-    }
-
-    /// Makes `id` the appearance every client of this server shows, as the page's picker does.
-    pub fn select(&mut self, id: &str) -> Result<(), String> {
-        let reply: Value = serde_json::from_slice(&self.exchange(format!("puppet-select\n{}", json!({ "id": id })).as_bytes(), "puppet-select", "puppet-selected")?).map_err(|_| "puppet-selected is not JSON")?;
-        if reply["id"].as_str() != Some(id) {
-            return Err(format!("puppet-select {id}: the server selected {}", reply["id"]));
-        }
-        Ok(())
     }
 
     pub fn catalog(&mut self) -> Result<Catalog, String> {

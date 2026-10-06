@@ -8,7 +8,8 @@
       "tests": [
         "nix-build vr/default.nix --no-out-link",
         "nix-build vr/default.nix -A bundle --no-out-link",
-        "nix-build vr/default.nix -A simulatedController --no-out-link"
+        "nix-build vr/default.nix -A simulatedController --no-out-link",
+        "nix-build vr/default.nix -A harness --no-out-link"
       ],
       "why": "the overlay host's build runs its unit tests and offscreen-render tests on a software Vulkan device, and wraps the runtime libraries SteamVR's client needs; the headset bundle's build checks its architecture, loader, libraries and glibc floor; the simulated controller driver builds"
     },

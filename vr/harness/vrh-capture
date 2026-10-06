@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Usage: vrh-capture OUT.png [both|left|right]: the compositor mirror window, eyes side by side.
+set -euo pipefail
+out="$1"; eye="${2:-both}"
+magick import -display "${DISPLAY:-:9}" -window root "$out"
+case "$eye" in
+  both) ;;
+  left)  magick "$out" -crop 50%x100%+0+0 +repage "$out" ;;
+  right) magick "$out" -gravity east -crop 50%x100%+0+0 +repage "$out" ;;
+  *) echo "eye must be both|left|right" >&2; exit 2 ;;
+esac

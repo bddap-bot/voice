@@ -69,7 +69,7 @@ let
     substitute ${./voice-vr.vrmanifest} $out/voice-vr.vrmanifest --replace-fail '"binary_path_linux": "@out@/bin/voice-vr"' '"binary_path_linux_arm": "bin/voice-vr"'
   '';
 in
-pkgs.runCommand "voice-vr-${native.version}" { nativeBuildInputs = [ pkgs.makeWrapper ]; passthru = { inherit bundle; simulatedController = import ./simulated { inherit pkgs; }; }; } ''
+pkgs.runCommand "voice-vr-${native.version}" { nativeBuildInputs = [ pkgs.makeWrapper ]; passthru = rec { inherit bundle; simulatedController = import ./simulated { inherit pkgs; }; harness = import ./harness { inherit pkgs simulatedController; }; }; } ''
   makeWrapper ${native}/bin/voice-vr $out/bin/voice-vr \
     --prefix LD_LIBRARY_PATH : ${runtimeLibraries} \
     --set-default VOICE_VR_SPEAKER_MODEL ${speakerModel}

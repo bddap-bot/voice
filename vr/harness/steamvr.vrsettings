@@ -1,0 +1,27 @@
+{
+  "steamvr": {
+    "forcedDriver": "null",
+    "activateMultipleDrivers": true,
+    "allowFallbackMirrorWindowLinux": true,
+    "enableHomeApp": false,
+    "requireHmd": true,
+    "showMirrorView": true
+  },
+  "driver_null": {
+    "enable": true,
+    "renderWidth": 1024,
+    "renderHeight": 1024,
+    "windowX": 0,
+    "windowY": 0,
+    "windowWidth": 2048,
+    "windowHeight": 1024,
+    "displayFrequency": 90.0,
+    "secondsFromVsyncToPhotons": 0.01111111
+  },
+  "dashboard": {
+    "enableDashboard": false
+  },
+  "driver_simulated": {
+    "enable": true
+  }
+}

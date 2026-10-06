@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -uo pipefail
+mkdir -p /tmp/xdg /tmp/.X11-unix; chmod 700 /tmp/xdg; chmod 1777 /tmp/.X11-unix
+L="$VRH_STATE/logs"
+export DISPLAY=:9 SDL_VIDEODRIVER=x11 QT_QPA_PLATFORM=xcb
+export VK_ICD_FILENAMES=/run/opengl-driver/share/vulkan/icd.d/nvidia_icd.json
+SVR="$VRH/SteamVR"; RT="$VRH/steam-runtime/run.sh"
+Xvfb :9 -screen 0 "${VRH_SCREEN:-2048x1024x24}" -nolisten tcp >"$L/xvfb.log" 2>&1 &
+for _ in $(seq 50); do [ -S /tmp/.X11-unix/X9 ] && break; sleep 0.1; done
+steam-run "$RT" "$SVR/bin/vrenv.sh" "$SVR/bin/linux64/vrserver" --keepalive >"$L/vrserver.out" 2>&1 &
+sleep "${VRH_SERVER_WAIT:-3}"
+steam-run "$RT" "$SVR/bin/linux64/vrcompositor-launcher.sh" >"$L/vrcompositor.out" 2>&1 &
+sleep "${VRH_COMPOSITOR_WAIT:-5}"
+if [ $# -gt 0 ]; then "$@"; else echo "vrh: up; no command, idling"; wait; fi

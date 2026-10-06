@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Usage: vrh [-- cmd args...]   cmd runs inside the harness once vrcompositor is up.
+# VRH: a directory holding SteamVR/ and steam-runtime/ copied from a Steam install.
+# VRH_STATE (default ./vrh-state): the harness's home, config and logs.
+set -euo pipefail
+[ "${1-}" = "--" ] && shift
+: "${VRH:?set VRH to a directory holding SteamVR/ and steam-runtime/}"
+VRH=$(cd "$VRH" && pwd)
+RUN=$(mkdir -p "${VRH_STATE:-vrh-state}" && cd "${VRH_STATE:-vrh-state}" && pwd)
+
+foreign_vrserver() {
+  local uid
+  uid=$(ps -eo uid=,comm= | awk -v me="$(id -u)" '$2 == "vrserver" && $1 != me && !seen { print $1; seen = 1 }') || uid=unknown
+  [ -n "$uid" ] && echo "$uid"
+}
+if uid=$(foreign_vrserver); then
+  echo "vrh: refusing to start: uid $uid runs a vrserver" >&2
+  exit 75
+fi
+
+rm -rf "${RUN:?}/home" "$RUN/config" "$RUN/logs"
+mkdir -p "$RUN/home/.config/openvr" "$RUN/config" "$RUN/logs" "$RUN/home/.steam/steam/ubuntu12_32"
+ln -s "$VRH/steam-runtime" "$RUN/home/.steam/steam/ubuntu12_32/steam-runtime"
+ln -s steam "$RUN/home/.steam/root"
+cat > "$RUN/home/.config/openvr/openvrpaths.vrpath" <<J
+{"config":["$RUN/config"],"external_drivers":["@simulatedController@"],"jsonid":"vrpathreg","log":["$RUN/logs"],"runtime":["$VRH/SteamVR"],"version":1}
+J
+cp @share@/steamvr.vrsettings "$RUN/config/steamvr.vrsettings"
+if [ -n "${VRH_APPCONFIG:-}" ]; then cp "$VRH_APPCONFIG" "$RUN/config/appconfig.json"; fi
+
+# No host ports in either direction and no route to the host's loopback, so nothing here can bind or reach a port a host SteamVR uses.
+pasta --config-net -q -t none -u none -T none -U none --no-map-gw -- \
+  bwrap --dev-bind / / --proc /proc --tmpfs /tmp --tmpfs /dev/shm \
+  --unshare-ipc --unshare-pid --die-with-parent \
+  --setenv HOME "$RUN/home" --setenv XDG_RUNTIME_DIR /tmp/xdg --setenv VRH "$VRH" --setenv VRH_STATE "$RUN" \
+  --setenv VOICE_VR_SIMULATED_LEFT "$RUN/left-pose" --setenv VOICE_VR_SIMULATED_RIGHT "$RUN/right-pose" \
+  --unsetenv WAYLAND_DISPLAY --unsetenv XDG_CONFIG_HOME --unsetenv XDG_DATA_HOME --unsetenv XDG_CACHE_HOME \
+  --unsetenv DBUS_SESSION_BUS_ADDRESS \
+  vrh-inner "$@" &
+harness=$!
+trap 'kill "$harness" 2>/dev/null || true' EXIT
+while kill -0 "$harness" 2>/dev/null; do
+  if uid=$(foreign_vrserver); then
+    echo "vrh: stopping: uid $uid started a vrserver" >&2
+    kill "$harness"; wait "$harness" || true
+    exit 75
+  fi
+  sleep 1
+done
+wait "$harness"

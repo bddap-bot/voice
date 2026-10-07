@@ -77,12 +77,16 @@
     },
     {
       "paths": [
+        "scripts/vr-action-golden.mjs",
         "test/action-evaluation.js"
       ],
       "tests": [
-        "node test/action-evaluation.js"
+        "node --check scripts/vr-action-golden.mjs",
+        "node test/action-evaluation.js",
+        "node scripts/vr-action-golden.mjs && git diff --exit-code vr/golden/actions.json",
+        "nix-build vr/default.nix --no-out-link"
       ],
-      "why": "the real embedding model must reach every action token from natural conversational sentences"
+      "why": "the real embedding model must reach every action token from natural conversational sentences; the golden script also runs these sentences for the native overlay host to compare its classifier against"
     },
     {
       "paths": [
@@ -91,11 +95,14 @@
       "tests": [
         "npm run build",
         "node test/action-evaluation.js",
+        "node scripts/vr-action-golden.mjs && git diff --exit-code vr/golden/actions.json",
         "node --test --test-name-pattern='display pipe tables' test/page.test.js",
         "npm test",
-        "npm run smoke:ci"
+        "npm run smoke:ci",
+        "nix-build vr/default.nix --no-out-link",
+        "nix-build vr/default.nix -A bundle --no-out-link"
       ],
-      "why": "Classifier changes must pass real-model embedding invariance and action evaluation as well as browser coverage."
+      "why": "Classifier changes must pass real-model embedding invariance and action evaluation as well as browser coverage; the native overlay host reads the page's labels, instructions and decisions from the golden this file writes, and pins its embedding model by the name exported here."
     },
     {
       "paths": [

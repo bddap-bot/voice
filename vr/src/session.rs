@@ -11,6 +11,7 @@ use str0m::media::{Direction, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event as RtcEvent, IceConnectionState, Input, Output, Rtc};
 
+use crate::action;
 use crate::audio::{Audio, PlaybackBuffer, RATE};
 use crate::conversation::Wake;
 use crate::identity::identity;
@@ -235,7 +236,7 @@ impl Link {
                                     open = true;
                                     let mut channel = rtc.channel(channel).ok_or("the event channel closed")?;
                                     let identity = identity();
-                                    for (kind, id, content) in [("session.instructions.append", "identity", &identity.instructions), ("session.commentary.append", "wake", &identity.woken)] {
+                                    for (kind, id, content) in [("session.instructions.append", "identity", identity.instructions.as_str()), ("session.instructions.append", "actions", action::instructions()), ("session.commentary.append", "wake", &identity.woken)] {
                                         channel.write(false, json!({ "type": kind, "event_id": id, "delegation_id": null, "content": content }).to_string().as_bytes()).map_err(|error| format!("event channel: {error}"))?;
                                     }
                                     let _ = self.events.send(Event::Open);

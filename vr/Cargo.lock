@@ -5054,12 +5054,14 @@ dependencies = [
  "openvr_sys",
  "opus",
  "pulseaudio",
+ "regex",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "str0m",
  "tokio",
  "tract-onnx",
+ "unicode-normalization",
 ]
 
 [[package]]

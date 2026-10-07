@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::action::{Action, Actions};
 use crate::audio;
 use crate::calls::Calls;
 use crate::conversation::Trace;
@@ -37,6 +38,7 @@ pub struct Voice {
     stored: Option<Stored>,
     learning: Option<f32>,
     hearing: Arc<Mutex<Hearing>>,
+    actions: Actions,
 }
 
 /// What the board shows of Voice ID and Learn my voice.
@@ -50,7 +52,7 @@ pub struct VoiceId {
 impl Voice {
     pub fn new(token: Token, cache: PathBuf, voiceprint: PathBuf) -> Voice {
         let stored = Stored::read(&voiceprint);
-        let mut voice = Voice { token, cache, trace: Trace::default(), muted: false, awake: None, voiceprint, stored, learning: None, hearing: Arc::default() };
+        let mut voice = Voice { token, cache, trace: Trace::default(), muted: false, awake: None, voiceprint, stored, learning: None, hearing: Arc::default(), actions: Actions::start() };
         voice.refilter();
         voice
     }
@@ -142,12 +144,14 @@ impl Voice {
 
     pub fn summon(&mut self) {
         eprintln!("summoned, opening the session");
+        self.actions.reset();
         let session = Session::open(&self.token, &self.cache, self.trace.wake(Instant::now()), self.muted, self.hearing.clone());
         self.awake = Some(Awake { session, opened: false, said: String::new(), activity: Instant::now(), mouth: 0.0, hub: Hub::default() });
     }
 
     /// Ends the session and releases the microphone; an opened session becomes memory for the next.
     pub fn dismiss(&mut self, reason: &str) {
+        self.actions.reset();
         if self.awake.take().is_some_and(|ended| ended.opened) {
             self.trace.slept(Instant::now());
         }
@@ -171,6 +175,7 @@ impl Voice {
     /// As the page's Reset: ends the session and forgets the conversation carried between sessions, here and on the server.
     pub fn reset(&mut self) {
         self.awake = None;
+        self.actions.reset();
         self.stop_learning("voice learning stopped");
         self.trace = Trace::default();
         eprintln!("reset, dormant");
@@ -196,12 +201,14 @@ impl Voice {
                 }
                 session::Event::Heard(delta) => {
                     eprintln!("heard {delta:?}");
+                    self.actions.heard();
                     self.trace.heard(&delta, Instant::now());
                     awake.hub.heard(&delta, Instant::now());
                     awake.activity = Instant::now();
                 }
                 session::Event::Spoke(delta) => {
                     eprintln!("spoke {delta:?}");
+                    let delta = self.actions.spoke(&delta);
                     self.trace.spoke(&delta);
                     awake.hub.spoke();
                     awake.activity = Instant::now();
@@ -242,6 +249,11 @@ impl Voice {
         if let Some(reason) = ended {
             self.dismiss(&reason);
         }
+    }
+
+    /// The next action the page's driver decided on Live's speech, when it is due.
+    pub fn take_action(&mut self) -> Option<Action> {
+        self.actions.take(Instant::now())
     }
 
     /// The mouth opening, easing toward what the reply's output energy asks for.

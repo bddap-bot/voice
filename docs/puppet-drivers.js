@@ -60,6 +60,8 @@ export function keywordMood(text) {
   return null;
 }
 
+export const EMBEDDING_MODEL = 'Xenova/all-MiniLM-L6-v2';
+
 let webGpuAdapterPromise;
 
 export function webGpuAdapter() {
@@ -87,9 +89,11 @@ export async function browserEmbedder() {
   const { env, pipeline } = await import('./lib/transformers.js');
   env.allowLocalModels = false;
   const adapter = await webGpuAdapter();
-  const extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', { dtype: 'q8', device: adapter ? 'webgpu' : 'wasm' });
+  const extractor = await pipeline('feature-extraction', EMBEDDING_MODEL, { dtype: 'q8', device: adapter ? 'webgpu' : 'wasm' });
   return independentEmbedder(extractor);
 }
+
+export const POSTURE = /\b(?:sit(?:ting)?|stand(?:ing)?|back up)\b/i;
 
 export class EmbeddingActionClassifier {
   constructor(loadEmbedder = globalThis.__voiceLoadEmbedder ?? browserEmbedder) {
@@ -104,7 +108,7 @@ export class EmbeddingActionClassifier {
   }
   async classify(text) {
     await this.ready;
-    if (/\b(?:sit(?:ting)?|stand(?:ing)?|back up)\b/i.test(text)) return { kind: 'none', name: 'neutral', score: 1 };
+    if (POSTURE.test(text)) return { kind: 'none', name: 'neutral', score: 1 };
     const [vector] = await this.embed([text]);
     return this.centroids.reduce((best, candidate) => {
       const score = cosine(vector, candidate.centroid);

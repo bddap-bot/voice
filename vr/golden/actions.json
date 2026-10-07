@@ -1,0 +1,2109 @@
+{
+ "about": "docs/puppet-drivers.js on the real embedding model under onnxruntime-node, each case with its margin over the runner-up label: written by scripts/vr-action-golden.mjs, read and compared by the overlay host build",
+ "instructions": "Your body is an animated figure. When you make a gesture or show a mood, write its token in square brackets at the point in the sentence where it happens, for example \"[nod] Yes, that works.\" Gestures: [nod], [shrug], [think], [wave], [no], [laugh], [clap], [bow], [thumbs-up], [stretch], [look-around]. Moods: [neutral], [apologetic], [surprised], [amused], [pleased], [sad], [angry], [puzzled], [skeptical], [thinking], [alert], [sleepy], [relaxed], [curious]. Use only these tokens, and only where the action fits. The page acts them out and never shows them; speak everything else as usual.",
+ "labels": [
+  {
+   "kind": "none",
+   "name": "neutral",
+   "examples": [
+    "the available colors are red, green, and blue",
+    "the choices are small, medium, and large",
+    "the expressions include happy, sad, angry, and surprised",
+    "the list includes alpha, beta, gamma, and delta",
+    "first is setup, second is execution, and third is review"
+   ]
+  },
+  {
+   "kind": "gesture",
+   "name": "nod",
+   "examples": [
+    "yes, I agree completely",
+    "that conclusion is correct",
+    "absolutely, you have my approval",
+    "I concur with that",
+    "please proceed with the plan"
+   ]
+  },
+  {
+   "kind": "gesture",
+   "name": "shrug",
+   "examples": [
+    "I do not know",
+    "it could be either way",
+    "I have no preference"
+   ]
+  },
+  {
+   "kind": "gesture",
+   "name": "think",
+   "examples": [
+    "let me reason about this",
+    "I need to consider the options",
+    "give me a moment to work it out"
+   ]
+  },
+  {
+   "kind": "gesture",
+   "name": "wave",
+   "examples": [
+    "hello, good to see you",
+    "goodbye, see you later",
+    "welcome"
+   ]
+  },
+  {
+   "kind": "gesture",
+   "name": "no",
+   "examples": [
+    "no, I disagree with that",
+    "that is not correct",
+    "I have to reject that idea"
+   ]
+  },
+  {
+   "kind": "gesture",
+   "name": "laugh",
+   "examples": [
+    "that made me burst out laughing",
+    "I cannot stop laughing at that",
+    "I laughed out loud when I heard that"
+   ]
+  },
+  {
+   "kind": "gesture",
+   "name": "clap",
+   "examples": [
+    "that deserves a round of applause",
+    "let us applaud that achievement",
+    "I am clapping for that performance"
+   ]
+  },
+  {
+   "kind": "gesture",
+   "name": "bow",
+   "examples": [
+    "I am honored to meet you",
+    "thank you with my deepest respect",
+    "please accept my respectful greeting"
+   ]
+  },
+  {
+   "kind": "gesture",
+   "name": "thumbs-up",
+   "examples": [
+    "that gets a big thumbs up from me",
+    "what an emphatic sign of success",
+    "this result earns the strongest endorsement"
+   ]
+  },
+  {
+   "kind": "gesture",
+   "name": "stretch",
+   "examples": [
+    "I need to stretch after sitting so long",
+    "let me loosen up my stiff shoulders",
+    "time to take a quick stretch break"
+   ]
+  },
+  {
+   "kind": "gesture",
+   "name": "look-around",
+   "examples": [
+    "let me look around the room",
+    "I am checking what is around us",
+    "let me survey our surroundings"
+   ]
+  },
+  {
+   "kind": "mood",
+   "name": "neutral",
+   "examples": [
+    "I feel neutral",
+    "I have no particular emotion",
+    "my expression is neutral"
+   ]
+  },
+  {
+   "kind": "mood",
+   "name": "apologetic",
+   "examples": [
+    "I am sorry",
+    "please forgive my mistake",
+    "that was my fault"
+   ]
+  },
+  {
+   "kind": "mood",
+   "name": "surprised",
+   "examples": [
+    "that is completely unexpected",
+    "what an astonishing result",
+    "I cannot believe it"
+   ]
+  },
+  {
+   "kind": "mood",
+   "name": "amused",
+   "examples": [
+    "that is hilarious",
+    "what a funny joke",
+    "this makes me laugh"
+   ]
+  },
+  {
+   "kind": "mood",
+   "name": "pleased",
+   "examples": [
+    "I am delighted with the result",
+    "excellent work",
+    "this turned out wonderfully",
+    "I feel happy today"
+   ]
+  },
+  {
+   "kind": "mood",
+   "name": "sad",
+   "examples": [
+    "I feel sad about what happened",
+    "this news has left me unhappy",
+    "I am feeling down today"
+   ]
+  },
+  {
+   "kind": "mood",
+   "name": "angry",
+   "examples": [
+    "I am angry about what happened",
+    "this situation makes me furious",
+    "I feel upset and mad"
+   ]
+  },
+  {
+   "kind": "mood",
+   "name": "puzzled",
+   "examples": [
+    "I do not understand this",
+    "this is confusing",
+    "that does not make sense"
+   ]
+  },
+  {
+   "kind": "mood",
+   "name": "skeptical",
+   "examples": [
+    "I am not convinced",
+    "that claim seems doubtful",
+    "I question whether that is true"
+   ]
+  },
+  {
+   "kind": "mood",
+   "name": "thinking",
+   "examples": [
+    "I am considering the problem",
+    "let me think this through",
+    "perhaps there is another approach"
+   ]
+  },
+  {
+   "kind": "mood",
+   "name": "alert",
+   "examples": [
+    "please be careful",
+    "this is an urgent warning",
+    "watch out for danger"
+   ]
+  },
+  {
+   "kind": "mood",
+   "name": "sleepy",
+   "examples": [
+    "I am exhausted and need sleep",
+    "I feel drowsy",
+    "it is time to rest"
+   ]
+  },
+  {
+   "kind": "mood",
+   "name": "relaxed",
+   "examples": [
+    "I feel relaxed and at ease",
+    "everything feels calm and peaceful",
+    "I can finally unwind"
+   ]
+  },
+  {
+   "kind": "mood",
+   "name": "curious",
+   "examples": [
+    "I wonder how that works",
+    "why did this happen",
+    "I would like to learn more"
+   ]
+  }
+ ],
+ "posture": {
+  "source": "\\b(?:sit(?:ting)?|stand(?:ing)?|back up)\\b",
+  "flags": "i"
+ },
+ "cases": [
+  {
+   "text": "I'm neutral.",
+   "ids": [
+    101,
+    1045,
+    1005,
+    1049,
+    8699,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "neutral",
+   "score": 0.766863,
+   "margin": 0.406202
+  },
+  {
+   "text": "I am feeling neither happy nor sad.",
+   "ids": [
+    101,
+    1045,
+    2572,
+    3110,
+    4445,
+    3407,
+    4496,
+    6517,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "neutral",
+   "score": 0.562058,
+   "margin": 0.00313
+  },
+  {
+   "text": "My face has a neutral expression.",
+   "ids": [
+    101,
+    2026,
+    2227,
+    2038,
+    1037,
+    8699,
+    3670,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "neutral",
+   "score": 0.742838,
+   "margin": 0.381908
+  },
+  {
+   "text": "The available expressions are neutral, happy, sad, angry, surprised, blink, and mouth open.",
+   "ids": [
+    101,
+    1996,
+    2800,
+    11423,
+    2024,
+    8699,
+    1010,
+    3407,
+    1010,
+    6517,
+    1010,
+    4854,
+    1010,
+    4527,
+    1010,
+    12373,
+    1010,
+    1998,
+    2677,
+    2330,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "neutral",
+   "score": 0.557983,
+   "margin": 0.059832
+  },
+  {
+   "text": "The choices are small, medium, and large.",
+   "ids": [
+    101,
+    1996,
+    9804,
+    2024,
+    2235,
+    1010,
+    5396,
+    1010,
+    1998,
+    2312,
+    1012,
+    102
+   ],
+   "kind": "none",
+   "name": "neutral",
+   "score": 0.633566,
+   "margin": 0.438933
+  },
+  {
+   "text": "The colors are red, green, and blue.",
+   "ids": [
+    101,
+    1996,
+    6087,
+    2024,
+    2417,
+    1010,
+    2665,
+    1010,
+    1998,
+    2630,
+    1012,
+    102
+   ],
+   "kind": "none",
+   "name": "neutral",
+   "score": 0.561694,
+   "margin": 0.381122
+  },
+  {
+   "text": "I concur with that conclusion.",
+   "ids": [
+    101,
+    1045,
+    9530,
+    10841,
+    2099,
+    2007,
+    2008,
+    7091,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "nod",
+   "score": 0.673082,
+   "margin": 0.156643
+  },
+  {
+   "text": "You have my approval.",
+   "ids": [
+    101,
+    2017,
+    2031,
+    2026,
+    6226,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "nod",
+   "score": 0.56542,
+   "margin": 0.141609
+  },
+  {
+   "text": "That answer checks out.",
+   "ids": [
+    101,
+    2008,
+    3437,
+    14148,
+    2041,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "nod",
+   "score": 0.369664,
+   "margin": 0.00565
+  },
+  {
+   "text": "Proceed with the plan.",
+   "ids": [
+    101,
+    10838,
+    2007,
+    1996,
+    2933,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "nod",
+   "score": 0.554126,
+   "margin": 0.137982
+  },
+  {
+   "text": "Your guess is as good as mine.",
+   "ids": [
+    101,
+    2115,
+    3984,
+    2003,
+    2004,
+    2204,
+    2004,
+    3067,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "shrug",
+   "score": 0.388104,
+   "margin": 0.022092
+  },
+  {
+   "text": "Either option works for me.",
+   "ids": [
+    101,
+    2593,
+    5724,
+    2573,
+    2005,
+    2033,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "think",
+   "score": 0.381371,
+   "margin": 0.059149
+  },
+  {
+   "text": "I have no idea.",
+   "ids": [
+    101,
+    1045,
+    2031,
+    2053,
+    2801,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "shrug",
+   "score": 0.624391,
+   "margin": 0.133375
+  },
+  {
+   "text": "I need a moment to weigh the alternatives.",
+   "ids": [
+    101,
+    1045,
+    2342,
+    1037,
+    2617,
+    2000,
+    17042,
+    1996,
+    15955,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "think",
+   "score": 0.517859,
+   "margin": 0.196856
+  },
+  {
+   "text": "Let me reason through the consequences.",
+   "ids": [
+    101,
+    2292,
+    2033,
+    3114,
+    2083,
+    1996,
+    8465,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "think",
+   "score": 0.483595,
+   "margin": 0.072624
+  },
+  {
+   "text": "I will work out the answer.",
+   "ids": [
+    101,
+    1045,
+    2097,
+    2147,
+    2041,
+    1996,
+    3437,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "puzzled",
+   "score": 0.361678,
+   "margin": 0.005191
+  },
+  {
+   "text": "It is lovely to meet you.",
+   "ids": [
+    101,
+    2009,
+    2003,
+    8403,
+    2000,
+    3113,
+    2017,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "bow",
+   "score": 0.597488,
+   "margin": 0.082728
+  },
+  {
+   "text": "Farewell until next time.",
+   "ids": [
+    101,
+    13407,
+    2127,
+    2279,
+    2051,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "wave",
+   "score": 0.554809,
+   "margin": 0.174551
+  },
+  {
+   "text": "Hi there, welcome in.",
+   "ids": [
+    101,
+    7632,
+    2045,
+    1010,
+    6160,
+    1999,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "wave",
+   "score": 0.611551,
+   "margin": 0.16852
+  },
+  {
+   "text": "No, I cannot agree with that.",
+   "ids": [
+    101,
+    2053,
+    1010,
+    1045,
+    3685,
+    5993,
+    2007,
+    2008,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "no",
+   "score": 0.592666,
+   "margin": 0.035592
+  },
+  {
+   "text": "That conclusion is simply incorrect.",
+   "ids": [
+    101,
+    2008,
+    7091,
+    2003,
+    3432,
+    16542,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "no",
+   "score": 0.466783,
+   "margin": 0.008002
+  },
+  {
+   "text": "I reject that suggestion.",
+   "ids": [
+    101,
+    1045,
+    15454,
+    2008,
+    10293,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "no",
+   "score": 0.53802,
+   "margin": 0.08164
+  },
+  {
+   "text": "That made me laugh out loud.",
+   "ids": [
+    101,
+    2008,
+    2081,
+    2033,
+    4756,
+    2041,
+    5189,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "laugh",
+   "score": 0.812256,
+   "margin": 0.208376
+  },
+  {
+   "text": "I burst out laughing at the punchline.",
+   "ids": [
+    101,
+    1045,
+    6532,
+    2041,
+    5870,
+    2012,
+    1996,
+    8595,
+    4179,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "laugh",
+   "score": 0.646585,
+   "margin": 0.146074
+  },
+  {
+   "text": "I am still laughing about that story.",
+   "ids": [
+    101,
+    1045,
+    2572,
+    2145,
+    5870,
+    2055,
+    2008,
+    2466,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "laugh",
+   "score": 0.50951,
+   "margin": 0.068846
+  },
+  {
+   "text": "That performance deserves a round of applause.",
+   "ids": [
+    101,
+    2008,
+    2836,
+    17210,
+    1037,
+    2461,
+    1997,
+    20737,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "clap",
+   "score": 0.785334,
+   "margin": 0.322352
+  },
+  {
+   "text": "Let us applaud the team for their work.",
+   "ids": [
+    101,
+    2292,
+    2149,
+    10439,
+    17298,
+    2094,
+    1996,
+    2136,
+    2005,
+    2037,
+    2147,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "clap",
+   "score": 0.568888,
+   "margin": 0.16293
+  },
+  {
+   "text": "I am clapping for that wonderful achievement.",
+   "ids": [
+    101,
+    1045,
+    2572,
+    27104,
+    2005,
+    2008,
+    6919,
+    6344,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "clap",
+   "score": 0.847041,
+   "margin": 0.367924
+  },
+  {
+   "text": "It is an honor to meet you.",
+   "ids": [
+    101,
+    2009,
+    2003,
+    2019,
+    3932,
+    2000,
+    3113,
+    2017,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "bow",
+   "score": 0.716049,
+   "margin": 0.281981
+  },
+  {
+   "text": "Please accept my deepest respect.",
+   "ids": [
+    101,
+    3531,
+    5138,
+    2026,
+    17578,
+    4847,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "bow",
+   "score": 0.719084,
+   "margin": 0.39021
+  },
+  {
+   "text": "Thank you for this gracious welcome.",
+   "ids": [
+    101,
+    4067,
+    2017,
+    2005,
+    2023,
+    24665,
+    20113,
+    6160,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "bow",
+   "score": 0.419981,
+   "margin": 0.025187
+  },
+  {
+   "text": "This plan has my enthusiastic approval.",
+   "ids": [
+    101,
+    2023,
+    2933,
+    2038,
+    2026,
+    14727,
+    6226,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "nod",
+   "score": 0.53603,
+   "margin": 0.124313
+  },
+  {
+   "text": "I give that result a big thumbs up.",
+   "ids": [
+    101,
+    1045,
+    2507,
+    2008,
+    2765,
+    1037,
+    2502,
+    16784,
+    2039,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "thumbs-up",
+   "score": 0.630416,
+   "margin": 0.077504
+  },
+  {
+   "text": "You have my strongest endorsement.",
+   "ids": [
+    101,
+    2017,
+    2031,
+    2026,
+    10473,
+    20380,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "thumbs-up",
+   "score": 0.540528,
+   "margin": 0.154519
+  },
+  {
+   "text": "I need to stretch my stiff shoulders.",
+   "ids": [
+    101,
+    1045,
+    2342,
+    2000,
+    7683,
+    2026,
+    10551,
+    4065,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "stretch",
+   "score": 0.783785,
+   "margin": 0.47582
+  },
+  {
+   "text": "Let me loosen up after sitting so long.",
+   "ids": [
+    101,
+    2292,
+    2033,
+    29476,
+    2039,
+    2044,
+    3564,
+    2061,
+    2146,
+    1012,
+    102
+   ],
+   "kind": "none",
+   "name": "neutral",
+   "score": 1,
+   "margin": 1
+  },
+  {
+   "text": "It is time for a quick stretch break.",
+   "ids": [
+    101,
+    2009,
+    2003,
+    2051,
+    2005,
+    1037,
+    4248,
+    7683,
+    3338,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "stretch",
+   "score": 0.752712,
+   "margin": 0.401666
+  },
+  {
+   "text": "Let me look around the room.",
+   "ids": [
+    101,
+    2292,
+    2033,
+    2298,
+    2105,
+    1996,
+    2282,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "look-around",
+   "score": 0.756442,
+   "margin": 0.32947
+  },
+  {
+   "text": "I am checking our surroundings.",
+   "ids": [
+    101,
+    1045,
+    2572,
+    9361,
+    2256,
+    11301,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "look-around",
+   "score": 0.7854,
+   "margin": 0.327579
+  },
+  {
+   "text": "Let me survey what is around us.",
+   "ids": [
+    101,
+    2292,
+    2033,
+    5002,
+    2054,
+    2003,
+    2105,
+    2149,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "look-around",
+   "score": 0.66846,
+   "margin": 0.325289
+  },
+  {
+   "text": "I owe you an apology.",
+   "ids": [
+    101,
+    1045,
+    12533,
+    2017,
+    2019,
+    12480,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "apologetic",
+   "score": 0.577415,
+   "margin": 0.178014
+  },
+  {
+   "text": "Please accept my sincere remorse.",
+   "ids": [
+    101,
+    3531,
+    5138,
+    2026,
+    18006,
+    23124,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "bow",
+   "score": 0.43237,
+   "margin": 0.013708
+  },
+  {
+   "text": "I take responsibility for the error.",
+   "ids": [
+    101,
+    1045,
+    2202,
+    5368,
+    2005,
+    1996,
+    7561,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "apologetic",
+   "score": 0.471593,
+   "margin": 0.157884
+  },
+  {
+   "text": "That outcome caught me completely off guard.",
+   "ids": [
+    101,
+    2008,
+    9560,
+    3236,
+    2033,
+    3294,
+    2125,
+    3457,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "surprised",
+   "score": 0.427445,
+   "margin": 0.050434
+  },
+  {
+   "text": "What an astonishing turn of events.",
+   "ids": [
+    101,
+    2054,
+    2019,
+    26137,
+    2735,
+    1997,
+    2824,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "surprised",
+   "score": 0.55177,
+   "margin": 0.102386
+  },
+  {
+   "text": "I never saw that coming.",
+   "ids": [
+    101,
+    1045,
+    2196,
+    2387,
+    2008,
+    2746,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "surprised",
+   "score": 0.393888,
+   "margin": 0.009796
+  },
+  {
+   "text": "That story made me chuckle.",
+   "ids": [
+    101,
+    2008,
+    2466,
+    2081,
+    2033,
+    15375,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "laugh",
+   "score": 0.570594,
+   "margin": 0.008721
+  },
+  {
+   "text": "The punchline was hilarious.",
+   "ids": [
+    101,
+    1996,
+    8595,
+    4179,
+    2001,
+    26316,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "amused",
+   "score": 0.465826,
+   "margin": 0.044383
+  },
+  {
+   "text": "I cannot stop giggling at that.",
+   "ids": [
+    101,
+    1045,
+    3685,
+    2644,
+    21783,
+    2012,
+    2008,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "laugh",
+   "score": 0.652846,
+   "margin": 0.24127
+  },
+  {
+   "text": "I am delighted by how well this went.",
+   "ids": [
+    101,
+    1045,
+    2572,
+    15936,
+    2011,
+    2129,
+    2092,
+    2023,
+    2253,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "pleased",
+   "score": 0.687021,
+   "margin": 0.299689
+  },
+  {
+   "text": "The result is deeply satisfying.",
+   "ids": [
+    101,
+    1996,
+    2765,
+    2003,
+    6171,
+    17087,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "pleased",
+   "score": 0.565645,
+   "margin": 0.113435
+  },
+  {
+   "text": "Everything turned out beautifully.",
+   "ids": [
+    101,
+    2673,
+    2357,
+    2041,
+    17950,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "pleased",
+   "score": 0.529963,
+   "margin": 0.200609
+  },
+  {
+   "text": "I feel sad about the news.",
+   "ids": [
+    101,
+    1045,
+    2514,
+    6517,
+    2055,
+    1996,
+    2739,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "sad",
+   "score": 0.773047,
+   "margin": 0.36319
+  },
+  {
+   "text": "This outcome has left me unhappy.",
+   "ids": [
+    101,
+    2023,
+    9560,
+    2038,
+    2187,
+    2033,
+    12511,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "sad",
+   "score": 0.610173,
+   "margin": 0.088391
+  },
+  {
+   "text": "I am feeling down today.",
+   "ids": [
+    101,
+    1045,
+    2572,
+    3110,
+    2091,
+    2651,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "sad",
+   "score": 0.742388,
+   "margin": 0.235335
+  },
+  {
+   "text": "I am angry about this decision.",
+   "ids": [
+    101,
+    1045,
+    2572,
+    4854,
+    2055,
+    2023,
+    3247,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "angry",
+   "score": 0.595576,
+   "margin": 0.189269
+  },
+  {
+   "text": "That behavior makes me furious.",
+   "ids": [
+    101,
+    2008,
+    5248,
+    3084,
+    2033,
+    9943,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "angry",
+   "score": 0.573041,
+   "margin": 0.290581
+  },
+  {
+   "text": "I feel upset and mad.",
+   "ids": [
+    101,
+    1045,
+    2514,
+    6314,
+    1998,
+    5506,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "angry",
+   "score": 0.780611,
+   "margin": 0.222561
+  },
+  {
+   "text": "I cannot make heads or tails of this.",
+   "ids": [
+    101,
+    1045,
+    3685,
+    2191,
+    4641,
+    2030,
+    17448,
+    1997,
+    2023,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "thinking",
+   "score": 0.3351,
+   "margin": 0.003485
+  },
+  {
+   "text": "This explanation leaves me baffled.",
+   "ids": [
+    101,
+    2023,
+    7526,
+    3727,
+    2033,
+    29088,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "puzzled",
+   "score": 0.509034,
+   "margin": 0.157962
+  },
+  {
+   "text": "Something here does not add up.",
+   "ids": [
+    101,
+    2242,
+    2182,
+    2515,
+    2025,
+    5587,
+    2039,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "puzzled",
+   "score": 0.341454,
+   "margin": 0.046175
+  },
+  {
+   "text": "That assertion is hard to believe.",
+   "ids": [
+    101,
+    2008,
+    23617,
+    2003,
+    2524,
+    2000,
+    2903,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "skeptical",
+   "score": 0.549007,
+   "margin": 0.136551
+  },
+  {
+   "text": "I remain unconvinced by the evidence.",
+   "ids": [
+    101,
+    1045,
+    3961,
+    4895,
+    8663,
+    6371,
+    11788,
+    2011,
+    1996,
+    3350,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "skeptical",
+   "score": 0.382135,
+   "margin": 0.078003
+  },
+  {
+   "text": "The claim sounds rather dubious.",
+   "ids": [
+    101,
+    1996,
+    4366,
+    4165,
+    2738,
+    22917,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "skeptical",
+   "score": 0.478367,
+   "margin": 0.110621
+  },
+  {
+   "text": "I am contemplating a different solution.",
+   "ids": [
+    101,
+    1045,
+    2572,
+    25247,
+    1037,
+    2367,
+    5576,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "thinking",
+   "score": 0.607861,
+   "margin": 0.141503
+  },
+  {
+   "text": "There may be another angle to explore.",
+   "ids": [
+    101,
+    2045,
+    2089,
+    2022,
+    2178,
+    6466,
+    2000,
+    8849,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "look-around",
+   "score": 0.395358,
+   "margin": 0.005694
+  },
+  {
+   "text": "I am reflecting on the implications.",
+   "ids": [
+    101,
+    1045,
+    2572,
+    10842,
+    2006,
+    1996,
+    13494,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "skeptical",
+   "score": 0.377339,
+   "margin": 0.010957
+  },
+  {
+   "text": "Mind the hazard ahead.",
+   "ids": [
+    101,
+    2568,
+    1996,
+    15559,
+    3805,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "alert",
+   "score": 0.530337,
+   "margin": 0.189456
+  },
+  {
+   "text": "This situation demands immediate attention.",
+   "ids": [
+    101,
+    2023,
+    3663,
+    7670,
+    6234,
+    3086,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "angry",
+   "score": 0.365383,
+   "margin": 0.016144
+  },
+  {
+   "text": "Stay vigilant around that edge.",
+   "ids": [
+    101,
+    2994,
+    6819,
+    20142,
+    4630,
+    2105,
+    2008,
+    3341,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "alert",
+   "score": 0.464977,
+   "margin": 0.12182
+  },
+  {
+   "text": "I can barely keep my eyes open.",
+   "ids": [
+    101,
+    1045,
+    2064,
+    4510,
+    2562,
+    2026,
+    2159,
+    2330,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "relaxed",
+   "score": 0.405833,
+   "margin": 0.068065
+  },
+  {
+   "text": "A nap sounds irresistible right now.",
+   "ids": [
+    101,
+    1037,
+    18996,
+    4165,
+    27149,
+    2157,
+    2085,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "sleepy",
+   "score": 0.552151,
+   "margin": 0.23434
+  },
+  {
+   "text": "My energy is fading fast.",
+   "ids": [
+    101,
+    2026,
+    2943,
+    2003,
+    14059,
+    3435,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "sleepy",
+   "score": 0.487213,
+   "margin": 0.054076
+  },
+  {
+   "text": "I feel relaxed and at ease.",
+   "ids": [
+    101,
+    1045,
+    2514,
+    8363,
+    1998,
+    2012,
+    7496,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "relaxed",
+   "score": 0.813661,
+   "margin": 0.327468
+  },
+  {
+   "text": "Everything feels calm and peaceful.",
+   "ids": [
+    101,
+    2673,
+    5683,
+    5475,
+    1998,
+    9379,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "relaxed",
+   "score": 0.771257,
+   "margin": 0.300635
+  },
+  {
+   "text": "I can finally unwind.",
+   "ids": [
+    101,
+    1045,
+    2064,
+    2633,
+    4895,
+    11101,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "relaxed",
+   "score": 0.673948,
+   "margin": 0.240491
+  },
+  {
+   "text": "What causes this behavior?",
+   "ids": [
+    101,
+    2054,
+    5320,
+    2023,
+    5248,
+    1029,
+    102
+   ],
+   "kind": "mood",
+   "name": "curious",
+   "score": 0.262259,
+   "margin": 0.061997
+  },
+  {
+   "text": "I would love to discover what comes next.",
+   "ids": [
+    101,
+    1045,
+    2052,
+    2293,
+    2000,
+    7523,
+    2054,
+    3310,
+    2279,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "look-around",
+   "score": 0.348395,
+   "margin": 0.029702
+  },
+  {
+   "text": "Tell me more about the mechanism.",
+   "ids": [
+    101,
+    2425,
+    2033,
+    2062,
+    2055,
+    1996,
+    7337,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "curious",
+   "score": 0.285905,
+   "margin": 0.091841
+  },
+  {
+   "text": "I am fully on board.",
+   "ids": [
+    101,
+    1045,
+    2572,
+    3929,
+    2006,
+    2604,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "nod",
+   "score": 0.363149,
+   "margin": 0.025849
+  },
+  {
+   "text": "It makes no difference to me.",
+   "ids": [
+    101,
+    2009,
+    3084,
+    2053,
+    4489,
+    2000,
+    2033,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "neutral",
+   "score": 0.381875,
+   "margin": 0.030703
+  },
+  {
+   "text": "I could not be happier with it.",
+   "ids": [
+    101,
+    1045,
+    2071,
+    2025,
+    2022,
+    19366,
+    2007,
+    2009,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "neutral",
+   "score": 0.37685,
+   "margin": 0.000843
+  },
+  {
+   "text": "This has me completely stumped.",
+   "ids": [
+    101,
+    2023,
+    2038,
+    2033,
+    3294,
+    22475,
+    2098,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "puzzled",
+   "score": 0.468915,
+   "margin": 0.112001
+  },
+  {
+   "text": "Yes.",
+   "ids": [
+    101,
+    2748,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "nod",
+   "score": 0.342747,
+   "margin": 0.089681
+  },
+  {
+   "text": "No idea.",
+   "ids": [
+    101,
+    2053,
+    2801,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "shrug",
+   "score": 0.467899,
+   "margin": 0.154273
+  },
+  {
+   "text": "Hmm.",
+   "ids": [
+    101,
+    17012,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "thinking",
+   "score": 0.324419,
+   "margin": 0.02289
+  },
+  {
+   "text": "Happy.",
+   "ids": [
+    101,
+    3407,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "pleased",
+   "score": 0.482148,
+   "margin": 0.069304
+  },
+  {
+   "text": "Sad.",
+   "ids": [
+    101,
+    6517,
+    1012,
+    102
+   ],
+   "kind": "mood",
+   "name": "sad",
+   "score": 0.405821,
+   "margin": 0.090393
+  },
+  {
+   "text": "Hi there!",
+   "ids": [
+    101,
+    7632,
+    2045,
+    999,
+    102
+   ],
+   "kind": "gesture",
+   "name": "wave",
+   "score": 0.502303,
+   "margin": 0.150891
+  },
+  {
+   "text": "Here's a little wave for you.",
+   "ids": [
+    101,
+    2182,
+    1005,
+    1055,
+    1037,
+    2210,
+    4400,
+    2005,
+    2017,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "look-around",
+   "score": 0.321384,
+   "margin": 0.002047
+  },
+  {
+   "text": "Sure, asking.",
+   "ids": [
+    101,
+    2469,
+    1010,
+    4851,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "look-around",
+   "score": 0.32935,
+   "margin": 0.056582
+  },
+  {
+   "text": "Let me sit down.",
+   "ids": [
+    101,
+    2292,
+    2033,
+    4133,
+    2091,
+    1012,
+    102
+   ],
+   "kind": "none",
+   "name": "neutral",
+   "score": 1,
+   "margin": 1
+  },
+  {
+   "text": "I am standing up now.",
+   "ids": [
+    101,
+    1045,
+    2572,
+    3061,
+    2039,
+    2085,
+    1012,
+    102
+   ],
+   "kind": "none",
+   "name": "neutral",
+   "score": 1,
+   "margin": 1
+  },
+  {
+   "text": "Back up a bit.",
+   "ids": [
+    101,
+    2067,
+    2039,
+    1037,
+    2978,
+    1012,
+    102
+   ],
+   "kind": "none",
+   "name": "neutral",
+   "score": 1,
+   "margin": 1
+  },
+  {
+   "text": "Café naïveté, señor — 42%?",
+   "ids": [
+    101,
+    7668,
+    15743,
+    2618,
+    1010,
+    12411,
+    2953,
+    1517,
+    4413,
+    1003,
+    1029,
+    102
+   ],
+   "kind": "gesture",
+   "name": "shrug",
+   "score": 0.212214,
+   "margin": 0.021063
+  },
+  {
+   "text": "你好, friend.",
+   "ids": [
+    101,
+    100,
+    100,
+    1010,
+    2767,
+    1012,
+    102
+   ],
+   "kind": "gesture",
+   "name": "wave",
+   "score": 0.288364,
+   "margin": 0.048266
+  }
+ ],
+ "replays": [
+  {
+   "events": [
+    [
+     "spoke",
+     " Sure,"
+    ],
+    [
+     "spoke",
+     " asking."
+    ],
+    [
+     "spoke",
+     " Hi there"
+    ],
+    [
+     "spoke",
+     "!"
+    ],
+    [
+     "spoke",
+     " Here's"
+    ],
+    [
+     "spoke",
+     " a little"
+    ],
+    [
+     "spoke",
+     " wave"
+    ],
+    [
+     "spoke",
+     " for you"
+    ],
+    [
+     "spoke",
+     "."
+    ],
+    [
+     "heard",
+     " Okay"
+    ]
+   ],
+   "spoken": [
+    " Sure,",
+    " asking.",
+    " Hi there",
+    "!",
+    " Here's",
+    " a little",
+    " wave",
+    " for you",
+    "."
+   ],
+   "actions": [
+    {
+     "source": "classifier",
+     "kind": "gesture",
+     "name": "look-around",
+     "sentence": "Sure, asking."
+    },
+    {
+     "source": "classifier",
+     "kind": "gesture",
+     "name": "wave",
+     "sentence": "Hi there!"
+    },
+    {
+     "source": "classifier",
+     "kind": "gesture",
+     "name": "look-around",
+     "sentence": "Here's a little wave for you."
+    }
+   ]
+  },
+  {
+   "events": [
+    [
+     "spoke",
+     " [wa"
+    ],
+    [
+     "spoke",
+     "ve] Hello"
+    ],
+    [
+     "spoke",
+     " again."
+    ],
+    [
+     "spoke",
+     " [shrug]"
+    ],
+    [
+     "spoke",
+     " [bogus] Maybe."
+    ],
+    [
+     "heard",
+     " Hm"
+    ],
+    [
+     "spoke",
+     " [nod] Right"
+    ],
+    [
+     "heard",
+     " ok"
+    ]
+   ],
+   "spoken": [
+    " ",
+    " Hello",
+    " again.",
+    "",
+    " Maybe.",
+    " Right"
+   ],
+   "actions": [
+    {
+     "source": "bracket",
+     "kind": "gesture",
+     "name": "wave",
+     "token": "wave"
+    },
+    {
+     "source": "bracket",
+     "kind": "gesture",
+     "name": "shrug",
+     "token": "shrug"
+    },
+    {
+     "source": "bracket",
+     "kind": "unknown",
+     "name": "bogus",
+     "token": "bogus"
+    },
+    {
+     "source": "bracket",
+     "kind": "gesture",
+     "name": "nod",
+     "token": "nod"
+    }
+   ]
+  }
+ ]
+}

@@ -2,6 +2,7 @@
 # SteamVR launches the overlay once and never again, and the gesture and wake word live inside it, so a crash would leave nothing to summon it with.
 here=$(dirname "$(readlink -f "$0")")
 export VOICE_VR_SPEAKER_MODEL="${VOICE_VR_SPEAKER_MODEL:-$here/../share/speaker.onnx}"
+export VOICE_VR_ACTION_MODEL="${VOICE_VR_ACTION_MODEL:-$here/../share/action}"
 quick=0
 child=
 trap 'if [ -n "$child" ]; then kill "$child" 2>/dev/null; wait "$child"; fi; exit 143' TERM INT HUP

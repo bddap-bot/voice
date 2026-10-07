@@ -728,6 +728,60 @@ mod tests {
         pixels.chunks_exact(row).flat_map(|line| &line[..row / 2]).copied().collect()
     }
 
+    /// A recorded transcript the page waves at, through the overlay's driver and the real classifier, to the figure on screen.
+    #[test]
+    fn a_recorded_transcript_the_page_waves_at_waves_the_overlays_figure() {
+        use glam::Quat;
+        assert!(crate::played("wave") && crate::played("idle"), "the overlay loads the gesture clips beside its idles");
+        let replay = &crate::action::tests::replays()[0];
+        let (_, decisions) = crate::action::tests::replay(replay);
+        assert!(decisions.iter().any(|action| action.name == "wave"), "the page waves at this transcript: {decisions:?}");
+        let model = Model::parse(include_bytes!("../golden/figure.vrm")).unwrap();
+        let standing = model.standing();
+        let raised = Quat::from_rotation_z(-1.2).to_array().repeat(2);
+        let wave = serde_json::json!({ "name": "test wave", "duration": 2.0, "tracks": [{ "name": "rightUpperArm.quaternion", "times": [0.0, 2.0], "values": raised }] });
+        let clips = |gestures: bool| {
+            let mut idle = crate::motion::Clip::parse(include_bytes!("../golden/idle.json"), model.version, model.rest_hips()).unwrap();
+            idle.anchor(&standing);
+            let mut clips = std::collections::HashMap::from([("idle".to_owned(), idle)]);
+            if gestures {
+                clips.insert("wave".to_owned(), crate::motion::Clip::parse(&serde_json::to_vec(&wave).unwrap(), model.version, model.rest_hips()).unwrap());
+            }
+            clips
+        };
+        let golden = golden();
+        let eyes = [eye_projection(Vec3::from(golden.eye), golden.quad / 2.0, golden.quad / 2.0), None];
+        let frame = |gestures: bool, after: f32| {
+            let mut animator = crate::motion::Animator::new(clips(gestures), crate::motion::Random::seeded());
+            for action in &decisions {
+                crate::act(&mut animator, action);
+            }
+            for _ in 0..(after / 0.02) as usize {
+                animator.update(0.02);
+            }
+            let humanoid = animator.humanoid(&standing, model.rest_hips());
+            let pose = model.pose(&humanoid);
+            let pixels = draw_at(&model, &pose, [golden.size; 2], eyes, Vec3::ZERO, golden.height, golden.floor);
+            let row = (golden.size * 8) as usize;
+            (humanoid.rotations.get("rightUpperArm").copied(), pixels.chunks_exact(row).flat_map(|line| &line[..row / 2]).copied().collect::<Vec<u8>>())
+        };
+        let (arm, waving) = frame(true, 1.0);
+        let (_, idle) = frame(false, 1.0);
+        let (_, after) = frame(true, 3.0);
+        if let Some(directory) = std::env::var_os("VOICE_VR_PROOF") {
+            for (name, pixels) in [("idle", &idle), ("waving", &waving), ("after", &after)] {
+                image::save_buffer(std::path::Path::new(&directory).join(format!("{name}.png")), pixels, golden.size, golden.size, image::ExtendedColorType::Rgba8).unwrap();
+            }
+        }
+        let held = Quat::from_rotation_z(if model.version == Version::Zero { 1.2 } else { -1.2 });
+        assert!(arm.unwrap().abs_diff_eq(held, 1e-4), "mid-gesture the arm follows the wave clip: {arm:?}");
+        let moved = difference(&waving, &idle);
+        assert!(moved.coverage < 0.8, "the waving figure differs from the idle one: overlap {:.4}", moved.coverage);
+        let back = difference(&after, &idle);
+        eprintln!("overlap with the idle figure: waving {:.4}, after {:.4}", moved.coverage, back.coverage);
+        assert!(back.coverage > 0.95, "after the clip the figure is back in its idle: overlap {:.4}", back.coverage);
+    }
+
     struct Difference {
         coverage: f32,
         color: f32,

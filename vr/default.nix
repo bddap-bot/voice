@@ -2,6 +2,14 @@
 let
   pinned = builtins.match ".*url: '([^']+)',[[:space:]]*sha256: '([0-9a-f]+)'.*" (builtins.readFile ../docs/speaker.js);
   speakerModel = pkgs.fetchurl { url = builtins.elemAt pinned 0; sha256 = builtins.elemAt pinned 1; };
+  # The page's action embedding model at a fixed revision; vr/golden/actions.json holds the page's decisions on it.
+  actionModel = let
+    id = builtins.elemAt (builtins.match ".*export const EMBEDDING_MODEL = '([^']+)';.*" (builtins.readFile ../docs/puppet-drivers.js)) 0;
+    file = path: sha256: pkgs.fetchurl { url = "https://huggingface.co/${id}/resolve/751bff37182d3f1213fa05d7196b954e230abad9/${path}"; inherit sha256; };
+  in pkgs.linkFarm "voice-vr-action-model" {
+    "model_quantized.onnx" = file "onnx/model_quantized.onnx" "afdb6f1a0e45b715d0bb9b11772f032c399babd23bfc31fed1c170afc848bdb1";
+    "tokenizer.json" = file "tokenizer.json" "da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0";
+  };
   # Real recordings of three speakers from the model authors' examples (Apache-2.0), at the capture rate.
   speech = pkgs.runCommand "voice-vr-speech" { nativeBuildInputs = [ pkgs.sox ]; } (''
     mkdir $out
@@ -30,7 +38,7 @@ let
     preCheck = ''
       export LD_LIBRARY_PATH=${pkgs.vulkan-loader}/lib
       export VK_ICD_FILENAMES=${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.${pkgs.stdenv.hostPlatform.parsed.cpu.name}.json
-      export VOICE_VR_SPEAKER_MODEL=${speakerModel} VOICE_VR_SPEECH=${speech}
+      export VOICE_VR_SPEAKER_MODEL=${speakerModel} VOICE_VR_SPEECH=${speech} VOICE_VR_ACTION_MODEL=${actionModel}
     '';
   };
   native = host pkgs;
@@ -42,6 +50,7 @@ let
     mkdir -p $out/bin $out/share
     install -m755 ${aarch64}/bin/voice-vr $out/bin/voice-vr-host
     install -m644 ${speakerModel} $out/share/speaker.onnx
+    install -Dm644 -t $out/share/action ${actionModel}/model_quantized.onnx ${actionModel}/tokenizer.json
     patchelf --set-interpreter /lib/ld-linux-aarch64.so.1 --remove-rpath $out/bin/voice-vr-host
     nuke-refs $out/bin/voice-vr-host
 
@@ -67,7 +76,8 @@ in
 pkgs.runCommand "voice-vr-${native.version}" { nativeBuildInputs = [ pkgs.makeWrapper ]; passthru = rec { inherit bundle; simulatedController = import ./simulated { inherit pkgs; }; harness = import ./harness { inherit pkgs simulatedController; }; }; } ''
   makeWrapper ${native}/bin/voice-vr $out/bin/voice-vr \
     --prefix LD_LIBRARY_PATH : ${runtimeLibraries} \
-    --set-default VOICE_VR_SPEAKER_MODEL ${speakerModel}
+    --set-default VOICE_VR_SPEAKER_MODEL ${speakerModel} \
+    --set-default VOICE_VR_ACTION_MODEL ${actionModel}
   mkdir -p $out/share/voice-vr
   substitute ${./voice-vr.vrmanifest} $out/share/voice-vr/voice-vr.vrmanifest --subst-var out
 ''

@@ -1,3 +1,4 @@
+mod action;
 mod audio;
 mod board;
 mod calls;
@@ -96,24 +97,44 @@ fn load(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer) -> Result<P
     let model = Model::parse(&relay.puppet(avatar)?).map_err(|error| format!("{}: {error}", avatar.id))?;
     let standing = model.standing();
     let mut clips = HashMap::new();
-    for entry in relay.clips()?.iter().filter(|entry| IDLES.contains(&entry.action.as_str())) {
+    for entry in relay.clips()?.iter().filter(|entry| played(&entry.action)) {
         if entry.format != "fbx" {
             eprintln!("{}: {} clips are not played natively", entry.name, entry.format);
             continue;
         }
         match relay.motion(entry).and_then(|bytes| Clip::parse(&bytes, model.version, model.rest_hips())) {
             Ok(mut clip) => {
-                clip.anchor(&standing);
+                if IDLES.contains(&entry.action.as_str()) {
+                    clip.anchor(&standing);
+                }
                 clips.insert(entry.action.clone(), clip);
             }
             Err(error) => eprintln!("{}: {error}", entry.name),
         }
     }
-    eprintln!("appearance {} with {} standing idle clips", avatar.id, clips.len());
+    let idles = clips.keys().filter(|name| IDLES.contains(&name.as_str())).count();
+    eprintln!("appearance {} with {idles} standing idle clips and gestures {:?}", avatar.id, clips.keys().filter(|name| !IDLES.contains(&name.as_str())).collect::<Vec<_>>());
     let skinned = model.skinned()?;
     let fit = Fit::new(&model, &skinned, HEIGHT);
     let drawn = renderer.appearance(&model, &skinned)?;
     Ok(Puppet { model, skinned, fit, standing, animator: Animator::new(clips, Random::seeded()), gaze: Gaze::default(), springs: Springs::default(), drawn })
+}
+
+/// The catalog clips the overlay plays: its idles and every gesture the page's classifier can reach.
+fn played(clip: &str) -> bool {
+    IDLES.contains(&clip) || action::gestures().any(|gesture| gesture == clip)
+}
+
+/// Acts out one of the page's decisions as the page's `applyTranscriptAction` does; the page's moods are faces the overlay does not draw yet.
+fn act(animator: &mut Animator, action: &action::Action) {
+    let outcome = match action.kind {
+        action::Kind::Gesture if animator.gesture(&action.name) => "played",
+        action::Kind::Gesture => "refused, no clip",
+        action::Kind::Mood => "not drawn",
+        action::Kind::None | action::Kind::Unknown => "ignored",
+    };
+    let score = action.score.map_or(String::new(), |score| format!(" {score:.3}"));
+    eprintln!("action {:?} {}{score} from {} {:?}: {outcome}", action.kind, action.name, action.source, action.said);
 }
 
 fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(), String> {
@@ -218,6 +239,9 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
             meter = Meter::default();
         }
         voice.step();
+        while let Some(action) = voice.take_action() {
+            act(&mut puppet.animator, &action);
+        }
         let (true, Some(head), Some(left), Some(device)) = (voice.awake(), head, hand(Hand::Left), runtime.hand_index(Hand::Left)) else {
             overlay.hide();
             board_overlay.hide();

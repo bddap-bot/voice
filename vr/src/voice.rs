@@ -149,10 +149,26 @@ impl Voice {
         self.awake = Some(Awake { session, opened: false, said: String::new(), activity: Instant::now(), mouth: 0.0, hub: Hub::default() });
     }
 
-    /// Ends the session and releases the microphone; an opened session becomes memory for the next.
+    /// Ends the session and releases the microphone; an opened session hands the hub what it never heard and becomes memory for the next.
     pub fn dismiss(&mut self, reason: &str) {
         self.actions.reset();
-        if self.awake.take().is_some_and(|ended| ended.opened) {
+        if let Some(mut ended) = self.awake.take().filter(|ended| ended.opened) {
+            ended.hub.ended(&self.trace, Instant::now());
+            let frames = ended.hub.drain();
+            if !frames.is_empty() {
+                let (token, cache) = (self.token.clone(), self.cache.clone());
+                std::thread::spawn(move || {
+                    let sent = Relay::connect(&token, &cache).and_then(|mut relay| {
+                        frames.iter().try_for_each(|frame| match frame {
+                            hub::Command::Frame(verb, body) => relay.post(verb, Some(body)),
+                            hub::Command::Tell(_) => Ok(()),
+                        })
+                    });
+                    if let Err(error) = sent {
+                        eprintln!("the session's last words did not reach the hub: {error}");
+                    }
+                });
+            }
             self.trace.slept(Instant::now());
         }
         self.stop_learning("voice learning stopped");
@@ -174,11 +190,8 @@ impl Voice {
 
     /// As the page's Reset: ends the session and forgets the conversation carried between sessions, here and on the server.
     pub fn reset(&mut self) {
-        self.awake = None;
-        self.actions.reset();
-        self.stop_learning("voice learning stopped");
+        self.dismiss("reset");
         self.trace = Trace::default();
-        eprintln!("reset, dormant");
         let (token, cache) = (self.token.clone(), self.cache.clone());
         std::thread::spawn(move || match Relay::connect(&token, &cache).and_then(|mut relay| relay.forget()) {
             Ok(()) => eprintln!("the server forgot the conversation"),

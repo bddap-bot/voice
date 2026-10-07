@@ -230,6 +230,17 @@ test('shared material and its hub reply remain in the conversation trace', () =>
   assert.deepEqual(trace.entries[0], { kind: 'delegation', id: 'share_1', sent: 'https://example.test/a?q=one', context: [], reply: 'received', timing: 12, shared: true });
 });
 
+test('pending holds only the words heard since the last delegation and leaves them pending', () => {
+  const trace = new ConversationTrace();
+  trace.heard('check the beacon', 100);
+  trace.delegated('first', 200);
+  trace.spoke('Checking.');
+  trace.heard(' order filament ', 300);
+  assert.deepEqual(trace.pending(500), { sent: 'order filament', context: [{ speaker: 'user', text: 'check the beacon' }, { speaker: 'live', text: 'Checking.' }], duration_ms: 200 });
+  assert.equal(trace.delegated('second', 500).sent, 'order filament');
+  assert.equal(trace.pending().sent, '');
+});
+
 test('ending voice does not cancel a pending shared request', () => {
   const trace = new ConversationTrace();
   trace.shared('share_pending', 'image');

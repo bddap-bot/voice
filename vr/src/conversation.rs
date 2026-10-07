@@ -106,7 +106,7 @@ impl Trace {
     }
 
     /// The user's words since the last delegation, and up to twenty turns before them.
-    pub fn delegated(&mut self, now: Instant) -> Delegation {
+    pub fn pending(&self, now: Instant) -> Delegation {
         let heard: Vec<&str> = (self.pending_from..self.turns.len()).filter(|&index| self.is_pending(index)).map(|index| self.turns[index].text.trim()).filter(|text| !text.is_empty()).collect();
         let text = bounded_text(&heard, MAX_CONTEXT);
         let visible: Vec<usize> = (0..self.turns.len()).filter(|&index| !self.is_pending(index)).collect();
@@ -114,9 +114,15 @@ impl Trace {
         while !context.is_empty() && serde_json::to_string(&context).unwrap().len() > MAX_CONTEXT {
             context.remove(0);
         }
-        let duration_ms = self.heard_at.take().map_or(0, |at| now.saturating_duration_since(at).as_millis() as u64);
-        self.pending_from = self.turns.len();
+        let duration_ms = self.heard_at.map_or(0, |at| now.saturating_duration_since(at).as_millis() as u64);
         Delegation { text, context, duration_ms }
+    }
+
+    pub fn delegated(&mut self, now: Instant) -> Delegation {
+        let delegation = self.pending(now);
+        self.heard_at = None;
+        self.pending_from = self.turns.len();
+        delegation
     }
 
     pub fn hub_replied(&mut self) {

@@ -74,6 +74,7 @@ export async function send_only(bytes) {
   }
   if (frame.startsWith('spans\\n')) (globalThis.spanBatches ??= []).push(JSON.parse(frame.slice(6)).spans);
   if (frame.startsWith('delegate\\n')) (globalThis.delegateFrames ??= []).push(JSON.parse(frame.slice(9)));
+  if (frame.startsWith('ended\\n')) (globalThis.endedFrames ??= []).push(JSON.parse(frame.slice(6)));
   if (frame.startsWith('telemetry\\n')) {
     const batch = JSON.parse(frame.slice(frame.indexOf('\\n') + 1));
     globalThis.telemetryBatches.push(batch.events);
@@ -1988,6 +1989,39 @@ test('a sign-off with a delegation outstanding ends the session and its late hub
     return { delegates: count('delegate'), sleeps: sessionEvents('sleep').map((event) => event.detail), appended: sentLiveEvents.filter((event) => event.event_id?.includes('late')).length, acks: hubAcks };
   `, { budget: 6000 });
   assert.deepEqual(result, { delegates: 1, sleeps: ['sign-off'], appended: 0, acks: ['late'] });
+});
+
+test('words heard after the last delegation reach the hub once as the session signs off', async () => {
+  const result = await runWakePage(`
+    hear('Check the test beacon.');
+    delegateTurn('beacon');
+    await until(() => count('delegate'));
+    emitLive({ type: 'session.output_transcript.delta', delta: 'Checking.' });
+    hear('Also remember the filament order.');
+    signOff();
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && sessionEvents('close').length);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    return { ended: globalThis.endedFrames ?? [], delegates: count('delegate') };
+  `);
+  assert.equal(result.delegates, 1);
+  assert.equal(result.ended.length, 1);
+  assert.equal(result.ended[0].text, 'Also remember the filament order.');
+  assert.deepEqual(result.ended[0].context, [{ speaker: 'user', text: 'Check the test beacon.' }, { speaker: 'live', text: 'Checking.' }, { speaker: 'live', text: SIGN_OFF }]);
+  assert.ok(Number.isFinite(result.ended[0].duration_ms));
+});
+
+test('a session that heard nothing after its last delegation sends the hub nothing as it signs off', async () => {
+  const result = await runWakePage(`
+    hear('Check the test beacon.');
+    delegateTurn('beacon');
+    await until(() => count('delegate'));
+    hear(' ?');
+    signOff();
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && sessionEvents('close').length);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    return { ended: count('ended'), delegates: count('delegate') };
+  `);
+  assert.deepEqual(result, { ended: 0, delegates: 1 });
 });
 
 test('a sign-off split by user speech still ends the session, and more speech after it sleeps only once', async () => {

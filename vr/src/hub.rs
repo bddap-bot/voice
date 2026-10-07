@@ -176,6 +176,14 @@ impl Hub {
         self.sleeping = true;
     }
 
+    /// The session is over: words heard since the last delegation go to the hub as one `ended` frame, which no voice answers.
+    pub fn ended(&mut self, trace: &Trace, now: Instant) {
+        let unrelayed = trace.pending(now);
+        if has_word(&unrelayed.text) {
+            self.out.push(Command::Frame("ended", json!({ "text": unrelayed.text, "context": unrelayed.context, "duration_ms": unrelayed.duration_ms })));
+        }
+    }
+
     /// A `hub` frame's body: one JSON line, then any display image.
     pub fn reply(&mut self, body: &[u8], trace: &mut Trace, now: Instant) {
         let (line, image) = match body.iter().position(|&byte| byte == b'\n') {
@@ -554,6 +562,42 @@ mod tests {
         f.reply(json!({ "id": "late", "stamp": "late_stamp", "first": true, "commentary": ["Too late."], "instructions": ["Ignored."] }));
         assert!(f.told().is_empty());
         assert_eq!(f.frames("hub-ack"), [json!({ "id": "late", "stamp": "late_stamp", "unspoken": ASLEEP })]);
+    }
+
+    #[test]
+    fn words_after_the_last_delegation_reach_the_hub_once_when_the_session_ends() {
+        let mut f = Fixture::new();
+        f.hear("Check the printer.");
+        f.delegate("printer");
+        f.speak("Checking.");
+        f.hear("Also remember the filament order. Goodnight.");
+        f.speak(&crate::identity::identity().sign_off);
+        f.hub.sleep();
+        f.hub.ended(&f.trace, f.now);
+        f.collect();
+        let ended = f.frames("ended");
+        assert_eq!(ended.len(), 1);
+        assert_eq!(ended[0]["text"], "Also remember the filament order. Goodnight.");
+        assert_eq!(ended[0]["context"], json!([{ "speaker": "user", "text": "Check the printer." }, { "speaker": "live", "text": "Checking." }, { "speaker": "live", "text": crate::identity::identity().sign_off }]));
+        assert_eq!(f.frames("delegate").len(), 1);
+    }
+
+    #[test]
+    fn a_session_ending_with_nothing_said_since_the_last_delegation_sends_nothing() {
+        let mut f = Fixture::new();
+        f.hear("Check the printer.");
+        f.delegate("printer");
+        f.speak("Checking. ");
+        f.hear("?");
+        f.speak(&crate::identity::identity().sign_off);
+        f.hub.sleep();
+        f.hub.ended(&f.trace, f.now);
+        f.collect();
+        assert!(f.frames("ended").is_empty());
+        let mut silent = Fixture::new();
+        silent.hub.ended(&silent.trace, silent.now);
+        silent.collect();
+        assert!(silent.frames("ended").is_empty());
     }
 
     #[test]

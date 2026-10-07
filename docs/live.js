@@ -393,11 +393,11 @@ export class ConversationTrace {
     while (context.length && new TextEncoder().encode(JSON.stringify(context)).length > 8192) context.shift();
     return context;
   }
+  pending(now = Date.now()) {
+    return { sent: boundedText(this.pendingTurns.map((text) => text.trim()).filter(Boolean), 8192), context: this.context(this.pendingEntries), duration_ms: this.heardAt ? now - this.heardAt : 0 };
+  }
   delegated(id, now = Date.now()) {
-    const pending = this.pendingTurns.map((text) => text.trim()).filter(Boolean);
-    const sent = boundedText(pending, 8192);
-    const context = this.context(this.pendingEntries);
-    const entry = { kind: 'delegation', id, sent, context, reply: '', timing: null, duration_ms: this.heardAt ? now - this.heardAt : 0 };
+    const entry = { kind: 'delegation', id, ...this.pending(now), reply: '', timing: null };
     this.entries.push(entry);
     this.pendingTurns = [];
     this.pendingEntries.clear();

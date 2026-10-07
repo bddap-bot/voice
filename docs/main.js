@@ -1245,6 +1245,10 @@ function release(attempt) {
   attempt.playback?.close().catch(recordPageError);
   return flushed;
 }
+function sendUnrelayed() {
+  const { sent, context, duration_ms } = trace.pending();
+  if (/[\p{L}\p{N}]/u.test(sent)) sendFrame(`ended\n${JSON.stringify({ text: sent, context, duration_ms })}`).catch(() => {});
+}
 function stopConversation(reason = '') {
   if (starting) cancelStarting();
   const current = conversation;
@@ -1253,6 +1257,7 @@ function stopConversation(reason = '') {
   recorderFlush = Promise.all([recorderFlush, release(current.audioOwner)]).then(() => {});
   recordSession('close', reason, current.id);
   sendFrame('cancel').catch(() => {});
+  sendUnrelayed();
   current.clock.stop();
   stageTrace?.sessionEnded();
   stageTrace = null;
@@ -1417,6 +1422,7 @@ $('forget').addEventListener('click', async () => { listening = false; setMicrop
 navigator.mediaDevices?.addEventListener('devicechange', syncSpotter);
 document.addEventListener('visibilitychange', () => { syncScreenLock(); keepPage(); if (document.hidden) puppetRuntime?.pause(); else if (!$('conversation').classList.contains('hidden')) puppetRuntime?.start(); });
 window.addEventListener('beforeunload', () => puppetRuntime?.dispose());
+window.addEventListener('pagehide', (event) => { if (!event.persisted && conversation) sendUnrelayed(); });
 const saved = configuredToken(config, localStorage.getItem(KEY));
 if (saved) { setCard(false); start(saved).then(() => {
   if (!restored) return;

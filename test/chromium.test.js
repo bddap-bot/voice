@@ -70,6 +70,16 @@ test('Chromium shares the launcher process group, so an interrupt reaches it', a
   }
 });
 
+test('Chromium keeps its config, cache and crash database in its own scratch and loads only software Vulkan, so no other browser\'s locks or a gated GPU driver can stall it', async () => {
+  const chrome = await launchFake(`const { HOME, XDG_CONFIG_HOME, XDG_CACHE_HOME, TMPDIR, VK_LOADER_DRIVERS_SELECT } = process.env; process.stderr.write(JSON.stringify({ HOME, XDG_CONFIG_HOME, XDG_CACHE_HOME, TMPDIR, VK_LOADER_DRIVERS_SELECT }) + '\\n'); setInterval(() => {}, 1000);`);
+  try {
+    const { scratch } = chrome;
+    assert.deepEqual(JSON.parse(chrome.stderr), { HOME: scratch, XDG_CONFIG_HOME: scratch, XDG_CACHE_HOME: scratch, TMPDIR: scratch, VK_LOADER_DRIVERS_SELECT: '*swiftshader*' });
+  } finally {
+    await chrome.close();
+  }
+});
+
 test('Chromium cleanup removes the profile when spawning fails', async () => {
   const browser = await launchChromium({ executable: join(process.cwd(), 'missing-chromium') });
   assert.equal((await browser.exited).code, 'ENOENT');

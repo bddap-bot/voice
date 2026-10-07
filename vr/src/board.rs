@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use font8x8::legacy::BASIC_LEGACY;
 
 use crate::calls::{Calls, State};
@@ -5,6 +7,8 @@ use crate::placement::Vec3;
 use crate::voice::VoiceId;
 
 pub const WIDTH: f32 = 0.2;
+/// How long the appearance library stays after a reveal.
+pub const LIBRARY_SHOWN: Duration = Duration::from_secs(60);
 const PIXELS_PER_METRE: f32 = 2000.0;
 const ROW: f32 = 0.022;
 const GAP: f32 = 0.004;
@@ -74,7 +78,8 @@ pub struct Touch {
 
 pub struct Board {
     previews: Vec<Option<Vec<u8>>>,
-    library: bool,
+    /// When the appearance library was last revealed, while it shows.
+    library: Option<Instant>,
     log: bool,
     pub calls: Calls,
     pub active: usize,
@@ -88,26 +93,34 @@ pub struct Board {
 
 impl Board {
     pub fn new(appearances: usize, active: usize) -> Board {
-        Board { previews: vec![None; appearances], library: false, log: false, calls: Calls::default(), active, pending: None, muted: false, voice: VoiceId::default(), armed: false, hover: None, dirty: true }
+        Board { previews: vec![None; appearances], library: None, log: false, calls: Calls::default(), active, pending: None, muted: false, voice: VoiceId::default(), armed: false, hover: None, dirty: true }
     }
 
     /// As summoned: a hand already at the board must withdraw before it presses, and the appearance library is hidden.
     pub fn reset(&mut self) {
         self.armed = false;
         self.hover = None;
-        self.library = false;
+        self.library = None;
         self.log = false;
         self.dirty = true;
     }
 
-    /// Shows the appearance library below the buttons, growing the board downward.
-    pub fn reveal(&mut self) {
-        self.library = true;
+    /// Shows the appearance library below the buttons, growing the board downward, for `LIBRARY_SHOWN` from `now`.
+    pub fn reveal(&mut self, now: Instant) {
+        self.library = Some(now);
         self.dirty = true;
     }
 
+    /// Hides the appearance library once `LIBRARY_SHOWN` has passed since its reveal.
+    pub fn tick(&mut self, now: Instant) {
+        if self.library.is_some_and(|revealed| now.duration_since(revealed) >= LIBRARY_SHOWN) {
+            self.library = None;
+            self.dirty = true;
+        }
+    }
+
     pub fn library(&self) -> bool {
-        self.library
+        self.library.is_some()
     }
 
     /// Shows or hides the recent hub calls below the buttons.
@@ -148,7 +161,7 @@ impl Board {
     }
 
     pub fn height(&self) -> f32 {
-        let lines = if self.library { self.previews.len().div_ceil(COLUMNS) } else { 0 };
+        let lines = if self.library() { self.previews.len().div_ceil(COLUMNS) } else { 0 };
         ROWS as f32 * ROW + self.log_height() + lines as f32 * CELL + (ROWS + lines + 1) as f32 * GAP
     }
 
@@ -180,7 +193,7 @@ impl Board {
         if self.voice.stored {
             buttons.push(Button { press: Press::VoiceId, rect: self.row(2, left, right) });
         }
-        let shown = if self.library { self.previews.len() } else { 0 };
+        let shown = if self.library() { self.previews.len() } else { 0 };
         buttons.extend((0..shown).map(|index| Button { press: Press::Appearance(index), rect: self.cell(index) }));
         buttons
     }
@@ -486,7 +499,7 @@ mod tests {
     #[test]
     fn touching_each_button_fires_its_action_exactly_once() {
         let mut board = Board::new(3, 0);
-        board.reveal();
+        board.reveal(Instant::now());
         for button in board.buttons() {
             for depth in [0.0, 0.01, 0.03, 0.2] {
                 assert_eq!(poke_on(&mut board, button.press, depth), [button.press], "{:?} pressed {depth} m deep", button.press);
@@ -505,7 +518,7 @@ mod tests {
         let left = Pose { r: [[yaw.cos(), pitch.sin() * yaw.sin(), pitch.cos() * yaw.sin()], [0.0, pitch.cos(), -pitch.sin()], [-yaw.sin(), pitch.sin() * yaw.cos(), pitch.cos() * yaw.cos()]], t: [-0.2, 1.1, -0.35] };
         let over = left.then(&Pose { r: [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]], t: [0.0; 3] });
         let mut board = Board::new(36, 0);
-        board.reveal();
+        board.reveal(Instant::now());
         let pose = over.then(&under_controller(board.height()));
         let tip = |right: &Pose| local_tip(&pose, right, TIP);
         for z in [0.05, 0.015] {
@@ -532,7 +545,7 @@ mod tests {
         let left = Pose { r: [[0.8, 0.0, 0.6], [0.0, 1.0, 0.0], [-0.6, 0.0, 0.8]], t: [-0.2, 1.1, -0.35] };
         const PRESSING: Vec3 = [0.004, -0.021, -0.012];
         let mut board = Board::new(12, 0);
-        board.reveal();
+        board.reveal(Instant::now());
         let pose = left.then(&under_controller(board.height()));
         for button in board.buttons() {
             let [left, bottom, right, top] = button.rect;
@@ -563,7 +576,7 @@ mod tests {
     #[test]
     fn a_point_presses_a_button_exactly_where_that_button_is_drawn() {
         let mut board = Board::new(12, 0);
-        board.reveal();
+        board.reveal(Instant::now());
         let image = board.take_image().unwrap().pixels;
         let [width, height] = board.pixels();
         let edge = 1.0 / PIXELS_PER_METRE;
@@ -655,7 +668,7 @@ mod tests {
     #[test]
     fn sliding_across_buttons_while_touching_fires_only_the_first() {
         let mut board = Board::new(3, 0);
-        board.reveal();
+        board.reveal(Instant::now());
         let [x, top] = centre(&board, Press::Dismiss);
         let [_, bottom] = centre(&board, Press::Appearance(0));
         board.touch(Some([x, top, 0.1]));
@@ -698,7 +711,7 @@ mod tests {
     fn every_appearance_has_its_own_cell_on_the_board_at_once() {
         for count in [1, COLUMNS - 1, COLUMNS, COLUMNS + 1, 36, 37] {
             let mut board = Board::new(count, 0);
-            board.reveal();
+            board.reveal(Instant::now());
             let half = [WIDTH / 2.0, board.height() / 2.0];
             let cells: Vec<[f32; 4]> = (0..count).map(|index| rect_of(&board, Press::Appearance(index))).collect();
             for (index, &[left, bottom, right, top]) in cells.iter().enumerate() {
@@ -717,7 +730,7 @@ mod tests {
     #[test]
     fn each_cell_shows_its_preview_framed_in_the_cell_highlight() {
         let mut board = Board::new(3, 1);
-        board.reveal();
+        board.reveal(Instant::now());
         let opaque: Vec<u8> = (0..PREVIEW * PREVIEW).flat_map(|_| [200, 10, 90, 255]).collect();
         let half: Vec<u8> = (0..PREVIEW * PREVIEW).flat_map(|texel| if texel % PREVIEW < PREVIEW / 2 { [0, 0, 0, 0] } else { [100, 0, 0, 128] }).collect();
         board.preview(0, opaque);
@@ -767,7 +780,7 @@ mod tests {
     #[test]
     fn voice_id_shows_only_with_a_voiceprint_and_each_voice_button_presses_once() {
         let mut board = Board::new(3, 0);
-        board.reveal();
+        board.reveal(Instant::now());
         let has = |board: &Board, press| board.buttons().iter().any(|button| button.press == press);
         assert!(!has(&board, Press::VoiceId) && has(&board, Press::Learn));
         board.voice = VoiceId { stored: true, off: false, learning: None };
@@ -810,7 +823,7 @@ mod tests {
     #[test]
     fn the_microphone_and_reset_share_a_row_without_overlapping() {
         let mut board = Board::new(3, 0);
-        board.reveal();
+        board.reveal(Instant::now());
         let rect = |press| rect_of(&board, press);
         let ([_, mute_bottom, mute_right, mute_top], [reset_left, reset_bottom, _, reset_top]) = (rect(Press::Mute), rect(Press::Reset));
         assert!(mute_right < reset_left);
@@ -834,7 +847,7 @@ mod tests {
     #[test]
     fn hub_calls_show_below_the_buttons_and_above_the_library_marked_by_state_and_hide_again() {
         let mut board = Board::new(6, 0);
-        board.reveal();
+        board.reveal(Instant::now());
         board.calls = calls(&[("What is queued right now on every lane of the build queue, and which are stalled?", &[], false), ("Is the printer busy?", &["It is idle.", "The bed is clear."], false), ("Lost one", &[], true)]);
         let closed = board.height();
         let cell = rect_of(&board, Press::Appearance(0));
@@ -882,11 +895,32 @@ mod tests {
         let hidden = board.height();
         assert_eq!(appearances(&board), 0);
         assert_eq!(board.take_image().unwrap().pixels.len(), (board.pixels()[0] * board.pixels()[1] * 4) as usize);
-        board.reveal();
+        board.reveal(Instant::now());
         assert_eq!(appearances(&board), 36);
         assert!(board.height() > hidden && board.take_image().is_some(), "the board grows to hold it");
         assert!(board.take_image().is_none());
         board.reset();
         assert_eq!((appearances(&board), board.height()), (0, hidden));
+    }
+
+    #[test]
+    fn the_library_hides_itself_a_minute_after_each_reveal() {
+        let mut board = Board::new(36, 0);
+        let hidden = board.height();
+        let start = Instant::now();
+        let at = |seconds: u64| start + Duration::from_secs(seconds);
+        board.reveal(start);
+        board.take_image();
+        board.tick(at(59));
+        assert!(board.library() && board.take_image().is_none(), "still shown at 59 s");
+        board.tick(at(60));
+        assert!(!board.library() && board.height() == hidden && board.take_image().is_some(), "hidden and redrawn at 60 s");
+        board.reveal(at(100));
+        board.tick(at(150));
+        board.reveal(at(150));
+        board.tick(at(209));
+        assert!(board.library(), "a second reveal restarts the minute");
+        board.tick(at(210));
+        assert!(!board.library());
     }
 }

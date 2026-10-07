@@ -246,9 +246,10 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
         let tip = pressing.filter(|&(known, _)| Some(known) == right_device).map_or(TIP, |(_, tip)| tip);
         let stand = on_controller(&left);
         let quad = facing(stand.apply([0.0, -FLOOR, 0.0]), head.t);
-        if !board.library() && reveal.hold(started, hand(Hand::Right).map(|right| local_tip(&stand, &right, tip))) {
+        board.tick(started);
+        if reveal.hold(started, hand(Hand::Right).map(|right| local_tip(&stand, &right, tip))) {
             eprintln!("appearance library revealed");
-            board.reveal();
+            board.reveal(started);
             if previews.is_none() {
                 match Relay::connect(token, &cache) {
                     Ok(relay) => previews = Some(preview::spawn(relay, catalog.avatars.clone())),

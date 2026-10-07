@@ -118,7 +118,7 @@ mod tests {
         let mut previews = renderer(Rc::new(Gpu::new(None).unwrap())).unwrap();
         let models = [plain([1.0, 0.0, 0.0, 1.0]), plain([0.0, 0.0, 1.0, 1.0]), plain([0.0, 1.0, 0.0, 1.0])];
         let mut board = Board::new(models.len(), 0);
-        board.reveal();
+        board.reveal(Instant::now());
         for (index, model) in models.iter().enumerate() {
             board.preview(index, render(&mut previews, model).unwrap());
         }

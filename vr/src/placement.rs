@@ -76,7 +76,7 @@ impl Pose {
     }
 }
 
-/// Where the avatar's feet stand on the controller: its top, in the controller's frame (x right, y up, z toward the elbow), facing the elbow.
+/// Where the avatar's feet stand on the controller: its top, in the controller's frame (x right, y up, z toward the elbow).
 const STAND: Vec3 = [0.0, 0.03, 0.02];
 /// The board's face plane below the controller, in the controller's frame.
 const BELOW: f32 = 0.07;
@@ -87,9 +87,9 @@ const SIDE_GAP: f32 = 0.01;
 /// The right controller's touch point ahead of its origin, in its frame, for a controller whose render model has no tip.
 pub const TIP: Vec3 = [0.0, 0.0, -0.05];
 
-/// The avatar's frame (feet at the origin, y up, z its facing) standing on the controller and turning with it.
+/// The avatar's frame (feet at the origin, y up, z its facing) standing on the controller and turning with it: its head toward the controller's tip and its face toward the controller's top, upright in a grip that holds the tip up.
 pub fn on_controller(hand: &Pose) -> Pose {
-    hand.then(&Pose { r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], t: STAND })
+    hand.then(&Pose { r: [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]], t: STAND })
 }
 
 /// The board under the controller, its face toward the floor while the controller is held upright: turned over, it reads with its top away from the elbow.
@@ -161,14 +161,20 @@ mod tests {
 
     #[test]
     fn the_avatar_stands_on_the_controller_and_turns_with_it() {
-        let hand = turned(0.7, [-0.2, 1.0, -0.3]);
+        let hand = turned(0.7, [-0.2, 1.0, -0.3]).then(&Pose { r: [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]], t: [0.0; 3] });
+        assert!(close(hand.rotate([0.0, 0.0, -1.0]), [0.0, 1.0, 0.0]), "tip up");
         let avatar = on_controller(&hand);
-        assert!(avatar.t[1] > hand.t[1], "on top");
-        assert!(close(avatar.axis(1), [0.0, 1.0, 0.0]), "upright on an upright controller");
-        assert!(close(avatar.axis(2), hand.axis(2)), "faces the elbow");
+        assert!(close(avatar.axis(1), [0.0, 1.0, 0.0]), "upright on a controller held tip up");
+        assert!(close(avatar.axis(2), hand.axis(1)), "faces the controller's top");
         let tilted = hand.then(&rolled(0.5, [0.0; 3]));
         let avatar = on_controller(&tilted);
-        assert!(close(avatar.axis(1), tilted.axis(1)), "leans as the controller rolls");
+        assert!(close(avatar.axis(1), tilted.rotate([0.0, 0.0, -1.0])), "leans as the controller rolls");
+    }
+
+    #[test]
+    fn the_avatar_is_near_upright_in_the_held_grip() {
+        let held = Pose::from_m34(&[[0.5984, -0.7703, -0.2204, -0.1249], [0.1491, 0.3774, -0.9140, 0.7643], [0.7872, 0.5141, 0.3407, 0.0554]]);
+        assert!(on_controller(&held).axis(1)[1] > 0.9, "within 25 degrees of world up");
     }
 
     #[test]

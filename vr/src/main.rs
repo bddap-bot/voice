@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use openvr::{Runtime, Signal};
 use board::{Board, Press};
-use placement::{beside, facing, local_tip, marker, on_controller, under_controller, Hand, Pose, Vec3, TIP};
+use placement::{beside, facing, local_tip, marker, under_controller, Anchor, Hand, Pose, Vec3, TIP};
 use gaze::Gaze;
 use motion::{Animator, Clip, Random, IDLES};
 use gesture::{Recognizer, Templates};
@@ -144,6 +144,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
     let epoch = Instant::now();
     let mut last = epoch;
     let mut pressing: Option<(u32, Vec3)> = None;
+    let mut anchor = Anchor::Riding;
     let mut calibration = (epoch, String::new());
     let mut voice = Voice::new(token.clone(), cache.clone(), state.join("voiceprint.json"));
     let wake_file = state.join("wake.json");
@@ -244,7 +245,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
             }
         }
         let tip = pressing.filter(|&(known, _)| Some(known) == right_device).map_or(TIP, |(_, tip)| tip);
-        let stand = on_controller(&left);
+        let stand = anchor.stand(started, &left);
         let quad = facing(stand.apply([0.0, -FLOOR, 0.0]), head.t);
         board.tick(started);
         if reveal.hold(started, hand(Hand::Right).map(|right| local_tip(&stand, &right, tip))) {
@@ -302,6 +303,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
             Some(Press::VoiceId) => voice.toggle_voice_id(),
             Some(Press::Learn) => voice.toggle_learning(),
             Some(Press::Calls) => board.toggle_log(),
+            Some(Press::SetDown) => anchor.toggle(started),
             Some(Press::Appearance(index)) if index != board.active => {
                 let avatar = &catalog.avatars[index];
                 eprintln!("picked appearance {}", avatar.id);
@@ -327,6 +329,10 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
             board.calls = voice.calls().clone();
             board.mark();
         }
+        if board.anchor != anchor {
+            board.anchor = anchor;
+            board.mark();
+        }
         if board.voice != voice.voice_id() {
             board.voice = voice.voice_id();
             board.mark();
@@ -350,7 +356,10 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
         let changed = puppet.skinned.morph(&pose.weights);
         let palette = puppet.skinned.palette(&puppet.model.worlds(&pose), local.then(&stand).mat4() * placement);
         puppet.drawn.update(&palette, &puppet.skinned.vertices, &changed);
-        overlay.place_on(device, &left.inverse().then(&quad));
+        match anchor {
+            Anchor::Stuck(_) => overlay.place_in_world(&quad),
+            _ => overlay.place_on(device, &left.inverse().then(&quad)),
+        }
         let eyes = eye_offsets.map(|eye: Pose| eye_projection(local.apply(head.then(&eye).t).into(), QUAD / 2.0, QUAD / 2.0));
         overlay.texture(&mut renderer.render(&puppet.drawn, eyes)?)?;
         overlay.show();

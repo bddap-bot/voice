@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use font8x8::legacy::BASIC_LEGACY;
 
 use crate::calls::{Calls, State};
-use crate::placement::Vec3;
+use crate::placement::{Anchor, Vec3};
 use crate::voice::VoiceId;
 
 pub const WIDTH: f32 = 0.2;
@@ -12,7 +12,7 @@ pub const LIBRARY_SHOWN: Duration = Duration::from_secs(60);
 const PIXELS_PER_METRE: f32 = 2000.0;
 const ROW: f32 = 0.022;
 const GAP: f32 = 0.004;
-/// Dismiss, the microphone and reset, Voice ID, Learn my voice, and the hub calls.
+/// Dismiss, the microphone and reset, Voice ID, Learn my voice, and the hub calls with setting the avatar down.
 const ROWS: usize = 5;
 const COLUMNS: usize = 6;
 const CELL: f32 = (WIDTH - (COLUMNS + 1) as f32 * GAP) / COLUMNS as f32;
@@ -52,6 +52,7 @@ pub enum Press {
     VoiceId,
     Learn,
     Calls,
+    SetDown,
     Appearance(usize),
 }
 
@@ -86,6 +87,7 @@ pub struct Board {
     pub pending: Option<usize>,
     pub muted: bool,
     pub voice: VoiceId,
+    pub anchor: Anchor,
     armed: bool,
     hover: Option<Press>,
     dirty: bool,
@@ -93,7 +95,7 @@ pub struct Board {
 
 impl Board {
     pub fn new(appearances: usize, active: usize) -> Board {
-        Board { previews: vec![None; appearances], library: None, log: false, calls: Calls::default(), active, pending: None, muted: false, voice: VoiceId::default(), armed: false, hover: None, dirty: true }
+        Board { previews: vec![None; appearances], library: None, log: false, calls: Calls::default(), active, pending: None, muted: false, voice: VoiceId::default(), anchor: Anchor::Riding, armed: false, hover: None, dirty: true }
     }
 
     /// As summoned: a hand already at the board must withdraw before it presses, and the appearance library is hidden.
@@ -188,7 +190,8 @@ impl Board {
             Button { press: Press::Mute, rect: self.row(1, left, left + half) },
             Button { press: Press::Reset, rect: self.row(1, right - half, right) },
             Button { press: Press::Learn, rect: self.row(3, left, right) },
-            Button { press: Press::Calls, rect: self.row(4, left, right) },
+            Button { press: Press::Calls, rect: self.row(4, left, left + half) },
+            Button { press: Press::SetDown, rect: self.row(4, right - half, right) },
         ];
         if self.voice.stored {
             buttons.push(Button { press: Press::VoiceId, rect: self.row(2, left, right) });
@@ -261,6 +264,11 @@ impl Board {
                     None => (BUTTON, "Learn my voice".to_owned()),
                 },
                 Press::Calls => (if self.log { ACTIVE } else { BUTTON }, "Hub calls".to_owned()),
+                Press::SetDown => match self.anchor {
+                    Anchor::Riding => (BUTTON, "Set down".to_owned()),
+                    Anchor::Settling(_) => (PENDING, "Set down".to_owned()),
+                    Anchor::Stuck(_) => (ACTIVE, "Pick up".to_owned()),
+                },
                 Press::Appearance(index) => {
                     let fill = if self.pending == Some(index) {
                         PENDING
@@ -829,6 +837,27 @@ mod tests {
         assert!(mute_right < reset_left);
         assert_eq!((mute_bottom, mute_top), (reset_bottom, reset_top));
         assert!(rect(Press::Dismiss)[1] > mute_top && mute_bottom > rect(Press::Appearance(0))[3]);
+    }
+
+    #[test]
+    fn set_down_shares_the_hub_calls_row_presses_once_and_shows_its_state() {
+        let mut board = Board::new(3, 0);
+        let ([_, calls_bottom, calls_right, calls_top], [set_left, set_bottom, _, set_top]) = (rect_of(&board, Press::Calls), rect_of(&board, Press::SetDown));
+        assert!(calls_right < set_left);
+        assert_eq!((calls_bottom, calls_top), (set_bottom, set_top));
+        assert_eq!(poke_on(&mut board, Press::SetDown, 0.0), [Press::SetDown]);
+        board.touch(None);
+        let mut shown = |anchor| {
+            board.anchor = anchor;
+            board.mark();
+            let image = board.take_image().unwrap().pixels;
+            (corner_of(&board, &image, Press::SetDown), inked(&board, &image, board.area(rect_of(&board, Press::SetDown))))
+        };
+        let now = std::time::Instant::now();
+        let (riding, settling, stuck) = (shown(Anchor::Riding), shown(Anchor::Settling(now)), shown(Anchor::Stuck(crate::placement::Pose { r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], t: [0.0; 3] })));
+        assert_eq!([riding.0, settling.0, stuck.0], [BUTTON, PENDING, ACTIVE]);
+        assert!(riding.1.iter().any(|&inked| inked));
+        assert_ne!(riding.1, stuck.1, "Set down, then Pick up");
     }
 
     fn calls(requests: &[(&str, &[&str], bool)]) -> Calls {

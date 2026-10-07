@@ -177,6 +177,11 @@ impl Overlay<'_> {
         call!(self.runtime.overlay, SetOverlayTransformTrackedDeviceRelative, self.handle, device, &mut matrix);
     }
 
+    pub fn place_in_world(&self, pose: &Pose) {
+        let mut matrix = sys::HmdMatrix34_t { m: pose.to_m34() };
+        call!(self.runtime.overlay, SetOverlayTransformAbsolute, self.handle, sys::ETrackingUniverseOrigin_TrackingUniverseStanding, &mut matrix);
+    }
+
     pub fn above_others(&self) {
         call!(self.runtime.overlay, SetOverlaySortOrder, self.handle, 1);
     }

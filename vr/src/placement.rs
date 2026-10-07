@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 pub type Vec3 = [f32; 3];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -92,6 +94,40 @@ pub fn on_controller(hand: &Pose) -> Pose {
     hand.then(&Pose { r: [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]], t: STAND })
 }
 
+/// How long a set-down avatar keeps riding the controller before it stays where it is.
+pub const SETTLE: Duration = Duration::from_secs(1);
+
+/// Where the avatar stands: on the controller, riding it a moment longer after a set-down press, or left in the world.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Anchor {
+    Riding,
+    Settling(Instant),
+    Stuck(Pose),
+}
+
+impl Anchor {
+    /// Riding, a press sets it down after `SETTLE`; otherwise it returns to the controller.
+    pub fn toggle(&mut self, now: Instant) {
+        *self = match self {
+            Anchor::Riding => Anchor::Settling(now + SETTLE),
+            _ => Anchor::Riding,
+        };
+    }
+
+    /// The avatar's frame this frame, staying at the pose it rode to once `SETTLE` has passed.
+    pub fn stand(&mut self, now: Instant, hand: &Pose) -> Pose {
+        match *self {
+            Anchor::Stuck(pose) => pose,
+            Anchor::Settling(until) if now >= until => {
+                let pose = on_controller(hand);
+                *self = Anchor::Stuck(pose);
+                pose
+            }
+            _ => on_controller(hand),
+        }
+    }
+}
+
 /// The board under the controller, its face toward the floor while the controller is held upright: turned over, it reads with its top away from the elbow.
 pub fn under_controller(height: f32) -> Pose {
     Pose::from_axes([-1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, -1.0, 0.0], [0.0, -BELOW, NEAR_EDGE - height / 2.0])
@@ -175,6 +211,30 @@ mod tests {
     fn the_avatar_is_near_upright_in_the_held_grip() {
         let held = Pose::from_m34(&[[0.5984, -0.7703, -0.2204, -0.1249], [0.1491, 0.3774, -0.9140, 0.7643], [0.7872, 0.5141, 0.3407, 0.0554]]);
         assert!(on_controller(&held).axis(1)[1] > 0.9, "within 25 degrees of world up");
+    }
+
+    #[test]
+    fn a_set_down_avatar_rides_a_moment_then_stays_while_the_controller_moves_until_pressed_back() {
+        let start = Instant::now();
+        let at = |seconds: f32| start + Duration::from_secs_f32(seconds);
+        let hand = |seconds: f32| turned(seconds, [seconds, 1.0, -0.3]);
+        let mut anchor = Anchor::Riding;
+        assert_eq!(anchor.stand(at(0.0), &hand(0.0)), on_controller(&hand(0.0)));
+        anchor.toggle(at(0.0));
+        let late = SETTLE.as_secs_f32() - 0.01;
+        assert_eq!(anchor.stand(at(late), &hand(late)), on_controller(&hand(late)), "still riding just before it settles");
+        let settled = SETTLE.as_secs_f32();
+        let left = anchor.stand(at(settled), &hand(settled));
+        assert_eq!(left, on_controller(&hand(settled)), "stays where it rode to");
+        for seconds in [1.5, 3.0, 9.0] {
+            assert_eq!(anchor.stand(at(seconds), &hand(seconds)), left, "held while the controller moves");
+        }
+        anchor.toggle(at(10.0));
+        assert_eq!(anchor, Anchor::Riding);
+        assert_eq!(anchor.stand(at(10.0), &hand(10.0)), on_controller(&hand(10.0)), "back on the controller");
+        anchor.toggle(at(11.0));
+        anchor.toggle(at(11.5));
+        assert_eq!(anchor.stand(at(13.0), &hand(13.0)), on_controller(&hand(13.0)), "a second press while settling keeps it riding");
     }
 
     #[test]

@@ -59,13 +59,8 @@ let
     fi
     grep -q linuxarm64 $out/bin/voice-vr-host
 
-    cat > $out/bin/voice-vr <<'EOF'
-    #!/bin/sh
-    here=$(dirname "$(readlink -f "$0")")
-    export VOICE_VR_SPEAKER_MODEL="''${VOICE_VR_SPEAKER_MODEL:-$here/../share/speaker.onnx}"
-    exec "$here/voice-vr-host" "$@"
-    EOF
-    chmod 755 $out/bin/voice-vr
+    install -m755 ${./voice-vr.sh} $out/bin/voice-vr
+    sh ${./voice-vr-test.sh} $out/bin/voice-vr
     substitute ${./voice-vr.vrmanifest} $out/voice-vr.vrmanifest --replace-fail '"binary_path_linux": "@out@/bin/voice-vr"' '"binary_path_linux_arm": "bin/voice-vr"'
   '';
 in

@@ -226,11 +226,11 @@ impl Board {
     }
 
     /// The board's premultiplied RGBA image, top row first, when it changed since the last call.
-    pub fn take_image(&mut self) -> Option<Vec<u8>> {
+    pub fn take_image(&mut self) -> Option<Canvas> {
         std::mem::take(&mut self.dirty).then(|| self.image())
     }
 
-    fn image(&self) -> Vec<u8> {
+    fn image(&self) -> Canvas {
         let [width, height] = self.pixels();
         let mut image = Canvas::new(width, height, BACKGROUND);
         for button in self.buttons() {
@@ -287,7 +287,7 @@ impl Board {
         if let Some(button) = self.buttons().into_iter().find(|button| Some(button.press) == self.hover) {
             image.outline(self.area(button.rect), BORDER, HOVER);
         }
-        image.pixels
+        image
     }
 
     /// Metres from the board's centre to left, top, right, bottom pixels.
@@ -299,9 +299,9 @@ impl Board {
     }
 }
 
-pub fn marker_image() -> Vec<u8> {
+pub fn marker_image() -> Canvas {
     let centre = MARKER_PIXELS as f32 / 2.0;
-    let mut image = Canvas { pixels: vec![0; (MARKER_PIXELS * MARKER_PIXELS * 4) as usize], width: MARKER_PIXELS };
+    let mut image = Canvas { pixels: vec![0; (MARKER_PIXELS * MARKER_PIXELS * 4) as usize], width: MARKER_PIXELS, height: MARKER_PIXELS };
     for y in 0..MARKER_PIXELS {
         for x in 0..MARKER_PIXELS {
             let distance = (x as f32 + 0.5 - centre).hypot(y as f32 + 0.5 - centre);
@@ -312,17 +312,18 @@ pub fn marker_image() -> Vec<u8> {
             }
         }
     }
-    image.pixels
+    image
 }
 
 pub struct Canvas {
     pub pixels: Vec<u8>,
     pub width: u32,
+    pub height: u32,
 }
 
 impl Canvas {
     pub fn new(width: u32, height: u32, color: [u8; 4]) -> Canvas {
-        let mut canvas = Canvas { pixels: vec![0; (width * height * 4) as usize], width };
+        let mut canvas = Canvas { pixels: vec![0; (width * height * 4) as usize], width, height };
         canvas.fill([0, 0, width, height], color);
         canvas
     }
@@ -563,7 +564,7 @@ mod tests {
     fn a_point_presses_a_button_exactly_where_that_button_is_drawn() {
         let mut board = Board::new(12, 0);
         board.reveal();
-        let image = board.take_image().unwrap();
+        let image = board.take_image().unwrap().pixels;
         let [width, height] = board.pixels();
         let edge = 1.0 / PIXELS_PER_METRE;
         for line in 0..height {
@@ -600,7 +601,7 @@ mod tests {
         assert_eq!(board.hover, None, "pressed; the next press needs the tip drawn back");
         board.touch(Some([x, y, 0.03]));
         assert_eq!(board.hover, Some(Press::Reset));
-        let image = board.take_image().expect("redrawn for the hover");
+        let image = board.take_image().expect("redrawn for the hover").pixels;
         let [left, _, _, top] = rect_of(&board, Press::Reset);
         assert_eq!(pixel(&board, &image, left + 0.0005, top - 0.0005), HOVER);
         let [left, _, _, top] = rect_of(&board, Press::Mute);
@@ -619,7 +620,7 @@ mod tests {
         for z in [-0.05, -0.3] {
             assert_eq!(board.touch(Some([x, y, z])).marker, Some([x, y, 0.0]), "held at the face once through it");
         }
-        let image = marker_image();
+        let image = marker_image().pixels;
         let at = |x: u32, y: u32| <[u8; 4]>::try_from(&image[((y * MARKER_PIXELS + x) * 4) as usize..][..4]).unwrap();
         let middle = MARKER_PIXELS / 2;
         assert_eq!((at(middle, middle), at(1, middle)[3], at(0, 0)[3]), (INK, BACKGROUND[3], 0), "a light dot ringed dark on a clear square");
@@ -722,7 +723,7 @@ mod tests {
         board.preview(0, opaque);
         board.preview(1, half);
         board.pending = Some(2);
-        let image = board.take_image().unwrap();
+        let image = board.take_image().unwrap().pixels;
         let at = |index, u: f32, v: f32| {
             let [left, bottom, right, top] = rect_of(&board, Press::Appearance(index));
             pixel(&board, &image, left + (right - left) * u, top - (top - bottom) * v)
@@ -739,7 +740,7 @@ mod tests {
     #[test]
     fn the_image_draws_each_button_with_its_label() {
         let mut board = Board::new(3, 1);
-        let image = board.take_image().unwrap();
+        let image = board.take_image().unwrap().pixels;
         let [width, height] = board.pixels();
         assert_eq!(image.len(), (width * height * 4) as usize);
         assert!(board.take_image().is_none(), "unchanged");
@@ -758,7 +759,7 @@ mod tests {
         let unmuted = inked(&board, &image, mute);
         board.muted = true;
         board.mark();
-        let image = board.take_image().unwrap();
+        let image = board.take_image().unwrap().pixels;
         assert_eq!(corner(&board, &image, Press::Mute), MUTED);
         assert_ne!(inked(&board, &image, mute), unmuted, "the label says Unmute mic");
     }
@@ -782,7 +783,7 @@ mod tests {
         let ink = |voice: VoiceId, press| {
             let mut board = Board::new(3, 0);
             board.voice = voice;
-            let image = board.take_image().unwrap();
+            let image = board.take_image().unwrap().pixels;
             let area = board.area(rect_of(&board, press));
             let fill = <[u8; 4]>::try_from(&image[((area[1] * board.pixels()[0] + area[0]) * 4) as usize..][..4]).unwrap();
             (fill, inked(&board, &image, area))
@@ -851,7 +852,7 @@ mod tests {
             "Lost one",
         ]);
         assert!(board.height() > closed && rect_of(&board, Press::Appearance(0))[3] < cell[3], "the board grows and the library moves down");
-        let image = board.take_image().unwrap();
+        let image = board.take_image().unwrap().pixels;
         let [left, _, _, bottom] = board.area(rect_of(&board, Press::Calls));
         assert_eq!(corner_of(&board, &image, Press::Calls), ACTIVE);
         let first = bottom + (GAP * PIXELS_PER_METRE) as u32 + PADDING;
@@ -880,7 +881,7 @@ mod tests {
         let appearances = |board: &Board| board.buttons().iter().filter(|button| matches!(button.press, Press::Appearance(_))).count();
         let hidden = board.height();
         assert_eq!(appearances(&board), 0);
-        assert_eq!(board.take_image().unwrap().len(), (board.pixels()[0] * board.pixels()[1] * 4) as usize);
+        assert_eq!(board.take_image().unwrap().pixels.len(), (board.pixels()[0] * board.pixels()[1] * 4) as usize);
         board.reveal();
         assert_eq!(appearances(&board), 36);
         assert!(board.height() > hidden && board.take_image().is_some(), "the board grows to hold it");

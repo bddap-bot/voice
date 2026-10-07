@@ -129,16 +129,16 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
     let mut previews = None;
     let mut board = Board::new(catalog.avatars.len(), active);
     let mut reveal = Reveal::new(HEIGHT);
-    let mut board_size = board.pixels();
-    let mut board_image = vulkan::Flat::new(gpu.clone(), board_size[0], board_size[1])?;
+    let mut board_image = vulkan::Flat::new(gpu.clone());
     let mut overlay = runtime.create_overlay("voice.puppet", "Puppet", QUAD, true)?;
     let mut board_overlay = runtime.create_overlay("voice.board", "Board", board::WIDTH, false)?;
     let mut marker_overlay = runtime.create_overlay("voice.marker", "Fingertip", board::MARKER_WIDTH, false)?;
     marker_overlay.above_others();
-    let mut marker_texture = vulkan::Flat::new(gpu.clone(), board::MARKER_PIXELS, board::MARKER_PIXELS)?;
+    let mut marker_texture = vulkan::Flat::new(gpu.clone());
     marker_overlay.texture(&mut marker_texture.upload(&board::marker_image())?)?;
     let mut display_overlay = runtime.create_overlay("voice.display", "Display", panel::WIDTH, false)?;
-    let mut display: Option<([f32; 2], vulkan::Flat)> = None;
+    let mut display_image = vulkan::Flat::new(gpu.clone());
+    let mut display: Option<[f32; 2]> = None;
     let eye_offsets = runtime.eye_offsets();
     let mut meter = Meter::default();
     let epoch = Instant::now();
@@ -256,21 +256,17 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
                 }
             }
         }
-        if board.pixels() != board_size {
-            board_size = board.pixels();
-            board_image = vulkan::Flat::new(gpu.clone(), board_size[0], board_size[1])?;
-        }
         let mount = under_controller(board.height());
         let board_pose = left.then(&mount);
         board_overlay.place_on(device, &mount);
         let fresh = voice.take_display().map(|shown| panel::draw(&shown));
         if let Some(picture) = &fresh {
-            display = Some((picture.size(), vulkan::Flat::new(gpu.clone(), picture.width, picture.height)?));
+            display = Some(panel::size(picture));
         }
-        if let Some((size, image)) = &mut display {
-            display_overlay.place_on(device, &beside(&mount, [board::WIDTH, board.height()], *size));
+        if let Some(size) = display {
+            display_overlay.place_on(device, &beside(&mount, [board::WIDTH, board.height()], size));
             if let Some(picture) = fresh {
-                display_overlay.texture(&mut image.upload(&picture.rgba)?)?;
+                display_overlay.texture(&mut display_image.upload(&picture)?)?;
                 display_overlay.show();
             }
         }

@@ -122,7 +122,7 @@ mod tests {
         for (index, model) in models.iter().enumerate() {
             board.preview(index, render(&mut previews, model).unwrap());
         }
-        let image = board.take_image().unwrap();
+        let image = board.take_image().unwrap().pixels;
         let over = Pose { r: [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]], t: [-0.2, 1.1, -0.35] };
         let pose = over.then(&under_controller(board.height()));
         let [width, height] = board.pixels();

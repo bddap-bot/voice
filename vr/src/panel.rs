@@ -46,17 +46,9 @@ struct Line {
     text: String,
 }
 
-pub struct Picture {
-    pub width: u32,
-    pub height: u32,
-    /// Premultiplied RGBA, top row first.
-    pub rgba: Vec<u8>,
-}
-
-impl Picture {
-    pub fn size(&self) -> [f32; 2] {
-        [WIDTH, self.height as f32 / PIXELS_PER_METRE]
-    }
+/// The panel's extent in metres.
+pub fn size(picture: &Canvas) -> [f32; 2] {
+    [WIDTH, picture.height as f32 / PIXELS_PER_METRE]
 }
 
 /// The font's ASCII for what a reply's text commonly carries beyond it.
@@ -178,7 +170,7 @@ fn fitted(encoded: &[u8], [width, height]: [u32; 2]) -> Result<(Vec<u8>, [u32; 2
 }
 
 /// The page's display card for one reply: its text, its link, then its picture; at most `MAX_HEIGHT` tall, text cut short to leave the picture half.
-pub fn draw(display: &Display) -> Picture {
+pub fn draw(display: &Display) -> Canvas {
     let width = (WIDTH * PIXELS_PER_METRE) as u32;
     let inside = (MAX_HEIGHT * PIXELS_PER_METRE) as u32 - 2 * PADDING;
     let image = display.image.as_deref();
@@ -214,7 +206,7 @@ pub fn draw(display: &Display) -> Picture {
     if let Some((rgba, size)) = &picture {
         canvas.over([(width - size[0]) / 2, y], *size, rgba);
     }
-    Picture { width, height, rgba: canvas.pixels }
+    canvas
 }
 
 #[cfg(test)]
@@ -231,9 +223,9 @@ mod tests {
         encoded
     }
 
-    fn at(picture: &Picture, x: u32, y: u32) -> [u8; 4] {
+    fn at(picture: &Canvas, x: u32, y: u32) -> [u8; 4] {
         let at = ((y * picture.width + x) * 4) as usize;
-        picture.rgba[at..at + 4].try_into().unwrap()
+        picture.pixels[at..at + 4].try_into().unwrap()
     }
 
     #[test]
@@ -280,7 +272,7 @@ mod tests {
         assert_eq!(picture.height, 2 * PADDING + Kind::Text.height() + width / 2);
         assert_eq!(at(&picture, picture.width / 2, PADDING + Kind::Text.height() + width / 4), red);
         let tall = draw(&Display { markdown: Some("words ".repeat(2000)), link: None, image: Some(png(10, 40, red)) });
-        assert!(tall.size()[1] <= MAX_HEIGHT);
+        assert!(size(&tall)[1] <= MAX_HEIGHT);
         assert_eq!(at(&tall, tall.width / 2, tall.height - PADDING - 4), red);
         assert_eq!(at(&tall, tall.width / 2, tall.height / 2 + 8), red, "text stops at half");
     }

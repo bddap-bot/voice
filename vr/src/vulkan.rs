@@ -4,6 +4,7 @@ use openvr_sys as sys;
 use std::ffi::CString;
 use std::rc::Rc;
 
+use crate::board::Canvas;
 use crate::openvr::Runtime;
 
 const FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
@@ -133,7 +134,7 @@ impl Drop for Gpu {
     }
 }
 
-/// A flat image for an overlay, replaced whole; the compositor may still read the previous ones.
+/// A flat image for an overlay, replaced whole at whatever size each upload brings; the compositor may still read the previous ones.
 pub struct Flat {
     gpu: Rc<Gpu>,
     images: Vec<(vk::Image, vk::DeviceMemory)>,
@@ -143,10 +144,14 @@ pub struct Flat {
 }
 
 impl Flat {
-    pub fn new(gpu: Rc<Gpu>, width: u32, height: u32) -> Result<Flat, String> {
-        let mut images = Vec::new();
+    pub fn new(gpu: Rc<Gpu>) -> Flat {
+        Flat { gpu, images: Vec::new(), next: 0, width: 0, height: 0 }
+    }
+
+    fn allocate(&mut self, width: u32, height: u32) -> Result<(), String> {
+        self.release();
         for _ in 0..RING {
-            images.push(gpu.image(
+            self.images.push(self.gpu.image(
                 &vk::ImageCreateInfo::default()
                     .image_type(vk::ImageType::TYPE_2D)
                     .format(FORMAT)
@@ -159,11 +164,29 @@ impl Flat {
                     .initial_layout(vk::ImageLayout::UNDEFINED),
             )?);
         }
-        Ok(Flat { gpu, images, next: 0, width, height })
+        (self.width, self.height, self.next) = (width, height, 0);
+        Ok(())
     }
 
-    pub fn upload(&mut self, rgba: &[u8]) -> Result<sys::VRVulkanTextureData_t, String> {
-        assert_eq!(rgba.len(), (self.width * self.height * 4) as usize, "one RGBA texel per pixel");
+    fn release(&mut self) {
+        if self.images.is_empty() {
+            return;
+        }
+        unsafe {
+            let _ = self.gpu.device.device_wait_idle();
+            for (image, memory) in self.images.drain(..) {
+                self.gpu.device.destroy_image(image, None);
+                self.gpu.device.free_memory(memory, None);
+            }
+        }
+    }
+
+    pub fn upload(&mut self, picture: &Canvas) -> Result<sys::VRVulkanTextureData_t, String> {
+        let (width, height, rgba) = (picture.width, picture.height, picture.pixels.as_slice());
+        assert_eq!(rgba.len(), (width * height * 4) as usize, "one RGBA texel per pixel");
+        if (width, height) != (self.width, self.height) || self.images.is_empty() {
+            self.allocate(width, height)?;
+        }
         let (image, _) = self.images[self.next];
         self.next = (self.next + 1) % RING;
         let staging = self.gpu.host_buffer(rgba.len() as u64, vk::BufferUsageFlags::TRANSFER_SRC)?;
@@ -171,7 +194,6 @@ impl Flat {
         let range = vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::COLOR).level_count(1).layer_count(1);
         let barrier = |from, to, src, dst| vk::ImageMemoryBarrier::default().old_layout(from).new_layout(to).src_access_mask(src).dst_access_mask(dst).image(image).subresource_range(range);
         let device = &self.gpu.device;
-        let (width, height) = (self.width, self.height);
         let copied = self.gpu.once(|commands| unsafe {
             device.cmd_pipeline_barrier(commands, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[barrier(vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::AccessFlags::empty(), vk::AccessFlags::TRANSFER_WRITE)]);
             let region = vk::BufferImageCopy::default().image_subresource(vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1)).image_extent(vk::Extent3D { width, height, depth: 1 });
@@ -191,13 +213,7 @@ impl Flat {
 
 impl Drop for Flat {
     fn drop(&mut self) {
-        unsafe {
-            let _ = self.gpu.device.device_wait_idle();
-            for &(image, memory) in &self.images {
-                self.gpu.device.destroy_image(image, None);
-                self.gpu.device.free_memory(memory, None);
-            }
-        }
+        self.release();
     }
 }
 
@@ -206,13 +222,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_flat_image_reaches_the_overlay_texture_as_given() {
-        let mut flat = Flat::new(Rc::new(Gpu::new(None).unwrap()), 3, 2).unwrap();
-        for round in 0..RING as u8 + 1 {
-            let rgba: Vec<u8> = (0..24).map(|byte| byte * 10 + round).collect();
-            let texture = flat.upload(&rgba).unwrap();
-            assert_eq!((texture.m_nWidth, texture.m_nHeight), (3, 2));
-            assert_eq!(flat.read().unwrap(), rgba, "round {round}");
+    fn a_flat_image_reaches_the_overlay_texture_as_given_at_each_size() {
+        let mut flat = Flat::new(Rc::new(Gpu::new(None).unwrap()));
+        for (round, (width, height)) in [(3, 2), (3, 2), (3, 2), (3, 2), (3, 5), (2, 1), (3, 5)].into_iter().enumerate() {
+            let pixels: Vec<u8> = (0..width * height * 4).map(|byte| (byte * 10 + round as u32) as u8).collect();
+            let texture = flat.upload(&Canvas { pixels: pixels.clone(), width, height }).unwrap();
+            assert_eq!((texture.m_nWidth, texture.m_nHeight), (width, height));
+            assert_eq!(flat.read().unwrap(), pixels, "round {round}");
         }
+    }
+
+    #[test]
+    fn the_board_texture_follows_the_board_as_hub_calls_open_and_close() {
+        let mut flat = Flat::new(Rc::new(Gpu::new(None).unwrap()));
+        let mut board = crate::board::Board::new(6, 0);
+        let mut sizes = Vec::new();
+        for round in 0..3 {
+            if round > 0 {
+                board.toggle_log();
+            }
+            let image = board.take_image().unwrap();
+            let texture = flat.upload(&image).unwrap();
+            assert_eq!((texture.m_nWidth, texture.m_nHeight), (image.width, image.height));
+            assert_eq!(flat.read().unwrap(), image.pixels);
+            sizes.push(image.height);
+        }
+        assert!(sizes[1] > sizes[0] && sizes[2] == sizes[0], "opening the log grows the board: {sizes:?}");
     }
 }

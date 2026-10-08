@@ -1,8 +1,7 @@
 import { execFile } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { chromiumExecutable, launchChromium } from './chromium.mjs';
+import { chromiumExecutable, launchChromium, livePageArgs, openPage } from './chromium.mjs';
 import http from 'node:http';
-import net from 'node:net';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { assessSmoke, clipClearsStage, evidenceRegion, installSmokeMeasurements, smokeLimits, smokeStatusText, smokeViewports } from '../test/smoke-measurements.js';
@@ -109,65 +108,34 @@ async function makeServer() {
   return { server, url: `http://127.0.0.1:${server.address().port}/`, token, close: () => server.close() };
 }
 
-async function connectCdp(port, exit) {
-  const seconds = 120;
-  const deadline = Date.now() + seconds * 1000;
-  let page;
-  while (!page && Date.now() < deadline) {
-    try { page = (await (await fetch(`http://127.0.0.1:${port}/json`)).json()).find((target) => target.type === 'page'); } catch {}
-    if (!page) await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  if (!page) throw new Error(`Chromium DevTools page target did not appear within ${seconds} seconds`);
-  const browser = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
-  const socket = new WebSocket(browser.webSocketDebuggerUrl);
-  await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject; });
-  let id = 0;
-  let pageSession;
-  const pending = new Map();
+async function connectCdp(chrome, exit) {
   const consoleErrors = [];
   let workerSession;
-  socket.onmessage = ({ data }) => {
-    const message = JSON.parse(data);
-    if (pending.has(message.id)) {
-      const { resolve, reject } = pending.get(message.id);
-      pending.delete(message.id);
-      if (message.error) reject(new Error(message.error.message)); else resolve(message);
-    } else if (message.method === 'Inspector.targetCrashed' && message.sessionId === pageSession) {
-      exit(new Error('Chromium renderer crashed'));
-    } else if (message.method === 'Target.attachedToTarget' && message.params.targetInfo.type === 'service_worker') {
-      workerSession = message.params.sessionId;
-    } else if (message.method === 'ServiceWorker.workerErrorReported') {
-      consoleErrors.push('service-worker: ' + message.params.errorMessage.errorMessage);
-    } else if (message.method === 'Runtime.exceptionThrown') {
-      consoleErrors.push(message.params.exceptionDetails.exception?.description ?? message.params.exceptionDetails.text);
-    } else if (message.method === 'Runtime.consoleAPICalled' && message.params.type === 'error') {
-      consoleErrors.push(message.params.args.map((value) => value.value ?? value.description).join(' '));
-    }
-  };
-  const call = (method, params = {}, sessionId = pageSession) => new Promise((resolve, reject) => {
-    const next = ++id;
-    pending.set(next, { resolve, reject });
-    socket.send(JSON.stringify({ id: next, method, params, sessionId }));
+  const { sessionId, call, evaluate } = await openPage(chrome.devtools.call);
+  chrome.devtools.listen(({ method, params, sessionId: from }) => {
+    if (method === 'Inspector.targetCrashed' && from === sessionId) exit(new Error(`Chromium renderer crashed: ${chrome.stderr}`));
+    else if (method === 'Target.attachedToTarget' && params.targetInfo.type === 'service_worker') workerSession = params.sessionId;
+    else if (method === 'ServiceWorker.workerErrorReported') consoleErrors.push('service-worker: ' + params.errorMessage.errorMessage);
+    else if (method === 'Runtime.exceptionThrown') consoleErrors.push(params.exceptionDetails.exception?.description ?? params.exceptionDetails.text);
+    else if (method === 'Runtime.consoleAPICalled' && params.type === 'error') consoleErrors.push(params.args.map((value) => value.value ?? value.description).join(' '));
   });
-  const evaluate = async (expression) => { const message=await call('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(message.result.exceptionDetails)throw new Error(message.result.exceptionDetails.exception?.description??message.result.exceptionDetails.text);return message.result.result.value; };
-  pageSession = (await call('Target.attachToTarget', { targetId: page.id, flatten: true })).result.sessionId;
+  await call('Inspector.enable');
   const prepareWorker = async () => {
     if (!workerSession) throw new Error('service worker was not observed');
     // Delay cache lookup so response consumption wins the race if cloning moves back inside it.
-    const result = await call('Runtime.evaluate', { expression: `if (!self.__smokeCacheDelayed) { self.__smokeCacheDelayed = true; const open = caches.open.bind(caches); caches.open = async (...args) => { const cache = await open(...args); await new Promise(resolve => setTimeout(resolve, 100)); return cache; }; }` }, workerSession);
-    if (result.result.exceptionDetails) throw new Error('could not delay service-worker cache lookup: ' + JSON.stringify(result.result.exceptionDetails));
+    const result = await chrome.devtools.call('Runtime.evaluate', { expression: `if (!self.__smokeCacheDelayed) { self.__smokeCacheDelayed = true; const open = caches.open.bind(caches); caches.open = async (...args) => { const cache = await open(...args); await new Promise(resolve => setTimeout(resolve, 100)); return cache; }; }` }, workerSession);
+    if (result.exceptionDetails) throw new Error('could not delay service-worker cache lookup: ' + JSON.stringify(result.exceptionDetails));
   };
   return { call, evaluate, consoleErrors, prepareWorker };
 }
 
 async function runViewport(viewport, executable, server) {
-  const devPort = await new Promise((resolve) => { const listener=net.createServer().listen(0,'127.0.0.1',()=>{const value=listener.address().port;listener.close(()=>resolve(value))}); });
-  const args=['--headless=new','--no-sandbox','--disable-background-timer-throttling','--disable-renderer-backgrounding','--hide-scrollbars','--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream','--autoplay-policy=no-user-gesture-required',`--window-size=${viewport.width},${viewport.height}`,`--remote-debugging-port=${devPort}`,'--remote-debugging-address=127.0.0.1',...(viewport.mobile?['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36']:[]),'about:blank'];
+  const args=[...livePageArgs(viewport),...(viewport.mobile?['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36']:[])];
   const chrome = await launchChromium({ executable, args, prefix: '.smoke-' });
   const { promise: exited, resolve: exit } = Promise.withResolvers();
   chrome.exited.then(exit);
   const run = async () => {
-    const cdp=await connectCdp(devPort, exit);
+    const cdp=await connectCdp(chrome, exit);
     if (development) await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `
       globalThis.__smokeLiveChannels = [];
       globalThis.__smokeSpeech = ${JSON.stringify(speech)};
@@ -276,7 +244,7 @@ async function runViewport(viewport, executable, server) {
       await cdp.evaluate('__smoke.sample()');
       if(!neutralSilhouette&&!clipClearsStage(region,(await stageGeometry()).canvas))throw new Error(`the stage canvas reached the evidence crop at second ${second}; this run did not load the neutral silhouette`);
       const shot=await cdp.call('Page.captureScreenshot',{format:'png',captureBeyondViewport:false,clip:{...region,scale:1}});
-      const file=path.join(output,`${viewport.name}-${String(second).padStart(3,'0')}.png`);await writeFile(file,Buffer.from(shot.result.data,'base64'));frames.push(file);
+      const file=path.join(output,`${viewport.name}-${String(second).padStart(3,'0')}.png`);await writeFile(file,Buffer.from(shot.data,'base64'));frames.push(file);
       await new Promise((resolve)=>setTimeout(resolve,1000));
     }
     if (development) {

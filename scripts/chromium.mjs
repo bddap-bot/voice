@@ -30,13 +30,19 @@ export async function launchChromium({ executable, args = [], prefix = '.chromiu
     await exited;
     await rm(scratch, { recursive: true, force: true });
   })();
-  return { scratch, exited, close, devtools: devtools(chrome.stdio[3], chrome.stdio[4]), get stderr() { return stderr; } };
+  return { scratch, exited, close, devtools: devtools(chrome.stdio[3], chrome.stdio[4], () => stderr), get stderr() { return stderr; } };
 }
 
-function devtools(input, output) {
-  let id = 0, buffer = '';
+function devtools(input, output, stderr) {
+  let id = 0, buffer = '', ended = false;
   const pending = new Map(), listeners = new Set();
   const closed = new Promise(resolve => output.on('close', resolve));
+  const unanswered = method => new Error(`Chromium closed DevTools before answering ${method}: ${stderr()}`);
+  closed.then(() => {
+    ended = true;
+    for (const { reject, method } of pending.values()) reject(unanswered(method));
+    pending.clear();
+  });
   output.setEncoding('utf8').on('data', chunk => {
     const messages = (buffer + chunk).split('\0');
     buffer = messages.pop();
@@ -52,12 +58,26 @@ function devtools(input, output) {
   return {
     closed,
     call: (method, params = {}, sessionId) => new Promise((resolve, reject) => {
-      pending.set(++id, { resolve, reject });
-      closed.then(() => reject(new Error(`Chromium closed DevTools before answering ${method}`)));
+      if (ended) return reject(unanswered(method));
+      pending.set(++id, { resolve, reject, method });
       input.write(`${JSON.stringify({ id, method, params, sessionId })}\0`);
     }),
     listen: listener => { listeners.add(listener); return () => listeners.delete(listener); },
   };
+}
+
+export const livePageArgs = ({ width, height }) => ['--headless=new', '--no-sandbox', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--hide-scrollbars', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required', `--window-size=${width},${height}`];
+
+export async function openPage(call, url = 'about:blank') {
+  const { targetId } = await call('Target.createTarget', { url });
+  const { sessionId } = await call('Target.attachToTarget', { targetId, flatten: true });
+  const page = (method, params) => call(method, params, sessionId);
+  const evaluate = async expression => {
+    const { result, exceptionDetails } = await page('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+    if (exceptionDetails) throw new Error(exceptionDetails.exception?.description ?? exceptionDetails.text);
+    return result.value;
+  };
+  return { targetId, sessionId, call: page, evaluate };
 }
 
 const DOCUMENT_HTML = "(document.doctype ? new XMLSerializer().serializeToString(document.doctype) + '\\n' : '') + document.documentElement.outerHTML";
@@ -82,9 +102,7 @@ export async function renderDom(chrome, url, { budget }) {
   });
   const step = work => Promise.race([work, failure]);
   try {
-    const { targetId } = await step(call('Target.createTarget', { url: 'about:blank' }));
-    const { sessionId } = await step(call('Target.attachToTarget', { targetId, flatten: true }));
-    const page = (method, params) => step(call(method, params, sessionId));
+    const { call: page, evaluate } = await openPage((...args) => step(call(...args)));
     await page('Inspector.enable');
     await page('Page.enable');
     await page('Page.setLifecycleEventsEnabled', { enabled: true });
@@ -93,7 +111,7 @@ export async function renderDom(chrome, url, { budget }) {
     await step(until(() => loads.has(loaderId)));
     await page('Emulation.setVirtualTimePolicy', { policy: 'pauseIfNetworkFetchesPending', budget, maxVirtualTimeTaskStarvationCount: 9999 });
     await step(until(() => expired));
-    return (await page('Runtime.evaluate', { expression: DOCUMENT_HTML, returnByValue: true })).result.value;
+    return await evaluate(DOCUMENT_HTML);
   } finally {
     stop();
   }

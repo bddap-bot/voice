@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { launchChromium } from '../scripts/chromium.mjs';
+import { launchChromium, openPage } from '../scripts/chromium.mjs';
 import { CHUNK } from '../docs/wake.js';
 
 const docs = fileURLToPath(new URL('../docs/', import.meta.url));
@@ -90,12 +90,10 @@ document.body.dataset.result = JSON.stringify(result);
   const origin = `http://127.0.0.1:${server.address().port}`;
   const chrome = await launchChromium({ args: ['--headless=new', '--no-sandbox', '--disable-gpu'] });
   try {
-    const { call } = chrome.devtools;
-    const { targetId } = await call('Target.createTarget', { url: `${origin}/` });
-    const { sessionId } = await call('Target.attachToTarget', { targetId, flatten: true });
+    const { evaluate } = await openPage(chrome.devtools.call, `${origin}/`);
     let result = null;
     for (const deadline = Date.now() + 60000; !result && Date.now() < deadline; await new Promise((resolve) => setTimeout(resolve, 200))) {
-      const { result: { value } } = await call('Runtime.evaluate', { expression: 'document.body?.dataset.result ?? null', returnByValue: true }, sessionId);
+      const value = await evaluate('document.body?.dataset.result ?? null');
       result = value && JSON.parse(value);
     }
     assert.match(result?.wasm ?? '', new RegExp(`^${origin}/lib/ort-wasm-simd-threaded\\.jsep-[A-Z0-9]{8}\\.wasm$`), JSON.stringify(result) + chrome.stderr);

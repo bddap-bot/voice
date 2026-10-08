@@ -7,7 +7,7 @@ import { IDENTITY, INACTIVITY_MS, NAME, SIGN_OFF, WAKE_PHRASE } from '../docs/id
 import { WIDTH, WINDOW } from '../docs/wake.js';
 import { MODEL } from '../docs/speaker.js';
 import { ACTION_INSTRUCTIONS } from '../docs/puppet-drivers.js';
-import { launchChromium, renderDom } from '../scripts/chromium.mjs';
+import { launchChromium, openPage, renderDom } from '../scripts/chromium.mjs';
 import { assessSmoke, canvasAspectMatches, clipClearsStage, evidenceRegion, installSmokeMeasurements, smokeLimits, smokeStatusText, smokeViewports } from './smoke-measurements.js';
 
 test('private smoke uses the same authenticated relay transport as the page', async () => {
@@ -374,17 +374,10 @@ async function driveLifecycle(testSetup, drive) {
     }
   });
   try {
-    const { targetId } = await call('Target.createTarget', { url: 'about:blank' });
-    const { sessionId } = await call('Target.attachToTarget', { targetId, flatten: true });
-    const page = (method, params) => call(method, params, sessionId);
+    const { targetId, call: page, evaluate } = await openPage(call);
     await page('Inspector.enable');
     await page('Page.enable');
     await page('Page.setLifecycleEventsEnabled', { enabled: true });
-    const evaluate = async (expression) => {
-      const { result, exceptionDetails } = await page('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
-      if (exceptionDetails) throw new Error(exceptionDetails.exception?.description ?? exceptionDetails.text);
-      return result.value;
-    };
     const poll = async (check) => {
       while (!(await check())) {
         await Promise.race([new Promise(resolve => setTimeout(resolve, 20)), failure.then(error => { throw error; })]);

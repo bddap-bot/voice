@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { crc32, deflateSync, gzipSync } from 'node:zlib';
 import { build } from 'esbuild';
-import { launchChromium } from './chromium.mjs';
+import { launchChromium, openPage } from './chromium.mjs';
 
 const out = new URL('../vr/golden/', import.meta.url).pathname;
 const GOLDEN = { eye: [-0.03, 0.02, 0.5], size: 256, time: 0.5, quad: 0.4, floor: -0.17, height: 0.3, pageHeight: 2.7 };
@@ -262,16 +262,9 @@ async function pageRender(vrm, motion) {
     },
     bundle: true, format: 'iife', write: false, logLevel: 'warning',
   });
-  const chrome = await launchChromium({ args: ['--headless=new', '--no-sandbox', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', 'about:blank'], prefix: '.vr-golden-' });
+  const chrome = await launchChromium({ args: ['--headless=new', '--no-sandbox', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'], prefix: '.vr-golden-' });
   try {
-    const { call } = chrome.devtools;
-    const { targetId } = await call('Target.createTarget', { url: 'about:blank' });
-    const { sessionId } = await call('Target.attachToTarget', { targetId, flatten: true });
-    const evaluate = async (expression) => {
-      const { result, exceptionDetails } = await call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, sessionId);
-      if (exceptionDetails) throw new Error(exceptionDetails.exception?.description ?? exceptionDetails.text);
-      return result.value;
-    };
+    const { evaluate } = await openPage(chrome.devtools.call);
     await evaluate(bundle.outputFiles[0].text);
     return Buffer.from(await evaluate(`renderGolden(${JSON.stringify(vrm.toString('base64'))}, ${JSON.stringify(motion)}, ${JSON.stringify(GOLDEN)})`), 'base64');
   } finally { await chrome.close(); }

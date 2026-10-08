@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { launchChromium } from '../scripts/chromium.mjs';
+import { launchChromium, openPage } from '../scripts/chromium.mjs';
 
 test('a reload after a deploy runs every shell module from the new deploy even while the old ones are still fresh in the HTTP cache', async () => {
   const worker = await readFile(new URL('../docs/sw.js', import.meta.url));
@@ -26,11 +26,7 @@ test('a reload after a deploy runs every shell module from the new deploy even w
   const chrome = await launchChromium({ args: ['--headless=new', '--no-sandbox', '--disable-gpu'] });
   try {
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const { call } = chrome.devtools;
-    const { targetId } = await call('Target.createTarget', { url: 'about:blank' });
-    const { sessionId } = await call('Target.attachToTarget', { targetId, flatten: true });
-    const page = (method, params) => call(method, params, sessionId);
-    const evaluate = async (expression) => (await page('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true })).result.value;
+    const { call: page, evaluate } = await openPage(chrome.devtools.call);
     const settle = async (check) => {
       for (let tries = 0; tries < 200; tries++) {
         if (await evaluate(check).catch(() => false)) return evaluate('document.title');

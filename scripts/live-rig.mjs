@@ -1,10 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import net from 'node:net';
 import path from 'node:path';
 import { RATE } from '../docs/wake.js';
-import { launchChromium } from './chromium.mjs';
+import { launchChromium, livePageArgs, openPage } from './chromium.mjs';
 import { developmentConfig, serveDevelopment } from './dev.mjs';
 
 const root = path.resolve(new URL('..', import.meta.url).pathname);
@@ -37,7 +36,7 @@ export async function runRig({ outDir, speech, page, extra = {} }, scenario) {
   const sourceHashes = { 'test/fixtures/wake-reply/botq_dash_wasm.js': sha256(relayFixture) };
   const capture = { rt: [], frames: [], heard: [], marks: [] };
   const consoleErrors = [];
-  let server, pageUrl, chrome, ws;
+  let server, pageUrl, chrome;
   const record = () => writeFile(path.join(outDir, 'capture.json'), JSON.stringify({ ...extra, commit, page: pageUrl, sourceHashes, capture, consoleErrors }, null, 2));
   let drain = async () => {};
 
@@ -50,28 +49,16 @@ export async function runRig({ outDir, speech, page, extra = {} }, scenario) {
       if (!response.ok || sha256(Buffer.from(await response.arrayBuffer())) !== sourceHashes[file]) throw new Error(`${pageUrl} does not serve this checkout's ${file}`);
     }
     say('serving', commit, pageUrl);
-    let target;
-    for (let i = 0; !target && i < 600; i++) { try { target = (await (await fetch(`http://127.0.0.1:${debugPort}/json`)).json()).find((t) => t.type === 'page'); } catch {} if (!target) await sleep(100); }
-    if (!target) throw new Error('no page target: ' + chrome.stderr);
-    const browser = await (await fetch(`http://127.0.0.1:${debugPort}/json/version`)).json();
-    ws = new WebSocket(browser.webSocketDebuggerUrl);
-    await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
-    let id = 0; const pending = new Map(); let session;
-    ws.onclose = () => { for (const { reject } of pending.values()) reject(new Error('browser disconnected')); pending.clear(); };
-    const call = (method, params = {}, sessionId = session) => new Promise((resolve, reject) => { if (ws.readyState !== WebSocket.OPEN) return reject(new Error('browser disconnected')); const n = ++id; pending.set(n, { resolve, reject }); ws.send(JSON.stringify({ id: n, method, params, sessionId })); });
-    ws.onmessage = ({ data }) => {
-      const m = JSON.parse(data);
-      if (pending.has(m.id)) { const { resolve, reject } = pending.get(m.id); pending.delete(m.id); m.error ? reject(new Error(m.error.message)) : resolve(m); }
-      else if (m.method === 'Fetch.requestPaused') {
+    const { call, evaluate } = await openPage(chrome.devtools.call);
+    chrome.devtools.listen((m) => {
+      if (m.method === 'Fetch.requestPaused') {
         const { requestId, request } = m.params;
         const relay = request.url === relayUrl;
-        call(relay ? 'Fetch.fulfillRequest' : 'Fetch.continueRequest', relay ? { requestId, responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'text/javascript' }], body: relayFixture.toString('base64') } : { requestId }, m.sessionId).catch(() => {});
+        chrome.devtools.call(relay ? 'Fetch.fulfillRequest' : 'Fetch.continueRequest', relay ? { requestId, responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'text/javascript' }], body: relayFixture.toString('base64') } : { requestId }, m.sessionId).catch(() => {});
       }
       else if (m.method === 'Runtime.exceptionThrown') consoleErrors.push({ at: now(), text: m.params.exceptionDetails.exception?.description ?? m.params.exceptionDetails.text });
       else if (m.method === 'Runtime.consoleAPICalled' && ['error', 'warning'].includes(m.params.type)) consoleErrors.push({ at: now(), text: m.params.args.map((v) => v.value ?? v.description).join(' ') });
-    };
-    const evaluate = async (expression) => { const m = await call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }); if (m.result.exceptionDetails) throw new Error(m.result.exceptionDetails.exception?.description ?? m.result.exceptionDetails.text); return m.result.result.value; };
-    session = (await call('Target.attachToTarget', { targetId: target.id, flatten: true })).result.sessionId;
+    });
     await call('Page.enable'); await call('Runtime.enable');
     await call('Fetch.enable', { patterns: [{ urlPattern: `${relayUrl}*` }] });
     await call('Page.addScriptToEvaluateOnNewDocument', { source: `
@@ -205,16 +192,14 @@ export async function runRig({ outDir, speech, page, extra = {} }, scenario) {
     await scenario({ capture, now, say, sleep, mark, evaluate, drain, settle, quietRelay, wake, tap, ask, askToSleep });
   }
 
-  const debugPort = await new Promise((r) => { const l = net.createServer().listen(0, '127.0.0.1', () => { const p = l.address().port; l.close(() => r(p)); }); });
   try {
     server = page ? null : await serveDevelopment({ config, port: 0 });
     pageUrl = page ?? server.url;
-    chrome = await launchChromium({ prefix: '.live-rig-', args: ['--headless=new', '--no-sandbox', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--hide-scrollbars', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required', '--window-size=1280,800', `--remote-debugging-port=${debugPort}`, '--remote-debugging-address=127.0.0.1', 'about:blank'] });
+    chrome = await launchChromium({ prefix: '.live-rig-', args: livePageArgs({ width: 1280, height: 800 }) });
     await Promise.race([chrome.exited.then((error) => { throw error; }), run()]);
   } finally {
     await drain().catch(() => {});
     await record();
-    ws?.close();
     await chrome?.close();
     await server?.close();
   }

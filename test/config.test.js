@@ -6,6 +6,7 @@ import path from 'node:path';
 import { homedir } from 'node:os';
 import config, { configuredToken } from '../docs/config.js';
 import { developmentConfig, serveDevelopment } from '../scripts/dev.mjs';
+import { livePageArgs } from '../scripts/chromium.mjs';
 
 test('deployed config preserves saved and manually entered credentials', () => {
   assert.equal(configuredToken(config, 'deployed-token'), 'deployed-token');
@@ -53,8 +54,9 @@ test('development smoke requires a started Live session and rejects deployed Liv
   assert.match(source, /const live = development/);
   assert.match(source, /if \(development && deployed\) throw/);
   assert.match(source, /getAttribute\('aria-pressed'\) === 'true'/);
-  assert.match(source, /--use-fake-device-for-media-stream/);
-  assert.match(source, /--use-fake-ui-for-media-stream/);
+  assert.match(source, /livePageArgs\(viewport\)/);
+  const args = livePageArgs({ width: 1, height: 1 });
+  assert.ok(args.includes('--use-fake-device-for-media-stream') && args.includes('--use-fake-ui-for-media-stream'), args.join(' '));
 });
 
 test('development credential command uses only the isolated instance files', async () => {

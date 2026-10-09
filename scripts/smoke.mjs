@@ -131,7 +131,7 @@ async function connectCdp(chrome, exit) {
 
 async function runViewport(viewport, executable, server) {
   const args=[...livePageArgs(viewport),...(viewport.mobile?['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36']:[])];
-  const chrome = await launchChromium({ executable, args, prefix: '.smoke-' });
+  const chrome = await launchChromium({ executable, args });
   const { promise: exited, resolve: exit } = Promise.withResolvers();
   chrome.exited.then(exit);
   const run = async () => {

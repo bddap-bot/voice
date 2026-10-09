@@ -195,7 +195,7 @@ export async function runRig({ outDir, speech, page, extra = {} }, scenario) {
   try {
     server = page ? null : await serveDevelopment({ config, port: 0 });
     pageUrl = page ?? server.url;
-    chrome = await launchChromium({ prefix: '.live-rig-', args: livePageArgs({ width: 1280, height: 800 }) });
+    chrome = await launchChromium({ args: livePageArgs({ width: 1280, height: 800 }) });
     await Promise.race([chrome.exited.then((error) => { throw error; }), run()]);
   } finally {
     await drain().catch(() => {});

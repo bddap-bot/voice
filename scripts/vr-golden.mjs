@@ -262,7 +262,7 @@ async function pageRender(vrm, motion) {
     },
     bundle: true, format: 'iife', write: false, logLevel: 'warning',
   });
-  const chrome = await launchChromium({ args: ['--headless=new', '--no-sandbox', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'], prefix: '.vr-golden-' });
+  const chrome = await launchChromium({ args: ['--headless=new', '--no-sandbox', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] });
   try {
     const { evaluate } = await openPage(chrome.devtools.call);
     await evaluate(bundle.outputFiles[0].text);

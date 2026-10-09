@@ -36,7 +36,7 @@ for (const mobile of [false, true]) test(`audio returns after ${mobile ? 'standa
   try {
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     const origin = `http://127.0.0.1:${server.address().port}`;
-    chrome = await launchChromium({ prefix: '.playback-return-', args: ['--headless=new', '--no-sandbox', '--autoplay-policy=no-user-gesture-required', mobile ? `--app=${origin}` : origin] });
+    chrome = await launchChromium({ args: ['--headless=new', '--no-sandbox', '--autoplay-policy=no-user-gesture-required', mobile ? `--app=${origin}` : origin] });
     const pages = (await chrome.devtools.call('Target.getTargets')).targetInfos.filter(target => target.type === 'page');
     assert.equal(pages.length, 1, JSON.stringify(pages));
     const [{ targetId }] = pages;

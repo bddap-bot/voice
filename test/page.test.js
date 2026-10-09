@@ -77,6 +77,11 @@ export async function send_only(bytes) {
   if (frame.startsWith('ended\\n')) (globalThis.endedFrames ??= []).push(JSON.parse(frame.slice(6)));
   if (frame.startsWith('telemetry\\n')) {
     const batch = JSON.parse(frame.slice(frame.indexOf('\\n') + 1));
+    (globalThis.telemetryIds ??= []).push(batch.batch_id);
+    if (globalThis.refuseTelemetry?.()) {
+      deliver(enc.encode('storage-error\\n' + JSON.stringify({ kind: 'telemetry', batch_id: batch.batch_id, message: 'telemetry queue full', retryable: true })));
+      return;
+    }
     globalThis.telemetryBatches.push(batch.events);
     globalThis.onTelemetry?.();
     for (const event of batch.events.filter((item) => item.kind === 'error')) globalThis.fleetLines.push('fleet-error: voice/page — ' + event.name + ': ' + event.message);
@@ -1081,6 +1086,23 @@ window.addEventListener('test-ready', () => {
   assert.ok(event, stderr);
   assert.match(event.user_agent, /Chrome/);
   assert.equal(event.webgpu_adapter, null);
+});
+
+test('a resent telemetry batch keeps its batch id', async () => {
+  const { stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  let refusals = 1;
+  globalThis.refuseTelemetry = () => refusals-- > 0;
+  setTimeout(() => { throw new TypeError('resent page fault'); }, 0);
+  setTimeout(() => { document.body.dataset.telemetryResendTest = JSON.stringify({ ids: telemetryIds, events: telemetryBatches.flat().filter((event) => event.message === 'resent page fault').length }); }, 1500);
+});
+`);
+  const encoded = /data-telemetry-resend-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
+  const result = JSON.parse(encoded ?? 'null');
+  assert.ok(result, stderr);
+  assert.equal(result.ids.length, 2, stderr);
+  assert.equal(result.ids[0], result.ids[1]);
+  assert.equal(result.events, 1);
 });
 
 test('session open and close arrive as two batched telemetry events', async () => {

@@ -82,9 +82,9 @@ const hubReplies = [];
 let hubTurn = null;
 let stageTrace;
 const traces = new EventBatcher((spans) => sendFrame(`spans\n${JSON.stringify({ spans })}`));
-const telemetryWaiters = new Map();
 const puppetChannel = new PuppetChannel(sendFrame, caches, () => token?.endpoint_id ?? '', config.transferTimeout);
-const telemetry = new EventBatcher(sendTelemetry);
+const telemetryUploads = new AckUploader(sendBytes);
+const telemetry = new EventBatcher((events) => { const id = crypto.randomUUID(); telemetryUploads.add(id, enc.encode(`telemetry\n${JSON.stringify({ batch_id: id, events })}`)); return telemetryUploads.idle(); });
 const persistenceUploads = new AckUploader(sendBytes, { maximumBytes: 128 * 1024 * 1024, onOverflow: () => recordPageError(new Error('session upload queue is full')) });
 
 function sessionId() { return conversation?.id ?? starting?.offerId ?? null; }
@@ -99,28 +99,6 @@ function recordPageError(error, id = sessionId()) { if (!isMicrophoneUnavailable
 function recordSession(name, detail = '', id = sessionId()) { telemetry.add({ kind: 'session', session_id: id, name, detail: String(detail).slice(0, 2048), at: Date.now() }); }
 window.addEventListener('error', (event) => recordPageError(event.error || Object.assign(new Error(event.message), { stack: `${event.filename || ''}:${event.lineno || 0}:${event.colno || 0}` })));
 window.addEventListener('unhandledrejection', (event) => recordPageError(event.reason));
-
-async function sendTelemetry(events) {
-  const batchId = crypto.randomUUID();
-  const acknowledged = new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      telemetryWaiters.delete(batchId);
-      reject(new Error('telemetry acknowledgment timed out'));
-    }, 5000);
-    telemetryWaiters.set(batchId, {
-      resolve: () => { clearTimeout(timer); telemetryWaiters.delete(batchId); resolve(); },
-      reject: (error) => { clearTimeout(timer); telemetryWaiters.delete(batchId); reject(error); },
-    });
-  });
-  // Awaited only once the send settles; handled now so an earlier rejection is not reported as unhandled.
-  acknowledged.catch(() => {});
-  try {
-    await sendFrame(`telemetry\n${JSON.stringify({ batch_id: batchId, events })}`);
-  } catch (error) {
-    telemetryWaiters.get(batchId)?.reject(error);
-  }
-  await acknowledged;
-}
 
 function setStatus(text = '', kind = '') { $('status').textContent = text; $('status').title = text; $('status').className = kind; }
 function setCard(open) {
@@ -403,13 +381,13 @@ async function listen(mine) {
       }
       else if (verb === 'telemetry-ack') {
         const result = JSON.parse(body);
-        telemetryWaiters.get(result.batch_id)?.resolve();
+        telemetryUploads.ack(result.batch_id);
       }
       else if (verb === 'storage-error') {
         const result = JSON.parse(body);
         const key = result.kind === 'transcript' ? `transcript:${result.session_id}:${result.seq}`
           : result.kind === 'audio' ? `audio:${result.session_id}:${result.side}:${result.seq}` : null;
-        if (result.kind === 'telemetry') telemetryWaiters.get(result.batch_id)?.reject(new Error(result.message));
+        if (result.kind === 'telemetry') telemetryUploads.fail(result.batch_id, result.retryable !== false);
         else if (key) {
           persistenceUploads.fail(key, result.retryable !== false);
           if (result.retryable === false) recordPageError(new Error(result.message));

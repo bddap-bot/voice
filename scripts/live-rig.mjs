@@ -32,7 +32,7 @@ export async function runRig({ outDir, speech, page, extra = {} }, scenario) {
   if (!relayModule) throw new Error('page relay module was not found');
   const relayFixture = await readFile(path.join(root, 'test/fixtures/wake-reply/botq_dash_wasm.js'));
   const commit = execFileSync('git', ['describe', '--always', '--dirty', '--exclude=*', '--abbrev=40'], { cwd: root }).toString().trim();
-  const config = await developmentConfig();
+  const config = developmentConfig();
   const sourceHashes = { 'test/fixtures/wake-reply/botq_dash_wasm.js': sha256(relayFixture) };
   const capture = { rt: [], frames: [], heard: [], marks: [] };
   const consoleErrors = [];

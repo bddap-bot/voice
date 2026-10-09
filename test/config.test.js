@@ -1,9 +1,8 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { test } from 'node:test';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { homedir } from 'node:os';
 import config, { configuredToken } from '../docs/config.js';
 import { developmentConfig, serveDevelopment } from '../scripts/dev.mjs';
 import { livePageArgs } from '../scripts/chromium.mjs';
@@ -59,17 +58,9 @@ test('development smoke requires a started Live session and rejects deployed Liv
   assert.ok(args.includes('--use-fake-device-for-media-stream') && args.includes('--use-fake-ui-for-media-stream'), args.join(' '));
 });
 
-test('development credential command uses only the isolated instance files', async () => {
-  const scratch = await mkdtemp(path.join(process.cwd(), '.config-test-'));
-  const previousPath = process.env.PATH;
-  const state = path.join(homedir(), '.local/state/voice-web-dev');
-  const args = ['token', '--key-file', state + '/secret.key', '--secret-file', state + '/auth.env', '--relay-file', state + '/relay-url'];
+test('development credential comes from VOICE_DEV_TOKEN', () => {
   const token = Buffer.from(JSON.stringify({ endpoint_id: 'dev-endpoint', relay_url: 'https://relay.example', secret: 'dev-secret' })).toString('base64url');
-  try {
-    await writeFile(path.join(scratch, 'voice-web'), '#!' + process.execPath + '\n' + 'if (JSON.stringify(process.argv.slice(2)) !== ' + JSON.stringify(JSON.stringify(args)) + ') process.exit(2); console.log(' + JSON.stringify(token) + ');', { mode: 0o700 });
-    process.env.PATH = scratch + path.delimiter + previousPath;
-    assert.deepEqual(await developmentConfig(), { token, storageKey: 'voice.dev.dev-endpoint', serviceWorker: false, transferTimeout: 120000 });
-    await writeFile(path.join(scratch, 'voice-web'), '#!' + process.execPath + '\nprocess.exit(1);');
-    await assert.rejects(developmentConfig());
-  } finally { process.env.PATH = previousPath; await rm(scratch, { recursive: true, force: true }); }
+  assert.deepEqual(developmentConfig(token), { token, storageKey: 'voice.dev.dev-endpoint', serviceWorker: false, transferTimeout: 120000 });
+  assert.throws(() => developmentConfig(''), /VOICE_DEV_TOKEN/);
+  assert.throws(() => developmentConfig(Buffer.from('{}').toString('base64url')), /not ready/);
 });

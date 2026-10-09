@@ -1,25 +1,20 @@
-import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import http from 'node:http';
-import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
 
 const root = path.resolve(fileURLToPath(new URL('../docs/', import.meta.url)));
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json', '.wasm': 'application/wasm', '.css': 'text/css', '.svg': 'image/svg+xml' };
 
-export async function developmentConfig() {
-  const state = path.join(homedir(), '.local/state/voice-web-dev');
-  const { stdout } = await promisify(execFile)('voice-web', ['token', '--key-file', `${state}/secret.key`, '--secret-file', `${state}/auth.env`, '--relay-file', `${state}/relay-url`]);
-  const token = stdout.trim();
+export function developmentConfig(token = process.env.VOICE_DEV_TOKEN?.trim()) {
+  if (!token) throw new Error('set VOICE_DEV_TOKEN to the development server\'s `voice-web token`');
   const { endpoint_id, relay_url, secret } = JSON.parse(Buffer.from(token, 'base64url'));
   if (!endpoint_id || !relay_url || !secret) throw new Error('development backend is not ready');
   return { token, storageKey: `voice.dev.${endpoint_id}`, serviceWorker: false, transferTimeout: 120000 };
 }
 
 export async function serveDevelopment({ config, port = 5173 } = {}) {
-  config ??= await developmentConfig();
+  config ??= developmentConfig();
   const server = http.createServer(async (request, response) => {
     const host = request.headers.host;
     if (host !== `127.0.0.1:${server.address().port}` && host !== `localhost:${server.address().port}`) return response.writeHead(403).end();

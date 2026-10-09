@@ -1,7 +1,6 @@
 import { spawn } from 'node:child_process';
 import { access, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 export async function chromiumExecutable() {
@@ -16,7 +15,7 @@ export async function chromiumExecutable() {
 
 export async function launchChromium({ executable, args = [], prefix = '.chromium-' } = {}) {
   executable ??= await chromiumExecutable();
-  const scratch = await mkdtemp(join(tmpdir(), prefix));
+  const scratch = await mkdtemp(join(process.cwd(), prefix));
   const chrome = spawn(executable, [...args, `--user-data-dir=${scratch}`, '--remote-debugging-pipe'], { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'], env: { ...process.env, HOME: scratch, XDG_CONFIG_HOME: scratch, XDG_CACHE_HOME: scratch, TMPDIR: scratch, VK_LOADER_DRIVERS_SELECT: '*swiftshader*' } });
   let stderr = '', failure;
   chrome.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-500); });

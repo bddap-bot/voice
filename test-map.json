@@ -56,7 +56,7 @@
         "node --check android/test/microphone.mjs",
         "bash android/build.sh --test"
       ],
-      "why": "Compile, package, align and verify the signed Android host with SDK 35 and a private signing key."
+      "why": "Compile, package, align and verify the signed Android host with SDK 35 from android/shell.nix and a throwaway signing key."
     },
     {
       "paths": [

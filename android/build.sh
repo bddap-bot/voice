@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-: "${ANDROID_HOME:?Set ANDROID_HOME to an Android SDK with platform 35 and build-tools 35.0.0}"
+if [[ -z "${VOICE_ANDROID_SHELL:-}" ]]; then
+    exec env VOICE_ANDROID_SHELL=1 nix-shell android/shell.nix --run "bash android/build.sh $(printf '%q ' "$@")"
+fi
 tools="$ANDROID_HOME/build-tools/35.0.0"
 platform="$ANDROID_HOME/platforms/android-35/android.jar"
 out=android/build

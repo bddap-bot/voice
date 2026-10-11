@@ -360,7 +360,7 @@ async function listen(mine) {
         const answer = JSON.parse(body);
         if (isOfferFor(answerWaiter, answer)) answerWaiter.resolve(answer);
       }
-      else if (verb === 'closed') liveClosed();
+      else if (verb === 'closed') liveClosed(JSON.parse(body));
       else if (verb === 'offer-error') {
         const failure = JSON.parse(body);
         if (isOfferFor(answerWaiter, failure)) answerWaiter.reject(new Error(failure.message));
@@ -945,17 +945,17 @@ function onLiveEvent(message, source) {
   else if (event.type === 'session.usage.updated') {
     usageSeconds = Number(event.usage?.audio_duration_ms ?? usageSeconds * 1000) / 1000;
     const limit = usageLimit(event);
-    if (limit && conversation && !conversation.limitReported) {
-      conversation.limitReported = true;
+    if (limit && owner && !owner.limitReported) {
+      owner.limitReported = true;
       recordPageError(new Error(`Live usage limit: ${JSON.stringify(limit)}`));
       sendFrame(`usage-limit\n${JSON.stringify(limit)}`).catch(recordPageError);
     }
     if (conversation?.standing && !conversation.pendingStanding && usageSeconds - conversation.standingAt >= STANDING_REFRESH_S) standBy(conversation.standing);
   }
 }
-function liveClosed() {
-  if (conversation) stopConversation('Session ended — tap to continue');
-  else cancelStarting();
+function liveClosed(payload) {
+  if (isOfferFor(conversation, payload)) stopConversation('Session ended — tap to continue');
+  else if (isOfferFor(starting, payload)) cancelStarting();
 }
 function presentTranscript(event) {
     clearTimeout(unanswered);

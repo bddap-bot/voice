@@ -207,7 +207,7 @@ globalThis.hear = (text) => emitLive({ type: 'input_transcript.added', item: liv
 globalThis.say = (text, start_ms, end_ms) => emitLive({ type: 'output_transcript.added', item: liveItem('output_transcript', text), start_ms, end_ms });
 globalThis.delegateTurn = (id) => emitLive({ type: 'delegation.created', item: { id, type: 'delegation', content: [{ type: 'input_text', text: 'Delegated turn.' }], handoff_id: 'handoff_' + id, target: 'client' } });
 globalThis.told = (keep = () => true) => sentLiveEvents.filter(keep).map(({ type, channel, delegation_item_id, content }) => [type, channel, delegation_item_id ?? null, content[0].text]);
-globalThis.closeLive = (reason = 'call ended') => deliverRelay(new TextEncoder().encode('closed\\n' + JSON.stringify({ reason })));
+globalThis.closeLive = (reason = 'call ended', offer_id = globalThis.lastOffer?.id) => deliverRelay(new TextEncoder().encode('closed\\n' + JSON.stringify({ reason, offer_id })));
 globalThis.replyFromHub = (id, stamp, commentary = [], timing_ms = 5, extra = {}, image) => {
   const text = new TextEncoder().encode('hub\\n' + JSON.stringify({ id, commentary, instructions: [], timing_ms, stamp, ...extra }) + (image ? '\\n' : ''));
   const frame = new Uint8Array(text.length + (image?.length ?? 0));
@@ -1714,6 +1714,17 @@ window.addEventListener('test-ready', async () => {
   assert.deepEqual(result, { offered: 'Session ended — tap to continue', active: 'true' }, stderr);
 });
 
+test('a closed frame for an earlier call leaves the open conversation running', async () => {
+  const { result, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  closeLive('call ended', 'an-earlier-offer');
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  document.body.dataset.result = JSON.stringify({ active: document.querySelector('#puppet').getAttribute('aria-pressed') });
+});
+`);
+  assert.deepEqual(result, { active: 'true' }, stderr);
+});
+
 test('a usage limit reaches the relay once per conversation and the session line reports audio seconds', async () => {
   const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {
@@ -2708,8 +2719,9 @@ test('a hub instruction reaches Live as its own silent developer append only aft
     for (const seconds of [300, 599]) emitLive({ type: 'session.usage.updated', usage: { audio_duration_ms: seconds * 1000 } });
     await settled();
     const early = told().length;
-    for (const seconds of [600, 601, 1199]) emitLive({ type: 'session.usage.updated', usage: { audio_duration_ms: seconds * 1000 } });
+    emitLive({ type: 'session.usage.updated', usage: { audio_duration_ms: 600000 } });
     await until(() => told().length === 5);
+    for (const seconds of [601, 1199]) emitLive({ type: 'session.usage.updated', usage: { audio_duration_ms: seconds * 1000 } });
     await settled();
     return { beside, spoken, alone, early, rolled: told().slice(4), acks: hubAckFrames };
   `);

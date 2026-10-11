@@ -192,6 +192,7 @@ impl Link {
             match verb {
                 "answer" if mine => return value["sdp"].as_str().map(str::to_owned).ok_or_else(|| "the answer has no sdp".into()),
                 "offer-error" if mine => return Err(format!("offer: {}", message(body))),
+                "closed" if mine => return Err("the call closed before its answer".into()),
                 _ => {}
             }
         }

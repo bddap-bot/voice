@@ -167,6 +167,16 @@
     },
     {
       "paths": [
+        "test/fixtures/delegated-reply-capture.json"
+      ],
+      "tests": [
+        "npm test",
+        "nix-build vr/default.nix --no-out-link"
+      ],
+      "why": "the page's recorded delegated-reply sessions are judged by the page tests and replayed against the native client by the overlay host's build"
+    },
+    {
+      "paths": [
         "docs/**",
         "src/**",
         "scripts/build.mjs",

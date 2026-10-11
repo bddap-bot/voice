@@ -717,22 +717,24 @@ mod tests {
             let start = Instant::now();
             let mut f = Fixture::new();
             let mut delegations = Vec::new();
+            let mut recorded = Vec::new();
             for row in rows.iter().filter(|row| row["ch"] == session) {
                 f.now = start + Duration::from_millis(row["at"].as_u64().unwrap());
                 f.wait(Duration::ZERO, false);
                 let event = &row["event"];
                 match (row["dir"].as_str().unwrap(), event["type"].as_str().unwrap_or("")) {
-                    ("in", "session.input_transcript.delta") => f.hear(event["delta"].as_str().unwrap()),
-                    ("in", "session.output_transcript.delta") => f.speak(event["delta"].as_str().unwrap()),
-                    ("in", "session.delegation.created") => {
+                    ("in", "input_transcript.added") => f.hear(event["item"]["text"].as_str().unwrap()),
+                    ("in", "output_transcript.added") => f.speak(event["item"]["text"].as_str().unwrap()),
+                    ("in", "delegation.created") => {
                         let id = format!("recorded_{session}_{}", delegations.len());
                         f.delegate(&id);
                         delegations.push(id);
+                        recorded.push(event["item"]["id"].clone());
                     }
-                    ("out", "session.commentary.append") if event["event_id"].as_str().unwrap().starts_with("hub_") => {
-                        let stamp = event["event_id"].as_str().unwrap().strip_prefix("hub_").unwrap();
+                    ("out", "delegation.context.append") => {
+                        assert_eq!(event["delegation_item_id"], recorded[0], "session {session}");
                         let before = f.told().len();
-                        f.reply(json!({ "id": delegations[0], "stamp": stamp, "first": true, "commentary": [event["content"]], "instructions": [], "timing_ms": 1 }));
+                        f.reply(json!({ "id": delegations[0], "stamp": format!("reply-{session}"), "first": true, "commentary": [event["content"][0]["text"]], "instructions": [], "timing_ms": 1 }));
                         assert_eq!(f.told()[before..], [speakable(json!(delegations[0]), expected.as_str().unwrap())], "session {session}");
                     }
                     _ => {}
@@ -742,7 +744,7 @@ mod tests {
             let delegate = f.frames("delegate");
             assert_eq!(delegate.len(), 1, "session {session}");
             assert_eq!(delegate[0]["id"], delegations[0].as_str());
-            let heard: String = rows.iter().filter(|row| row["ch"] == session && row["event"]["type"] == "session.input_transcript.delta" && row["at"].as_u64() < rows.iter().find(|row| row["ch"] == session && row["event"]["type"] == "session.delegation.created").unwrap()["at"].as_u64()).map(|row| row["event"]["delta"].as_str().unwrap()).collect();
+            let heard: String = rows.iter().filter(|row| row["ch"] == session && row["event"]["type"] == "input_transcript.added" && row["at"].as_u64() < rows.iter().find(|row| row["ch"] == session && row["event"]["type"] == "delegation.created").unwrap()["at"].as_u64()).map(|row| row["event"]["item"]["text"].as_str().unwrap()).collect();
             assert_eq!(delegate[0]["text"], heard.trim(), "session {session}");
             assert_eq!(f.frames("hub-ack").len(), 1, "session {session}");
             assert!(f.hub.waiting.is_empty(), "session {session}");

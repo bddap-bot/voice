@@ -42,15 +42,16 @@ const gzippedPuppets = ${JSON.stringify(Object.fromEntries(['42', '43', '44'].ma
 const testWakeModel = ${JSON.stringify(testWakeModel)};
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-const queued = [enc.encode(JSON.stringify({ ok: true }))];
+const queued = [];
 const waiting = [];
 globalThis.puppetRequests = [];
 globalThis.transferOrder = [];
 globalThis.telemetryBatches = [];
 globalThis.fleetLines = [];
-let lost = false;
+let lost = false, authenticated = false, held = null;
 function deliver(value) {
   if (lost) return;
+  if (held) return held.push(value);
   const receiver = waiting.shift();
   if (receiver) receiver.resolve(value);
   else queued.push(value);
@@ -59,6 +60,8 @@ globalThis.deliverRelay = deliver;
 globalThis.loseRelay = (error) => {
   lost = error;
   queued.length = 0;
+  held = null;
+  globalThis.answerAuth = undefined;
   for (const receiver of waiting.splice(0)) receiver.reject(error);
 };
 export default async function initWasm() {}
@@ -68,6 +71,18 @@ export async function send_only(bytes) {
   if (globalThis.relayLatency) await new Promise((resolve) => setTimeout(resolve, relayLatency));
   const frame = dec.decode(bytes);
   (globalThis.sentVerbs ??= []).push(frame.split('\\n', 1)[0]);
+  if (frame.startsWith('{"auth"')) {
+    if (!authenticated) return deliver(enc.encode(JSON.stringify({ ok: authenticated = true })));
+    held = [];
+    globalThis.answerAuth = (ok) => {
+      const replies = held;
+      held = null;
+      globalThis.answerAuth = undefined;
+      deliver(enc.encode(JSON.stringify({ ok })));
+      if (ok) for (const reply of replies) deliver(reply);
+    };
+    return;
+  }
   if (frame.startsWith('hub-ack\\n')) {
     (globalThis.hubAcks ??= []).push(JSON.parse(frame.slice(8)).stamp);
     (globalThis.hubAckFrames ??= []).push(JSON.parse(frame.slice(8)));
@@ -77,8 +92,7 @@ export async function send_only(bytes) {
   if (frame.startsWith('ended\\n')) (globalThis.endedFrames ??= []).push(JSON.parse(frame.slice(6)));
   if (frame.startsWith('telemetry\\n')) {
     const batch = JSON.parse(frame.slice(frame.indexOf('\\n') + 1));
-    (globalThis.telemetryIds ??= []).push(batch.batch_id);
-    if (globalThis.refuseTelemetry?.()) {
+    if (globalThis.refuseTelemetry?.(batch)) {
       deliver(enc.encode('storage-error\\n' + JSON.stringify({ kind: 'telemetry', batch_id: batch.batch_id, message: 'telemetry queue full', retryable: true })));
       return;
     }
@@ -120,14 +134,18 @@ export async function send_only(bytes) {
     const id = JSON.parse(frame.slice(frame.indexOf('\\n') + 1)).id;
     globalThis.puppetRequests.push(id);
     globalThis.transferOrder.push(id);
-    const compressed = Uint8Array.from(gzippedPuppets[id]);
-    deliver(enc.encode('puppet-start\\n' + JSON.stringify({ id, size: compressed.length, originalSize: 3, contentHash: 'hash-' + id, encoding: 'gzip' })));
-    const prefix = enc.encode('puppet-chunk\\n' + id + '\\n');
-    const chunk = new Uint8Array(prefix.length + compressed.length);
-    chunk.set(prefix);
-    chunk.set(compressed, prefix.length);
-    deliver(chunk);
-    deliver(enc.encode('puppet-end\\n' + id));
+    const sendPuppet = () => {
+      const compressed = Uint8Array.from(gzippedPuppets[id]);
+      deliver(enc.encode('puppet-start\\n' + JSON.stringify({ id, size: compressed.length, originalSize: 3, contentHash: 'hash-' + id, encoding: 'gzip' })));
+      const prefix = enc.encode('puppet-chunk\\n' + id + '\\n');
+      const chunk = new Uint8Array(prefix.length + compressed.length);
+      chunk.set(prefix);
+      chunk.set(compressed, prefix.length);
+      deliver(chunk);
+      deliver(enc.encode('puppet-end\\n' + id));
+    };
+    if (globalThis.holdPuppet === id) globalThis.releasePuppet = sendPuppet;
+    else sendPuppet();
   } else if (frame.startsWith('puppet-select\\n')) {
     const id = JSON.parse(frame.slice(frame.indexOf('\\n') + 1)).id;
     deliver(enc.encode('puppet-selected\\n' + JSON.stringify({ id })));
@@ -178,6 +196,9 @@ export class PuppetRuntime {
 `;
 
 const browserSetup = `
+const until = async (check) => { while (!check()) await new Promise((resolve) => setTimeout(resolve)); };
+const nextTask = () => new Promise((resolve) => setTimeout(resolve));
+const spans = () => (globalThis.spanBatches ?? []).flat();
 globalThis.emitLive = (event) => testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(event) }));
 globalThis.hear = (delta) => emitLive({ type: 'session.input_transcript.delta', delta });
 globalThis.delegateTurn = (id) => emitLive({ type: 'session.delegation.created', event_id: 'event_' + id, offset_ms: 0, delegation: { id, type: 'delegation', target: 'client' } });
@@ -269,31 +290,26 @@ globalThis.__voiceSpeaker = {
   startSpeakerGate: async (stream, voiceprint, heard) => fakeSpeaker(stream, voiceprint, heard),
   learnVoice: async (stream, heard) => { const gate = fakeSpeaker(stream, null, heard); return { close: () => gate.close() }; },
 };
+globalThis.spotterStarts = [];
 globalThis.__voiceStartSpotter = async (stream, heard, model) => {
+  spotterStarts.push({ muted: document.querySelector('#mic-mute').getAttribute('aria-pressed'), awake: document.querySelector('#puppet').getAttribute('aria-pressed') });
   globalThis.testSpotter = { stream, heard, model, closed: 0 };
   return { close() { testSpotter.closed++; } };
 };
 globalThis.sentLiveEvents = [];
-window.addEventListener('load', () => {
+window.addEventListener('load', async () => {
   if (localStorage.getItem('voice.token')) return;
-  const poll = globalThis.setInterval.bind(globalThis);
   globalThis.statusTextWrites = [];
   new MutationObserver(() => statusTextWrites.push(document.querySelector('#status').textContent)).observe(document.querySelector('#status'), { childList: true, characterData: true, subtree: true });
   document.querySelector('#token').value = btoa(JSON.stringify({ endpoint_id: 'test', secret: 'test' }));
   document.querySelector('#connect').click();
-  const ready = poll(() => {
-    if (document.querySelector('#puppet').getAttribute('aria-disabled') === 'true') return;
-    clearInterval(ready);
-    if (globalThis.skipTap) return window.dispatchEvent(new Event('test-ready'));
-    document.querySelector('#puppet').click();
-    const started = poll(() => {
-      const status = document.querySelector('#status').textContent;
-      if (document.querySelector('#puppet').getAttribute('aria-pressed') !== 'true' && !status.startsWith('conversation could not start:') && status !== 'no microphone found') return;
-      clearInterval(started);
-      document.body.dataset.startTest = status || 'puppet';
-      window.dispatchEvent(new Event('test-ready'));
-    }, 10);
-  }, 10);
+  await until(() => document.querySelector('#puppet').getAttribute('aria-disabled') !== 'true');
+  if (globalThis.skipTap) return window.dispatchEvent(new Event('test-ready'));
+  document.querySelector('#puppet').click();
+  const status = () => document.querySelector('#status').textContent;
+  await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true' || status().startsWith('conversation could not start:') || status() === 'no microphone found');
+  document.body.dataset.startTest = status() || 'puppet';
+  window.dispatchEvent(new Event('test-ready'));
 });
 `;
 
@@ -305,11 +321,22 @@ for (let index = 0; index < 10; index++) {
 }
 `;
 
-async function dumpDom(url, args, budget) {
+const CEILING_MS = 60000;
+
+const ENTITIES = { quot: '"', lt: '<', gt: '>', amp: '&', nbsp: '\u00a0' };
+
+async function dumpDom(url, args, { virtualTime = false } = {}) {
   const chrome = await launchChromium({ args: ['--headless=new', '--no-sandbox', '--autoplay-policy=no-user-gesture-required', ...args] });
+  let timer;
   try {
-    return { stdout: await renderDom(chrome, url, { budget }), stderr: chrome.stderr };
+    const rendered = renderDom(chrome, url, { done: "document.body?.hasAttribute('data-result')", virtualTime });
+    rendered.catch(() => {});
+    const ceiling = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`the page set no result within ${CEILING_MS} ms: ${chrome.stderr}`)), CEILING_MS); });
+    const stdout = await Promise.race([rendered, ceiling]);
+    const result = JSON.parse(/data-result="([^"]*)"/.exec(stdout)[1].replace(/&(quot|lt|gt|amp|nbsp);/g, (_, name) => ENTITIES[name]));
+    return { result, stdout, stderr: chrome.stderr };
   } finally {
+    clearTimeout(timer);
     await chrome.close();
   }
 }
@@ -340,10 +367,10 @@ async function pageServer(testSetup) {
   return { server, requests, url: `http://127.0.0.1:${server.address().port}/` };
 }
 
-async function runPage(testSetup = '', { scale = 1, size = '390,844', budget = 3000, mobile = false } = {}) {
+async function runPage(testSetup, { virtualTime, scale = 1, size = '390,844', mobile = false } = {}) {
   const { server, requests, url } = await pageServer(testSetup);
   try {
-    const { stdout, stderr } = await dumpDom(url, [
+    const page = await dumpDom(url, [
       '--disable-gpu',
       '--autoplay-policy=no-user-gesture-required',
       '--disable-popup-blocking',
@@ -352,8 +379,8 @@ async function runPage(testSetup = '', { scale = 1, size = '390,844', budget = 3
       `--force-device-scale-factor=${scale}`,
       `--window-size=${size}`,
       ...(mobile ? ['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36'] : []),
-    ], budget);
-    return { stdout, stderr, requests };
+    ], { virtualTime });
+    return { ...page, requests };
   } finally {
     if (server.listening) await new Promise((resolve) => server.close(resolve));
   }
@@ -367,7 +394,17 @@ async function driveLifecycle(testSetup, drive) {
   const failure = new Promise(resolve => { fail = resolve; });
   closed.then(() => fail(new Error(`Chromium's browser process ended: ${chrome.stderr}`)));
   const call = (...args) => Promise.race([chrome.devtools.call(...args), failure.then(error => { throw error; })]);
-  const events = [], contentLoaded = new Set();
+  const events = [], contentLoaded = new Set(), checks = new Set();
+  const within = (work, what) => {
+    let timer;
+    const ceiling = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`no ${what} within ${CEILING_MS} ms`)), CEILING_MS); });
+    return Promise.race([work, ceiling]).finally(() => clearTimeout(timer));
+  };
+  const settles = (check, what) => within(new Promise((resolve) => {
+    const test = () => { if (check()) { checks.delete(test); resolve(); } };
+    checks.add(test);
+    test();
+  }), what);
   const stop = listen(({ method, params }) => {
     if (method === 'Page.lifecycleEvent') {
       events.push(`lifecycle:${params.name}`);
@@ -377,26 +414,23 @@ async function driveLifecycle(testSetup, drive) {
       events.push('crashed');
       if (!expectingCrash) fail(new Error(`Chromium renderer crashed: ${chrome.stderr}`));
     }
+    for (const check of checks) check();
   });
   try {
-    const { targetId, call: page, evaluate } = await openPage(call);
+    const { targetId, call: page, evaluate: unbounded } = await openPage(call);
+    const evaluate = (expression) => within(unbounded(expression), expression);
     await page('Inspector.enable');
     await page('Page.enable');
     await page('Page.setLifecycleEventsEnabled', { enabled: true });
-    const poll = async (check) => {
-      while (!(await check())) {
-        await Promise.race([new Promise(resolve => setTimeout(resolve, 20)), failure.then(error => { throw error; })]);
-      }
-    };
-    const until = (expression) => poll(() => evaluate(expression));
-    const event = (name) => poll(() => events.includes(name));
+    const until = (expression) => evaluate(`until(() => ${expression}).then(() => true)`);
+    const event = (name) => settles(() => events.includes(name), name);
     const expectCrash = async (work) => {
       expectingCrash = true;
       try { await work(); await event('crashed'); }
       finally { expectingCrash = false; }
     };
     const { loaderId } = await page('Page.navigate', { url });
-    await poll(() => contentLoaded.has(loaderId));
+    await settles(() => contentLoaded.has(loaderId), 'DOMContentLoaded');
     return await drive({ call, page, evaluate, until, event, events, targetId, expectCrash });
   } finally {
     stop();
@@ -405,7 +439,7 @@ async function driveLifecycle(testSetup, drive) {
   }
 }
 
-async function runPuppetPage(html, { scale = 1, size = '390,844', budget = 3000, mobile = false } = {}) {
+async function runPuppetPage(html, { scale = 1, size = '390,844', mobile = false } = {}) {
   const puppet = await readFile(new URL('../docs/puppet.js', import.meta.url));
   const server = createServer((request, response) => {
     const body = request.url === '/puppet.js' ? puppet : html;
@@ -420,7 +454,7 @@ async function runPuppetPage(html, { scale = 1, size = '390,844', budget = 3000,
       `--force-device-scale-factor=${scale}`,
       `--window-size=${size}`,
       ...(mobile ? ['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36'] : []),
-    ], budget);
+    ]);
   } finally {
     if (server.listening) await new Promise((resolve) => server.close(resolve));
   }
@@ -444,26 +478,24 @@ const beforePlayable = renders;
 runtime.clipAction = { isRunning: () => true, getClip: () => null };
 runtime.animate(16);
 runtime.pause();
-document.body.dataset.visibilityTest = JSON.stringify({ beforeAvatar, beforePlayable, afterPlayable: renders });
+document.body.dataset.result = JSON.stringify({ beforeAvatar, beforePlayable, afterPlayable: renders });
 runtime.dispose();
 </script>`);
 }
 
 test('a new puppet runtime rests seated and asleep', async () => {
-  const { stdout, stderr } = await runPuppetPage(`<!doctype html><canvas id="puppet"></canvas><script type="module">
+  const { result, stderr } = await runPuppetPage(`<!doctype html><canvas id="puppet"></canvas><script type="module">
 import { PuppetRuntime } from '/puppet.js';
 const runtime = new PuppetRuntime(document.querySelector('#puppet'));
-document.body.dataset.restTest = JSON.stringify({ pose: runtime.poseName, asleep: runtime.sleeping });
+document.body.dataset.result = JSON.stringify({ pose: runtime.poseName, asleep: runtime.sleeping });
 runtime.dispose();
 </script>`);
-  const encoded = /data-rest-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { pose: 'sit', asleep: true }, stderr);
+  assert.deepEqual(result, { pose: 'sit', asleep: true }, stderr);
 });
 
 test('headless Chromium renders an avatar before its animation clips arrive', async () => {
-  const { stdout, stderr } = await runVisibilityPage();
-  const encoded = /data-visibility-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { beforeAvatar: 0, beforePlayable: 1, afterPlayable: 2 }, stderr);
+  const { result, stderr } = await runVisibilityPage();
+  assert.deepEqual(result, { beforeAvatar: 0, beforePlayable: 1, afterPlayable: 2 }, stderr);
 });
 
 async function runLayoutPage() {
@@ -483,14 +515,12 @@ runtime.dispose();
 const settled = canvas.clientHeight;
 canvas.width = 100;
 canvas.height = 1000;
-document.body.dataset.layoutTest = JSON.stringify({ heights, settled, afterBufferChange: canvas.clientHeight });
+document.body.dataset.result = JSON.stringify({ heights, settled, afterBufferChange: canvas.clientHeight });
 </script></body></html>`, { scale: 1.25, size: '1000,700' });
 }
 
 test('the puppet canvas keeps one layout height as the runtime fits its drawing buffer', async () => {
-  const { stdout, stderr } = await runLayoutPage();
-  const encoded = /data-layout-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  const result = JSON.parse(encoded ?? 'null');
+  const { result, stderr } = await runLayoutPage();
   assert.ok(result, stderr);
   assert.deepEqual(result.heights, result.heights.map(() => result.heights[0]), `heights across fits: ${result.heights.join(' ')}`);
   assert.equal(result.settled, result.heights[0], 'canvas must retain its projected height');
@@ -528,7 +558,7 @@ test('canvas aspect comparison rejects either non-uniform stretch and accepts re
 });
 
 test('smoke sampling rejects a stretched canvas and passes after browser geometry is restored', async () => {
-  const { stdout, stderr } = await runPuppetPage(`<!doctype html><main><canvas id="puppet" width="600" height="800" style="width:300px;height:400px"></canvas></main><script>
+  const { result: aspects, stdout, stderr } = await runPuppetPage(`<!doctype html><main><canvas id="puppet" width="600" height="800" style="width:300px;height:400px"></canvas></main><script>
   const smokeLimits = ${JSON.stringify(smokeLimits)};
   const canvasAspectMatches = ${canvasAspectMatches.toString()};
   const smoke = (${installSmokeMeasurements.toString()})();
@@ -541,10 +571,8 @@ test('smoke sampling rejects a stretched canvas and passes after browser geometr
   smoke.sample();
   canvas.style.height = '400px';
   smoke.sample();
-  document.body.dataset.aspectTest = JSON.stringify(smoke.state.aspects);
+  document.body.dataset.result = JSON.stringify(smoke.state.aspects);
   </script></body>`, { size: '500,500' });
-  const encoded = /data-aspect-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  const aspects = JSON.parse(encoded ?? 'null');
   assert.ok(aspects, `${stdout}\n${stderr}`);
   assert.deepEqual(aspects.map(canvasAspectMatches), [true, false, false, true]);
 });
@@ -588,7 +616,7 @@ test('one card holds every control: minimized it shows only Mute mic, expanded t
   assert.doesNotMatch(index, /token-toggle/);
   const card = /<section id="controls"[\s\S]*?<\/section>\n<\/div>/.exec(index)[0];
   for (const id of ['mic-mute', 'card-toggle', 'voice-filter', 'voice-print', 'puppet-choice', 'share-text', 'share-target', 'share-file', 'share-remove', 'share-send', 'token', 'connect', 'reenter', 'forget']) assert.match(card, new RegExp(`id="${id}"`), id);
-  const { stdout, stderr } = await runPage(`
+  const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   const toggle = document.querySelector('#card-toggle');
   const shown = (selector) => document.querySelector(selector).getClientRects().length > 0;
@@ -601,16 +629,15 @@ window.addEventListener('test-ready', () => {
   toggle.click();
   toggle.click();
   states.push(state());
-  document.body.dataset.cardTest = JSON.stringify(states);
+  document.body.dataset.result = JSON.stringify(states);
 });
 `);
-  const encoded = /data-card-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
   const closed = { expanded: 'false', mute: true, rest: 0 };
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), [closed, { expanded: 'true', mute: true, rest: 4 }, closed, closed], stderr);
+  assert.deepEqual(result, [closed, { expanded: 'true', mute: true, rest: 4 }, closed, closed], stderr);
 });
 
 test('the live microphone can mute and resume without ending its session', async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   const button = document.querySelector('#mic-mute');
   const puppet = document.querySelector('#puppet');
@@ -621,11 +648,10 @@ window.addEventListener('test-ready', () => {
   capture();
   button.click();
   capture();
-  document.body.dataset.microphoneMuteTest = JSON.stringify(states);
+  document.body.dataset.result = JSON.stringify(states);
 });
 `);
-  const encoded = /data-microphone-mute-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), [
+  assert.deepEqual(result, [
     { capture: 'live', muted: 'false', label: 'Mute mic', live: 'true', channel: 'open' },
     { capture: 'ended', muted: 'true', label: 'Unmute mic', live: 'true', channel: 'open' },
     { capture: 'live', muted: 'false', label: 'Mute mic', live: 'true', channel: 'open' },
@@ -674,7 +700,11 @@ test('a voice ID gate that starts late is closed unless it is still wanted, and 
     const start = __voiceSpeaker.startSpeakerGate;
     const pending = [];
     __voiceSpeaker.startSpeakerGate = (...args) => new Promise((resolve) => pending.push(() => resolve(start(...args))));
-    const settle = async () => { pending.shift()(); await new Promise((resolve) => setTimeout(resolve, 50)); };
+    const settle = async () => {
+      pending.shift()();
+      const gate = gateStarts.at(-1);
+      await until(() => gate.closed || globalThis.replacedTracks?.includes(gate.stream.getAudioTracks()[0]));
+    };
     toggle.click();
     await until(() => (globalThis.replacedTracks ?? []).length === 1);
     toggle.click();
@@ -787,7 +817,7 @@ for (const viewport of layoutViewports) test(`stage UI stays outside the puppet 
   const header = /<header>[\s\S]*?<\/header>/.exec(index)[0];
   const main = /<main[\s\S]*?<\/main>/.exec(index)[0].replace('class="hidden"', '');
   const dock = /<div class="dock">[\s\S]*?\n<\/div>/.exec(index)[0];
-  const { stdout, stderr } = await runPuppetPage(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">${style}</head><body>${header}${main}${dock}<script type="module">
+  const { result, stderr } = await runPuppetPage(`<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">${style}</head><body>${header}${main}${dock}<script type="module">
   import { PuppetRuntime } from '/puppet.js';
   const stageHeight = Math.round(visualViewport?.height ?? innerHeight);
   document.querySelector('main').style.setProperty('--stage-height', stageHeight + 'px');
@@ -807,10 +837,8 @@ for (const viewport of layoutViewports) test(`stage UI stays outside the puppet 
   const regions = selectors.map((selector) => ({ selector, rect: rect(document.querySelector(selector)) })).filter(({ rect }) => rect.right > rect.left && rect.bottom > rect.top);
   const collisions = regions.flatMap((left, index) => regions.slice(index + 1).filter((right) => overlaps(left.rect, right.rect)).map((right) => ({ left, right })));
   const shown = [...document.querySelectorAll('#controls button, #controls select, #controls textarea')].filter((element) => element.getClientRects().length).map((element) => element.id);
-  document.body.dataset.overlapTest = JSON.stringify({ puppet, figure, result, collisions, shown, display: rect(document.querySelector('#display')), ledger: rect(document.querySelector('.ledger')), column: rect(document.querySelector('.control')), controls: rect(document.querySelector('#controls')), stage: rect(document.querySelector('main')), pageHeight: document.documentElement.scrollHeight, viewportWidth: innerWidth, stageHeight });
+  document.body.dataset.result = JSON.stringify({ puppet, figure, result, collisions, shown, display: rect(document.querySelector('#display')), ledger: rect(document.querySelector('.ledger')), column: rect(document.querySelector('.control')), controls: rect(document.querySelector('#controls')), stage: rect(document.querySelector('main')), pageHeight: document.documentElement.scrollHeight, viewportWidth: innerWidth, stageHeight });
   </script></body></html>`, { scale: viewport.scale, size: `${viewport.width},${viewport.height}`, mobile: viewport.mobile });
-  const encoded = /data-overlap-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  const result = JSON.parse(encoded ?? 'null');
   assert.deepEqual(result?.result, [], `${viewport.name}: ${JSON.stringify(result)}\n${stderr}`);
   assert.deepEqual(result.collisions, [], `${viewport.name}: ${JSON.stringify(result.collisions)}`);
   assert.deepEqual(result.shown, ['mic-mute', 'card-toggle'], `${viewport.name} minimized card`);
@@ -826,17 +854,15 @@ for (const viewport of layoutViewports) test(`stage UI stays outside the puppet 
 });
 
 for (const viewport of layoutViewports) test(`the status line stays stationary across status changes at ${viewport.name} size`, async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   const status = document.querySelector('#status');
   const box = () => { const value = document.querySelector('header').getBoundingClientRect(); return [value.left, value.top, value.width, value.height]; };
   const boxes = {};
   for (const [name, text] of Object.entries({ empty: '', short: 'sent', long: ${JSON.stringify(smokeStatusText)}, longer: ${JSON.stringify(smokeStatusText.repeat(3))} })) { status.textContent = text; boxes[name] = box(); }
-  document.body.dataset.headerBoxTest = JSON.stringify({ boxes, viewportWidth: innerWidth });
+  document.body.dataset.result = JSON.stringify({ boxes, viewportWidth: innerWidth });
 });
 `, { scale: viewport.scale, size: `${viewport.width},${viewport.height}`, mobile: viewport.mobile });
-  const encoded = /data-header-box-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  const result = JSON.parse(encoded ?? 'null');
   assert.ok(result, stderr);
   for (const [name, box] of Object.entries(result.boxes)) assert.ok(box[0] >= 0 && box[0] + box[2] <= result.viewportWidth, `${viewport.name} header overflows with ${name} status text: ${JSON.stringify(box)}`);
   for (const [name, box] of Object.entries(result.boxes)) assert.deepEqual(box, result.boxes.empty, `${viewport.name} status line moved with ${name} status text: ${JSON.stringify(result.boxes)}`);
@@ -844,7 +870,7 @@ window.addEventListener('test-ready', () => {
 
 for (const [size, axis, grows] of [['1440,900', 'width', { ledger: 'ArrowRight', display: 'ArrowLeft' }], ['390,844', 'height', { ledger: 'ArrowUp', display: 'ArrowUp' }]]) test(`each pane grip resizes its pane by ${axis}, saves the size, restores it on load and resets on double-click at ${size}`, async () => {
   const suffix = axis === 'width' ? 'w' : 'h';
-  const { stdout, stderr } = await runPage(`
+  const { result, stderr } = await runPage(`
 localStorage.setItem('voice.token.panes', JSON.stringify({ 'ledger-${suffix}': 130, 'display-${suffix}': 140 }));
 window.addEventListener('test-ready', () => {
   const result = {};
@@ -859,11 +885,10 @@ window.addEventListener('test-ready', () => {
   for (const grip of document.querySelectorAll('.grip')) grip.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
   result.stored = localStorage.getItem('voice.token.panes');
   result.orientation = document.querySelector('.grip').getAttribute('aria-orientation');
-  document.body.dataset.gripTest = JSON.stringify(result);
+  document.body.dataset.result = JSON.stringify(result);
 });
 `, { size });
-  const encoded = /data-grip-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { ledger: { restored: 130, grown: 154, saved: 154 }, display: { restored: 140, grown: 164, saved: 164 }, stored: '{}', orientation: axis === 'width' ? 'vertical' : 'horizontal' }, stderr);
+  assert.deepEqual(result, { ledger: { restored: 130, grown: 154, saved: 154 }, display: { restored: 140, grown: 164, saved: 164 }, stored: '{}', orientation: axis === 'width' ? 'vertical' : 'horizontal' }, stderr);
 });
 
 for (const [width, height] of [[1440, 900], [390, 844]]) test(`a full display panel keeps its grip, selects text by drag or double-click, survives taps and touches, and leaves by dragging the grip back, back or Escape at ${width}x${height}`, async () => {
@@ -873,6 +898,7 @@ for (const [width, height] of [[1440, 900], [390, 844]]) test(`a full display pa
     await evaluate(`replyFromHub('unknown', 'display', [], 1, { display: { markdown: 'Pick these words\\n\\n| a | b |\\n|---|---|\\n| one | two |', image: { mime: 'image/png' } } }, Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAQAAAADCAIAAAA7ljmRAAAAEElEQVR4nGM4kGAARww4OQA6Fg/BwfqvjwAAAABJRU5ErkJggg=='), (c) => c.charCodeAt(0)))`);
     await until(`document.querySelector('#display img')?.naturalWidth === 4`);
     await until(`document.querySelector('.grip').getAttribute('aria-orientation') === '${width < 720 ? 'horizontal' : 'vertical'}'`);
+    await evaluate(`globalThis.popstates = 0; addEventListener('popstate', () => popstates++); 0`);
     const grip = '.grip[data-pane="display"]';
     const full = () => evaluate(`document.querySelector('#display').classList.contains('full')`);
     const box = (selector) => evaluate(`(() => { const box = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, x: box.left + box.width / 2, y: box.top + box.height / 2 }; })()`);
@@ -889,7 +915,7 @@ for (const [width, height] of [[1440, 900], [390, 844]]) test(`a full display pa
       }
       return full();
     };
-    const settle = () => new Promise((resolve) => setTimeout(resolve, 300));
+    const settle = () => evaluate('new Promise((resolve) => requestAnimationFrame(() => resolve(0)))');
     const selected = () => evaluate('getSelection().toString()');
     const dragSelect = async () => {
       await evaluate('getSelection().removeAllRanges()');
@@ -906,9 +932,11 @@ for (const [width, height] of [[1440, 900], [390, 844]]) test(`a full display pa
       await settle();
       return [await selected(), await full()];
     };
-    const left = async () => {
-      for (const end = Date.now() + 2000; Date.now() < end; await new Promise((resolve) => setTimeout(resolve, 20))) if (!await full()) return true;
-      return false;
+    const popped = async (action) => {
+      const before = await evaluate('popstates');
+      await action();
+      await until(`popstates > ${before}`);
+      return !await full();
     };
     const depth = await evaluate('history.length');
     const outcome = {};
@@ -935,20 +963,14 @@ for (const [width, height] of [[1440, 900], [390, 844]]) test(`a full display pa
     await page('Emulation.setTouchEmulationEnabled', { enabled: false });
     outcome.touchStays = await full();
     const back = await box(grip);
-    await drag(back, { x: width < 720 ? back.x : width / 2, y: width < 720 ? height / 2 : back.y });
-    outcome.dragLeft = await left();
-    await settle();
+    outcome.dragLeft = await popped(() => drag(back, { x: width < 720 ? back.x : width / 2, y: width < 720 ? height / 2 : back.y }));
     outcome.dragState = await evaluate('JSON.stringify(history.state)');
     outcome.backEntered = await enter();
-    await evaluate('history.back()');
-    outcome.backLeft = await left();
-    await evaluate('history.forward()');
-    await settle();
+    outcome.backLeft = await popped(() => evaluate('history.back()'));
+    await popped(() => evaluate('history.forward()'));
     outcome.forwardState = await evaluate(`JSON.stringify([document.querySelector('#display').classList.contains('full'), history.state])`);
     outcome.escapeEntered = await enter();
-    await page('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
-    outcome.escapeLeft = await left();
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    outcome.escapeLeft = await popped(() => page('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 }));
     outcome.historyGrew = await evaluate('history.length') - depth;
     outcome.stillFull = await full();
     return outcome;
@@ -958,7 +980,7 @@ for (const [width, height] of [[1440, 900], [390, 844]]) test(`a full display pa
 });
 
 for (const stored of ['{', 'null', '{"ledger-w":"wide","display-w":99999}']) test(`stored pane sizes ${stored} neither break the page nor escape the pane limits`, async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result, stderr } = await runPage(`
 localStorage.setItem('voice.token.panes', ${JSON.stringify(stored)});
 window.addEventListener('test-ready', () => {
   const width = (selector) => Math.round(document.querySelector(selector).getBoundingClientRect().width);
@@ -967,11 +989,9 @@ window.addEventListener('test-ready', () => {
   document.querySelector('.grip[data-pane="display"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
   measured.saved = JSON.parse(localStorage.getItem('voice.token.panes'))['display-w'];
   measured.full = document.querySelector('#display').classList.contains('full');
-  document.body.dataset.storedTest = JSON.stringify(measured);
+  document.body.dataset.result = JSON.stringify(measured);
 });
 `, { size: '1440,900' });
-  const encoded = /data-stored-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  const result = JSON.parse(encoded ?? 'null');
   assert.ok(result, stderr);
   const huge = stored.includes('99999');
   assert.equal(result.ledger, Math.round(1440 * .22));
@@ -982,7 +1002,7 @@ window.addEventListener('test-ready', () => {
 });
 
 test('Android DPR 3 keeps the visual stage height stable and renders after sixty seconds', async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result, stderr } = await runPage(`
   const heights = [];
   window.addEventListener('load', () => new ResizeObserver(() => heights.push(document.querySelector('#puppet').clientHeight)).observe(document.querySelector('#puppet')));
   window.addEventListener('test-ready', () => {
@@ -990,12 +1010,10 @@ test('Android DPR 3 keeps the visual stage height stable and renders after sixty
   setTimeout(() => {
       const canvas = document.querySelector('#puppet');
       const pixel = canvas.getContext('2d').getImageData(Math.floor(canvas.width / 2), Math.floor(canvas.height / 2), 1, 1).data;
-      document.body.dataset.androidTest = JSON.stringify({ viewportHeight: Math.round(visualViewport.height), stageHeight: document.querySelector('#conversation').clientHeight, heights, initial, settled: canvas.clientHeight, loaded: testPuppet.humanoidBone > 0, visible: pixel[3] > 0 });
+      document.body.dataset.result = JSON.stringify({ viewportHeight: Math.round(visualViewport.height), stageHeight: document.querySelector('#conversation').clientHeight, heights, initial, settled: canvas.clientHeight, loaded: testPuppet.humanoidBone > 0, visible: pixel[3] > 0 });
   }, 60000);
   });
-  `, { scale: 3, size: '390,844', budget: 65000, mobile: true });
-  const encoded = /data-android-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  const result = JSON.parse(encoded ?? 'null');
+  `, { scale: 3, size: '390,844', virtualTime: true, mobile: true });
   assert.ok(result?.loaded && result.visible, `${JSON.stringify(result)}\n${stderr}`);
   assert.equal(result.settled, result.initial);
   assert.ok(result.stageHeight > 0 && result.stageHeight <= result.viewportHeight);
@@ -1003,36 +1021,35 @@ test('Android DPR 3 keeps the visual stage height stable and renders after sixty
 });
 
 test('tapping the puppet starts standing and tapping it again stops sitting', async () => {
-  const { stdout, stderr } = await runPage(`
-window.addEventListener('test-ready', () => {
+  const { result, stdout, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  const poses = () => testPuppet.calls.filter(([name]) => name === 'pose').map(([, pose]) => pose);
   document.querySelector('#puppet').click();
-  setTimeout(() => { document.body.dataset.puppetToggleTest = JSON.stringify(testPuppet.calls.filter(([name]) => name === 'pose').map(([, pose]) => pose)); }, 30);
+  await until(() => poses().at(-1) === 'sit');
+  document.body.dataset.result = JSON.stringify(poses());
 });
 `);
   const observed = /data-start-test="([^"]*)"/.exec(stdout)?.[1] ?? 'start path did not settle';
   assert.equal(observed, 'puppet', `${observed}\n${stderr}`);
-  const encoded = /data-puppet-toggle-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), ['stand', 'listen', 'sit'], stderr);
+  assert.deepEqual(result, ['stand', 'listen', 'sit'], stderr);
 });
 
 for (const viewport of layoutViewports) test(`puppet states have no duplicate text at ${viewport.name} size`, async () => {
-  const { stdout, stderr } = await runPage(`
-window.addEventListener('test-ready', () => {
+  const { result, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
   const text = () => document.body.innerText;
   const listening = text();
   testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.input_transcript.delta', delta: 'Where is the report?' }) }));
   delegateTurn('state_1');
   const waiting = text();
   replyFromHub('state_1', 'state_stamp', ['On the display.'], 12);
-  setTimeout(() => {
-    const answered = text();
-    document.querySelector('#puppet').click();
-    setTimeout(() => { document.body.dataset.stateTextTest = JSON.stringify({ states: { listening, waiting, answered, ended: text() }, statusTextWrites }); }, 30);
-  }, 30);
+  await until(() => globalThis.hubAcks?.includes('state_stamp'));
+  const answered = text();
+  document.querySelector('#puppet').click();
+  await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false');
+  document.body.dataset.result = JSON.stringify({ states: { listening, waiting, answered, ended: text() }, statusTextWrites });
 });
 `, { scale: viewport.scale, size: `${viewport.width},${viewport.height}`, mobile: viewport.mobile });
-  const encoded = /data-state-text-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  const result = JSON.parse(encoded ?? 'null');
   assert.ok(result, stderr);
   const states = result.states;
   const removed = ['ready', 'opening microphone', 'live', 'conversation off', 'session ended', 'listening', 'waiting for the hub', 'asleep', 'awake', 'sleep', 'woken'];
@@ -1048,57 +1065,61 @@ window.addEventListener('test-ready', () => {
 });
 
 test('a forced page error reaches the fleet catcher line in headless Chromium', async () => {
-  const { stdout, stderr } = await runPage(`
-window.addEventListener('test-ready', () => {
-  setTimeout(() => { throw new TypeError('forced page fault'); }, 0);
-  setTimeout(() => { document.body.dataset.telemetryErrorTest = JSON.stringify(fleetLines); }, 600);
+  const { result, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  setTimeout(() => { throw new TypeError('forced page fault'); });
+  await until(() => fleetLines.length);
+  document.body.dataset.result = JSON.stringify(fleetLines);
 });
 `);
-  const encoded = /data-telemetry-error-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), ['fleet-error: voice/page — TypeError: forced page fault'], stderr);
+  assert.deepEqual(result, ['fleet-error: voice/page — TypeError: forced page fault'], stderr);
 });
 
 test('a forced page error carries browser and WebGPU identity', async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result: event, stderr } = await runPage(`
 Object.defineProperty(navigator, 'gpu', { value: undefined });
-window.addEventListener('test-ready', () => {
-  setTimeout(() => { throw new TypeError('identified page fault'); }, 0);
-  setTimeout(() => { document.body.dataset.telemetryIdentityTest = JSON.stringify(telemetryBatches.flat().find((event) => event.message === 'identified page fault')); }, 600);
+window.addEventListener('test-ready', async () => {
+  const fault = () => telemetryBatches.flat().find((event) => event.message === 'identified page fault');
+  setTimeout(() => { throw new TypeError('identified page fault'); });
+  await until(fault);
+  document.body.dataset.result = JSON.stringify(fault());
 });
 `);
-  const encoded = /data-telemetry-identity-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  const event = JSON.parse(encoded ?? 'null');
   assert.ok(event, stderr);
   assert.match(event.user_agent, /Chrome/);
   assert.equal(event.webgpu_adapter, false);
 });
 
 test('a page error is reported while the WebGPU probe is still pending', async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result: event, stderr } = await runPage(`
 Object.defineProperty(navigator, 'gpu', { value: { requestAdapter: () => new Promise(() => {}) } });
-window.addEventListener('test-ready', () => {
-  setTimeout(() => { throw new TypeError('unprobed page fault'); }, 0);
-  setTimeout(() => { document.body.dataset.telemetryPendingProbeTest = JSON.stringify(telemetryBatches.flat().find((event) => event.message === 'unprobed page fault')); }, 600);
+window.addEventListener('test-ready', async () => {
+  const fault = () => telemetryBatches.flat().find((event) => event.message === 'unprobed page fault');
+  setTimeout(() => { throw new TypeError('unprobed page fault'); });
+  await until(fault);
+  document.body.dataset.result = JSON.stringify(fault());
 });
 `);
-  const encoded = /data-telemetry-pending-probe-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  const event = JSON.parse(encoded ?? 'null');
   assert.ok(event, stderr);
   assert.match(event.user_agent, /Chrome/);
   assert.equal(event.webgpu_adapter, null);
 });
 
 test('a resent telemetry batch keeps its batch id', async () => {
-  const { stdout, stderr } = await runPage(`
-window.addEventListener('test-ready', () => {
-  let refusals = 1;
-  globalThis.refuseTelemetry = () => refusals-- > 0;
-  setTimeout(() => { throw new TypeError('resent page fault'); }, 0);
-  setTimeout(() => { document.body.dataset.telemetryResendTest = JSON.stringify({ ids: telemetryIds, events: telemetryBatches.flat().filter((event) => event.message === 'resent page fault').length }); }, 1500);
+  const { result, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  const carriesFault = (events) => events.some((event) => event.message === 'resent page fault');
+  const ids = [];
+  globalThis.refuseTelemetry = (batch) => {
+    if (!carriesFault(batch.events)) return false;
+    ids.push(batch.batch_id);
+    return ids.length === 1;
+  };
+  setTimeout(() => { throw new TypeError('resent page fault'); });
+  await until(() => telemetryBatches.some(carriesFault));
+  document.body.dataset.result = JSON.stringify({ ids, events: telemetryBatches.flat().filter((event) => event.message === 'resent page fault').length });
 });
 `);
-  const encoded = /data-telemetry-resend-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  const result = JSON.parse(encoded ?? 'null');
   assert.ok(result, stderr);
   assert.equal(result.ids.length, 2, stderr);
   assert.equal(result.ids[0], result.ids[1]);
@@ -1106,62 +1127,58 @@ window.addEventListener('test-ready', () => {
 });
 
 test('session open and close arrive as two batched telemetry events', async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   document.querySelector('#puppet').click();
   globalThis.onTelemetry = () => {
     const names = telemetryBatches.flat().filter((event) => event.kind === 'session').map((event) => event.name);
-    if (names.includes('close')) document.body.dataset.telemetrySessionTest = JSON.stringify(names);
+    if (names.includes('close')) document.body.dataset.result = JSON.stringify(names);
   };
 });
 `);
-  const encoded = /data-telemetry-session-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), ['live-config-sdp-answer', 'live-config-session-started', 'open', 'close'], stderr);
+  assert.deepEqual(result, ['live-config-sdp-answer', 'live-config-session-started', 'open', 'close'], stderr);
 });
 
 test('a fresh page shows the active puppet at rest before anything taps it', async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result, stderr } = await runPage(`
 globalThis.skipTap = true;
-window.addEventListener('test-ready', () => {
-  const poll = setInterval(() => {
-    if (!globalThis.clipMovement) return;
-    clearInterval(poll);
-    document.body.dataset.bootTest = JSON.stringify({ requests: puppetRequests, prompt: !document.querySelector('#puppet-prompt').classList.contains('hidden'), pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), calls: testPuppet.calls });
-  }, 10);
+window.addEventListener('test-ready', async () => {
+  await until(() => globalThis.clipMovement);
+  document.body.dataset.result = JSON.stringify({ requests: puppetRequests, prompt: !document.querySelector('#puppet-prompt').classList.contains('hidden'), pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), calls: testPuppet.calls });
 });
 `);
-  const encoded = /data-boot-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { requests: ['42'], prompt: false, pressed: 'false', calls: [] }, stderr);
+  assert.deepEqual(result, { requests: ['42'], prompt: false, pressed: 'false', calls: [] }, stderr);
 });
 
 test('a late avatar catalog loads once after the voice session is already open', async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result, stderr } = await runPage(`
 globalThis.holdPuppetCatalog = true;
 window.addEventListener('test-ready', () => {
   const before = { pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), transfers: [...transferOrder], spotter: Boolean(testSpotter) };
   releasePuppetCatalog();
-  setTimeout(() => { document.body.dataset.lateAvatarTest = JSON.stringify({ before, requests: puppetRequests, pressed: document.querySelector('#puppet').getAttribute('aria-pressed') }); }, 100);
+  until(() => spans().some((span) => span.name === 'avatar-load')).then(() => {
+    document.body.dataset.result = JSON.stringify({ before, requests: puppetRequests, pressed: document.querySelector('#puppet').getAttribute('aria-pressed') });
+  });
 });
 `);
-  const encoded = /data-late-avatar-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { before: { pressed: 'true', transfers: [], spotter: true }, requests: ['42'], pressed: 'true' }, stderr);
+  assert.deepEqual(result, { before: { pressed: 'true', transfers: [], spotter: true }, requests: ['42'], pressed: 'true' }, stderr);
 });
 
 test('the page loads the active puppet and its clips without fetching inactive puppets', async () => {
-  const { stdout, stderr } = await runPage(`
-window.addEventListener('test-ready', () => setTimeout(() => {
-  document.body.dataset.initialPuppetTest = JSON.stringify({ requests: puppetRequests, cacheKeys: [...puppetCache.keys()].map((url) => new URL(url).pathname.split('/').at(-1)), clipMovement, firstVisible: { ...firstVisible, order: firstVisible.order.slice(0, 1) } });
-}, 100));
+  const { result, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  await until(() => spans().some((span) => span.name === 'avatar-load'));
+  document.body.dataset.result = JSON.stringify({ requests: puppetRequests, cacheKeys: [...puppetCache.keys()].map((url) => new URL(url).pathname.split('/').at(-1)), clipMovement, firstVisible: { ...firstVisible, order: firstVisible.order.slice(0, 1) } });
+});
 `);
-  const encoded = /data-initial-puppet-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { requests: ['42'], cacheKeys: ['hash-42.vrm', 'sit-hash.motion', 'idle-hash.motion'], clipMovement: { before: 0, after: 2, loaded: [['sit', 'motion', { clip: 'sit.fbx' }], ['idle', 'motion', { clip: 'idle.fbx' }]] }, firstVisible: { playable: 'Standing', order: ['42'] } }, stderr);
+  assert.deepEqual(result, { requests: ['42'], cacheKeys: ['hash-42.vrm', 'sit-hash.motion', 'idle-hash.motion'], clipMovement: { before: 0, after: 2, loaded: [['sit', 'motion', { clip: 'sit.fbx' }], ['idle', 'motion', { clip: 'idle.fbx' }]] }, firstVisible: { playable: 'Standing', order: ['42'] } }, stderr);
 });
 
 test('a first switch to an unseen puppet sits right after its first render, with no relay traffic between, and the selector stays live', async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result, stderr } = await runPage(`
 globalThis.relayLatency = 500;
-window.addEventListener('test-ready', function switchOnceSeated() {
-  if (!globalThis.clipMovement) return setTimeout(switchOnceSeated, 10);
+window.addEventListener('test-ready', async () => {
+  await until(() => globalThis.clipMovement);
   const choice = document.querySelector('#puppet-choice');
   let disabled = false;
   new MutationObserver(() => { disabled ||= choice.disabled; }).observe(choice, { attributes: true });
@@ -1174,12 +1191,10 @@ window.addEventListener('test-ready', function switchOnceSeated() {
     if (!rendered && firstVisible !== booted) rendered = { at: performance.now(), sent: sentVerbs.length };
     if (!rendered || clipMovement === seated) return;
     clearInterval(poll);
-    document.body.dataset.firstSwitchTest = JSON.stringify({ renderToSitMs: Math.round(performance.now() - rendered.at), sentBetween: sentVerbs.slice(rendered.sent), disabled, selected: choice.value });
+    document.body.dataset.result = JSON.stringify({ renderToSitMs: Math.round(performance.now() - rendered.at), sentBetween: sentVerbs.slice(rendered.sent), disabled, selected: choice.value });
   }, 4);
 });
-`, { budget: 12000 });
-  const encoded = /data-first-switch-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  const result = JSON.parse(encoded ?? 'null');
+`, { virtualTime: true });
   assert.ok(result, stderr);
   assert.deepEqual(result.sentBetween, [], stderr);
   assert.ok(result.renderToSitMs <= 100, `render to sitting took ${result.renderToSitMs} ms`);
@@ -1188,36 +1203,33 @@ window.addEventListener('test-ready', function switchOnceSeated() {
 });
 
 test('choosing again mid-load supersedes the pending puppet without an error', async () => {
-  const { stdout, stderr } = await runPage(`
-globalThis.relayLatency = 200;
-window.addEventListener('test-ready', function switchOnceSeated() {
-  if (!globalThis.clipMovement) return setTimeout(switchOnceSeated, 10);
+  const { result, stderr } = await runPage(`
+globalThis.holdPuppet = '43';
+window.addEventListener('test-ready', async () => {
+  await until(() => globalThis.clipMovement);
   const choice = document.querySelector('#puppet-choice');
   choice.value = '43';
   choice.dispatchEvent(new Event('change'));
-  setTimeout(() => {
+  until(() => globalThis.releasePuppet).then(async () => {
     choice.value = '44';
     choice.dispatchEvent(new Event('change'));
-  }, 50);
-  const poll = setInterval(() => {
-    if (clipMovement.after < 4) return;
-    clearInterval(poll);
-    setTimeout(() => { document.body.dataset.supersedeTest = JSON.stringify({ selected: choice.value, status: document.querySelector('#status').textContent, requests: puppetRequests, seated: clipMovement.after }); }, 1000);
-  }, 10);
+    releasePuppet();
+    await until(() => spans().filter((span) => span.name === 'avatar-load').length === 3);
+    document.body.dataset.result = JSON.stringify({ selected: choice.value, status: document.querySelector('#status').textContent, requests: puppetRequests, seated: clipMovement.after });
+  });
 });
-`, { budget: 12000 });
-  const encoded = /data-supersede-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { selected: '44', status: '', requests: ['42', '43', '44'], seated: 4 }, stderr);
+`);
+  assert.deepEqual(result, { selected: '44', status: '', requests: ['42', '43', '44'], seated: 4 }, stderr);
 });
 
 test('each avatar load reaches the relay as one trace with a span per stage', async () => {
-  const { stdout, stderr } = await runPage(`
-window.addEventListener('test-ready', () => setTimeout(() => {
-  document.body.dataset.avatarTraceTest = JSON.stringify((globalThis.spanBatches ?? []).flat());
-}, 300));
+  const { result, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  await until(() => spans().some((span) => span.name === 'avatar-load'));
+  document.body.dataset.result = JSON.stringify(spans());
+});
 `);
-  const encoded = /data-avatar-trace-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  const spans = JSON.parse(encoded ?? 'null') ?? [];
+  const spans = result ?? [];
   const root = spans.find((span) => span.name === 'avatar-load');
   assert.ok(root, stderr);
   const attributes = (span) => Object.fromEntries(span.attributes.map(({ key, value }) => [key, value.stringValue]));
@@ -1230,88 +1242,90 @@ window.addEventListener('test-ready', () => setTimeout(() => {
 });
 
 test('choosing an inactive puppet fetches only that puppet on demand', async () => {
-  const { stdout, stderr } = await runPage(`
-window.addEventListener('test-ready', () => {
+  const { result, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  const loads = () => spans().filter((span) => span.name === 'avatar-load').length;
+  await until(loads);
   const choice = document.querySelector('#puppet-choice');
   choice.value = '43';
   choice.dispatchEvent(new Event('change'));
-  setTimeout(() => { document.body.dataset.selectionTest = JSON.stringify({ requests: puppetRequests, selected: choice.value, disabled: choice.disabled, options: [...choice.options].map((option) => [option.value, option.textContent]) }); }, 100);
+  await until(() => loads() === 2);
+  document.body.dataset.result = JSON.stringify({ requests: puppetRequests, selected: choice.value, disabled: choice.disabled, options: [...choice.options].map((option) => [option.value, option.textContent]) });
 });
 `);
-  const encoded = /data-selection-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { requests: ['42', '43'], selected: '43', disabled: false, options: [['42', 'model-42.vrm'], ['43', 'model-43.vrm'], ['44', 'model-44.vrm']] }, stderr);
+  assert.deepEqual(result, { requests: ['42', '43'], selected: '43', disabled: false, options: [['42', 'model-42.vrm'], ['43', 'model-43.vrm'], ['44', 'model-44.vrm']] }, stderr);
 });
 
 test('authenticated text box sends a URL verbatim and informs an open Live session', async () => {
-  const { stdout, stderr } = await runPage(`
-window.addEventListener('test-ready', () => {
+  const { result, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
   document.querySelector('#share-text').value = 'https://example.test/a?q=one';
   document.querySelector('#share-send').click();
-  setTimeout(() => { document.body.dataset.shareTest = JSON.stringify({ sent: globalThis.sentShare?.metadata?.text, status: document.querySelector('#status').textContent, notices: sentLiveEvents.filter((event) => event.event_id?.startsWith('share_')).map((event) => event.content ?? event.type) }); }, 30);
+  await until(() => !['', 'sending…'].includes(document.querySelector('#status').textContent));
+  document.body.dataset.result = JSON.stringify({ sent: globalThis.sentShare?.metadata?.text, status: document.querySelector('#status').textContent, notices: sentLiveEvents.filter((event) => event.event_id?.startsWith('share_')).map((event) => event.content ?? event.type) });
 });
 `);
-  const encoded = /data-share-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { sent: 'https://example.test/a?q=one', status: 'sent', notices: ['A link arrived.'] }, stderr);
+  assert.deepEqual(result, { sent: 'https://example.test/a?q=one', status: 'sent', notices: ['A link arrived.'] }, stderr);
 });
 
 test('a rejected submission immediately restores its controls and reports the reason', async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   document.querySelector('#share-text').value = 'reject';
   document.querySelector('#share-send').click();
-  setTimeout(() => { document.body.dataset.shareErrorTest = JSON.stringify({ status: document.querySelector('#status').textContent, disabled: document.querySelector('#share-send').disabled }); }, 30);
+  until(() => !['', 'sending…'].includes(document.querySelector('#status').textContent)).then(() => {
+    document.body.dataset.result = JSON.stringify({ status: document.querySelector('#status').textContent, disabled: document.querySelector('#share-send').disabled });
+  });
 });
 `);
-  const encoded = /data-share-error-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { status: 'hub queue is full', disabled: false }, stderr);
+  assert.deepEqual(result, { status: 'hub queue is full', disabled: false }, stderr);
 });
 
 test('a display payload appears newest first without changing the puppet gesture while a plain hub reply adds nothing', async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   replyFromHub('unknown', 'display_1', [], 1, { display: { markdown: '**Result** details', link: 'https://example.test/result', image: { mime: 'image/png' } } }, Uint8Array.from([137,80,78,71,13,10,26,10]));
   replyFromHub('unknown', 'display_2', [], 1, { display: { markdown: 'Newest' } });
   replyFromHub('unknown', undefined, ['plain'], 1);
-  setTimeout(() => { document.body.dataset.displayTest = JSON.stringify({ count: document.querySelectorAll('.display-item').length, first: document.querySelector('.display-item')?.textContent, link: document.querySelector('.display-item:last-child a')?.href, image: Boolean(document.querySelector('.display-item:last-child img')), gestured: testPuppet.calls.some((call) => call[0] === 'gesture') }); }, 40);
+  until(() => globalThis.hubAcks?.length === 3 && document.querySelectorAll('.display-item').length === 2).then(() => {
+    document.body.dataset.result = JSON.stringify({ count: document.querySelectorAll('.display-item').length, first: document.querySelector('.display-item')?.textContent, link: document.querySelector('.display-item:last-child a')?.href, image: Boolean(document.querySelector('.display-item:last-child img')), gestured: testPuppet.calls.some((call) => call[0] === 'gesture') });
+  });
 });
 `);
-  const encoded = /data-display-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { count: 2, first: 'Newest', link: 'https://example.test/result', image: true, gestured: false }, stderr);
+  assert.deepEqual(result, { count: 2, first: 'Newest', link: 'https://example.test/result', image: true, gestured: false }, stderr);
 });
 
 for (const size of ['720,1280', '1440,900']) test(`the delegation log keeps its newest entry in view at ${size}`, async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   ${appendEntries}
   const log = document.querySelector('#log');
   log.dispatchEvent(new Event('scroll'));
   append('session.input_transcript.delta', 'newest');
-  document.body.dataset.followTest = JSON.stringify({ overflow: log.scrollHeight - log.clientHeight, below: log.scrollHeight - log.scrollTop - log.clientHeight });
+  document.body.dataset.result = JSON.stringify({ overflow: log.scrollHeight - log.clientHeight, below: log.scrollHeight - log.scrollTop - log.clientHeight });
 });
 `, { size });
-  const encoded = /data-follow-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  const result = JSON.parse(encoded ?? 'null');
-  assert.ok(result?.overflow > 1 && result.below <= 1, `${size}: ${encoded}\n${stderr}`);
+  assert.ok(result?.overflow > 1 && result.below <= 1, `${size}: ${JSON.stringify(result)}\n${stderr}`);
 });
 
 test('the delegation log renders every trace kind and delegation field', async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   const emit = (event) => testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(event) }));
   emit({ type: 'session.output_transcript.delta', delta: 'I will inspect the fixture.', start_ms: 0, end_ms: 20 });
   emit({ type: 'session.input_transcript.delta', delta: 'Check the fixture stream.' });
   delegateTurn('fixture');
   replyFromHub('fixture', 'fixture', ['The fixture is complete.'], 42);
-  setTimeout(() => { document.body.dataset.delegationLogTest = document.querySelector('#log').innerText; }, 30);
+  until(() => globalThis.hubAcks?.includes('fixture')).then(() => { document.body.dataset.result = JSON.stringify(document.querySelector('#log').innerText); });
 });
 `, { size: '1440,900' });
-  const observed = /data-delegation-log-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"') ?? '';
+  const observed = result ?? '';
   const expected = ['MODEL ALONE', 'spoke: I will inspect the fixture.', 'MODEL HEARD', 'heard: Check the fixture stream.', 'DELEGATED', 'sent to hub: Check the fixture stream.', 'context sent: [{"speaker":"live","text":"I will inspect the fixture."}]', 'hub reply: The fixture is complete.', 'hub timing: 42 ms'];
   for (const value of expected) assert.ok(observed.includes(value), `${value}\n${observed}\n${stderr}`);
 });
 
 test('the delegation log does not move when an entry arrives after scrolling to the top', async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   ${appendEntries}
   const log = document.querySelector('#log');
@@ -1320,29 +1334,26 @@ window.addEventListener('test-ready', () => {
   const before = log.scrollTop;
   append('session.input_transcript.delta', 'newest');
   delegateTurn('scroll_newest');
-  document.body.dataset.pauseTest = String(log.scrollTop === before);
+  document.body.dataset.result = JSON.stringify(log.scrollTop === before);
 });
 `);
-  const observed = /data-pause-test="([^"]*)"/.exec(stdout)?.[1] ?? 'pause test did not run';
-  assert.equal(observed, 'true', `${observed}\n${stderr}`);
+  assert.equal(result, true, stderr);
 });
 
 test('a delegated turn reaches the relay as one trace whose delegate span is its traceparent', async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {
-  const pause = () => new Promise((resolve) => setTimeout(resolve, 30));
   hear('Check the weather.');
   delegateTurn('dlg');
-  await pause();
+  await until(() => globalThis.delegateFrames?.length);
   replyFromHub('dlg', 'stamp_1', ['Sunny.']);
-  await pause();
+  await until(() => globalThis.hubAcks?.includes('stamp_1'));
   emitLive({ type: 'session.output_transcript.delta', delta: 'Sunny.' });
-  await new Promise((resolve) => setTimeout(resolve, 200));
-  document.body.dataset.stageTest = JSON.stringify({ batches: globalThis.spanBatches ?? [], delegates: globalThis.delegateFrames ?? [] });
+  await until(() => spans().some((span) => span.name === 'turn'));
+  document.body.dataset.result = JSON.stringify({ batches: globalThis.spanBatches ?? [], delegates: globalThis.delegateFrames ?? [] });
 });
 `);
-  const encoded = /data-stage-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  const { batches, delegates } = JSON.parse(encoded ?? 'null') ?? {};
+  const { batches, delegates } = result ?? {};
   const traced = batches?.flat() ?? [];
   const spans = traced.filter((span) => span.traceId === traced.find((turn) => turn.name === 'turn')?.traceId);
   assert.deepEqual(spans.map((span) => span.name).sort(), ['await-speech', 'decide', 'delegate', 'hear', 'turn'], stderr);
@@ -1352,7 +1363,7 @@ window.addEventListener('test-ready', async () => {
 });
 
 test('a client delegation hands the hub the exact transcript heard since the last delegation and the visible turns before it', async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result: frames, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {
   hear('Hello there.');
   delegateTurn('item_first');
@@ -1361,11 +1372,10 @@ window.addEventListener('test-ready', async () => {
   hear('the build ');
   hear('queue right now?');
   delegateTurn('item_exact');
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  document.body.dataset.handoffTest = JSON.stringify(globalThis.delegateFrames ?? []);
+  await until(() => globalThis.delegateFrames?.length === 2);
+  document.body.dataset.result = JSON.stringify(globalThis.delegateFrames ?? []);
 });
 `);
-  const frames = JSON.parse(/data-handoff-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"') ?? 'null');
   assert.ok(frames, stderr);
   assert.deepEqual(frames.map(({ id, text, context }) => ({ id, text, context })), [
     { id: 'item_first', text: 'Hello there.', context: [] },
@@ -1375,30 +1385,29 @@ window.addEventListener('test-ready', async () => {
 });
 
 test('a delegation appends nothing until its hub reply, which reaches Live as commentary alone, while a display-only push says nothing', async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {
-  const pause = () => new Promise((resolve) => setTimeout(resolve, 30));
   const told = () => sentLiveEvents.filter(({ type, event_id }) => type.endsWith('.append') && !['identity', 'actions', 'wake'].includes(event_id)).map(({ type, event_id, delegation_id, content }) => [type, event_id, delegation_id, content]);
+  const delegated = (id) => globalThis.delegateFrames?.some((frame) => frame.id === id);
+  const acked = (stamp) => globalThis.hubAcks?.includes(stamp);
   hear('How many jobs are queued?');
   delegateTurn('slow');
-  await pause();
+  await until(() => delegated('slow'));
   const closed = told();
   replyFromHub('slow', 'push_1');
-  await pause();
+  await until(() => acked('push_1'));
   const pushed = { told: told().length - closed.length, waiting: testPuppet.calls.filter(([name]) => name === 'waiting').map(([, value]) => value) };
   replyFromHub('slow', 'reply_1', ['Four jobs are queued.'], 180000);
-  await pause();
+  await until(() => acked('reply_1'));
   deliverRelay(new TextEncoder().encode('hub-error\\n' + JSON.stringify({ id: 'slow', message: 'invalid hub reply' })));
   hear('Is the printer busy?');
   delegateTurn('lost');
-  await pause();
+  await until(() => delegated('lost'));
   deliverRelay(new TextEncoder().encode('hub-error\\n' + JSON.stringify({ id: 'lost', message: 'delegation queue is full' })));
-  await pause();
-  document.body.dataset.asyncHubTest = JSON.stringify({ closed, pushed, told: told(), acks: globalThis.hubAcks ?? [], waiting: testPuppet.calls.filter(([name]) => name === 'waiting').map(([, value]) => value), log: document.querySelector('#log').innerText });
+  await until(() => sentLiveEvents.some((event) => event.event_id === 'hub_error_lost'));
+  document.body.dataset.result = JSON.stringify({ closed, pushed, told: told(), acks: globalThis.hubAcks ?? [], waiting: testPuppet.calls.filter(([name]) => name === 'waiting').map(([, value]) => value), log: document.querySelector('#log').innerText });
 });
 `);
-  const encoded = /data-async-hub-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  const result = JSON.parse(encoded ?? 'null');
   assert.ok(result, stderr);
   const shape = (events) => events.map(([type, event_id, delegation_id]) => [type, event_id, delegation_id]);
   assert.deepEqual(result.closed, []);
@@ -1416,7 +1425,7 @@ window.addEventListener('test-ready', async () => {
 });
 
 test('while a delegation is pending, a turn the model ignores for three seconds goes to the hub, and its reply or failure carries a null delegation id', async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const frames = () => (globalThis.delegateFrames ?? []).map(({ id, text }) => ({ id, text }));
@@ -1448,11 +1457,10 @@ window.addEventListener('test-ready', async () => {
   await wait(3100);
   const door = frames().at(-1).id;
   deliverRelay(new TextEncoder().encode('hub-error\\n' + JSON.stringify({ id: door, message: 'delegation queue is full' })));
-  await wait(50);
-  document.body.dataset.forwardTest = JSON.stringify({ nothingPending, afterSpeech, beforeTimeout, afterModelDelegation, door, frames: frames(), told: sentLiveEvents.filter(({ event_id }) => event_id === 'hub_printer' || event_id?.startsWith('hub_error_')).map(({ type, event_id, delegation_id, content }) => [type, event_id, delegation_id, content]) });
+  await until(() => sentLiveEvents.some((event) => event.event_id === 'hub_error_' + door));
+  document.body.dataset.result = JSON.stringify({ nothingPending, afterSpeech, beforeTimeout, afterModelDelegation, door, frames: frames(), told: sentLiveEvents.filter(({ event_id }) => event_id === 'hub_printer' || event_id?.startsWith('hub_error_')).map(({ type, event_id, delegation_id, content }) => [type, event_id, delegation_id, content]) });
 });
-`, { budget: 20000 });
-  const result = JSON.parse(/data-forward-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"') ?? 'null');
+`, { virtualTime: true });
   assert.ok(result, stderr);
   assert.deepEqual([result.nothingPending, result.afterSpeech, result.beforeTimeout, result.afterModelDelegation], [0, 1, 1, 3]);
   assert.deepEqual(result.frames.map(({ id, text }) => [id.startsWith('turn_') ? 'page' : id, text]), [
@@ -1468,25 +1476,22 @@ window.addEventListener('test-ready', async () => {
 });
 
 test('a hub reply appends each part as commentary, with a delegation ID only when it answers one', async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result: replies, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {
-  const pause = () => new Promise((resolve) => setTimeout(resolve, 30));
   hear('How many jobs need attention?');
   delegateTurn('item_mix');
-  await pause();
+  await until(() => globalThis.delegateFrames?.length);
   const replies = {};
   for (const [id, commentary] of [['item_mix', ['Two jobs need attention.', 'Both are on the display.']], ['share_1', ['The link is the release notes.']]]) {
     const before = sentLiveEvents.length;
     replyFromHub(id, id, commentary);
-    await pause();
+    await until(() => globalThis.hubAcks?.includes(id));
     replies[id] = sentLiveEvents.slice(before).map(({ type, event_id, delegation_id, content }) => [type, event_id, delegation_id, content]);
     emitLive({ type: 'session.output_transcript.delta', delta: commentary[0] });
-    await pause();
   }
-  document.body.dataset.channelTest = JSON.stringify(replies);
+  document.body.dataset.result = JSON.stringify(replies);
 });
 `);
-  const replies = JSON.parse(/data-channel-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"') ?? 'null');
   assert.ok(replies, stderr);
   assert.deepEqual(replies, {
     item_mix: [
@@ -1498,28 +1503,30 @@ window.addEventListener('test-ready', async () => {
 });
 
 test('output transcript drives mood and delegation drives the hub wait', async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   const event = (value) => testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(value) }));
   event({ type: 'session.output_transcript.delta', delta: 'Sorry, that was my fault.' });
   event({ type: 'session.input_transcript.delta', delta: 'check it' });
   delegateTurn('wait_1');
-  setTimeout(() => { document.body.dataset.driverTest = JSON.stringify(testPuppet.calls.filter(([name]) => name === 'mood' || name === 'waiting' || name === 'speak').map(([name, value]) => [name, value])); }, 20);
+  until(() => testPuppet.calls.some(([name]) => name === 'mood')).then(() => {
+    document.body.dataset.result = JSON.stringify(testPuppet.calls.filter(([name]) => name === 'mood' || name === 'waiting' || name === 'speak').map(([name, value]) => [name, value]));
+  });
 });
 `);
-  const encoded = /data-driver-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), [['speak', 'Sorry, that was my fault.'], ['waiting', true], ['mood', 'apologetic']], stderr);
+  assert.deepEqual(result, [['speak', 'Sorry, that was my fault.'], ['waiting', true], ['mood', 'apologetic']], stderr);
 });
 
 test('output transcript can reach a catalog clip action', async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.output_transcript.delta', delta: 'Let us applaud that achievement.' }) }));
-  setTimeout(() => { document.body.dataset.catalogActionTest = JSON.stringify(testPuppet.calls.filter(([name]) => name === 'gesture')); }, 20);
+  until(() => testPuppet.calls.some(([name]) => name === 'gesture')).then(() => {
+    document.body.dataset.result = JSON.stringify(testPuppet.calls.filter(([name]) => name === 'gesture'));
+  });
 });
 `);
-  const encoded = /data-catalog-action-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), [['gesture', 'clap']], stderr);
+  assert.deepEqual(result, [['gesture', 'clap']], stderr);
 });
 
 async function libBytes(paths) {
@@ -1543,28 +1550,30 @@ test('a display renders a mermaid diagram, math and a chart, fetching each rende
     '2,0.9',
     '```',
   ].join('\n');
-  const { stdout, stderr, requests } = await runPage(`
+  const { result, stdout, stderr, requests } = await runPage(`
 window.addEventListener('test-ready', () => {
   const enc = new TextEncoder();
   const before = performance.getEntriesByType('resource').map((entry) => new URL(entry.name).pathname);
   replyFromHub('unknown', 'display', [], 1, { display: { markdown: ${JSON.stringify(markdown)} } });
   const painted = (canvas) => { const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data; let count = 0; for (let index = 3; index < pixels.length; index += 4) if (pixels[index]) count++; return count; };
-  setTimeout(() => {
+  const rendered = () => {
     const item = document.querySelector('.display-item');
-    const canvas = item.querySelector('.chart canvas');
-    document.body.dataset.renderTest = JSON.stringify({
-      before: before.filter((path) => path.startsWith('/lib/')),
-      inline: item.querySelector('p .math .katex') !== null,
-      block: item.querySelector('.math-block .katex-display') !== null,
-      diagram: item.querySelectorAll('.mermaid svg g').length > 0 && item.querySelector('.mermaid code') === null,
+    const canvas = item?.querySelector('.chart canvas');
+    return {
+      inline: item?.querySelector('p .math .katex') != null,
+      block: item?.querySelector('.math-block .katex-display') != null,
+      diagram: item?.querySelectorAll('.mermaid svg g').length > 0 && item.querySelector('.mermaid code') === null,
       chart: Boolean(canvas) && canvas.width > 0 && painted(canvas) > 100,
       stylesheet: [...document.styleSheets].some((sheet) => /katex-[A-Z0-9]{8}\\.css$/.test(sheet.href ?? '')),
-    });
-  }, 6000);
+    };
+  };
+  const failed = () => telemetryBatches.flat().some((event) => event.kind === 'error');
+  until(() => failed() || Object.values(rendered()).every(Boolean)).then(() => {
+    document.body.dataset.result = JSON.stringify({ before: before.filter((path) => path.startsWith('/lib/')), ...rendered() });
+  });
 });
-`, { budget: 9000 });
-  const encoded = /data-render-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  const { before, ...rendered } = JSON.parse(encoded ?? 'null') ?? {};
+`);
+  const { before, ...rendered } = result ?? {};
   assert.deepEqual(rendered, { inline: true, block: true, diagram: true, chart: true, stylesheet: true }, stderr + stdout.slice(0, 2000));
   assert.ok(await libBytes(before) < 8192, before.join(' '));
   const lazy = requests.filter((path) => /^\/lib\/.+-[A-Z0-9]{8}\.(js|css)$/.test(path));
@@ -1573,44 +1582,44 @@ window.addEventListener('test-ready', () => {
 
 test('unknown inherited fence names remain code and Mermaid image sources do not load', async () => {
   const markdown = '```constructor\nplain text\n```\n```mermaid\nflowchart LR\nA@{ img: "https://example.invalid/tracker.png" }\n```';
-  const { stdout, stderr, requests } = await runPage(`
+  const { result, stderr, requests } = await runPage(`
 window.mermaidImageRequests = [];
 const NativeImage = window.Image;
 window.Image = class extends NativeImage { set src(value) { window.mermaidImageRequests.push(value); super.src = value; } get src() { return super.src; } };
 window.addEventListener('test-ready', () => {
   const enc = new TextEncoder();
   replyFromHub('unknown', 'display', [], 1, { display: { markdown: ${JSON.stringify(markdown)} } });
-  setTimeout(() => { document.body.dataset.renderTest = JSON.stringify({ code: document.querySelector('.display-item pre code')?.textContent, diagram: document.querySelector('.display-item .mermaid')?.textContent, images: window.mermaidImageRequests }); }, 1000);
+  until(() => telemetryBatches.flat().some((event) => event.message === 'mermaid image sources are not supported')).then(() => {
+    document.body.dataset.result = JSON.stringify({ code: document.querySelector('.display-item pre code')?.textContent, diagram: document.querySelector('.display-item .mermaid')?.textContent, images: window.mermaidImageRequests });
+  });
 });`);
-  const encoded = /data-render-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { code: 'plain text', diagram: 'flowchart LR\nA@{ img: "https://example.invalid/tracker.png" }', images: [] }, stderr);
+  assert.deepEqual(result, { code: 'plain text', diagram: 'flowchart LR\nA@{ img: "https://example.invalid/tracker.png" }', images: [] }, stderr);
   assert.equal(requests.some((path) => path.includes('tracker')), false);
 });
 
 test('a display without diagrams, math or charts fetches no renderer, and prose keeps its dollars and links its bare URLs', async () => {
-  const { stdout, stderr, requests } = await runPage(`
+  const { result, stderr, requests } = await runPage(`
 window.addEventListener('test-ready', () => {
   const enc = new TextEncoder();
   replyFromHub('unknown', 'display', [], 1, { display: { markdown: 'Spent $9 on the pizza and $3 more, see https://example.test/receipt?id=1). Ended.' } });
-  setTimeout(() => {
+  until(() => globalThis.hubAcks?.includes('display')).then(() => {
     const item = document.querySelector('.display-item');
-    document.body.dataset.linkTest = JSON.stringify({ text: item.textContent, links: [...item.querySelectorAll('a')].map((a) => [a.href, a.rel, a.target]), math: item.querySelectorAll('.math').length });
-  }, 500);
+    document.body.dataset.result = JSON.stringify({ text: item.textContent, links: [...item.querySelectorAll('a')].map((a) => [a.href, a.rel, a.target]), math: item.querySelectorAll('.math').length });
+  });
 });
 `);
-  const encoded = /data-link-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { text: 'Spent $9 on the pizza and $3 more, see https://example.test/receipt?id=1). Ended.', links: [['https://example.test/receipt?id=1', 'noopener noreferrer', '']], math: 0 }, stderr);
+  assert.deepEqual(result, { text: 'Spent $9 on the pizza and $3 more, see https://example.test/receipt?id=1). Ended.', links: [['https://example.test/receipt?id=1', 'noopener noreferrer', '']], math: 0 }, stderr);
   assert.ok(await libBytes(requests) < 8192, requests.join(' '));
 });
 
 for (const standalone of [false, true]) test(`panel links preserve the page only in standalone mode: ${standalone}`, async () => {
-  const { stdout, stderr, requests } = await runPage(`
+  const { result, stderr, requests } = await runPage(`
 const originalMatchMedia = window.matchMedia.bind(window);
 window.matchMedia = (query) => query === '(display-mode: standalone)' ? { matches: ${standalone} } : originalMatchMedia(query);
 window.addEventListener('test-ready', () => {
   const url = location.origin + '/panel-link-destination';
   replyFromHub('unknown', 'display', [], 1, { display: { markdown: '[label](' + url + '#markdown) ' + url + '#bare', link: url + '#payload' } });
-  setTimeout(async () => {
+  until(() => globalThis.hubAcks?.includes('display')).then(async () => {
     const channel = testChannel;
     const links = [...document.querySelectorAll('.display-item a')];
     const attributes = links.map(link => [link.textContent === 'label' ? 'label' : new URL(link.href).hash, new URL(link.href).hash, link.getAttribute('target'), link.rel]);
@@ -1620,14 +1629,12 @@ window.addEventListener('test-ready', () => {
       if (!${standalone}) link.href = '#' + new URL(link.href).hash.slice(1);
       else opened++;
       link.click();
-      await new Promise(resolve => setTimeout(resolve, 50));
     }
     await fetch('/panel-links-loaded?count=' + opened);
-    document.body.dataset.linkTest = JSON.stringify({ attributes, hash: location.hash, active: document.querySelector('#puppet').getAttribute('aria-pressed'), sameSession: channel === testChannel && channel.readyState === 'open' });
-  }, 100);
+    document.body.dataset.result = JSON.stringify({ attributes, hash: location.hash, active: document.querySelector('#puppet').getAttribute('aria-pressed'), sameSession: channel === testChannel && channel.readyState === 'open' });
+  });
 });`);
-  const encoded = /data-link-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), {
+  assert.deepEqual(result, {
     attributes: [['label', '#markdown'], ['#bare', '#bare'], ['#payload', '#payload']].map(([label, hash]) => [label, hash, standalone ? '_blank' : null, 'noopener noreferrer']),
     hash: standalone ? '' : '#payload', active: 'true', sameSession: true,
   }, stderr);
@@ -1635,7 +1642,7 @@ window.addEventListener('test-ready', () => {
 });
 
 test('adopted renderer output loses scripts, handlers, remote references and unsafe links in both SVG and HTML', async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {
   const { adopt } = await import('/lib/render.js');
   const svg = document.createElement('div');
@@ -1644,11 +1651,9 @@ window.addEventListener('test-ready', async () => {
   adopt(html, '<span class="katex"><img src="x" onerror="alert(4)"><a href="https://ok.test/" target="_blank">k</a><a href="data:text/html,x">d</a><iframe srcdoc="x"></iframe></span>', 'text/html');
   let unparseable = false;
   try { adopt(document.createElement('div'), '<svg', 'image/svg+xml'); } catch { unparseable = true; }
-  document.body.dataset.adoptTest = JSON.stringify({ svg: svg.innerHTML, html: html.innerHTML, unparseable });
+  document.body.dataset.result = JSON.stringify({ svg: svg.innerHTML, html: html.innerHTML, unparseable });
 });
 `);
-  const encoded = /data-adopt-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"').replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&amp;', '&');
-  const result = JSON.parse(encoded ?? 'null');
   assert.ok(result, stderr);
   assert.equal(result.unparseable, true);
   for (const forbidden of ['script', 'onload', 'onclick', 'onmouseover', 'onerror', 'javascript:', 'evil.test', '<image', '<iframe', 'srcdoc', 'data:']) assert.equal(result.svg.includes(forbidden) || result.html.includes(forbidden), false, forbidden + ': ' + result.svg + result.html);
@@ -1657,34 +1662,31 @@ window.addEventListener('test-ready', async () => {
 });
 
 for (const close of ["testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.closed' }) }))", "testChannel.dispatchEvent(new Event('close'))"]) test('provider close offers a fresh session: ' + close, async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {
   ${close};
-  await new Promise(resolve => setTimeout(resolve, 30));
+  await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false');
   const offered = document.querySelector('#status').textContent;
   document.querySelector('#puppet').click();
-  await new Promise(resolve => setTimeout(resolve, 50));
-  document.body.dataset.closeTest = JSON.stringify({ offered, active: document.querySelector('#puppet').getAttribute('aria-pressed') });
+  await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+  document.body.dataset.result = JSON.stringify({ offered, active: document.querySelector('#puppet').getAttribute('aria-pressed') });
 });
 `);
-  const encoded = /data-close-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), { offered: 'Session ended — tap to continue', active: 'true' }, stderr);
+  assert.deepEqual(result, { offered: 'Session ended — tap to continue', active: 'true' }, stderr);
 });
 
 test('animation deltas and input utterances reach session telemetry', async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result: events, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   testPuppet.onAnimation({ clips: [{ name: 'sit', weight: 0.5 }], hip_height: 1.2 });
   for (const event of [{ type: 'input_audio_buffer.speech_started' }, { type: 'session.input_transcript.delta', delta: 'Please stand.' }]) emitLive(event);
   globalThis.onTelemetry = () => {
     const events = telemetryBatches.flat().filter((event) => ['animation', 'input_utterance', 'input_speech_started'].includes(event.name));
-    if (events.length >= 3) document.body.dataset.poseTelemetry = JSON.stringify(events);
+    if (events.length >= 3) document.body.dataset.result = JSON.stringify(events);
   };
   onTelemetry();
 });
 `);
-  const encoded = /data-pose-telemetry="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  const events = JSON.parse(encoded ?? 'null');
   assert.ok(events, stderr);
   assert.equal(events.length, 3);
   assert.deepEqual(JSON.parse(events.find((event) => event.name === 'animation').detail), { clips: [{ name: 'sit', weight: 0.5 }], hip_height: 1.2 });
@@ -1694,13 +1696,13 @@ window.addEventListener('test-ready', () => {
 
 test('display pipe tables preserve rows, inline links and pipes inside code', async () => {
   const markdown = '| Name | Value |\n| :--- | ---: |\n| First | one |\n| Second | two |\nAfter\n\n| Link | Code | Empty |\n| --- | :---: | --- |\n| [docs](https://example.test/docs) | `left|right` | |\n\n| ordinary | prose |\n| not a separator | text |';
-  const { stdout, stderr } = await runPage(`
+  const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   const enc = new TextEncoder();
   replyFromHub('unknown', 'display', [], 1, { display: { markdown: ${JSON.stringify(markdown)} } });
-  setTimeout(() => {
+  until(() => globalThis.hubAcks?.includes('display')).then(() => {
     const item = document.querySelector('.display-item');
-    document.body.dataset.tableTest = JSON.stringify({
+    document.body.dataset.result = JSON.stringify({
       tables: [...item.querySelectorAll('table')].map((table) => ({
         head: [...table.querySelectorAll('thead tr')].map((row) => [...row.querySelectorAll('th')].map((cell) => cell.textContent)),
         body: [...table.querySelectorAll('tbody tr')].map((row) => [...row.querySelectorAll('td')].map((cell) => cell.textContent)),
@@ -1709,10 +1711,9 @@ window.addEventListener('test-ready', () => {
       code: [...item.querySelectorAll('td code')].map((code) => code.textContent),
       paragraphs: [...item.querySelectorAll('p')].map((paragraph) => paragraph.textContent),
     });
-  }, 500);
+  });
 });`);
-  const encoded = /data-table-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  assert.deepEqual(JSON.parse(encoded ?? 'null'), {
+  assert.deepEqual(result, {
     tables: [
       { head: [['Name', 'Value']], body: [['First', 'one'], ['Second', 'two']] },
       { head: [['Link', 'Code', 'Empty']], body: [['docs', 'left|right', '']] },
@@ -1724,10 +1725,14 @@ window.addEventListener('test-ready', () => {
 });
 
 const untilAsleep = `
-const until = async (check) => { while (!check()) await new Promise((resolve) => setTimeout(resolve, 10)); };
 const signOff = (delta = ${JSON.stringify(SIGN_OFF)}) => emitLive({ type: 'session.output_transcript.delta', delta });
 const count = (verb) => sentVerbs.filter((item) => item === verb).length;
 const sessionEvents = (name) => telemetryBatches.flat().filter((event) => event.kind === 'session' && event.name === name);
+const settled = async () => {
+  const marks = sessionEvents('live-config-session-updated').length;
+  emitLive({ type: 'session.updated', session: {} });
+  await until(() => sessionEvents('live-config-session-updated').length > marks);
+};
 const sleepNow = async () => {
   document.querySelector('#puppet').click();
   await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false');
@@ -1737,13 +1742,12 @@ const sleepNow = async () => {
 `;
 
 async function runWakePage(script, { setup = '', ...options } = {}) {
-  const { stdout, stderr } = await runPage(`${setup}${untilAsleep}
+  const { result, stderr } = await runPage(`${setup}${untilAsleep}
 window.addEventListener('test-ready', async () => {
-  try { document.body.dataset.wakeTest = JSON.stringify(await (async () => { ${script} })()); }
-  catch (error) { document.body.dataset.wakeTest = JSON.stringify({ error: String(error?.stack ?? error) }); }
+  try { document.body.dataset.result = JSON.stringify(await (async () => { ${script} })()); }
+  catch (error) { document.body.dataset.result = JSON.stringify({ error: String(error?.stack ?? error) }); }
 });
 `, options);
-  const result = JSON.parse(/data-wake-test="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"') ?? 'null');
   assert.ok(result && !result.error, `${result?.error}\n${stderr}`);
   return result;
 }
@@ -1754,7 +1758,7 @@ test('while asleep, anything short of a wake opens no session, asks the hub noth
     const offers = count('offer');
     for (const miss of [0.2, 0.4, 0.6]) testSpotter.heard({ miss });
     testSpotter.heard({ ready: true });
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await until(() => sessionEvents('wake-miss').length === 3);
     return { offers: count('offer') - offers, delegates: count('delegate'), pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), wakes: sessionEvents('wake').length, spoken: testPuppet.calls.filter(([name]) => name === 'speak').length, live: sentLiveEvents.length };
   `);
   assert.deepEqual(result, { offers: 0, delegates: 0, pressed: 'false', wakes: 0, spoken: 0, live: 0 });
@@ -1772,8 +1776,9 @@ test('the wake phrase carries earlier turns and a completed-sleep marker into on
     testSpotter.heard({ wake: 0.93 });
     testSpotter.heard({ wake: 0.95 });
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+    await until(() => sessionEvents('open').some((event) => event.session_id === lastOffer.id) && testPuppet.calls.some(([name, pose]) => name === 'pose' && pose === 'listen'));
     testSpotter.heard({ wake: 0.97 });
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await settled();
     return {
       offers: count('offer') - offers,
       offer: Object.keys(lastOffer),
@@ -1849,50 +1854,49 @@ for (const [name, served, error] of [
     const errors = () => telemetryBatches.flat().filter((event) => event.kind === 'error').map((event) => event.message);
     await sleepNow();
     await until(() => errors().length);
+    await new Promise((resolve) => setTimeout(resolve, 60000));
     const requests = count('wake-model');
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    const retried = count('wake-model') - requests;
     document.querySelector('#puppet').click();
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
-    return { spotter: Boolean(globalThis.testSpotter), errors: [...new Set(errors())], retried };
-  `, { setup: `globalThis.backendWakeModel = ${JSON.stringify(served)};` });
-  assert.deepEqual(result, { spotter: false, errors: [error], retried: 0 });
+    return { spotter: Boolean(globalThis.testSpotter), errors: [...new Set(errors())], requests };
+  `, { setup: `globalThis.backendWakeModel = ${JSON.stringify(served)};`, virtualTime: true });
+  assert.deepEqual(result, { spotter: false, errors: [error], requests: 1 });
 });
 
 const startInFlight = `
 const errors = () => telemetryBatches.flat().filter((event) => event.kind === 'error').map((event) => event.message);
-const within = async (check) => { const end = Date.now() + 1000; while (!check() && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 10)); return Boolean(check()); };
 await sleepNow();
 globalThis.holdAnswer = true;
 document.querySelector('#puppet').click();
 await until(() => globalThis.releaseAnswer);
-const opened = () => within(() => sessionEvents('open').some((event) => event.session_id === lastOffer.id));
+const opened = () => until(() => sessionEvents('open').some((event) => event.session_id === lastOffer.id));
 `;
 
 test('a generic error frame fails neither a conversation start nor a wake-model request in flight', async () => {
   const result = await runWakePage(`${startInFlight}
     deliverRelay(new TextEncoder().encode('error\\nunrelated failure'));
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    const status = document.querySelector('#status').textContent;
+    await until(() => document.querySelector('#status').textContent === 'unrelated failure');
     globalThis.backendWakeModel = undefined;
     releaseWakeModel();
     releaseAnswer();
-    const started = await opened();
+    await opened();
     await sleepNow();
-    return { status, started, spotter: await within(() => globalThis.testSpotter), errors: errors() };
-  `, { setup: "globalThis.backendWakeModel = 'unanswered';", budget: 8000 });
-  assert.deepEqual(result, { status: 'unrelated failure', started: true, spotter: true, errors: [] });
+    await until(() => globalThis.testSpotter);
+    return { errors: errors() };
+  `, { setup: "globalThis.backendWakeModel = 'unanswered';" });
+  assert.deepEqual(result, { errors: [] });
 });
 
 test('an unreadable wake model fails only the wake-model request while a conversation start is in flight', async () => {
   const result = await runWakePage(`${startInFlight}
     globalThis.backendWakeModel = 'unreadable';
     releaseWakeModel();
-    await within(() => errors().length);
+    await until(() => errors().length);
     releaseAnswer();
-    return { started: await opened(), errors: errors() };
-  `, { setup: "globalThis.backendWakeModel = 'unanswered';", budget: 8000 });
-  assert.deepEqual(result, { started: true, errors: ['wake model unreadable'] });
+    await opened();
+    return { errors: errors() };
+  `, { setup: "globalThis.backendWakeModel = 'unanswered';" });
+  assert.deepEqual(result, { errors: ['wake model unreadable'] });
 });
 
 test('a wake model that arrives after a long wait still starts the spotter', async () => {
@@ -1902,7 +1906,7 @@ test('a wake model that arrives after a long wait still starts the spotter', asy
     deliverRelay(new TextEncoder().encode('wake-model\\n' + ${JSON.stringify(JSON.stringify(testWakeModel))}));
     await until(() => globalThis.testSpotter);
     return { errors: telemetryBatches.flat().filter((event) => event.kind === 'error').map((event) => event.message) };
-  `, { setup: "globalThis.backendWakeModel = 'unanswered';", budget: 70000 });
+  `, { setup: "globalThis.backendWakeModel = 'unanswered';", virtualTime: true });
   assert.deepEqual(result, { errors: [] });
 });
 
@@ -1923,8 +1927,8 @@ test('a reconnect that fails asks for no wake model on a connection nobody reads
     await until(() => telemetryBatches.flat().some((event) => event.kind === 'error'));
     const requests = count('wake-model');
     document.querySelector('#puppet').click();
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    deliverRelay(new TextEncoder().encode(JSON.stringify({ ok: false })));
+    await until(() => globalThis.answerAuth);
+    answerAuth(false);
     await until(() => document.querySelector('#status').textContent.includes('token rejected'));
     return { requests: count('wake-model') - requests };
   `, { setup: "globalThis.backendWakeModel = 'unanswered';" });
@@ -1939,9 +1943,9 @@ test('a reconnect cancelled while it dials still listens for the wake phrase onc
     globalThis.backendWakeModel = undefined;
     const requests = count('wake-model');
     document.querySelector('#puppet').click();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await until(() => globalThis.answerAuth);
     document.querySelector('#puppet').click();
-    deliverRelay(new TextEncoder().encode(JSON.stringify({ ok: true })));
+    answerAuth(true);
     await until(() => globalThis.testSpotter);
     return { requests: count('wake-model') - requests };
   `, { setup: "globalThis.backendWakeModel = 'unanswered';" });
@@ -1956,7 +1960,7 @@ test('the model speaking the sign-off ends the session once speech goes quiet an
     hear('That will be all.');
     signOff('Goodnight. ' + ${JSON.stringify(SIGN_OFF.slice(0, 8).toUpperCase())});
     signOff(${JSON.stringify(SIGN_OFF.slice(8).replace(/\.$/, '!'))});
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await until(() => quiet);
     const speaking = document.querySelector('#puppet').getAttribute('aria-pressed');
     quiet?.();
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && sessionEvents('close').length);
@@ -1975,13 +1979,16 @@ test('the model speaking the sign-off ends the session once speech goes quiet an
 
 test('a goodbye from the user or a partial sign-off keeps the session open', async () => {
   const result = await runWakePage(`
+    const { LivePlayback } = await import('/live-playback.js');
+    let quiets = 0;
+    LivePlayback.prototype.quiet = () => { quiets++; return new Promise(() => {}); };
     hear('Goodnight, Corvus. Go to sleep.');
     signOff(${JSON.stringify(SIGN_OFF.split(' ').slice(0, -1).join(' ') + '.')});
     hear(' ${SIGN_OFF}');
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    return { pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), sleeps: sessionEvents('sleep').length };
+    await settled();
+    return { pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), sleeps: sessionEvents('sleep').length, quiets };
   `);
-  assert.deepEqual(result, { pressed: 'true', sleeps: 0 });
+  assert.deepEqual(result, { pressed: 'true', sleeps: 0, quiets: 0 });
 });
 
 test('a sign-off with a delegation outstanding ends the session and its late hub reply is never spoken', async () => {
@@ -2002,7 +2009,7 @@ test('a sign-off with a delegation outstanding ends the session and its late hub
     quiets[0]();
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && sessionEvents('close').length);
     return { delegates: count('delegate'), sleeps: sessionEvents('sleep').map((event) => event.detail), appended: sentLiveEvents.filter((event) => event.event_id?.includes('late')).length, acks: hubAcks };
-  `, { budget: 6000 });
+  `, { virtualTime: true });
   assert.deepEqual(result, { delegates: 1, sleeps: ['sign-off'], appended: 0, acks: ['late'] });
 });
 
@@ -2014,9 +2021,8 @@ test('words heard after the last delegation reach the hub once as the session si
     emitLive({ type: 'session.output_transcript.delta', delta: 'Checking.' });
     hear('Also remember the filament order.');
     signOff();
-    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && sessionEvents('close').length);
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    return { ended: globalThis.endedFrames ?? [], delegates: count('delegate') };
+    await until(() => globalThis.endedFrames?.length);
+    return { ended: endedFrames, delegates: count('delegate') };
   `);
   assert.equal(result.delegates, 1);
   assert.equal(result.ended.length, 1);
@@ -2033,7 +2039,6 @@ test('a session that heard nothing after its last delegation sends the hub nothi
     hear(' ?');
     signOff();
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && sessionEvents('close').length);
-    await new Promise((resolve) => setTimeout(resolve, 200));
     return { ended: count('ended'), delegates: count('delegate') };
   `);
   assert.deepEqual(result, { ended: 0, delegates: 1 });
@@ -2057,11 +2062,14 @@ test('a session woken after a sign-off stays awake through its greeting', async 
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && sessionEvents('close').length);
     testSpotter.heard({ wake: 0.95 });
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+    const { LivePlayback } = await import('/live-playback.js');
+    let quiets = 0;
+    LivePlayback.prototype.quiet = () => { quiets++; return new Promise(() => {}); };
     emitLive({ type: 'session.output_transcript.delta', delta: 'Hi, I am listening.' });
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    return { pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), sleeps: sessionEvents('sleep').map((event) => event.detail) };
+    await settled();
+    return { pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), sleeps: sessionEvents('sleep').map((event) => event.detail), quiets };
   `);
-  assert.deepEqual(result, { pressed: 'true', sleeps: ['sign-off'] });
+  assert.deepEqual(result, { pressed: 'true', sleeps: ['sign-off'], quiets: 0 });
 });
 
 test('the screen stays on only while awake, and a lock the browser drops on hide returns with the page', async () => {
@@ -2078,7 +2086,6 @@ test('the screen stays on only while awake, and a lock the browser drops on hide
     await until(() => held() === 0);
     showPage(false);
     showPage(true);
-    await new Promise((resolve) => setTimeout(resolve, 100));
     const asleep = { held: held(), requests: screenLocks.length };
     globalThis.holdSessionStart = true;
     document.querySelector('#puppet').click();
@@ -2092,7 +2099,7 @@ test('the screen stays on only while awake, and a lock the browser drops on hide
     await until(() => grantScreenLock);
     await sleepNow();
     grantScreenLock();
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await until(() => screenLocks.at(-1).released);
     return { awake, hidden, returned, asleep, starting, late: { held: held(), requests: screenLocks.length }, types: [...new Set(screenLocks.map((lock) => lock.type))] };
   `, { setup: `
     const screenLocks = [];
@@ -2137,7 +2144,7 @@ test('inactivity sleeps after the generous window even while a hub request is pe
     const before = document.querySelector('#puppet').getAttribute('aria-pressed');
     await new Promise((resolve) => setTimeout(resolve, 65000));
     return { before, after: document.querySelector('#puppet').getAttribute('aria-pressed'), sleeps: sessionEvents('sleep').map((event) => event.detail) };
-  `, { budget: INACTIVITY_MS + 30000 });
+  `, { virtualTime: true });
   assert.deepEqual(result, { before: 'true', after: 'false', sleeps: ['inactivity'] });
 });
 
@@ -2211,21 +2218,19 @@ globalThis.RTCPeerConnection = class extends FakeLive {
   const result = await driveLifecycle(timelineLive, async ({ evaluate, until }) => {
     await until(`document.querySelector('#puppet').getAttribute('aria-pressed') === 'true' && document.querySelector('#speaker').srcObject`);
     return evaluate(`(async () => {
-      // Bounded because these waits are the asserted outcomes: a regression should fail the assertion, not hang the run.
-      const waitFor = async (done) => { for (const deadline = Date.now() + 60000; !done() && Date.now() < deadline;) await new Promise((resolve) => setTimeout(resolve, 20)); };
       const heard = { frames: 0, peak: 0 };
       measure(document.querySelector('#speaker').srcObject.getAudioTracks()[0], heard);
-      await waitFor(() => sent.peak > 0.1);
+      await until(() => sent.peak > 0.1);
       const open = sent.peak;
       document.querySelector('#mic-mute').click();
       // Tone frames queued before the mute never reach a processor made after it, and any still rendering arrive before its first silent frame.
       const muted = { frames: 0, peak: 0 };
       measure(sentTrack, muted);
-      await waitFor(() => muted.last === 0);
+      await until(() => muted.last === 0);
       Object.assign(muted, { frames: 0, peak: 0 });
       heard.peak = 0;
       replyFromHub('pushed', 'pushed', ['The beacon is green.']);
-      await waitFor(() => muted.frames > 50 && heard.peak > 0.1);
+      await until(() => muted.frames > 50 && heard.peak > 0.1);
       return { open: open > 0.1, muted: document.querySelector('#mic-mute').getAttribute('aria-pressed'), capture: testMicrophoneTrack.readyState, sentFrames: muted.frames > 50, sentPeak: muted.peak, spoken: heard.peak > 0.1, live: document.querySelector('#puppet').getAttribute('aria-pressed') };
     })()`);
   });
@@ -2240,16 +2245,17 @@ test('a muted microphone runs no wake spotter, not even after a session ends, an
     document.querySelector('#mic-mute').click();
     document.querySelector('#puppet').click();
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+    const closes = sessionEvents('close').length;
     await sleepNow();
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await until(() => sessionEvents('close').length > closes);
     const muted = { closed: listening.closed, replaced: testSpotter !== listening };
     document.querySelector('#mic-mute').click();
     await until(() => !testSpotter.closed);
     testSpotter.heard({ wake: 0.9 });
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true' && sessionEvents('wake').length);
-    return { before, muted, wakes: sessionEvents('wake').map((event) => event.detail) };
+    return { before, muted, startedMuted: spotterStarts.filter((start) => start.muted === 'true').length, wakes: sessionEvents('wake').map((event) => event.detail) };
   `);
-  assert.deepEqual(result, { before: 0, muted: { closed: 1, replaced: false }, wakes: ['0.900'] });
+  assert.deepEqual(result, { before: 0, muted: { closed: 1, replaced: false }, startedMuted: 0, wakes: ['0.900'] });
 });
 
 test('a reconnect while the microphone is muted starts no wake spotter until unmute', async () => {
@@ -2259,16 +2265,16 @@ test('a reconnect while the microphone is muted starts no wake spotter until unm
     loseRelay(new Error('relay closed'));
     await until(() => document.querySelector('#status').textContent.includes('connection lost'));
     document.querySelector('#puppet').click();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await until(() => globalThis.answerAuth);
     document.querySelector('#puppet').click();
-    deliverRelay(new TextEncoder().encode(JSON.stringify({ ok: true })));
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    answerAuth(true);
+    await until(() => sessionEvents('reconnect').length);
     const spotter = !testSpotter.closed;
     document.querySelector('#mic-mute').click();
     await until(() => !testSpotter.closed);
-    return { spotter };
+    return { spotter, startedMuted: spotterStarts.filter((start) => start.muted === 'true').length };
   `);
-  assert.deepEqual(result, { spotter: false });
+  assert.deepEqual(result, { spotter: false, startedMuted: 0 });
 });
 
 test('the spotter stops throughout a conversation and restarts when it ends', async () => {
@@ -2277,18 +2283,19 @@ test('the spotter stops throughout a conversation and restarts when it ends', as
     await until(() => !testSpotter.closed);
     const asleep = testSpotter;
     document.querySelector('#puppet').click();
-    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true' && asleep.closed);
+    await settled();
     const mid = { closed: asleep.closed, replaced: testSpotter !== asleep, running: !testSpotter.closed };
     document.querySelector('#mic-mute').click();
     document.querySelector('#mic-mute').click();
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await until(() => testMicrophoneTrack.readyState === 'live');
+    await settled();
     const unmuted = { closed: asleep.closed, replaced: testSpotter !== asleep, running: !testSpotter.closed };
     await sleepNow();
     await until(() => !testSpotter.closed);
-    return { mid, unmuted, restarted: testSpotter !== asleep };
+    return { mid, unmuted, restarted: testSpotter !== asleep, startedAwake: spotterStarts.filter((start) => start.awake === 'true').length };
   `);
-  assert.deepEqual(result, { mid: { closed: 1, replaced: false, running: false }, unmuted: { closed: 1, replaced: false, running: false }, restarted: true });
+  assert.deepEqual(result, { mid: { closed: 1, replaced: false, running: false }, unmuted: { closed: 1, replaced: false, running: false }, restarted: true, startedAwake: 0 });
 });
 
 for (const [phase, enter, status] of [
@@ -2319,8 +2326,7 @@ test('microphone audio that has never run is reported and shown, and a tapped co
     const status = () => document.querySelector('#status').textContent;
     const audio = () => sessionEvents('microphone-audio').map((event) => event.detail);
     document.querySelector('#puppet').click();
-    await until(() => status() === 'tap to let me hear you');
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await until(() => status() === 'tap to let me hear you' && audio().length);
     const held = { status: status(), events: audio(), offers: count('offer') };
     globalThis.audioHeld = false;
     heldAudio.dispatchEvent(new Event('statechange'));
@@ -2347,11 +2353,11 @@ test('a microphone that cannot reopen after it ends shows on the status line as 
     const opens = microphoneOpens;
     globalThis.microphoneMissing = true;
     endMicrophone();
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await until(() => sessionEvents('microphone-missing').length && testSpotter.closed);
     const missing = { opens: microphoneOpens - opens, running: !testSpotter.closed, status: document.querySelector('#status').textContent, events: sessionEvents('microphone-missing').map((event) => event.detail) };
     globalThis.microphoneMissing = false;
     navigator.mediaDevices.dispatchEvent(new Event('devicechange'));
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await until(() => !testSpotter.closed);
     return { missing, returned: { opens: microphoneOpens - opens, running: !testSpotter.closed, hears: testSpotter.stream.getAudioTracks()[0].readyState, status: document.querySelector('#status').textContent }, errors: fleetLines };
   `);
   assert.deepEqual(result, { missing: { opens: 0, running: false, status: 'no microphone found', events: ['Requested device not found'] }, returned: { opens: 1, running: true, hears: 'live', status: '' }, errors: [] });
@@ -2364,14 +2370,15 @@ test('a refused microphone shows on the status line, asleep or tapped, as a sess
     const status = () => document.querySelector('#status').textContent;
     globalThis.microphoneRefused = true;
     endMicrophone();
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await until(() => sessionEvents('microphone-refused').length && testSpotter.closed);
     const asleep = { status: status(), refusals: sessionEvents('microphone-refused').map((event) => event.detail), running: !testSpotter.closed };
+    const refused = sessionEvents('microphone-refused').length;
     document.querySelector('#puppet').click();
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await until(() => sessionEvents('microphone-refused').length > refused);
     const tapped = { status: status(), pressed: document.querySelector('#puppet').getAttribute('aria-pressed') };
     globalThis.microphoneRefused = false;
     navigator.mediaDevices.dispatchEvent(new Event('devicechange'));
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await until(() => !testSpotter.closed);
     return { asleep, tapped, allowed: { status: status(), running: !testSpotter.closed, hears: testSpotter.stream.getAudioTracks()[0].readyState }, errors: fleetLines };
   `);
   const refused = "microphone not allowed — enable it in this site's settings";
@@ -2385,10 +2392,9 @@ test('with no microphone at load, mute is available at once and holds when a dev
     button.click();
     globalThis.microphoneMissing = false;
     navigator.mediaDevices.dispatchEvent(new Event('devicechange'));
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    const arrived = { opens: microphoneOpens, pressed: button.getAttribute('aria-pressed') };
     document.querySelector('#puppet').click();
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+    const arrived = { opens: microphoneOpens, pressed: button.getAttribute('aria-pressed') };
     return { before, arrived, sends: { state: sentTracks.at(-1).readyState, enabled: sentTracks.at(-1).enabled } };
   `, { setup: 'globalThis.microphoneMissing = true;' });
   assert.deepEqual(result, { before: { opens: 0, disabled: false }, arrived: { opens: 0, pressed: 'true' }, sends: { state: 'live', enabled: true } });
@@ -2401,18 +2407,17 @@ test('a mute set while no microphone is open holds, and the next session uses si
     const opens = microphoneOpens;
     globalThis.microphoneMissing = true;
     endMicrophone();
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await until(() => sessionEvents('microphone-missing').length && testSpotter.closed);
     document.querySelector('#mic-mute').click();
     globalThis.microphoneMissing = false;
     navigator.mediaDevices.dispatchEvent(new Event('devicechange'));
-    await new Promise((resolve) => setTimeout(resolve, 300));
     const button = document.querySelector('#mic-mute');
-    const muted = { opens: microphoneOpens - opens, running: !testSpotter.closed, pressed: button.getAttribute('aria-pressed'), disabled: button.disabled };
+    const muted = { running: !testSpotter.closed, pressed: button.getAttribute('aria-pressed'), disabled: button.disabled };
     document.querySelector('#puppet').click();
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
-    return { muted, sends: { state: sentTracks.at(-1).readyState, enabled: sentTracks.at(-1).enabled } };
+    return { muted: { opens: microphoneOpens - opens, ...muted }, startedMuted: spotterStarts.filter((start) => start.muted === 'true').length, sends: { state: sentTracks.at(-1).readyState, enabled: sentTracks.at(-1).enabled } };
   `);
-  assert.deepEqual(result, { muted: { opens: 0, running: false, pressed: 'true', disabled: false }, sends: { state: 'live', enabled: true } });
+  assert.deepEqual(result, { muted: { opens: 0, running: false, pressed: 'true', disabled: false }, startedMuted: 0, sends: { state: 'live', enabled: true } });
 });
 
 test('a running spotter survives relay loss and the wake phrase reconnects', async () => {
@@ -2422,15 +2427,15 @@ test('a running spotter survives relay loss and the wake phrase reconnects', asy
     const before = testSpotter;
     loseRelay(new Error('relay closed'));
     await until(() => document.querySelector('#status').textContent.includes('connection lost'));
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await nextTask();
     const afterLoss = { closed: before.closed, replaced: testSpotter !== before, running: !testSpotter.closed };
     const offers = count('offer');
     before.heard({ wake: 0.95 });
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    deliverRelay(new TextEncoder().encode(JSON.stringify({ ok: true })));
-    await new Promise((resolve) => setTimeout(resolve, 2500));
+    await until(() => globalThis.answerAuth);
+    answerAuth(true);
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
     return { afterLoss, pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), offers: count('offer') - offers };
-  `, { budget: 15000 });
+  `);
   assert.deepEqual(result.afterLoss, { closed: 0, replaced: false, running: true });
   assert.equal(result.pressed, 'true');
   assert.equal(result.offers, 1);
@@ -2440,7 +2445,7 @@ for (const control of ['reenter', 'forget']) test(control + ' stops the spotter 
   const result = await runWakePage(`
     await sleepNow();
     await until(() => !testSpotter.closed);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await nextTask();
     const asleep = testSpotter;
     document.querySelector('#${control}').click();
     await Promise.resolve();
@@ -2455,28 +2460,26 @@ test('relay loss during a conversation restarts the listener and its wake reconn
     await until(() => globalThis.testSpotter && !testSpotter.closed);
     const asleep = testSpotter;
     document.querySelector('#puppet').click();
-    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true' && asleep.closed);
+    await settled();
     const mid = { closed: asleep.closed, replaced: testSpotter !== asleep, running: !testSpotter.closed };
     loseRelay(new Error('relay closed'));
-    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false');
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await until(() => testSpotter !== asleep && !testSpotter.closed);
     const live = testSpotter;
     const afterLoss = { closed: live.closed, replaced: live !== asleep, running: !live.closed, status: document.querySelector('#status').textContent };
     const offers = count('offer');
-    if (!live.closed) {
-      live.heard({ wake: 0.95 });
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      deliverRelay(new TextEncoder().encode(JSON.stringify({ ok: true })));
-      await new Promise((resolve) => setTimeout(resolve, 2500));
-    }
-    return { mid, afterLoss, pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), offers: count('offer') - offers };
-  `, { budget: 15000 });
+    live.heard({ wake: 0.95 });
+    await until(() => globalThis.answerAuth);
+    answerAuth(true);
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+    return { mid, afterLoss, pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), offers: count('offer') - offers, startedAwake: spotterStarts.filter((start) => start.awake === 'true').length };
+  `);
   assert.deepEqual(result.mid, { closed: 1, replaced: false, running: false });
   assert.equal(result.afterLoss.running, true);
   assert.equal(result.afterLoss.replaced, true);
   assert.equal(result.pressed, 'true');
   assert.equal(result.offers, 1);
+  assert.equal(result.startedAwake, 0);
 });
 
 test('a failed wake reconnect restarts the listener for another wake', async () => {
@@ -2486,24 +2489,21 @@ test('a failed wake reconnect restarts the listener for another wake', async () 
     const asleep = testSpotter;
     loseRelay(new Error('relay closed'));
     await until(() => document.querySelector('#status').textContent.includes('connection lost'));
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await nextTask();
     const afterLoss = { closed: asleep.closed, replaced: testSpotter !== asleep, running: !testSpotter.closed };
     asleep.heard({ wake: 0.95 });
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await until(() => globalThis.answerAuth);
     loseRelay(new Error('relay still down'));
-    await until(() => document.querySelector('#status').textContent.includes('could not start'));
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await until(() => document.querySelector('#status').textContent.includes('could not start') && testSpotter !== asleep && !testSpotter.closed);
     const live = testSpotter;
     const afterFailedReconnect = { closed: live.closed, replaced: live !== asleep, running: !live.closed, status: document.querySelector('#status').textContent };
     const offers = count('offer');
-    if (!live.closed) {
-      live.heard({ wake: 0.95 });
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      deliverRelay(new TextEncoder().encode(JSON.stringify({ ok: true })));
-      await new Promise((resolve) => setTimeout(resolve, 2500));
-    }
+    live.heard({ wake: 0.95 });
+    await until(() => globalThis.answerAuth);
+    answerAuth(true);
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
     return { afterLoss, afterFailedReconnect, pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), offers: count('offer') - offers };
-  `, { budget: 20000 });
+  `);
   assert.deepEqual(result.afterLoss, { closed: 0, replaced: false, running: true });
   assert.equal(result.afterFailedReconnect.running, true);
   assert.equal(result.afterFailedReconnect.replaced, true);
@@ -2518,14 +2518,12 @@ for (const loseRefresh of [false, true]) test('a cached model remains wakeable d
     const model = testSpotter.model;
     loseRelay(new Error('relay closed'));
     await until(() => document.querySelector('#status').textContent.includes('connection lost'));
-    await new Promise((resolve) => setTimeout(resolve, 300));
     globalThis.backendWakeModel = 'unanswered';
     testSpotter.heard({ wake: 0.95 });
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await until(() => globalThis.answerAuth);
     const requests = count('wake-model');
-    deliverRelay(new TextEncoder().encode(JSON.stringify({ ok: true })));
-    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    answerAuth(true);
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true' && count('wake-model') > requests);
     if (${loseRefresh}) loseRelay(new Error('refresh lost'));
     else await sleepNow();
     await until(() => !testSpotter.closed);
@@ -2533,26 +2531,25 @@ for (const loseRefresh of [false, true]) test('a cached model remains wakeable d
     const refreshed = count('wake-model') - requests;
     if (!${loseRefresh}) {
       deliverRelay(new TextEncoder().encode('wake-model\\n' + JSON.stringify({ ...model, threshold: 0.9 })));
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await nextTask();
       document.querySelector('#mic-mute').click();
       document.querySelector('#mic-mute').click();
       await until(() => !testSpotter.closed && testSpotter.model.threshold === 0.9);
     }
     return { cached, refreshed, running: !testSpotter.closed, threshold: testSpotter.model.threshold };
-  `, { budget: 15000 });
+  `);
   assert.deepEqual(result, { cached: true, refreshed: 1, running: true, threshold: loseRefresh ? 0.5 : 0.9 });
 });
 
 test('provider configuration reaches private telemetry with only allowlisted fields', async () => {
-  const { stdout, stderr } = await runPage(`
+  const { result: events, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   for (const type of ['session.created', 'session.updated']) emitLive({ type, session: { model: 'live-model', instructions: 'private instructions', delegation: { type: 'client' } } });
   emitLive({ type: 'session.delegation.created', delegation: { id: 'd', type: 'delegation', target: 'client', instructions: 'private state' } });
-  setTimeout(() => { document.body.dataset.configTelemetry = JSON.stringify(telemetryBatches.flat().filter((event) => event.name?.startsWith('live-config-'))); }, 600);
+  const events = () => telemetryBatches.flat().filter((event) => event.name?.startsWith('live-config-'));
+  until(() => events().some((event) => event.name === 'live-config-session-delegation-created')).then(() => { document.body.dataset.result = JSON.stringify(events()); });
 });
 `);
-  const encoded = /data-config-telemetry="([^"]*)"/.exec(stdout)?.[1]?.replaceAll('&quot;', '"');
-  const events = JSON.parse(encoded ?? 'null');
   assert.ok(events, stderr);
   assert.ok(events.every((event) => event.session_id && /^[a-zA-Z0-9_-]+$/.test(event.name)));
   const records = Object.fromEntries(events.map((event) => [event.name, JSON.parse(event.detail)]));
@@ -2652,7 +2649,7 @@ test('a hub instruction reaches Live as its own null-id instructions append only
     const alone = { told: told().slice(3), pending, waiting: waiting(), speak: testPuppet.calls.filter(([name]) => name === 'speak').length };
     for (const [seconds, usage_ratio] of [[60, 0.5], [61, 0.95], [62, 0.96]]) emitLive({ type: 'session.usage.updated', usage: { seconds }, context_window: { usage_ratio } });
     await until(() => told().length === 5);
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await settled();
     return { beside, spoken, alone, rolled: told().slice(4), acks: hubAckFrames };
   `);
   const instructions = (content) => ['session.instructions.append', null, content];
@@ -2671,7 +2668,7 @@ test('pending hub instructions wait for every hub reply appended before them to 
     const quiet = [];
     LivePlayback.prototype.quiet = () => new Promise((resolve) => quiet.push(resolve));
     const told = () => sentLiveEvents.filter((event) => /^(hub|standing)_/.test(event.event_id ?? '')).map(({ type, content }) => [type.split('.')[1], content]);
-    const settle = async () => { await until(() => quiet.length); while (quiet.length) quiet.shift()(); await new Promise((resolve) => setTimeout(resolve, 50)); };
+    const settle = async () => { await until(() => quiet.length); while (quiet.length) quiet.shift()(); await nextTask(); };
     replyFromHub('early', 'early', [], 5, { instructions: ['Old direction.'] });
     await until(() => told().length === 1);
     replyFromHub('a', 'a', ['Reply A.'], 5, { instructions: ['New direction.'] });
@@ -2710,7 +2707,7 @@ test('hub instructions wait while their reply stays unspoken past the hub turn t
     while (quiet.length) quiet.shift()();
     await until(() => told().length === 2);
     return { timedOut, spoken: told() };
-  `, { budget: 30000 });
+  `, { virtualTime: true });
   assert.deepEqual(result, {
     timedOut: [['commentary', 'Reply.']],
     spoken: [['commentary', 'Reply.'], ['instructions', 'Direction.']],
@@ -2797,10 +2794,8 @@ test('leaving the app keeps the delegation log and whether Live was awake throug
     await hide();
     await freeze();
     await discardAndReturn();
-    await until(`sessionEvents('restore').length === 1`);
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await until(`sessionEvents('restore').length === 1 && globalThis.testSpotter?.closed === 0`);
     const slept = { ...(await state()), offers: await offers() };
-    await until(`globalThis.testSpotter?.closed === 0`);
     await hide();
     await evaluate(`testSpotter.heard({ wake: 0.9 }); 0`);
     await pressed('true');
@@ -2815,8 +2810,7 @@ test('leaving the app keeps the delegation log and whether Live was awake throug
     await tap('false');
     const sleptInView = await state();
     await reload();
-    await until(`sessionEvents('restore').length === 1`);
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await until(`sessionEvents('restore').length === 1 && globalThis.testSpotter?.closed === 0`);
     const reloadedInView = { ...(await state()), restores: await restores(), offers: await offers() };
     await tap('true');
     await hide();
@@ -2824,7 +2818,7 @@ test('leaving the app keeps the delegation log and whether Live was awake throug
     await back();
     await tap('false');
     await discardAndReturn();
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await until(`globalThis.testSpotter?.closed === 0`);
     const killedInView = { ...(await state()), restores: await restores(), offers: await offers() };
     return { awake, frozen, reopened, asleep, slept, wokenHidden, sleptInView, reloadedInView, killedInView };
   });

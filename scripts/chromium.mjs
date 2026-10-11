@@ -85,10 +85,10 @@ export async function openPage(call, url = 'about:blank') {
 
 const DOCUMENT_HTML = "(document.doctype ? new XMLSerializer().serializeToString(document.doctype) + '\\n' : '') + document.documentElement.outerHTML";
 
-export async function renderDom(chrome, url, { budget }) {
+export async function renderDom(chrome, url, { done, virtualTime = false }) {
   const { call, listen, closed } = chrome.devtools;
   const loads = new Set();
-  let expired = false, wake = () => {}, fail;
+  let wake = () => {}, fail;
   const failure = new Promise((_, reject) => {
     fail = reject;
     closed.then(() => reject(new Error(`Chromium's browser process ended: ${chrome.stderr}`)));
@@ -96,14 +96,14 @@ export async function renderDom(chrome, url, { budget }) {
   const stop = listen(({ method, params }) => {
     if (method === 'Inspector.targetCrashed') fail(new Error(`Chromium renderer crashed: ${chrome.stderr}`));
     if (method === 'Page.lifecycleEvent' && params.name === 'load') loads.add(params.loaderId);
-    if (method === 'Emulation.virtualTimeBudgetExpired') expired = true;
     wake();
   });
   const until = condition => new Promise(resolve => {
     wake = () => { if (condition()) resolve(); };
     wake();
   });
-  const step = work => Promise.race([work, failure]);
+  // A dead browser also rejects the pending call; report the death, not the unanswered call.
+  const step = work => Promise.race([work, failure]).catch(error => Promise.race([failure, Promise.reject(error)]));
   try {
     const { call: page, evaluate } = await openPage((...args) => step(call(...args)));
     await page('Inspector.enable');
@@ -112,8 +112,13 @@ export async function renderDom(chrome, url, { budget }) {
     const { loaderId, errorText } = await page('Page.navigate', { url });
     if (errorText) throw new Error(`Chromium could not load ${url}: ${errorText}`);
     await step(until(() => loads.has(loaderId)));
-    await page('Emulation.setVirtualTimePolicy', { policy: 'pauseIfNetworkFetchesPending', budget, maxVirtualTimeTaskStarvationCount: 9999 });
-    await step(until(() => expired));
+    if (virtualTime) await page('Emulation.setVirtualTimePolicy', { policy: 'pauseIfNetworkFetchesPending', maxVirtualTimeTaskStarvationCount: 9999 });
+    await evaluate(`new Promise((resolve) => {
+      const check = () => { if (${done}) { observer.disconnect(); resolve(); } };
+      const observer = new MutationObserver(check);
+      observer.observe(document.documentElement, { attributes: true, subtree: true });
+      check();
+    })`);
     return await evaluate(DOCUMENT_HTML);
   } finally {
     stop();

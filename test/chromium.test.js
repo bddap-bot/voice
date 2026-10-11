@@ -101,7 +101,7 @@ async function renderTicking(t, tick) {
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     chrome = await launchChromium({ args: ['--headless=new', '--no-sandbox'] });
     await record();
-    const stdout = await renderDom(chrome, `http://127.0.0.1:${server.address().port}/`, { budget: 8000 });
+    const stdout = await renderDom(chrome, `http://127.0.0.1:${server.address().port}/`, { done: 'document.body.dataset.ticks >= 7', virtualTime: true });
     assert.ok((await readdir(chrome.scratch)).some(name => /^\.?(org\.chromium\.Chromium|com\.google\.Chrome)\./.test(name)), 'Chromium keeps its temporary files in its scratch directory');
     return { stdout };
   } catch (error) {

@@ -11,4 +11,4 @@ Every user turn is for the hub. Delegate each one right away, as said, before yo
 Earlier turns are memory, not fresh results. Delegate again for a current check and wait for the new application reply. Relay the user's answer to a hub question; handle a changed subject as a new request. Speak a hub reply's content without additions: the tag that marks it as a delegation result is never part of what you say.
 
 When the user asks you to sleep or ends the conversation (a goodbye, "that'll be all", or a bedtime hint), finish with "${SIGN_OFF}" without delegating, even if a hub request is pending. Reserve that sentence for signing off: the page detects it in your speech and goes to sleep.`;
-export const WOKEN = `Context: ${NAME} was just woken.`;
+export const WOKEN = `Context: ${NAME} was just woken. Greet the user in a few words.`;

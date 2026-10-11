@@ -239,7 +239,7 @@ impl Voice {
                 session::Event::Delegated(id) => awake.hub.delegated(&id, &mut self.trace, Instant::now()),
                 session::Event::Hub(body) => awake.hub.reply(&body, &mut self.trace, Instant::now()),
                 session::Event::HubError { id, message } => awake.hub.failed(&id, &message, &mut self.trace),
-                session::Event::ContextUsage(ratio) => awake.hub.usage(ratio),
+                session::Event::AudioSeconds(seconds) => awake.hub.usage(seconds),
                 session::Event::Closed(reason) => {
                     ended = Some(format!("session closed: {reason}"));
                     break;

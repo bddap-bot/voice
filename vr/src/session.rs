@@ -15,7 +15,7 @@ use crate::action;
 use crate::audio::{Audio, PlaybackBuffer, RATE};
 use crate::conversation::Wake;
 use crate::identity::identity;
-use crate::hub::Command;
+use crate::hub::{self, Command, Tell};
 use crate::relay::{message, split, Relay, Token};
 use crate::speaker::{Ear, Hearing};
 
@@ -36,7 +36,7 @@ pub enum Event {
     Delegated(String),
     Hub(Vec<u8>),
     HubError { id: String, message: String },
-    ContextUsage(f64),
+    AudioSeconds(f64),
     Closed(String),
 }
 
@@ -147,6 +147,7 @@ impl Link {
         let mut body = serde_json::to_value(&wake).unwrap();
         body["id"] = id.clone().into();
         body["sdp"] = offer.to_sdp_string().into();
+        body["instructions"] = json!([identity().instructions, action::instructions()]);
         relay.post("offer", Some(&body))?;
         let frames = relay.listen();
         let result = self.answer(&frames, &id, &mut audio, &mut capturing).and_then(|sdp| {
@@ -210,6 +211,7 @@ impl Link {
         let mut decoded = vec![0f32; 5760];
         let mut buffer = vec![0u8; 2000];
         let mut ear = Ear::new(self.hearing.clone());
+        let mut limit_reported = false;
         loop {
             let timeout = loop {
                 match rtc.poll_output().map_err(|error| format!("peer connection: {error}"))? {
@@ -235,30 +237,34 @@ impl Link {
                                 "session.started" if !open => {
                                     open = true;
                                     let mut channel = rtc.channel(channel).ok_or("the event channel closed")?;
-                                    let identity = identity();
-                                    for (kind, id, content) in [("session.instructions.append", "identity", identity.instructions.as_str()), ("session.instructions.append", "actions", action::instructions()), ("session.commentary.append", "wake", &identity.woken)] {
-                                        channel.write(false, json!({ "type": kind, "event_id": id, "delegation_id": null, "content": content }).to_string().as_bytes()).map_err(|error| format!("event channel: {error}"))?;
-                                    }
+                                    channel.write(false, Tell::Session(hub::Channel::Commentary, identity().woken.clone()).event().to_string().as_bytes()).map_err(|error| format!("event channel: {error}"))?;
                                     let _ = self.events.send(Event::Open);
                                 }
-                                "session.input_transcript.delta" => {
+                                "input_transcript.added" => {
                                     self.played.lock().unwrap().clear();
-                                    let _ = self.events.send(Event::Heard(event["delta"].as_str().unwrap_or("").to_owned()));
+                                    let _ = self.events.send(Event::Heard(event["item"]["text"].as_str().unwrap_or("").to_owned()));
                                 }
-                                "session.output_transcript.delta" => {
-                                    let _ = self.events.send(Event::Spoke(event["delta"].as_str().unwrap_or("").to_owned()));
+                                "output_transcript.added" => {
+                                    let _ = self.events.send(Event::Spoke(event["item"]["text"].as_str().unwrap_or("").to_owned()));
                                 }
-                                "session.delegation.created" => {
-                                    if let Some(id) = event["delegation"]["id"].as_str() {
+                                "delegation.created" => {
+                                    if let Some(id) = event["item"]["id"].as_str() {
                                         let _ = self.events.send(Event::Delegated(id.to_owned()));
                                     }
                                 }
                                 "session.usage.updated" => {
-                                    if let Some(ratio) = event["context_window"]["usage_ratio"].as_f64() {
-                                        let _ = self.events.send(Event::ContextUsage(ratio));
+                                    if let Some(ms) = event["usage"]["audio_duration_ms"].as_f64() {
+                                        let _ = self.events.send(Event::AudioSeconds(ms / 1000.0));
+                                    }
+                                    let limit = &event["usage_limit"];
+                                    if !limit_reported && (!limit["status"].is_null() || !limit["reset_seconds"].is_null()) {
+                                        limit_reported = true;
+                                        eprintln!("Live usage limit: {limit}");
+                                        if let Err(error) = relay.post("usage-limit", Some(&json!({ "status": limit["status"], "reset_seconds": limit["reset_seconds"] }))) {
+                                            return Ok(format!("the relay closed: {error}"));
+                                        }
                                     }
                                 }
-                                "session.closed" => return Ok("Session ended".into()),
                                 "error" => return Err(format!("Live protocol error: {}", event["error"]["message"].as_str().unwrap_or("unknown"))),
                                 _ => {}
                             }
@@ -287,6 +293,7 @@ impl Link {
                         ("hub", body) => {
                             let _ = self.events.send(Event::Hub(body.to_vec()));
                         }
+                        ("closed", _) => return Ok("Session ended".into()),
                         ("hub-error", body) => {
                             let value: Value = serde_json::from_slice(body).unwrap_or_default();
                             if let Some(id) = value["id"].as_str() {
@@ -304,11 +311,11 @@ impl Link {
                             return Ok(format!("the relay closed: {error}"));
                         }
                     }
-                    Command::Tell(event) => match rtc.channel(channel).filter(|_| open) {
+                    Command::Tell(tell) => match rtc.channel(channel).filter(|_| open) {
                         Some(mut channel) => {
-                            channel.write(false, event.to_string().as_bytes()).map_err(|error| format!("event channel: {error}"))?;
+                            channel.write(false, tell.event().to_string().as_bytes()).map_err(|error| format!("event channel: {error}"))?;
                         }
-                        None => eprintln!("not told, the event channel is not open: {}", event["event_id"]),
+                        None => eprintln!("not told, the event channel is not open: {tell:?}"),
                     },
                 }
             }

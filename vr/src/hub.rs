@@ -14,11 +14,46 @@ const TURN_START: Duration = Duration::from_secs(20);
 pub const TURN_QUIET: Duration = Duration::from_millis(1500);
 const FAILED: &str = "The hub request failed.";
 const ASLEEP: &str = "Live is asleep";
+/// Audio seconds after which the standing instructions go in again, so a long session does not lose them.
+const STANDING_REFRESH_S: f64 = 600.0;
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum Channel {
+    Speakable,
+    Commentary,
+    Developer,
+}
+
+impl Channel {
+    fn name(self) -> &'static str {
+        match self {
+            Channel::Speakable => "speakable",
+            Channel::Commentary => "commentary",
+            Channel::Developer => "developer",
+        }
+    }
+}
+
+/// Every client event the overlay sends; the realtime server closes the call on one it rejects, so nothing else is constructible.
+#[derive(Debug, PartialEq)]
+pub enum Tell {
+    Session(Channel, String),
+    Delegation(String, String),
+}
+
+impl Tell {
+    pub fn event(&self) -> Value {
+        match self {
+            Tell::Session(channel, text) => json!({ "type": "session.context.append", "channel": channel.name(), "content": [{ "type": "input_text", "text": text }] }),
+            Tell::Delegation(id, text) => json!({ "type": "delegation.context.append", "delegation_item_id": id, "channel": "speakable", "content": [{ "type": "input_text", "text": text }] }),
+        }
+    }
+}
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
     Frame(&'static str, Value),
-    Tell(Value),
+    Tell(Tell),
 }
 
 #[derive(Deserialize, Debug)]
@@ -78,7 +113,8 @@ pub struct Hub {
     pending_standing: Standing,
     standing: Vec<String>,
     reply_unspoken: bool,
-    over_context: bool,
+    audio_seconds: f64,
+    standing_at: f64,
     sleeping: bool,
     display: Option<Display>,
 }
@@ -91,16 +127,11 @@ fn stamp() -> String {
     format!("{:016x}{:016x}", fastrand::u64(..), fastrand::u64(..))
 }
 
-fn tell(kind: &str, event_id: String, delegation_id: Option<&str>, content: &str) -> Command {
-    Command::Tell(json!({ "type": kind, "event_id": event_id, "delegation_id": delegation_id, "content": content }))
-}
-
-fn part_id(prefix: &str, stamp: &str, index: usize) -> String {
-    if index == 0 {
-        format!("{prefix}_{stamp}")
-    } else {
-        format!("{prefix}_{stamp}_{index}")
-    }
+fn speak(delegation: Option<&str>, content: &str) -> Command {
+    Command::Tell(match delegation {
+        Some(id) => Tell::Delegation(id.to_owned(), content.to_owned()),
+        None => Tell::Session(Channel::Speakable, content.to_owned()),
+    })
 }
 
 impl Hub {
@@ -147,7 +178,7 @@ impl Hub {
         trace.calls.failed(id);
         eprintln!("hub request {id} failed: {message}");
         let owned = self.owned.contains(id).then_some(id);
-        self.out.push(tell("session.commentary.append", format!("hub_error_{id}"), owned, FAILED));
+        self.out.push(speak(owned, FAILED));
     }
 
     pub fn heard(&mut self, delta: &str, trace: &Trace, now: Instant) {
@@ -232,8 +263,8 @@ impl Hub {
         }
         let owned = self.owned.contains(&reply.id).then_some(reply.id.as_str());
         self.reply_unspoken = true;
-        for (index, content) in reply.commentary.iter().enumerate() {
-            self.out.push(tell("session.commentary.append", part_id("hub", &reply.stamp, index), owned, content));
+        for content in &reply.commentary {
+            self.out.push(speak(owned, content));
         }
         true
     }
@@ -271,21 +302,19 @@ impl Hub {
         let Standing::Waiting(instructions) = &mut self.pending_standing else { return };
         let instructions = std::mem::take(instructions);
         self.pending_standing = Standing::None;
-        let stamp = stamp();
-        for (index, content) in instructions.iter().enumerate() {
-            self.out.push(tell("session.instructions.append", part_id("standing", &stamp, index), None, content));
+        for content in &instructions {
+            self.out.push(Command::Tell(Tell::Session(Channel::Developer, content.clone())));
         }
         eprintln!("standing instructions applied");
         self.standing = instructions;
+        self.standing_at = self.audio_seconds;
     }
 
-    /// Past nine tenths of the context window the model may lose the standing instructions, so they go in again.
-    pub fn usage(&mut self, ratio: f64) {
-        let over = ratio > 0.9;
-        if over && !self.over_context && matches!(self.pending_standing, Standing::None) && !self.standing.is_empty() {
+    pub fn usage(&mut self, audio_seconds: f64) {
+        self.audio_seconds = audio_seconds;
+        if audio_seconds - self.standing_at >= STANDING_REFRESH_S && matches!(self.pending_standing, Standing::None) && !self.standing.is_empty() {
             self.stand_by(self.standing.clone());
         }
-        self.over_context = over;
     }
 
     fn interrupt(&mut self, reason: &str) {
@@ -370,16 +399,13 @@ mod tests {
                 _ => None,
             }).collect()
         }
-        /// (channel, delegation_id, content) of every append.
+        /// (channel, delegation item id, text) of every append.
         fn told(&self) -> Vec<(String, Value, String)> {
             self.out.iter().filter_map(|out| match out {
-                Command::Tell(event) => Some((event["type"].as_str().unwrap().split('.').nth(1).unwrap().to_owned(), event["delegation_id"].clone(), event["content"].as_str().unwrap().to_owned())),
-                _ => None,
-            }).collect()
-        }
-        fn event_ids(&self) -> Vec<String> {
-            self.out.iter().filter_map(|out| match out {
-                Command::Tell(event) => Some(event["event_id"].as_str().unwrap().to_owned()),
+                Command::Tell(tell) => {
+                    let event = tell.event();
+                    Some((event["channel"].as_str().unwrap().to_owned(), event.get("delegation_item_id").cloned().unwrap_or(Value::Null), event["content"][0]["text"].as_str().unwrap().to_owned()))
+                }
                 _ => None,
             }).collect()
         }
@@ -389,12 +415,19 @@ mod tests {
         json!({ "id": id, "stamp": stamp, "first": false, "commentary": commentary, "instructions": [], "timing_ms": 5 })
     }
 
-    fn commentary(delegation: Value, content: &str) -> (String, Value, String) {
-        ("commentary".into(), delegation, content.into())
+    fn speakable(delegation: Value, content: &str) -> (String, Value, String) {
+        ("speakable".into(), delegation, content.into())
     }
 
     fn instructions(content: &str) -> (String, Value, String) {
-        ("instructions".into(), Value::Null, content.into())
+        ("developer".into(), Value::Null, content.into())
+    }
+
+    #[test]
+    fn client_events_take_only_the_shapes_the_realtime_server_accepts() {
+        assert_eq!(Tell::Session(Channel::Developer, "Hum.".into()).event(), json!({ "type": "session.context.append", "channel": "developer", "content": [{ "type": "input_text", "text": "Hum." }] }));
+        assert_eq!(Tell::Session(Channel::Commentary, "An image arrived.".into()).event()["channel"], "commentary");
+        assert_eq!(Tell::Delegation("item_1".into(), "Green.".into()).event(), json!({ "type": "delegation.context.append", "delegation_item_id": "item_1", "channel": "speakable", "content": [{ "type": "input_text", "text": "Green." }] }));
     }
 
     #[test]
@@ -416,8 +449,7 @@ mod tests {
         f.speak("Two jobs need attention.");
         f.wait(Duration::ZERO, true);
         f.reply(reply("share_1", "share_1", &["The link is the release notes."]));
-        assert_eq!(f.event_ids(), ["hub_mix", "hub_mix_1", "hub_share_1"]);
-        assert_eq!(f.told(), [commentary(json!("item_exact"), "Two jobs need attention."), commentary(json!("item_exact"), "Both are on the display."), commentary(Value::Null, "The link is the release notes.")]);
+        assert_eq!(f.told(), [speakable(json!("item_exact"), "Two jobs need attention."), speakable(json!("item_exact"), "Both are on the display."), speakable(Value::Null, "The link is the release notes.")]);
         assert_eq!(f.frames("hub-ack"), [json!({ "id": "item_exact", "stamp": "mix" }), json!({ "id": "share_1", "stamp": "share_1" })]);
         let calls: Vec<_> = f.trace.calls.iter().map(|call| (call.request.as_str(), call.state, call.replies.join(" "))).collect();
         assert_eq!(calls, [
@@ -442,7 +474,7 @@ mod tests {
         body.extend([0x89, b'P', b'N', b'G', b'\n', 0]);
         f.hub.reply(&body, &mut f.trace, f.now);
         f.collect();
-        assert_eq!(f.told(), [commentary(json!("slow"), "Four jobs are queued.")]);
+        assert_eq!(f.told(), [speakable(json!("slow"), "Four jobs are queued.")]);
         assert!(f.hub.waiting.is_empty());
         assert_eq!(f.hub.take_display(), Some(Display { markdown: None, link: Some("https://example.com/q".into()), image: Some(vec![0x89, b'P', b'N', b'G', b'\n', 0]) }));
         assert!(f.frames("hub-ack").iter().all(|ack| ack.get("unspoken").is_none()));
@@ -457,8 +489,7 @@ mod tests {
         f.hub.failed("lost", "again", &mut f.trace);
         f.delegate("empty");
         f.collect();
-        assert_eq!(f.event_ids(), ["hub_error_lost", "hub_error_empty"]);
-        assert_eq!(f.told(), [commentary(json!("lost"), FAILED), commentary(json!("empty"), FAILED)]);
+        assert_eq!(f.told(), [speakable(json!("lost"), FAILED), speakable(json!("empty"), FAILED)]);
         assert_eq!(f.frames("delegate").len(), 1);
         let calls: Vec<_> = f.trace.calls.iter().map(|call| (call.request.clone(), call.state)).collect();
         assert_eq!(calls, [(String::new(), State::Failed), ("Is the printer busy?".into(), State::Failed)]);
@@ -474,7 +505,7 @@ mod tests {
         f.reply(json!({ "id": "first", "stamp": "o2", "commentary": ["Slide two."], "instructions": [], "display": { "markdown": "Slide two picture" } }));
         f.reply(json!({ "id": "first", "stamp": "o3", "commentary": ["Slide three."], "instructions": [] }));
         f.reply(json!({ "id": "other", "stamp": "o4", "first": true, "commentary": ["Other answer."], "instructions": [] }));
-        assert_eq!(f.told(), [commentary(json!("first"), "First part."), commentary(json!("first"), "Second part."), commentary(Value::Null, "Other answer.")]);
+        assert_eq!(f.told(), [speakable(json!("first"), "First part."), speakable(json!("first"), "Second part."), speakable(Value::Null, "Other answer.")]);
         f.wait(Duration::from_secs(1), true);
         assert_eq!(f.told().len(), 3, "quiet before the model speaks does not end the turn");
         f.hear(" about the garden.");
@@ -483,13 +514,13 @@ mod tests {
         f.wait(Duration::from_millis(100), false);
         assert_eq!(f.told().len(), 3);
         f.wait(Duration::from_millis(100), true);
-        assert_eq!(f.told()[3..], [commentary(json!("first"), "Slide two.")]);
+        assert_eq!(f.told()[3..], [speakable(json!("first"), "Slide two.")]);
         f.speak("Slide two.");
         f.hear("Stop there.");
         f.wait(Duration::from_secs(30), true);
         assert_eq!(f.told().len(), 4, "slide three was dropped by the barge-in");
         f.reply(reply("later", "o5", &["Later answer."]));
-        assert_eq!(f.told()[4..], [commentary(Value::Null, "Later answer.")]);
+        assert_eq!(f.told()[4..], [speakable(Value::Null, "Later answer.")]);
         assert_eq!(f.frames("hub-ack").iter().map(|ack| ack["stamp"].as_str().unwrap().to_owned()).collect::<Vec<_>>(), ["o1", "o2", "o3", "o4", "o5"]);
     }
 
@@ -510,7 +541,7 @@ mod tests {
         f.hear("Check the test beacon.");
         f.delegate("styled");
         f.reply(json!({ "id": "styled", "stamp": "s1", "first": true, "commentary": ["The beacon is violet."], "instructions": ["Hum while waiting.", "Keep everything else unchanged."] }));
-        assert_eq!(f.told(), [commentary(json!("styled"), "The beacon is violet.")]);
+        assert_eq!(f.told(), [speakable(json!("styled"), "The beacon is violet.")]);
         f.speak("The beacon is violet.");
         f.wait(Duration::from_millis(10), false);
         assert_eq!(f.told().len(), 1);
@@ -521,11 +552,17 @@ mod tests {
         f.reply(json!({ "id": "silent", "stamp": "s2", "first": true, "commentary": [], "instructions": ["Answer in one short sentence."] }));
         assert_eq!(f.told()[3..], [instructions("Answer in one short sentence.")]);
         assert!(f.hub.waiting.is_empty());
-        for ratio in [0.5, 0.95, 0.96] {
-            f.hub.usage(ratio);
+        for seconds in [300.0, 599.0, 600.0, 601.0] {
+            f.hub.usage(seconds);
         }
         f.collect();
         assert_eq!(f.told()[4..], [instructions("Answer in one short sentence.")]);
+        f.hub.usage(1199.0);
+        f.collect();
+        assert_eq!(f.told().len(), 5);
+        f.hub.usage(1200.0);
+        f.collect();
+        assert_eq!(f.told()[5..], [instructions("Answer in one short sentence.")]);
         assert_eq!(f.frames("hub-ack"), [json!({ "id": "styled", "stamp": "s1" }), json!({ "id": "silent", "stamp": "s2" })]);
     }
 
@@ -535,13 +572,13 @@ mod tests {
         f.reply(json!({ "id": "early", "stamp": "early", "commentary": [], "instructions": ["Old direction."] }));
         f.reply(json!({ "id": "a", "stamp": "a", "commentary": ["Reply A."], "instructions": ["New direction."] }));
         f.reply(json!({ "id": "b", "stamp": "b", "first": true, "commentary": ["Reply B."], "instructions": [] }));
-        f.hub.usage(0.95);
+        f.hub.usage(900.0);
         f.collect();
-        let early = [instructions("Old direction."), commentary(Value::Null, "Reply A.")];
+        let early = [instructions("Old direction."), speakable(Value::Null, "Reply A.")];
         assert_eq!(f.told(), early);
         f.speak("Reply A.");
         f.wait(Duration::ZERO, true);
-        assert_eq!(f.told()[2..], [commentary(Value::Null, "Reply B.")]);
+        assert_eq!(f.told()[2..], [speakable(Value::Null, "Reply B.")]);
         f.speak("Reply B.");
         f.wait(Duration::ZERO, true);
         assert_eq!(f.told()[3..], [instructions("New direction.")]);
@@ -552,7 +589,7 @@ mod tests {
         let mut f = Fixture::new();
         f.reply(json!({ "id": "late", "stamp": "late", "commentary": ["Reply."], "instructions": ["Direction."] }));
         f.wait(TURN_START + Duration::from_secs(1), true);
-        assert_eq!(f.told(), [commentary(Value::Null, "Reply.")]);
+        assert_eq!(f.told(), [speakable(Value::Null, "Reply.")]);
         f.speak("Reply.");
         f.wait(Duration::ZERO, true);
         assert_eq!(f.told()[1..], [instructions("Direction.")]);
@@ -667,7 +704,7 @@ mod tests {
         f.wait(Duration::from_millis(3100), false);
         assert_eq!(f.frames("delegate").len(), 3, "punctuation alone forwards nothing");
         f.reply(reply(&printer, "printer", &["The printer is idle."]));
-        assert_eq!(f.told(), [commentary(Value::Null, "The printer is idle.")]);
+        assert_eq!(f.told(), [speakable(Value::Null, "The printer is idle.")]);
     }
 
     /// The page's recorded delegated-reply sessions, replayed: each delegation reaches the hub as the words heard before it, and each first reply reaches Live as it arrives, mid-utterance, under the delegation's id.
@@ -696,8 +733,7 @@ mod tests {
                         let stamp = event["event_id"].as_str().unwrap().strip_prefix("hub_").unwrap();
                         let before = f.told().len();
                         f.reply(json!({ "id": delegations[0], "stamp": stamp, "first": true, "commentary": [event["content"]], "instructions": [], "timing_ms": 1 }));
-                        assert_eq!(f.told()[before..], [commentary(json!(delegations[0]), expected.as_str().unwrap())], "session {session}");
-                        assert_eq!(f.event_ids().last().unwrap(), event["event_id"].as_str().unwrap());
+                        assert_eq!(f.told()[before..], [speakable(json!(delegations[0]), expected.as_str().unwrap())], "session {session}");
                     }
                     _ => {}
                 }

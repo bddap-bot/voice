@@ -3,7 +3,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import test from 'node:test';
 import { gzipSync } from 'node:zlib';
-import { IDENTITY, INACTIVITY_MS, NAME, SIGN_OFF, WAKE_PHRASE } from '../docs/identity.js';
+import { IDENTITY, INACTIVITY_MS, SIGN_OFF, WAKE_PHRASE, WOKEN } from '../docs/identity.js';
 import { WIDTH, WINDOW } from '../docs/wake.js';
 import { MODEL } from '../docs/speaker.js';
 import { ACTION_INSTRUCTIONS } from '../docs/puppet-drivers.js';
@@ -90,6 +90,7 @@ export async function send_only(bytes) {
   if (frame.startsWith('spans\\n')) (globalThis.spanBatches ??= []).push(JSON.parse(frame.slice(6)).spans);
   if (frame.startsWith('delegate\\n')) (globalThis.delegateFrames ??= []).push(JSON.parse(frame.slice(9)));
   if (frame.startsWith('ended\\n')) (globalThis.endedFrames ??= []).push(JSON.parse(frame.slice(6)));
+  if (frame.startsWith('usage-limit\\n')) (globalThis.usageLimitFrames ??= []).push(JSON.parse(frame.slice(12)));
   if (frame.startsWith('telemetry\\n')) {
     const batch = JSON.parse(frame.slice(frame.indexOf('\\n') + 1));
     if (globalThis.refuseTelemetry?.(batch)) {
@@ -200,8 +201,13 @@ const until = async (check) => { while (!check()) await new Promise((resolve) =>
 const nextTask = () => new Promise((resolve) => setTimeout(resolve));
 const spans = () => (globalThis.spanBatches ?? []).flat();
 globalThis.emitLive = (event) => testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(event) }));
-globalThis.hear = (delta) => emitLive({ type: 'session.input_transcript.delta', delta });
-globalThis.delegateTurn = (id) => emitLive({ type: 'session.delegation.created', event_id: 'event_' + id, offset_ms: 0, delegation: { id, type: 'delegation', target: 'client' } });
+let liveItems = 0;
+const liveItem = (type, text) => ({ id: 'item_' + ++liveItems, type, text });
+globalThis.hear = (text) => emitLive({ type: 'input_transcript.added', item: liveItem('input_transcript', text) });
+globalThis.say = (text, start_ms, end_ms) => emitLive({ type: 'output_transcript.added', item: liveItem('output_transcript', text), start_ms, end_ms });
+globalThis.delegateTurn = (id) => emitLive({ type: 'delegation.created', item: { id, type: 'delegation', content: [{ type: 'input_text', text: 'Delegated turn.' }], handoff_id: 'handoff_' + id, target: 'client' } });
+globalThis.told = (keep = () => true) => sentLiveEvents.filter(keep).map(({ type, channel, delegation_item_id, content }) => [type, channel, delegation_item_id ?? null, content[0].text]);
+globalThis.closeLive = (reason = 'call ended') => deliverRelay(new TextEncoder().encode('closed\\n' + JSON.stringify({ reason })));
 globalThis.replyFromHub = (id, stamp, commentary = [], timing_ms = 5, extra = {}, image) => {
   const text = new TextEncoder().encode('hub\\n' + JSON.stringify({ id, commentary, instructions: [], timing_ms, stamp, ...extra }) + (image ? '\\n' : ''));
   const frame = new Uint8Array(text.length + (image?.length ?? 0));
@@ -255,7 +261,9 @@ globalThis.MediaRecorder = FakeMediaRecorder;
 class FakeChannel extends EventTarget {
   constructor() { super(); this.readyState = 'open'; }
   send(value) {
-    globalThis.sentLiveEvents.push(JSON.parse(value));
+    const event = JSON.parse(value);
+    try { checkClientEvent(event); } catch (error) { document.body.dataset.refusedLiveEvent = value; }
+    globalThis.sentLiveEvents.push(event);
   }
   close() { this.readyState = 'closed'; }
 }
@@ -265,7 +273,7 @@ class FakePeerConnection extends EventTarget {
   async createOffer() { return { type: 'offer', sdp: 'offer' }; }
   async setLocalDescription(description) { this.localDescription = description; }
   async setRemoteDescription() {
-    const start = () => this.channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.started', session: { model: 'gpt-live-1', delegation: { type: 'client' } } }) }));
+    const start = () => this.channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.started', session: { model: 'live-model', delegation: { type: 'client' } } }) }));
     if (globalThis.holdSessionStart) globalThis.heldSessionStart = start;
     else queueMicrotask(start);
   }
@@ -297,6 +305,7 @@ globalThis.__voiceStartSpotter = async (stream, heard, model) => {
   return { close() { testSpotter.closed++; } };
 };
 globalThis.sentLiveEvents = [];
+import('/live.js').then((live) => { globalThis.checkClientEvent = live.checkedClientEvent; });
 window.addEventListener('load', async () => {
   if (localStorage.getItem('voice.token')) return;
   globalThis.statusTextWrites = [];
@@ -314,9 +323,8 @@ window.addEventListener('load', async () => {
 `;
 
 const appendEntries = `
-const append = (type, delta) => testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type, delta }) }));
 for (let index = 0; index < 10; index++) {
-  append('session.input_transcript.delta', 'question ' + index);
+  hear('question ' + index);
   delegateTurn('scroll_' + index);
 }
 `;
@@ -380,6 +388,8 @@ async function runPage(testSetup, { virtualTime, scale = 1, size = '390,844', mo
       `--window-size=${size}`,
       ...(mobile ? ['--user-agent=Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36'] : []),
     ], { virtualTime });
+    const refused = /data-refused-live-event="([^"]*)"/.exec(page.stdout)?.[1];
+    assert.equal(refused, undefined, `the page sent a client event checkedClientEvent refuses: ${refused?.replace(/&(quot|lt|gt|amp|nbsp);/g, (_, name) => ENTITIES[name])}`);
     return { ...page, requests };
   } finally {
     if (server.listening) await new Promise((resolve) => server.close(resolve));
@@ -1039,7 +1049,7 @@ for (const viewport of layoutViewports) test(`puppet states have no duplicate te
 window.addEventListener('test-ready', async () => {
   const text = () => document.body.innerText;
   const listening = text();
-  testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.input_transcript.delta', delta: 'Where is the report?' }) }));
+  hear('Where is the report?');
   delegateTurn('state_1');
   const waiting = text();
   replyFromHub('state_1', 'state_stamp', ['On the display.'], 12);
@@ -1262,10 +1272,10 @@ window.addEventListener('test-ready', async () => {
   document.querySelector('#share-text').value = 'https://example.test/a?q=one';
   document.querySelector('#share-send').click();
   await until(() => !['', 'sending…'].includes(document.querySelector('#status').textContent));
-  document.body.dataset.result = JSON.stringify({ sent: globalThis.sentShare?.metadata?.text, status: document.querySelector('#status').textContent, notices: sentLiveEvents.filter((event) => event.event_id?.startsWith('share_')).map((event) => event.content ?? event.type) });
+  document.body.dataset.result = JSON.stringify({ sent: globalThis.sentShare?.metadata?.text, status: document.querySelector('#status').textContent, notices: told(({ channel }) => channel === 'commentary') });
 });
 `);
-  assert.deepEqual(result, { sent: 'https://example.test/a?q=one', status: 'sent', notices: ['A link arrived.'] }, stderr);
+  assert.deepEqual(result, { sent: 'https://example.test/a?q=one', status: 'sent', notices: [['session.context.append', 'commentary', null, WOKEN], ['session.context.append', 'commentary', null, 'A link arrived.']] }, stderr);
 });
 
 test('a rejected submission immediately restores its controls and reports the reason', async () => {
@@ -1301,7 +1311,7 @@ window.addEventListener('test-ready', () => {
   ${appendEntries}
   const log = document.querySelector('#log');
   log.dispatchEvent(new Event('scroll'));
-  append('session.input_transcript.delta', 'newest');
+  hear('newest');
   document.body.dataset.result = JSON.stringify({ overflow: log.scrollHeight - log.clientHeight, below: log.scrollHeight - log.scrollTop - log.clientHeight });
 });
 `, { size });
@@ -1311,9 +1321,8 @@ window.addEventListener('test-ready', () => {
 test('the delegation log renders every trace kind and delegation field', async () => {
   const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
-  const emit = (event) => testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(event) }));
-  emit({ type: 'session.output_transcript.delta', delta: 'I will inspect the fixture.', start_ms: 0, end_ms: 20 });
-  emit({ type: 'session.input_transcript.delta', delta: 'Check the fixture stream.' });
+  say('I will inspect the fixture.', 0, 20);
+  hear('Check the fixture stream.');
   delegateTurn('fixture');
   replyFromHub('fixture', 'fixture', ['The fixture is complete.'], 42);
   until(() => globalThis.hubAcks?.includes('fixture')).then(() => { document.body.dataset.result = JSON.stringify(document.querySelector('#log').innerText); });
@@ -1332,7 +1341,7 @@ window.addEventListener('test-ready', () => {
   log.scrollTop = 0;
   log.dispatchEvent(new Event('scroll'));
   const before = log.scrollTop;
-  append('session.input_transcript.delta', 'newest');
+  hear('newest');
   delegateTurn('scroll_newest');
   document.body.dataset.result = JSON.stringify(log.scrollTop === before);
 });
@@ -1348,7 +1357,7 @@ window.addEventListener('test-ready', async () => {
   await until(() => globalThis.delegateFrames?.length);
   replyFromHub('dlg', 'stamp_1', ['Sunny.']);
   await until(() => globalThis.hubAcks?.includes('stamp_1'));
-  emitLive({ type: 'session.output_transcript.delta', delta: 'Sunny.' });
+  say('Sunny.');
   await until(() => spans().some((span) => span.name === 'turn'));
   document.body.dataset.result = JSON.stringify({ batches: globalThis.spanBatches ?? [], delegates: globalThis.delegateFrames ?? [] });
 });
@@ -1367,7 +1376,7 @@ test('a client delegation hands the hub the exact transcript heard since the las
 window.addEventListener('test-ready', async () => {
   hear('Hello there.');
   delegateTurn('item_first');
-  emitLive({ type: 'session.output_transcript.delta', delta: 'Hi.', start_ms: 0, end_ms: 10 });
+  say('Hi.', 0, 10);
   hear("What's in ");
   hear('the build ');
   hear('queue right now?');
@@ -1384,19 +1393,19 @@ window.addEventListener('test-ready', async () => {
   assert.ok(frames.every((frame) => Number.isFinite(frame.duration_ms) && /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/.test(frame.traceparent)));
 });
 
-test('a delegation appends nothing until its hub reply, which reaches Live as commentary alone, while a display-only push says nothing', async () => {
+test('a delegation appends nothing until its hub reply, which reaches Live as speakable context alone, while a display-only push says nothing', async () => {
   const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {
-  const told = () => sentLiveEvents.filter(({ type, event_id }) => type.endsWith('.append') && !['identity', 'actions', 'wake'].includes(event_id)).map(({ type, event_id, delegation_id, content }) => [type, event_id, delegation_id, content]);
+  const spoken = () => told(({ channel }) => channel === 'speakable');
   const delegated = (id) => globalThis.delegateFrames?.some((frame) => frame.id === id);
   const acked = (stamp) => globalThis.hubAcks?.includes(stamp);
   hear('How many jobs are queued?');
   delegateTurn('slow');
   await until(() => delegated('slow'));
-  const closed = told();
+  const closed = spoken();
   replyFromHub('slow', 'push_1');
   await until(() => acked('push_1'));
-  const pushed = { told: told().length - closed.length, waiting: testPuppet.calls.filter(([name]) => name === 'waiting').map(([, value]) => value) };
+  const pushed = { told: spoken().length - closed.length, waiting: testPuppet.calls.filter(([name]) => name === 'waiting').map(([, value]) => value) };
   replyFromHub('slow', 'reply_1', ['Four jobs are queued.'], 180000);
   await until(() => acked('reply_1'));
   deliverRelay(new TextEncoder().encode('hub-error\\n' + JSON.stringify({ id: 'slow', message: 'invalid hub reply' })));
@@ -1404,20 +1413,17 @@ window.addEventListener('test-ready', async () => {
   delegateTurn('lost');
   await until(() => delegated('lost'));
   deliverRelay(new TextEncoder().encode('hub-error\\n' + JSON.stringify({ id: 'lost', message: 'delegation queue is full' })));
-  await until(() => sentLiveEvents.some((event) => event.event_id === 'hub_error_lost'));
-  document.body.dataset.result = JSON.stringify({ closed, pushed, told: told(), acks: globalThis.hubAcks ?? [], waiting: testPuppet.calls.filter(([name]) => name === 'waiting').map(([, value]) => value), log: document.querySelector('#log').innerText });
+  await until(() => spoken().some(([, , id]) => id === 'lost'));
+  document.body.dataset.result = JSON.stringify({ closed, pushed, told: spoken(), acks: globalThis.hubAcks ?? [], waiting: testPuppet.calls.filter(([name]) => name === 'waiting').map(([, value]) => value), log: document.querySelector('#log').innerText });
 });
 `);
   assert.ok(result, stderr);
-  const shape = (events) => events.map(([type, event_id, delegation_id]) => [type, event_id, delegation_id]);
   assert.deepEqual(result.closed, []);
   assert.deepEqual(result.pushed, { told: 0, waiting: [true] });
-  assert.deepEqual(shape(result.told), [
-    ['session.commentary.append', 'hub_reply_1', 'slow'],
-    ['session.commentary.append', 'hub_error_lost', 'lost'],
+  assert.deepEqual(result.told, [
+    ['delegation.context.append', 'speakable', 'slow', 'Four jobs are queued.'],
+    ['delegation.context.append', 'speakable', 'lost', 'The hub request failed.'],
   ]);
-  assert.equal(result.told[0][3], 'Four jobs are queued.');
-  assert.equal(result.told[1][3], 'The hub request failed.');
   assert.match(result.log, /Is the printer busy\?[\s\S]*delegation queue is full/);
   assert.deepEqual(result.acks, ['push_1', 'reply_1']);
   assert.deepEqual(result.waiting, [true, false, true, false]);
@@ -1440,7 +1446,7 @@ window.addEventListener('test-ready', async () => {
   delegateTurn('item_backup');
   hear(' from last night. Fly, Corvus');
   await wait(1000);
-  emitLive({ type: 'session.output_transcript.delta', delta: 'Okay.', start_ms: 0, end_ms: 10 });
+  say('Okay.', 0, 10);
   await wait(1900);
   const beforeTimeout = frames().length;
   await wait(200);
@@ -1468,7 +1474,7 @@ window.addEventListener('test-ready', async () => {
   delegateTurn('item_first');
   hear(' How are you?');
   await wait(1000);
-  emitLive({ type: 'session.output_transcript.delta', delta: 'Fine.', start_ms: 0, end_ms: 10 });
+  say('Fine.', 0, 10);
   await wait(2500);
   const afterSpeech = frames().length;
   hear(' Also, is the printer');
@@ -1490,8 +1496,9 @@ window.addEventListener('test-ready', async () => {
   await wait(3100);
   const door = frames().at(-1).id;
   deliverRelay(new TextEncoder().encode('hub-error\\n' + JSON.stringify({ id: door, message: 'delegation queue is full' })));
-  await until(() => sentLiveEvents.some((event) => event.event_id === 'hub_error_' + door));
-  document.body.dataset.result = JSON.stringify({ nothingPending, afterSpeech, beforeTimeout, afterModelDelegation, door, frames: frames(), told: sentLiveEvents.filter(({ event_id }) => event_id === 'hub_printer' || event_id?.startsWith('hub_error_')).map(({ type, event_id, delegation_id, content }) => [type, event_id, delegation_id, content]) });
+  const spoken = () => told(({ channel }) => channel === 'speakable');
+  await until(() => spoken().some(([, , , text]) => text === 'The hub request failed.'));
+  document.body.dataset.result = JSON.stringify({ nothingPending, afterSpeech, beforeTimeout, afterModelDelegation, frames: frames(), told: spoken() });
 });
 `, { virtualTime: true });
   assert.ok(result, stderr);
@@ -1503,12 +1510,12 @@ window.addEventListener('test-ready', async () => {
     ['page', '?  Is the door locked?'],
   ]);
   assert.deepEqual(result.told, [
-    ['session.commentary.append', 'hub_printer', null, 'The printer is idle.'],
-    ['session.commentary.append', 'hub_error_' + result.door, null, 'The hub request failed.'],
+    ['session.context.append', 'speakable', null, 'The printer is idle.'],
+    ['session.context.append', 'speakable', null, 'The hub request failed.'],
   ]);
 });
 
-test('a hub reply appends each part as commentary, with a delegation ID only when it answers one', async () => {
+test('a hub reply appends each part as speakable context, scoped to a delegation only when it answers one', async () => {
   const { result: replies, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {
   hear('How many jobs need attention?');
@@ -1519,8 +1526,8 @@ window.addEventListener('test-ready', async () => {
     const before = sentLiveEvents.length;
     replyFromHub(id, id, commentary);
     await until(() => globalThis.hubAcks?.includes(id));
-    replies[id] = sentLiveEvents.slice(before).map(({ type, event_id, delegation_id, content }) => [type, event_id, delegation_id, content]);
-    emitLive({ type: 'session.output_transcript.delta', delta: commentary[0] });
+    replies[id] = told().slice(before);
+    say(commentary[0]);
   }
   document.body.dataset.result = JSON.stringify(replies);
 });
@@ -1528,19 +1535,18 @@ window.addEventListener('test-ready', async () => {
   assert.ok(replies, stderr);
   assert.deepEqual(replies, {
     item_mix: [
-      ['session.commentary.append', 'hub_item_mix', 'item_mix', 'Two jobs need attention.'],
-      ['session.commentary.append', 'hub_item_mix_1', 'item_mix', 'Both are on the display.'],
+      ['delegation.context.append', 'speakable', 'item_mix', 'Two jobs need attention.'],
+      ['delegation.context.append', 'speakable', 'item_mix', 'Both are on the display.'],
     ],
-    share_1: [['session.commentary.append', 'hub_share_1', null, 'The link is the release notes.']],
+    share_1: [['session.context.append', 'speakable', null, 'The link is the release notes.']],
   });
 });
 
 test('output transcript drives mood and delegation drives the hub wait', async () => {
   const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
-  const event = (value) => testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(value) }));
-  event({ type: 'session.output_transcript.delta', delta: 'Sorry, that was my fault.' });
-  event({ type: 'session.input_transcript.delta', delta: 'check it' });
+  say('Sorry, that was my fault.');
+  hear('check it');
   delegateTurn('wait_1');
   until(() => testPuppet.calls.some(([name]) => name === 'mood')).then(() => {
     document.body.dataset.result = JSON.stringify(testPuppet.calls.filter(([name]) => name === 'mood' || name === 'waiting' || name === 'speak').map(([name, value]) => [name, value]));
@@ -1553,7 +1559,7 @@ window.addEventListener('test-ready', () => {
 test('output transcript can reach a catalog clip action', async () => {
   const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
-  testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.output_transcript.delta', delta: 'Let us applaud that achievement.' }) }));
+  say('Let us applaud that achievement.');
   until(() => testPuppet.calls.some(([name]) => name === 'gesture')).then(() => {
     document.body.dataset.result = JSON.stringify(testPuppet.calls.filter(([name]) => name === 'gesture'));
   });
@@ -1694,7 +1700,7 @@ window.addEventListener('test-ready', async () => {
   assert.ok(result.html.includes('href="https://ok.test/" rel="noopener noreferrer"') && result.html.includes('<img>'), result.html);
 });
 
-for (const close of ["testChannel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'session.closed' }) }))", "testChannel.dispatchEvent(new Event('close'))"]) test('provider close offers a fresh session: ' + close, async () => {
+for (const [label, close] of [['the relay closed frame', 'closeLive()'], ['a data channel close', "testChannel.dispatchEvent(new Event('close'))"]]) test('provider close offers a fresh session: ' + label, async () => {
   const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {
   ${close};
@@ -1708,20 +1714,46 @@ window.addEventListener('test-ready', async () => {
   assert.deepEqual(result, { offered: 'Session ended — tap to continue', active: 'true' }, stderr);
 });
 
+test('a usage limit reaches the relay once per conversation and the session line reports audio seconds', async () => {
+  const { result, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  const usage = (usage_limit) => emitLive({ type: 'session.usage.updated', usage: { audio_duration_ms: 90000 }, usage_limit });
+  usage(null);
+  usage({ status: 'exhausted', reset_seconds: 120 });
+  await until(() => globalThis.usageLimitFrames?.length);
+  usage({ status: 'exhausted', reset_seconds: 60 });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  document.querySelector('#puppet').click();
+  await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false');
+  document.body.dataset.result = JSON.stringify({ frames: usageLimitFrames, line: document.querySelector('#log .usage').textContent });
+});
+`);
+  assert.deepEqual(result, { frames: [{ status: 'exhausted', reset_seconds: 120 }], line: 'session: 90.0 s' }, stderr);
+});
+
+test('the harness fails a page that sends a client event checkedClientEvent refuses', async () => {
+  await assert.rejects(runPage(`
+window.addEventListener('test-ready', () => {
+  testChannel.send(JSON.stringify({ type: 'response.create' }));
+  document.body.dataset.result = 'true';
+});
+`), /refuses: \{"type":"response.create"\}/);
+});
+
 test('animation deltas and input utterances reach session telemetry', async () => {
   const { result: events, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
   testPuppet.onAnimation({ clips: [{ name: 'sit', weight: 0.5 }], hip_height: 1.2 });
-  for (const event of [{ type: 'input_audio_buffer.speech_started' }, { type: 'session.input_transcript.delta', delta: 'Please stand.' }]) emitLive(event);
+  hear('Please stand.');
   globalThis.onTelemetry = () => {
-    const events = telemetryBatches.flat().filter((event) => ['animation', 'input_utterance', 'input_speech_started'].includes(event.name));
-    if (events.length >= 3) document.body.dataset.result = JSON.stringify(events);
+    const events = telemetryBatches.flat().filter((event) => ['animation', 'input_utterance'].includes(event.name));
+    if (events.length >= 2) document.body.dataset.result = JSON.stringify(events);
   };
   onTelemetry();
 });
 `);
   assert.ok(events, stderr);
-  assert.equal(events.length, 3);
+  assert.equal(events.length, 2);
   assert.deepEqual(JSON.parse(events.find((event) => event.name === 'animation').detail), { clips: [{ name: 'sit', weight: 0.5 }], hip_height: 1.2 });
   assert.equal(events.find((event) => event.name === 'input_utterance').detail, 'Please stand.');
   assert.ok(events.every((event) => event.session_id === events[0].session_id && event.at > 0));
@@ -1758,13 +1790,13 @@ window.addEventListener('test-ready', () => {
 });
 
 const untilAsleep = `
-const signOff = (delta = ${JSON.stringify(SIGN_OFF)}) => emitLive({ type: 'session.output_transcript.delta', delta });
+const signOff = (text = ${JSON.stringify(SIGN_OFF)}) => say(text);
 const count = (verb) => sentVerbs.filter((item) => item === verb).length;
 const sessionEvents = (name) => telemetryBatches.flat().filter((event) => event.kind === 'session' && event.name === name);
 const settled = async () => {
-  const marks = sessionEvents('live-config-session-updated').length;
-  emitLive({ type: 'session.updated', session: {} });
-  await until(() => sessionEvents('live-config-session-updated').length > marks);
+  const marks = sessionEvents('live-config-session-started').length;
+  emitLive({ type: 'session.started', session: {} });
+  await until(() => sessionEvents('live-config-session-started').length > marks);
 };
 const sleepNow = async () => {
   document.querySelector('#puppet').click();
@@ -1799,7 +1831,7 @@ test('while asleep, anything short of a wake opens no session, asks the hub noth
 
 test('the wake phrase carries earlier turns and a completed-sleep marker into one new session', async () => {
   const result = await runWakePage(`
-    emitLive({ type: 'session.output_transcript.delta', delta: 'The beacon is green.' });
+    say('The beacon is green.');
     hear('Goodnight, Corvus.');
     signOff();
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false');
@@ -1815,15 +1847,17 @@ test('the wake phrase carries earlier turns and a completed-sleep marker into on
     return {
       offers: count('offer') - offers,
       offer: Object.keys(lastOffer),
+      instructions: lastOffer.instructions,
       context: lastOffer.context,
       marker: lastOffer.wake,
       wakes: sessionEvents('wake').map((event) => event.detail),
       puppet: testPuppet.calls.filter(([name]) => name === 'asleep' || name === 'pose'),
-      live: sentLiveEvents.map(({ type, delegation_id, content }) => ({ type, delegation_id, content })),
+      live: told(),
     };
   `);
   assert.equal(result.offers, 1);
-  assert.deepEqual(result.offer, ['id', 'sdp', 'context', 'wake']);
+  assert.deepEqual(result.offer, ['id', 'sdp', 'instructions', 'context', 'wake']);
+  assert.deepEqual(result.instructions, [IDENTITY, ACTION_INSTRUCTIONS]);
   assert.equal(result.context.length, 1);
   assert.equal(result.context[0].speaker, 'user');
   assert.match(result.context[0].text, /^Context: Archived transcripts of completed conversations, oldest first/);
@@ -1834,11 +1868,7 @@ test('the wake phrase carries earlier turns and a completed-sleep marker into on
   assert.match(result.marker, /^The previous conversation ended and you went to sleep about \d+ seconds? ago\. You have just been woken for a new conversation\. Any earlier goodbye or request to sleep was already completed\./);
   assert.deepEqual(result.wakes, ['0.930']);
   assert.deepEqual(result.puppet, [['asleep', false], ['pose', 'stand'], ['pose', 'listen']]);
-  assert.deepEqual(result.live, [
-    { type: 'session.instructions.append', delegation_id: null, content: IDENTITY },
-    { type: 'session.instructions.append', delegation_id: null, content: ACTION_INSTRUCTIONS },
-    { type: 'session.commentary.append', delegation_id: null, content: `Context: ${NAME} was just woken.` },
-  ]);
+  assert.deepEqual(result.live, [['session.context.append', 'commentary', null, WOKEN]]);
 });
 
 for (const [label, endScript] of [['the sign-off', 'signOff()'], ['a tap', "document.querySelector('#puppet').click()"]]) test(`a tap as soon as ${label} seats the puppet opens a fresh session that hears the microphone`, async () => {
@@ -2001,13 +2031,13 @@ test('the model speaking the sign-off ends the session once speech goes quiet an
       speaking,
       sleeps: sessionEvents('sleep').map((event) => event.detail),
       delegates: count('delegate'),
-      live: sentLiveEvents.map((event) => event.event_id),
+      live: told(),
       puppet: testPuppet.calls.filter(([name]) => name === 'asleep').at(-1),
       microphone: { enabled: testMicrophoneTrack.enabled, button: document.querySelector('#mic-mute').disabled },
       rewoken: await (async () => { testSpotter.heard({ wake: 0.9 }); await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true'); return true; })(),
     };
   `);
-  assert.deepEqual(result, { speaking: 'true', sleeps: ['sign-off'], delegates: 0, live: ['identity', 'actions', 'wake'], puppet: ['asleep', true], microphone: { enabled: true, button: false }, rewoken: true });
+  assert.deepEqual(result, { speaking: 'true', sleeps: ['sign-off'], delegates: 0, live: [['session.context.append', 'commentary', null, WOKEN]], puppet: ['asleep', true], microphone: { enabled: true, button: false }, rewoken: true });
 });
 
 test('a goodbye from the user or a partial sign-off keeps the session open', async () => {
@@ -2041,7 +2071,7 @@ test('a sign-off with a delegation outstanding ends the session and its late hub
     await until(() => globalThis.hubAcks?.length);
     quiets[0]();
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && sessionEvents('close').length);
-    return { delegates: count('delegate'), sleeps: sessionEvents('sleep').map((event) => event.detail), appended: sentLiveEvents.filter((event) => event.event_id?.includes('late')).length, acks: hubAcks };
+    return { delegates: count('delegate'), sleeps: sessionEvents('sleep').map((event) => event.detail), appended: told().filter(([, , , text]) => text.includes('amber')).length, acks: hubAcks };
   `, { virtualTime: true });
   assert.deepEqual(result, { delegates: 1, sleeps: ['sign-off'], appended: 0, acks: ['late'] });
 });
@@ -2051,7 +2081,7 @@ test('words heard after the last delegation reach the hub once as the session si
     hear('Check the test beacon.');
     delegateTurn('beacon');
     await until(() => count('delegate'));
-    emitLive({ type: 'session.output_transcript.delta', delta: 'Checking.' });
+    say('Checking.');
     hear('Also remember the filament order.');
     signOff();
     await until(() => globalThis.endedFrames?.length);
@@ -2098,7 +2128,7 @@ test('a session woken after a sign-off stays awake through its greeting', async 
     const { LivePlayback } = await import('/live-playback.js');
     let quiets = 0;
     LivePlayback.prototype.quiet = () => { quiets++; return new Promise(() => {}); };
-    emitLive({ type: 'session.output_transcript.delta', delta: 'Hi, I am listening.' });
+    say('Hi, I am listening.');
     await settled();
     return { pressed: document.querySelector('#puppet').getAttribute('aria-pressed'), sleeps: sessionEvents('sleep').map((event) => event.detail), quiets };
   `);
@@ -2230,7 +2260,7 @@ globalThis.RTCPeerConnection = class extends FakeLive {
         if (done) return;
         const { numberOfFrames, sampleRate } = value;
         value.close();
-        const replies = sentLiveEvents.filter((event) => event.type === 'session.commentary.append' && event.event_id.startsWith('hub_')).length;
+        const replies = sentLiveEvents.filter((event) => event.channel === 'speakable').length;
         if (replies > spoken) { owed += 50 * (replies - spoken); spoken = replies; }
         if (!owed) continue;
         owed--;
@@ -2577,25 +2607,24 @@ for (const loseRefresh of [false, true]) test('a cached model remains wakeable d
 test('provider configuration reaches private telemetry with only allowlisted fields', async () => {
   const { result: events, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
-  for (const type of ['session.created', 'session.updated']) emitLive({ type, session: { model: 'live-model', instructions: 'private instructions', delegation: { type: 'client' } } });
-  emitLive({ type: 'session.delegation.created', delegation: { id: 'd', type: 'delegation', target: 'client', instructions: 'private state' } });
+  emitLive({ type: 'session.started', session: { model: 'live-model', instructions: 'private instructions', delegation: { type: 'client' } } });
+  emitLive({ type: 'delegation.created', item: { id: 'd', type: 'delegation', content: [{ type: 'input_text', text: 'private state' }], handoff_id: 'h', target: 'client' } });
   const events = () => telemetryBatches.flat().filter((event) => event.name?.startsWith('live-config-'));
-  until(() => events().some((event) => event.name === 'live-config-session-delegation-created')).then(() => { document.body.dataset.result = JSON.stringify(events()); });
+  until(() => events().some((event) => event.name === 'live-config-delegation-created')).then(() => { document.body.dataset.result = JSON.stringify(events()); });
 });
 `);
   assert.ok(events, stderr);
   assert.ok(events.every((event) => event.session_id && /^[a-zA-Z0-9_-]+$/.test(event.name)));
   const records = Object.fromEntries(events.map((event) => [event.name, JSON.parse(event.detail)]));
   assert.deepEqual(records['live-config-sdp-answer'], {});
-  assert.deepEqual(records['live-config-session-started'], { session: { model: 'gpt-live-1', delegation: { type: 'client' } } });
-  for (const type of ['created', 'updated']) assert.deepEqual(records['live-config-session-' + type], { session: { model: 'live-model', delegation: { type: 'client' } } });
-  assert.deepEqual(records['live-config-session-delegation-created'], { delegation: { type: 'delegation', target: 'client' } });
+  assert.deepEqual(records['live-config-session-started'], { session: { model: 'live-model', delegation: { type: 'client' } } });
+  assert.deepEqual(records['live-config-delegation-created'], {});
   assert.doesNotMatch(JSON.stringify(events), /private instructions|private state/);
 });
 
 test('a woken session receives only the fresh hub reply', async () => {
   const result = await runWakePage(`
-    emitLive({ type: 'session.output_transcript.delta', delta: 'The test beacon is amber.' });
+    say('The test beacon is amber.');
     signOff();
     await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false');
     testSpotter.heard({ wake: 0.95 });
@@ -2604,16 +2633,12 @@ test('a woken session receives only the fresh hub reply', async () => {
     delegateTurn('fresh');
     await until(() => count('delegate') > 0);
     replyFromHub('fresh', 'fresh', ['The test beacon is violet.']);
-    await until(() => sentLiveEvents.some((event) => event.event_id === 'hub_fresh'));
-    return { sent: delegateFrames.at(-1).text, context: lastOffer.context, appended: sentLiveEvents.filter((event) => event.type.endsWith('.append') && !['identity', 'actions', 'wake'].includes(event.event_id)).map((event) => event.event_id), reply: sentLiveEvents.find((event) => event.event_id === 'hub_fresh') };
+    await until(() => told().some(([, , id]) => id === 'fresh'));
+    return { sent: delegateFrames.at(-1).text, context: lastOffer.context, appended: told(({ channel }) => channel !== 'commentary') };
   `);
   assert.equal(result.sent, 'Check the test beacon.');
   assert.ok(result.context.some((turn) => turn.text.includes('amber')));
-  assert.deepEqual(result.appended, ['hub_fresh']);
-  assert.equal(result.reply.type, 'session.commentary.append');
-  assert.equal(result.reply.delegation_id, 'fresh');
-  assert.equal(result.reply.content, 'The test beacon is violet.');
-  assert.doesNotMatch(result.reply.content, /amber/);
+  assert.deepEqual(result.appended, [['delegation.context.append', 'speakable', 'fresh', 'The test beacon is violet.']]);
 });
 
 test('a first hub reply reaches the model as it arrives, even mid-utterance; each follow-up waits until the model has spoken the reply before it, and barge-in drops the follow-ups still waiting', async () => {
@@ -2621,7 +2646,7 @@ test('a first hub reply reaches the model as it arrives, even mid-utterance; eac
     const { LivePlayback } = await import('/live-playback.js');
     const quiet = [];
     LivePlayback.prototype.quiet = () => new Promise((resolve) => quiet.push(resolve));
-    const replies = () => sentLiveEvents.filter(event => event.event_id?.startsWith('hub_ordered')).map(event => [event.delegation_id, event.content]);
+    const replies = () => told(({ channel }) => channel === 'speakable').map(([, , id, text]) => [id, text]);
     const shown = () => document.querySelector('#display-items').textContent;
     hear('Check the test beacon.');
     delegateTurn('first');
@@ -2634,12 +2659,12 @@ test('a first hub reply reaches the model as it arrives, even mid-utterance; eac
     await until(() => globalThis.hubAcks?.includes('ordered_other'));
     const held = { replies: replies(), shown: shown().includes('Slide two picture') };
     hear(' about the garden.');
-    emitLive({ type: 'session.output_transcript.delta', delta: 'First part.' });
+    say('First part.');
     const quiets = quiet.length;
     quiet.shift()();
     await until(() => replies().length === 4);
     const next = { replies: replies().slice(3), shown: shown().includes('Slide two picture') };
-    emitLive({ type: 'session.output_transcript.delta', delta: 'Slide two.' });
+    say('Slide two.');
     hear('Stop there.');
     await until(() => sessionEvents('hub-reply-dropped').length);
     return { held, quiets, next, final: replies().length, dropped: sessionEvents('hub-reply-dropped').map((event) => JSON.parse(event.detail)), acks: hubAcks, log: document.querySelector('#log').innerText.includes('hub reply: First part. Second part. Slide two.') };
@@ -2655,12 +2680,12 @@ test('a first hub reply reaches the model as it arrives, even mid-utterance; eac
   });
 });
 
-test('a hub instruction reaches Live as its own null-id instructions append only after the reply beside it has been spoken, an instructions-only reply ends the wait silently, and a context rollover re-appends it', async () => {
+test('a hub instruction reaches Live as its own silent developer append only after the reply beside it has been spoken, an instructions-only reply ends the wait silently, and 600 s of audio since it was applied re-appends it', async () => {
   const result = await runWakePage(`
     const { LivePlayback } = await import('/live-playback.js');
     const quiet = [];
     LivePlayback.prototype.quiet = () => new Promise((resolve) => quiet.push(resolve));
-    const told = () => sentLiveEvents.filter((event) => /^(hub|standing)_/.test(event.event_id ?? '')).map(({ type, delegation_id, content }) => [type, delegation_id, content]);
+    const told = () => globalThis.told(({ channel }) => channel !== 'commentary');
     const waiting = () => testPuppet.calls.filter(([name]) => name === 'waiting').map(([, value]) => value).at(-1);
     hear('Check the test beacon.');
     delegateTurn('styled');
@@ -2668,7 +2693,7 @@ test('a hub instruction reaches Live as its own null-id instructions append only
     replyFromHub('styled', 'styled_reply', ['The beacon is violet.'], 5, { first: true, instructions: ['While a hub request is pending, hum softly instead of speaking.', 'Keep everything else unchanged.'] });
     await until(() => globalThis.hubAcks?.includes('styled_reply'));
     const beside = told();
-    emitLive({ type: 'session.output_transcript.delta', delta: 'The beacon is violet.' });
+    say('The beacon is violet.');
     await until(() => quiet.length === 2);
     while (quiet.length) quiet.shift()();
     await until(() => told().length === 3);
@@ -2680,16 +2705,20 @@ test('a hub instruction reaches Live as its own null-id instructions append only
     replyFromHub('silent', 'silent_reply', [], 5, { first: true, instructions: ['Answer in one short sentence; keep everything else unchanged.'] });
     await until(() => told().length === 4);
     const alone = { told: told().slice(3), pending, waiting: waiting(), speak: testPuppet.calls.filter(([name]) => name === 'speak').length };
-    for (const [seconds, usage_ratio] of [[60, 0.5], [61, 0.95], [62, 0.96]]) emitLive({ type: 'session.usage.updated', usage: { seconds }, context_window: { usage_ratio } });
+    for (const seconds of [300, 599]) emitLive({ type: 'session.usage.updated', usage: { audio_duration_ms: seconds * 1000 } });
+    await settled();
+    const early = told().length;
+    for (const seconds of [600, 601, 1199]) emitLive({ type: 'session.usage.updated', usage: { audio_duration_ms: seconds * 1000 } });
     await until(() => told().length === 5);
     await settled();
-    return { beside, spoken, alone, rolled: told().slice(4), acks: hubAckFrames };
+    return { beside, spoken, alone, early, rolled: told().slice(4), acks: hubAckFrames };
   `);
-  const instructions = (content) => ['session.instructions.append', null, content];
+  const instructions = (text) => ['session.context.append', 'developer', null, text];
   assert.deepEqual(result, {
-    beside: [['session.commentary.append', 'styled', 'The beacon is violet.']],
+    beside: [['delegation.context.append', 'speakable', 'styled', 'The beacon is violet.']],
     spoken: [instructions('While a hub request is pending, hum softly instead of speaking.'), instructions('Keep everything else unchanged.')],
     alone: { told: [instructions('Answer in one short sentence; keep everything else unchanged.')], pending: true, waiting: false, speak: 1 },
+    early: 4,
     rolled: [instructions('Answer in one short sentence; keep everything else unchanged.')],
     acks: [{ id: 'styled', stamp: 'styled_reply' }, { id: 'silent', stamp: 'silent_reply' }],
   });
@@ -2700,28 +2729,28 @@ test('pending hub instructions wait for every hub reply appended before them to 
     const { LivePlayback } = await import('/live-playback.js');
     const quiet = [];
     LivePlayback.prototype.quiet = () => new Promise((resolve) => quiet.push(resolve));
-    const told = () => sentLiveEvents.filter((event) => /^(hub|standing)_/.test(event.event_id ?? '')).map(({ type, content }) => [type.split('.')[1], content]);
+    const told = () => globalThis.told(({ channel }) => channel !== 'commentary').map(([, channel, , text]) => [channel, text]);
     const settle = async () => { await until(() => quiet.length); while (quiet.length) quiet.shift()(); await nextTask(); };
     replyFromHub('early', 'early', [], 5, { instructions: ['Old direction.'] });
     await until(() => told().length === 1);
     replyFromHub('a', 'a', ['Reply A.'], 5, { instructions: ['New direction.'] });
     await until(() => told().length === 2);
     replyFromHub('b', 'b', ['Reply B.'], 5, { first: true });
-    emitLive({ type: 'session.usage.updated', usage: { seconds: 1 }, context_window: { usage_ratio: 0.95 } });
+    emitLive({ type: 'session.usage.updated', usage: { audio_duration_ms: 600000 } });
     await until(() => globalThis.hubAcks?.includes('b'));
     const held = told();
-    emitLive({ type: 'session.output_transcript.delta', delta: 'Reply A.' });
+    say('Reply A.');
     await settle();
     const afterA = told();
-    emitLive({ type: 'session.output_transcript.delta', delta: 'Reply B.' });
+    say('Reply B.');
     await settle();
     return { held, afterA, afterB: told() };
   `);
-  const early = [['instructions', 'Old direction.'], ['commentary', 'Reply A.']];
+  const early = [['developer', 'Old direction.'], ['speakable', 'Reply A.']];
   assert.deepEqual(result, {
     held: early,
-    afterA: [...early, ['commentary', 'Reply B.']],
-    afterB: [...early, ['commentary', 'Reply B.'], ['instructions', 'New direction.']],
+    afterA: [...early, ['speakable', 'Reply B.']],
+    afterB: [...early, ['speakable', 'Reply B.'], ['developer', 'New direction.']],
   });
 });
 
@@ -2730,20 +2759,20 @@ test('hub instructions wait while their reply stays unspoken past the hub turn t
     const { LivePlayback } = await import('/live-playback.js');
     const quiet = [];
     LivePlayback.prototype.quiet = () => new Promise((resolve) => quiet.push(resolve));
-    const told = () => sentLiveEvents.filter((event) => /^(hub|standing)_/.test(event.event_id ?? '')).map(({ type, content }) => [type.split('.')[1], content]);
+    const told = () => globalThis.told(({ channel }) => channel !== 'commentary').map(([, channel, , text]) => [channel, text]);
     replyFromHub('late', 'late', ['Reply.'], 5, { instructions: ['Direction.'] });
     await until(() => told().length === 1);
     await new Promise((resolve) => setTimeout(resolve, 21000));
     const timedOut = told();
-    emitLive({ type: 'session.output_transcript.delta', delta: 'Reply.' });
+    say('Reply.');
     await until(() => quiet.length);
     while (quiet.length) quiet.shift()();
     await until(() => told().length === 2);
     return { timedOut, spoken: told() };
   `, { virtualTime: true });
   assert.deepEqual(result, {
-    timedOut: [['commentary', 'Reply.']],
-    spoken: [['commentary', 'Reply.'], ['instructions', 'Direction.']],
+    timedOut: [['speakable', 'Reply.']],
+    spoken: [['speakable', 'Reply.'], ['developer', 'Direction.']],
   });
 });
 
@@ -2808,7 +2837,7 @@ test('leaving the app keeps the delegation log and whether Live was awake throug
     const offers = () => evaluate(`count('offer')`);
     const memory = () => evaluate(`JSON.parse(lastOffer.context[0].text.split('\\n').slice(1).join('\\n')).flatMap((conversation) => conversation.turns.map((turn) => turn.text))`);
     await until(`document.body?.dataset.startTest === 'puppet'`);
-    await evaluate(`hear('Where is the beacon?'); emitLive({ type: 'session.output_transcript.delta', delta: 'The beacon is green.' }); 0`);
+    await evaluate(`hear('Where is the beacon?'); say('The beacon is green.'); 0`);
     const awake = await state();
     events.length = 0;
     await hide();
@@ -2856,15 +2885,15 @@ test('leaving the app keeps the delegation log and whether Live was awake throug
     return { awake, frozen, reopened, asleep, slept, wokenHidden, sleptInView, reloadedInView, killedInView };
   });
   const log = /^MODEL HEARD\nheard: Where is the beacon\?\nMODEL ALONE\nspoke: The beacon is green\.\nMODEL HEARD\nheard: And the tower\?/;
-  const withoutCost = (text) => text.replaceAll(/\nsession: [^\n]*/g, '');
+  const withoutUsage = (text) => text.replaceAll(/\nsession: [^\n]*/g, '');
   assert.equal(result.awake.pressed, 'true');
   assert.deepEqual(result.frozen, { ...result.awake, lifecycle: ['hidden', 'freeze', 'resume', 'visible'], navigated: [] });
   assert.match(result.reopened.log, log);
   assert.deepEqual(result.reopened.memory, ['Where is the beacon?', 'The beacon is green.', 'And the tower?']);
   assert.deepEqual(result.reopened.restores, [true]);
   assert.equal(result.asleep.pressed, 'false');
-  assert.deepEqual(result.slept, { log: withoutCost(result.asleep.log), pressed: 'false', offers: 0 });
+  assert.deepEqual(result.slept, { log: withoutUsage(result.asleep.log), pressed: 'false', offers: 0 });
   assert.deepEqual(result.wokenHidden, [true]);
-  assert.deepEqual(result.reloadedInView, { log: withoutCost(result.sleptInView.log), pressed: 'false', restores: [false], offers: 0 });
+  assert.deepEqual(result.reloadedInView, { log: withoutUsage(result.sleptInView.log), pressed: 'false', restores: [false], offers: 0 });
   assert.deepEqual(result.killedInView, { log: '', pressed: 'false', restores: [], offers: 0 });
 });

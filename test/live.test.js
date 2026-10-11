@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, TranscriptBatcher, audioFrame, errorEvent, formatElapsed, formatStartError, includesPhrase, isOfferFor, withoutTrailingPhrase, shareFrame } from '../docs/live.js';
+import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, TranscriptBatcher, audioFrame, checkedClientEvent, contextEvent, errorEvent, formatElapsed, formatStartError, includesPhrase, isOfferFor, usageLimit, withoutTrailingPhrase, shareFrame } from '../docs/live.js';
 import { HAND_OFF_PHRASE, SIGN_OFF } from '../docs/identity.js';
 
 test('start errors include their name and first stack frame', () => {
@@ -439,4 +439,46 @@ test('woken-session memory stays within the wire limit by dropping the oldest tu
   assert.ok(turns.at(-2).text.startsWith('2.9:'));
   assert.equal(turns.at(-1).text, 'ok');
   assert.equal(trace.entries.length, 60);
+});
+
+const content = (text) => [{ type: 'input_text', text }];
+
+test('session context appends on the speakable, commentary and developer channels', () => {
+  for (const channel of ['speakable', 'commentary', 'developer']) assert.deepEqual(contextEvent(channel, 'Hello.'), { type: 'session.context.append', channel, content: content('Hello.') });
+  assert.throws(() => contextEvent('instructions', 'Hello.'), /refused Live client event "session.context.append"/);
+});
+
+test('a delegation context append is speakable and names its delegation item', () => {
+  assert.deepEqual(contextEvent('speakable', 'Four jobs.', 'item_1'), { type: 'delegation.context.append', delegation_item_id: 'item_1', channel: 'speakable', content: content('Four jobs.') });
+  for (const channel of ['commentary', 'developer']) assert.throws(() => contextEvent(channel, 'Four jobs.', 'item_1'), /refused/);
+  assert.throws(() => contextEvent('speakable', 'Four jobs.', ''), /refused/);
+  assert.throws(() => checkedClientEvent({ type: 'delegation.context.append', delegation_item_id: 7, channel: 'speakable', content: content('Four jobs.') }), /refused/);
+});
+
+test('one invalid client event would close the call, so the allowlist refuses it before it is sent', () => {
+  const valid = { type: 'session.context.append', channel: 'speakable', content: content('Hello.') };
+  assert.equal(checkedClientEvent(valid), valid);
+  for (const type of ['session.instructions.append', 'session.commentary.append', 'response.create', 'session.update']) assert.throws(() => checkedClientEvent({ ...valid, type }), new RegExp(`refused Live client event "${type}"`));
+  for (const event of [
+    null,
+    'session.context.append',
+    { ...valid, event_id: 'hub_1' },
+    { type: 'delegation.context.append', delegation_item_id: 'item_1', channel: 'speakable', content: content('Hello.'), delegation_id: 'item_1' },
+    { type: 'session.context.append', channel: 'speakable' },
+    { ...valid, content: content('') },
+    { ...valid, content: content('   ') },
+    { ...valid, content: 'Hello.' },
+    { ...valid, content: [] },
+    { ...valid, content: [...content('Hello.'), ...content('Again.')] },
+    { ...valid, content: [{ type: 'output_text', text: 'Hello.' }] },
+    { ...valid, content: [{ type: 'input_text', text: 'Hello.', extra: true }] },
+    { ...valid, content: [{ type: 'input_text', text: 7 }] },
+  ]) assert.throws(() => checkedClientEvent(event), /refused Live client event/, JSON.stringify(event));
+  assert.throws(() => contextEvent('speakable', ''), /refused/);
+});
+
+test('a usage limit is reported only when the server sets one', () => {
+  for (const event of [{}, { usage_limit: null }, { usage_limit: {} }, { usage_limit: { status: null, reset_seconds: null } }, null]) assert.equal(usageLimit(event), null);
+  assert.deepEqual(usageLimit({ usage: { audio_duration_ms: 1 }, usage_limit: { status: 'exhausted', reset_seconds: 120, extra: 1 } }), { status: 'exhausted', reset_seconds: 120 });
+  assert.deepEqual(usageLimit({ usage_limit: { reset_seconds: 0 } }), { status: null, reset_seconds: 0 });
 });

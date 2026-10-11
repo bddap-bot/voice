@@ -116,7 +116,7 @@ export async function runRig({ outDir, speech, page, extra = {} }, scenario) {
     const readyCount = () => capture.heard.filter((m) => m.ready).length;
     const started = (ch) => capture.rt.find((c) => c.ch === ch && c.dir === 'in' && c.event.type === 'session.started');
     const offerErrors = () => capture.frames.filter((f) => f.verb === 'offer-error');
-    const lastActivity = (ch) => capture.rt.filter((c) => c.ch === ch && c.dir === 'in' && ['session.output_transcript.delta', 'session.delegation.created', 'session.input_transcript.delta'].includes(c.event.type)).at(-1)?.at ?? 0;
+    const lastActivity = (ch) => capture.rt.filter((c) => c.ch === ch && c.dir === 'in' && ['output_transcript.added', 'delegation.created', 'input_transcript.added'].includes(c.event.type)).at(-1)?.at ?? 0;
     const pressed = async () => (await state()).pressed === 'true';
     const waitPressed = async (want, ms) => { const dl = Date.now() + ms; while (Date.now() < dl) { await drain(); if ((await pressed()) === want) return true; await sleep(150); } return false; };
 
@@ -163,7 +163,7 @@ export async function runRig({ outDir, speech, page, extra = {} }, scenario) {
       while (Date.now() < dl) {
         await drain();
         if (!(await pressed())) throw new Error(`session ${ch} ended itself`);
-        const spoke = capture.rt.some((c) => c.ch === ch && c.dir === 'in' && c.at >= since && c.event.type === 'session.output_transcript.delta');
+        const spoke = capture.rt.some((c) => c.ch === ch && c.dir === 'in' && c.at >= since && c.event.type === 'output_transcript.added');
         if (spoke && now() - lastActivity(ch) > quietMs) return;
         await sleep(200);
       }

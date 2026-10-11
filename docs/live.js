@@ -23,6 +23,30 @@ export function modelToolFields(value) {
   return result;
 }
 
+const CONTEXT_CHANNELS = ['speakable', 'commentary', 'developer'];
+const sameKeys = (value, keys) => Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+const isContent = (content) => Array.isArray(content) && content.length === 1 && sameKeys(content[0], ['type', 'text']) && content[0].type === 'input_text' && typeof content[0].text === 'string' && content[0].text.trim() !== '';
+
+// The realtime server closes the call on one event it rejects, so nothing outside these shapes is sent.
+export function checkedClientEvent(event) {
+  const valid = event && typeof event === 'object' && (
+    event.type === 'session.context.append' && sameKeys(event, ['type', 'channel', 'content']) && CONTEXT_CHANNELS.includes(event.channel) && isContent(event.content)
+    || event.type === 'delegation.context.append' && sameKeys(event, ['type', 'delegation_item_id', 'channel', 'content']) && typeof event.delegation_item_id === 'string' && event.delegation_item_id !== '' && event.channel === 'speakable' && isContent(event.content)
+  );
+  if (!valid) throw new Error(`refused Live client event ${JSON.stringify(event?.type ?? null)}`);
+  return event;
+}
+
+export function contextEvent(channel, text, delegationItemId = null) {
+  const content = [{ type: 'input_text', text }];
+  return checkedClientEvent(delegationItemId === null ? { type: 'session.context.append', channel, content } : { type: 'delegation.context.append', delegation_item_id: delegationItemId, channel, content });
+}
+
+export function usageLimit(event) {
+  const limit = event?.usage_limit;
+  return limit && (limit.status != null || limit.reset_seconds != null) ? { status: limit.status ?? null, reset_seconds: limit.reset_seconds ?? null } : null;
+}
+
 const phraseKey = (text) => text.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 
 export function includesPhrase(text, phrase) {

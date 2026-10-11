@@ -1,6 +1,6 @@
 import { Microphone } from './microphone.js';
 import wbgInit, { init as wasmInit, connect, send_only, recv } from './relay/botq_dash_wasm.js';
-import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, SessionClock, TranscriptBatcher, errorEvent, includesPhrase, modelToolFields, formatElapsed, formatStartError, isOfferFor, shareFrame } from './live.js';
+import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, SessionClock, TranscriptBatcher, contextEvent, errorEvent, includesPhrase, modelToolFields, formatElapsed, formatStartError, isOfferFor, shareFrame, usageLimit } from './live.js';
 import { PuppetChannel } from './puppet-client.js';
 import { ACTION_INSTRUCTIONS, TranscriptActionDriver, webGpuAdapter } from './puppet-drivers.js';
 import { StageTrace, traceStages } from './stage-trace.js';
@@ -21,6 +21,7 @@ const ALPN = 'voice-web/1';
 const UNANSWERED_MS = 3000;
 const HUB_TURN_START_MS = 20000;
 const HUB_TURN_QUIET_MS = 1500;
+const STANDING_REFRESH_S = 600;
 const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -359,6 +360,7 @@ async function listen(mine) {
         const answer = JSON.parse(body);
         if (isOfferFor(answerWaiter, answer)) answerWaiter.resolve(answer);
       }
+      else if (verb === 'closed') liveClosed();
       else if (verb === 'offer-error') {
         const failure = JSON.parse(body);
         if (isOfferFor(answerWaiter, failure)) answerWaiter.reject(new Error(failure.message));
@@ -558,7 +560,7 @@ async function submitShare() {
     $('share-file').value = '';
     sharing = false;
     chooseImage();
-    tell(conversation?.audioOwner, 'session.commentary.append', `share_${result.stamp}`, null, result.summary);
+    tell(conversation?.audioOwner, 'commentary', result.summary);
     setStatus('sent', 'ok');
   } finally {
     sharing = false;
@@ -912,7 +914,7 @@ function onLiveEvent(message, source) {
   if (source !== conversation?.channel && source !== starting?.channel) return;
   let event;
   try { event = JSON.parse(message.data); } catch { return; }
-  if (['session.created', 'session.started', 'session.updated', 'session.delegation.created', 'session.delegation.updated', 'session.delegation.completed', 'session.delegation.done'].includes(event.type)) {
+  if (['session.started', 'delegation.created'].includes(event.type)) {
     recordSession(`live-config-${event.type.replaceAll('.', '-')}`, JSON.stringify(modelToolFields(event)));
   }
   if (event.type === 'error') {
@@ -921,38 +923,39 @@ function onLiveEvent(message, source) {
     return;
   }
   const owner = source === starting?.channel ? starting : conversation?.audioOwner;
-  if (event.type === 'session.delegation.created') delegate(event.delegation?.id, owner);
-  else if (event.type === 'session.input_transcript.delta') {
+  if (event.type === 'delegation.created') delegate(event.item?.id, owner);
+  else if (event.type === 'input_transcript.added') {
+    const delta = event.item?.text ?? '';
     owner?.playback?.interrupt();
     if (hubTurn?.started) interruptHubReplies('barge-in');
-    recordSession('input_utterance', event.delta ?? '');
+    recordSession('input_utterance', delta);
     stageTrace?.inputTranscript();
     stayAwake();
-    trace.heard(event.delta ?? '', Date.now(), event.start_ms);
+    trace.heard(delta, Date.now(), event.start_ms);
     clearTimeout(requestEnd);
     if (trace.endsRequest() && !conversation?.sleeping) requestEnd = setTimeout(() => handOff(`turn_${crypto.randomUUID()}`), UNANSWERED_MS);
-    conversation?.transcript?.add('user', event.delta ?? '');
+    conversation?.transcript?.add('user', delta);
     actionDriver.endTurn();
-    if (/[\p{L}\p{N}]/u.test(event.delta ?? '')) {
+    if (/[\p{L}\p{N}]/u.test(delta)) {
       clearTimeout(unanswered);
       if (hubWaiting.size && !conversation?.sleeping) unanswered = setTimeout(() => handOff(`turn_${crypto.randomUUID()}`), UNANSWERED_MS);
     }
   }
-  else if (event.type === 'input_audio_buffer.speech_started') recordSession('input_speech_started');
-  else if (event.type === 'session.output_transcript.delta') presentTranscript(event);
+  else if (event.type === 'output_transcript.added') presentTranscript({ delta: event.item?.text ?? '', start_ms: event.start_ms, end_ms: event.end_ms });
   else if (event.type === 'session.usage.updated') {
-    usageSeconds = Number(event.usage?.seconds ?? usageSeconds);
-    const ratio = event.context_window?.usage_ratio;
-    if (conversation && typeof ratio === 'number') {
-      if (ratio > 0.9 && !conversation.overContext && conversation.standing && !conversation.pendingStanding) standBy(conversation.standing);
-      conversation.overContext = ratio > 0.9;
+    usageSeconds = Number(event.usage?.audio_duration_ms ?? usageSeconds * 1000) / 1000;
+    const limit = usageLimit(event);
+    if (limit && conversation && !conversation.limitReported) {
+      conversation.limitReported = true;
+      recordPageError(new Error(`Live usage limit: ${JSON.stringify(limit)}`));
+      sendFrame(`usage-limit\n${JSON.stringify(limit)}`).catch(recordPageError);
     }
+    if (conversation?.standing && !conversation.pendingStanding && usageSeconds - conversation.standingAt >= STANDING_REFRESH_S) standBy(conversation.standing);
   }
-  else if (event.type === 'session.closed') {
-    usageSeconds = Number(event.usage?.seconds ?? usageSeconds);
-    if (source === conversation?.channel) stopConversation('Session ended — tap to continue');
-    else cancelStarting();
-  }
+}
+function liveClosed() {
+  if (conversation) stopConversation('Session ended — tap to continue');
+  else cancelStarting();
 }
 function presentTranscript(event) {
     clearTimeout(unanswered);
@@ -976,13 +979,8 @@ function presentTranscript(event) {
     }
     if (includesPhrase(said, SIGN_OFF)) fallAsleep();
 }
-function awaken(channel) {
-  channel.send(JSON.stringify({ type: 'session.instructions.append', event_id: 'identity', delegation_id: null, content: IDENTITY }));
-  channel.send(JSON.stringify({ type: 'session.instructions.append', event_id: 'actions', delegation_id: null, content: ACTION_INSTRUCTIONS }));
-  channel.send(JSON.stringify({ type: 'session.commentary.append', event_id: 'wake', delegation_id: null, content: WOKEN }));
-}
-function tell(owner, type, event_id, delegation_id, content) {
-  if (owner?.channel?.readyState === 'open') owner.channel.send(JSON.stringify({ type, event_id, delegation_id, content }));
+function tell(owner, channel, content, delegationItemId = null) {
+  if (owner?.channel?.readyState === 'open') owner.channel.send(JSON.stringify(contextEvent(channel, content, delegationItemId)));
 }
 function delegate(id, owner) {
   if (!owner || typeof id !== 'string') return;
@@ -1005,7 +1003,7 @@ function hubFailed(id, message) {
   trace.failed(id, message);
   stageTrace?.hubReplied(id, 'failed');
   const owner = starting?.delegations.has(id) ? starting : conversation?.audioOwner;
-  tell(owner, 'session.commentary.append', `hub_error_${id}`, owner?.delegations.has(id) ? id : null, 'The hub request failed.');
+  tell(owner, 'speakable', 'The hub request failed.', owner?.delegations.has(id) ? id : null);
 }
 function fallAsleep() {
   const current = conversation;
@@ -1045,7 +1043,7 @@ function presentHubReply({ result, image }) {
   const owner = current.audioOwner;
   const delegation = owner.delegations.has(result.id) ? result.id : null;
   current.replyUnspoken = true;
-  result.commentary.forEach((content, index) => tell(owner, 'session.commentary.append', index ? `hub_${result.stamp}_${index}` : `hub_${result.stamp}`, delegation, content));
+  result.commentary.forEach((content) => tell(owner, 'speakable', content, delegation));
   return owner;
 }
 async function playHubReplies() {
@@ -1085,8 +1083,8 @@ function applyStanding() {
   const instructions = current.pendingStanding;
   current.pendingStanding = null;
   current.standing = instructions;
-  const stamp = crypto.randomUUID();
-  instructions.forEach((content, index) => tell(current.audioOwner, 'session.instructions.append', index ? `standing_${stamp}_${index}` : `standing_${stamp}`, null, content));
+  current.standingAt = usageSeconds;
+  instructions.forEach((content) => tell(current.audioOwner, 'developer', content));
 }
 function interruptHubReplies(reason) {
   for (const { result } of hubReplies.splice(0)) recordSession('hub-reply-dropped', JSON.stringify({ id: result.id, stamp: result.stamp, reason }));
@@ -1184,7 +1182,7 @@ async function startConversation() {
     attempt.offerId = crypto.randomUUID();
     const answerPromise = waitForAnswer(attempt.offerId);
     attempt.offered = true;
-    await sendFrame(`offer\n${JSON.stringify({ id: attempt.offerId, sdp: attempt.pc.localDescription.sdp, ...trace.wake() })}`);
+    await sendFrame(`offer\n${JSON.stringify({ id: attempt.offerId, sdp: attempt.pc.localDescription.sdp, instructions: [IDENTITY, ACTION_INSTRUCTIONS], ...trace.wake() })}`);
     if (attempt.cancelled) {
       cancelOffer(attempt);
       return;
@@ -1196,7 +1194,7 @@ async function startConversation() {
     await attempt.pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
     await started;
     if (attempt.cancelled) return;
-    awaken(attempt.channel);
+    tell(attempt, 'commentary', WOKEN);
     const clock = new SessionClock({ onTick: (seconds) => { $('elapsed').textContent = formatElapsed(seconds); } });
     conversation = { pc: attempt.pc, channel: attempt.channel, clock, id: attempt.offerId, audioOwner: attempt, said: '', transcript: new TranscriptBatcher(attempt.offerId, persistenceUploads, { onTurn: (side, at) => telemetry.add({ kind: 'transcript', session_id: attempt.offerId, name: side, at }) }) };
     startRecorders(attempt, attempt.offerId);
@@ -1248,10 +1246,9 @@ function stopConversation(reason = '') {
   trace.slept();
   paintOff();
   $('speaker').srcObject = null;
-  const cost = usageSeconds * 0.05 / 60;
   const item = document.createElement('div');
   item.className = 'usage';
-  item.textContent = `session: ${usageSeconds.toFixed(1)} s · estimated $${cost.toFixed(4)} at $0.05/min`;
+  item.textContent = `session: ${usageSeconds.toFixed(1)} s`;
   $('log').append(item);
   if (following) $('log').scrollTop = $('log').scrollHeight;
   setStatus(reason, reason ? 'err' : '');

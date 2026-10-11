@@ -70,8 +70,8 @@ export class PuppetRuntime {
 const browserMocks = `
 Object.defineProperty(navigator,'mediaDevices',{value:Object.assign(new EventTarget(),{getUserMedia:async()=>new AudioContext().createMediaStreamDestination().stream})});
 class Recorder extends EventTarget { static isTypeSupported(){return true} start(){this.state='recording'} stop(){this.state='inactive';this.dispatchEvent(new Event('stop'))} } globalThis.MediaRecorder=Recorder;
-class Channel extends EventTarget { constructor(){super();this.readyState='open'} send(value){const e=JSON.parse(value);if(e.type==='session.close')queueMicrotask(()=>this.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'session.closed',usage:{seconds:0}})})))} close(){this.readyState='closed'} }
-class Peer extends EventTarget { constructor(){super();this.connectionState='new';this.iceGatheringState='complete';this.localDescription={sdp:'offer'}} createDataChannel(){this.channel=new Channel();globalThis.__smokeChannel=this.channel;return this.channel}async createOffer(){return {type:'offer',sdp:'offer'}}async setLocalDescription(v){this.localDescription=v}async setRemoteDescription(){queueMicrotask(()=>this.channel.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'session.started',session:{model:'gpt-live-1',delegation:{type:'client'}}})})))}addTrack(){}async getStats(){return new Map()}close(){this.connectionState='closed';this.dispatchEvent(new Event('connectionstatechange'))} } globalThis.RTCPeerConnection=Peer;
+class Channel extends EventTarget { constructor(){super();this.readyState='open'} send(){} close(){this.readyState='closed'} }
+class Peer extends EventTarget { constructor(){super();this.connectionState='new';this.iceGatheringState='complete';this.localDescription={sdp:'offer'}} createDataChannel(){this.channel=new Channel();globalThis.__smokeChannel=this.channel;return this.channel}async createOffer(){return {type:'offer',sdp:'offer'}}async setLocalDescription(v){this.localDescription=v}async setRemoteDescription(){queueMicrotask(()=>this.channel.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'session.started',session:{model:'live-model',delegation:{type:'client'}}})})))}addTrack(){}async getStats(){return new Map()}close(){this.connectionState='closed';this.dispatchEvent(new Event('connectionstatechange'))} } globalThis.RTCPeerConnection=Peer;
 globalThis.__voiceStartSpotter=async()=>({close(){}});
 globalThis.__voiceLoadEmbedder=async()=>async(texts)=>texts.map(()=>[1]);
 const cache=new Map();Object.defineProperty(globalThis,'caches',{value:{open:async()=>({match:async(r)=>cache.get(r.url)?.clone(),put:async(r,v)=>cache.set(r.url,v.clone())})}});
@@ -170,12 +170,12 @@ async function runViewport(viewport, executable, server) {
           const channel = super.createDataChannel(...args);
           const record = { channel, events: [], spoken: '', spokeAt: 0, delegations: 0, replies: 0 }; globalThis.__smokeLiveChannels.push(record);
           const send = channel.send.bind(channel);
-          channel.send = (data) => { if (/^hub_/.test(JSON.parse(data).event_id)) record.replies++; return send(data); };
+          channel.send = (data) => { if (JSON.parse(data).channel === 'speakable') record.replies++; return send(data); };
           channel.addEventListener('message', ({ data }) => {
             const event = JSON.parse(data);
-            if (['session.started', 'session.closed'].includes(event.type)) record.events.push(event.type);
-            if (event.type === 'session.output_transcript.delta') { record.spoken += event.delta; record.spokeAt = Date.now(); }
-            if (event.type === 'session.delegation.created') record.delegations++;
+            if (event.type === 'session.started') record.events.push(event.type);
+            if (event.type === 'output_transcript.added') { record.spoken += event.item?.text ?? ''; record.spokeAt = Date.now(); }
+            if (event.type === 'delegation.created') record.delegations++;
           });
           return channel;
         }
@@ -230,7 +230,7 @@ async function runViewport(viewport, executable, server) {
     const liveRecord = () => cdp.evaluate('__smokeLiveChannels.map(({ channel, events, spoken, delegations, replies }) => ({ events, spoken, delegations, replies, state: channel.readyState }))');
     const quietLive = () => cdp.evaluate(`new Promise((resolve) => { const deadline = Date.now() + 30000; const check = () => { if (Date.now() - __smokeLiveChannels.at(-1).spokeAt > 2000 || Date.now() > deadline) return resolve(); setTimeout(check, 100); }; check(); })`);
     for(let second=0;second<duration;second++){
-      if(second===1){await cdp.evaluate(`${transitions[0]}`);if(mode==='public')await cdp.evaluate(`(async()=>{const deadline=Date.now()+30000;while(!globalThis.__smokeChannel){if(Date.now()>deadline||document.querySelector('#status').classList.contains('err'))throw new Error('fixture session did not open: '+document.querySelector('#status').textContent);await new Promise(done=>setTimeout(done,10))}const emit=(event)=>__smokeChannel.dispatchEvent(new MessageEvent('message',{data:JSON.stringify(event)}));emit({type:'session.output_transcript.delta',delta:'I will inspect the fixture.',start_ms:0,end_ms:20});emit({type:'session.input_transcript.delta',delta:'Check the fixture stream.'});emit({type:'session.delegation.created',delegation:{id:'fixture',type:'delegation',target:'client'}});await new Promise(resolve=>setTimeout(resolve,150))})()`)}
+      if(second===1){await cdp.evaluate(`${transitions[0]}`);if(mode==='public')await cdp.evaluate(`(async()=>{const deadline=Date.now()+30000;while(!globalThis.__smokeChannel){if(Date.now()>deadline||document.querySelector('#status').classList.contains('err'))throw new Error('fixture session did not open: '+document.querySelector('#status').textContent);await new Promise(done=>setTimeout(done,10))}const emit=(event)=>__smokeChannel.dispatchEvent(new MessageEvent('message',{data:JSON.stringify(event)}));emit({type:'output_transcript.added',item:{id:'fixture_out',type:'output_transcript',text:'I will inspect the fixture.'},start_ms:0,end_ms:20});emit({type:'input_transcript.added',item:{id:'fixture_in',type:'input_transcript',text:'Check the fixture stream.'}});emit({type:'delegation.created',item:{id:'fixture',type:'delegation',content:[{type:'input_text',text:'Check the fixture stream.'}],handoff_id:'fixture_handoff',target:'client'}});await new Promise(resolve=>setTimeout(resolve,150))})()`)}
       if (development && second === 2) {
         await cdp.evaluate(`new Promise((resolve, reject) => { const deadline = Date.now() + 60000; const check = () => { if (document.querySelector('#puppet').getAttribute('aria-pressed') === 'true') return resolve(); if (Date.now() > deadline || document.querySelector('#status').classList.contains('err')) return reject(new Error(document.querySelector('#status').textContent + ' heard ' + JSON.stringify(globalThis.__smokeHeard ?? []))); setTimeout(check, 100); }; check(); })`);
         liveSessionOpened = true;

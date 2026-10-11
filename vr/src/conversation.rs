@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::calls::Calls;
+use crate::identity::{identity, without_trailing_phrase};
 
 const MEMORY: &str = "Context: Archived transcripts of completed conversations, oldest first, for memory only. Each ended when you went to sleep. These utterances already happened; do not repeat or continue them.\n";
 const MAX_CONTEXT: usize = 8192;
@@ -50,6 +51,7 @@ pub struct Trace {
     sleeps: Vec<(usize, Instant)>,
     /// The turn count at the last delegation or sleep; user turns from here on are the next delegation's text, and the next turn of either speaker starts fresh.
     pending_from: usize,
+    request_from: usize,
     heard_at: Option<Instant>,
     force_new_speech: bool,
     pub calls: Calls,
@@ -98,6 +100,7 @@ impl Trace {
     pub fn slept(&mut self, now: Instant) {
         self.sleeps.push((self.turns.len(), now));
         self.pending_from = self.turns.len();
+        self.request_from = self.turns.len();
         self.heard_at = None;
     }
 
@@ -105,10 +108,24 @@ impl Trace {
         index >= self.pending_from && self.turns[index].speaker == Speaker::User
     }
 
-    /// The user's words since the last delegation, and up to twenty turns before them.
+    fn heard_text(&self, from: usize) -> String {
+        let heard: Vec<&str> = (from..self.turns.len()).filter(|&index| self.turns[index].speaker == Speaker::User).map(|index| self.turns[index].text.trim()).filter(|text| !text.is_empty()).collect();
+        bounded_text(&heard, MAX_CONTEXT)
+    }
+
+    pub fn ends_request(&self) -> bool {
+        let sent = self.heard_text(self.pending_from);
+        without_trailing_phrase(&sent, &identity().hand_off_phrase) != sent
+    }
+
+    /// The user's words since the last delegation, or since the last hand-off phrase when they end with it, and up to twenty turns before them.
     pub fn pending(&self, now: Instant) -> Delegation {
-        let heard: Vec<&str> = (self.pending_from..self.turns.len()).filter(|&index| self.is_pending(index)).map(|index| self.turns[index].text.trim()).filter(|text| !text.is_empty()).collect();
-        let text = bounded_text(&heard, MAX_CONTEXT);
+        let sent = self.heard_text(self.pending_from);
+        let request = self.heard_text(self.request_from);
+        let text = match without_trailing_phrase(&request, &identity().hand_off_phrase) {
+            whole if self.ends_request() && !whole.is_empty() => whole.to_owned(),
+            _ => sent,
+        };
         let visible: Vec<usize> = (0..self.turns.len()).filter(|&index| !self.is_pending(index)).collect();
         let mut context: Vec<Turn> = visible[visible.len().saturating_sub(20)..].iter().map(|&index| self.turns[index].clone()).collect();
         while !context.is_empty() && serde_json::to_string(&context).unwrap().len() > MAX_CONTEXT {
@@ -120,6 +137,9 @@ impl Trace {
 
     pub fn delegated(&mut self, now: Instant) -> Delegation {
         let delegation = self.pending(now);
+        if self.ends_request() {
+            self.request_from = self.turns.len();
+        }
         self.heard_at = None;
         self.pending_from = self.turns.len();
         delegation
@@ -259,6 +279,31 @@ mod tests {
         assert_eq!(second.context, vec![turn(Speaker::User, "Hello there."), turn(Speaker::Live, "Hi.")]);
         assert_eq!(second.duration_ms, 3000);
         assert_eq!(trace.delegated(start).text, "");
+    }
+
+    #[test]
+    fn a_request_ended_with_the_hand_off_phrase_carries_every_user_turn_since_the_last_such_request_or_sleep() {
+        let start = Instant::now();
+        let mut trace = Trace::default();
+        trace.heard("Egdod issue fourteen", start);
+        trace.delegated(start);
+        trace.spoke("Checking.");
+        trace.heard("give me a Chesterton", start);
+        assert_eq!(trace.delegated(start).text, "give me a Chesterton");
+        trace.heard("fence analysis. Fly, Corvus.", start);
+        assert!(trace.ends_request());
+        assert_eq!(trace.delegated(start).text, "Egdod issue fourteen\ngive me a Chesterton\nfence analysis.");
+        assert!(!trace.ends_request());
+        trace.heard("Check the printer", start);
+        assert_eq!(trace.delegated(start).text, "Check the printer");
+        trace.heard("and the deck. Fly corvus", start);
+        assert_eq!(trace.delegated(start).text, "Check the printer\nand the deck.");
+        trace.heard("Fly, Corvus.", start);
+        assert_eq!(trace.delegated(start).text, "Fly, Corvus.");
+        trace.heard("before the sleep", start);
+        trace.slept(start);
+        trace.heard("after it. Fly, Corvus", start);
+        assert_eq!(trace.delegated(start).text, "after it.");
     }
 
     #[test]

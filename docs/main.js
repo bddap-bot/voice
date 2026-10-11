@@ -62,6 +62,7 @@ let wakeModelWaiter;
 let listeningModel;
 let inactivity;
 let unanswered;
+let requestEnd;
 const startSpotter = globalThis.__voiceStartSpotter ?? startWakeSpotter;
 const speaker = globalThis.__voiceSpeaker ?? { learnVoice, prepareSpeaker, startSpeakerGate };
 const VOICEPRINT = `${config.storageKey}.voiceprint`;
@@ -928,6 +929,8 @@ function onLiveEvent(message, source) {
     stageTrace?.inputTranscript();
     stayAwake();
     trace.heard(event.delta ?? '', Date.now(), event.start_ms);
+    clearTimeout(requestEnd);
+    if (trace.endsRequest() && !conversation?.sleeping) requestEnd = setTimeout(() => handOff(`turn_${crypto.randomUUID()}`), UNANSWERED_MS);
     conversation?.transcript?.add('user', event.delta ?? '');
     actionDriver.endTurn();
     if (/[\p{L}\p{N}]/u.test(event.delta ?? '')) {
@@ -988,6 +991,7 @@ function delegate(id, owner) {
 }
 function handOff(id) {
   clearTimeout(unanswered);
+  clearTimeout(requestEnd);
   const turn = trace.delegated(id);
   hubWaiting.add(id);
   puppetRuntime?.waiting(true);
@@ -1092,6 +1096,7 @@ function paintOff() {
   syncSpotter();
   hubWaiting.clear();
   clearTimeout(unanswered);
+  clearTimeout(requestEnd);
   interruptHubReplies('conversation ended');
   actionDriver.reset();
   clearTimeout(inactivity);

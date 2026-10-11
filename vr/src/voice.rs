@@ -216,7 +216,7 @@ impl Voice {
                     eprintln!("heard {delta:?}");
                     self.actions.heard();
                     self.trace.heard(&delta, Instant::now());
-                    awake.hub.heard(&delta, Instant::now());
+                    awake.hub.heard(&delta, &self.trace, Instant::now());
                     awake.activity = Instant::now();
                 }
                 session::Event::Spoke(delta) => {

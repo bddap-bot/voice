@@ -6,6 +6,7 @@ const SOURCE: &str = include_str!("../../docs/identity.js");
 /// The page's identity constants, read from its own module so the two never drift.
 pub struct Identity {
     pub sign_off: String,
+    pub hand_off_phrase: String,
     pub inactivity: Duration,
     pub instructions: String,
     pub woken: String,
@@ -45,13 +46,15 @@ pub fn identity() -> &'static Identity {
     IDENTITY.get_or_init(|| {
         let name = text("NAME", &[]);
         let sign_off = text("SIGN_OFF", &[]);
-        let names = [("NAME", name.as_str()), ("SIGN_OFF", sign_off.as_str())];
+        let hand_off_phrase = text("HAND_OFF_PHRASE", &[("NAME", name.as_str())]);
+        let names = [("NAME", name.as_str()), ("SIGN_OFF", sign_off.as_str()), ("HAND_OFF_PHRASE", hand_off_phrase.as_str())];
         Identity {
             instructions: text("IDENTITY", &names),
             woken: text("WOKEN", &names),
             vr_wake_phrase: text("VR_WAKE_PHRASE", &names),
             inactivity: Duration::from_millis(milliseconds("INACTIVITY_MS")),
             sign_off,
+            hand_off_phrase,
         }
     })
 }
@@ -68,6 +71,30 @@ fn phrase_key(text: &str) -> String {
 /// The page's `includesPhrase`: letters and digits only, case-folded.
 pub fn includes_phrase(text: &str, phrase: &str) -> bool {
     phrase_key(text).contains(&phrase_key(phrase))
+}
+
+/// The page's `withoutTrailingPhrase`.
+pub fn without_trailing_phrase<'a>(text: &'a str, phrase: &str) -> &'a str {
+    let mut key = phrase_key(phrase);
+    let mut start = text.len();
+    for (index, c) in text.char_indices().rev() {
+        if key.is_empty() {
+            break;
+        }
+        if !c.is_alphanumeric() {
+            continue;
+        }
+        let letter: String = c.to_lowercase().collect();
+        if !key.ends_with(&letter) {
+            return text;
+        }
+        key.truncate(key.len() - letter.len());
+        start = index;
+    }
+    if !key.is_empty() {
+        return text;
+    }
+    text[..start].trim_end_matches(|c: char| c.is_whitespace() || c == ',')
 }
 
 #[cfg(test)]
@@ -89,5 +116,17 @@ mod tests {
         assert!(includes_phrase(&format!("Sure. {}", sign_off.to_uppercase().replace(' ', "  ")), sign_off));
         assert!(includes_phrase("my labor here, is ENDED!", "My labor here is ended."));
         assert!(!includes_phrase("my labor here is", "My labor here is ended."));
+    }
+
+    #[test]
+    fn a_trailing_hand_off_phrase_is_dropped_with_the_commas_before_it() {
+        let phrase = &identity().hand_off_phrase;
+        assert_eq!(phrase, "Fly, Corvus");
+        assert!(identity().instructions.contains(&format!("\"{phrase}\"")));
+        assert_eq!(without_trailing_phrase("Check the printer. Okay, fly corvus!", phrase), "Check the printer. Okay");
+        assert_eq!(without_trailing_phrase("Fly, Corvus.", phrase), "");
+        assert_eq!(without_trailing_phrase("Fly, Corvus, check the printer.", phrase), "Fly, Corvus, check the printer.");
+        assert_eq!(without_trailing_phrase("Corvus", phrase), "Corvus");
+        assert_eq!(without_trailing_phrase("Compare the evalFly Corvus", phrase), "Compare the eval");
     }
 }

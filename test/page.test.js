@@ -1424,6 +1424,39 @@ window.addEventListener('test-ready', async () => {
   assert.match(result.log, /sent to hub: How many jobs are queued\?[\s\S]*hub reply: Four jobs are queued\./);
 });
 
+test('a request ended with the hand-off phrase goes to the hub whole, from the model within three seconds or else from the page', async () => {
+  const { result, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const frames = () => (globalThis.delegateFrames ?? []).map(({ id, text }) => ({ id, text }));
+  hear('Is the printer');
+  delegateTurn('item_printer');
+  hear(' busy right now? Fly, Corvus.');
+  await wait(1000);
+  delegateTurn('item_complete');
+  await wait(3100);
+  const byModel = frames().length;
+  hear('And the backup');
+  delegateTurn('item_backup');
+  hear(' from last night. Fly, Corvus');
+  await wait(1000);
+  emitLive({ type: 'session.output_transcript.delta', delta: 'Okay.', start_ms: 0, end_ms: 10 });
+  await wait(1900);
+  const beforeTimeout = frames().length;
+  await wait(200);
+  document.body.dataset.result = JSON.stringify({ byModel, beforeTimeout, frames: frames() });
+});
+`, { virtualTime: true });
+  assert.ok(result, stderr);
+  assert.deepEqual([result.byModel, result.beforeTimeout], [2, 3]);
+  assert.deepEqual(result.frames.map(({ id, text }) => [id.startsWith('turn_') ? 'page' : id, text]), [
+    ['item_printer', 'Is the printer'],
+    ['item_complete', 'Is the printer\nbusy right now?'],
+    ['item_backup', 'And the backup'],
+    ['page', 'And the backup\nfrom last night.'],
+  ]);
+});
+
 test('while a delegation is pending, a turn the model ignores for three seconds goes to the hub, and its reply or failure carries a null delegation id', async () => {
   const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {

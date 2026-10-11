@@ -74,6 +74,7 @@ pub struct Hub {
     replies: VecDeque<Reply>,
     turn: Option<Turn>,
     unanswered: Option<Instant>,
+    request_end: Option<Instant>,
     pending_standing: Standing,
     standing: Vec<String>,
     reply_unspoken: bool,
@@ -128,6 +129,7 @@ impl Hub {
 
     fn hand_off(&mut self, id: &str, trace: &mut Trace, now: Instant) {
         self.unanswered = None;
+        self.request_end = None;
         let delegation = trace.delegated(now);
         trace.calls.asked(id, &delegation.text);
         self.waiting.insert(id.to_owned());
@@ -148,13 +150,14 @@ impl Hub {
         self.out.push(tell("session.commentary.append", format!("hub_error_{id}"), owned, FAILED));
     }
 
-    pub fn heard(&mut self, delta: &str, now: Instant) {
+    pub fn heard(&mut self, delta: &str, trace: &Trace, now: Instant) {
         if matches!(self.turn, Some(Turn::Speaking)) {
             self.interrupt("barge-in");
         }
         if has_word(delta) {
             self.unanswered = (!self.waiting.is_empty() && !self.sleeping).then_some(now + UNANSWERED);
         }
+        self.request_end = (trace.ends_request() && !self.sleeping).then_some(now + UNANSWERED);
     }
 
     pub fn spoke(&mut self) {
@@ -311,7 +314,7 @@ impl Hub {
                 self.play(trace, now);
             }
         }
-        if self.unanswered.is_some_and(|at| now >= at) {
+        if self.unanswered.is_some_and(|at| now >= at) || self.request_end.is_some_and(|at| now >= at) {
             self.hand_off(&format!("turn_{}", stamp()), trace, now);
         }
     }
@@ -340,7 +343,7 @@ mod tests {
         }
         fn hear(&mut self, delta: &str) {
             self.trace.heard(delta, self.now);
-            self.hub.heard(delta, self.now);
+            self.hub.heard(delta, &self.trace, self.now);
             self.collect();
         }
         fn speak(&mut self, delta: &str) {
@@ -609,6 +612,29 @@ mod tests {
         f.hear(" Goodbye.");
         f.wait(Duration::from_secs(4), false);
         assert_eq!(f.frames("delegate").len(), 1);
+    }
+
+    #[test]
+    fn a_request_ended_with_the_hand_off_phrase_goes_whole_from_the_model_within_three_seconds_or_else_from_the_hub() {
+        let mut f = Fixture::new();
+        f.hear("Is the printer");
+        f.delegate("item_printer");
+        f.hear(" busy right now? Fly, Corvus.");
+        f.wait(Duration::from_secs(1), false);
+        f.delegate("item_complete");
+        f.wait(Duration::from_millis(3100), false);
+        assert_eq!(f.frames("delegate").len(), 2);
+        f.hear("And the backup");
+        f.delegate("item_backup");
+        f.hear(" from last night. Fly, Corvus");
+        f.wait(Duration::from_secs(1), false);
+        f.speak("Okay.");
+        f.wait(Duration::from_millis(1900), false);
+        assert_eq!(f.frames("delegate").len(), 3);
+        f.wait(Duration::from_millis(200), false);
+        let frames = f.frames("delegate");
+        assert!(frames[3]["id"].as_str().unwrap().starts_with("turn_"));
+        assert_eq!(frames.iter().map(|frame| frame["text"].as_str().unwrap()).collect::<Vec<_>>(), ["Is the printer", "Is the printer\nbusy right now?", "And the backup", "And the backup\nfrom last night."]);
     }
 
     #[test]

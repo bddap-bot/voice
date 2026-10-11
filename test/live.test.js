@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, TranscriptBatcher, audioFrame, errorEvent, formatElapsed, formatStartError, includesPhrase, isOfferFor, shareFrame } from '../docs/live.js';
-import { SIGN_OFF } from '../docs/identity.js';
+import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, TranscriptBatcher, audioFrame, errorEvent, formatElapsed, formatStartError, includesPhrase, isOfferFor, withoutTrailingPhrase, shareFrame } from '../docs/live.js';
+import { HAND_OFF_PHRASE, SIGN_OFF } from '../docs/identity.js';
 
 test('start errors include their name and first stack frame', () => {
   const error = new TypeError('Illegal invocation');
@@ -239,6 +239,34 @@ test('pending holds only the words heard since the last delegation and leaves th
   assert.deepEqual(trace.pending(500), { sent: 'order filament', context: [{ speaker: 'user', text: 'check the beacon' }, { speaker: 'live', text: 'Checking.' }], duration_ms: 200 });
   assert.equal(trace.delegated('second', 500).sent, 'order filament');
   assert.equal(trace.pending().sent, '');
+});
+
+test('a request ended with the hand-off phrase carries every user turn since the last such request or sleep, without the phrase', () => {
+  assert.equal(HAND_OFF_PHRASE, 'Fly, Corvus');
+  assert.equal(withoutTrailingPhrase('Check the printer. Okay, fly corvus!', HAND_OFF_PHRASE), 'Check the printer. Okay');
+  assert.equal(withoutTrailingPhrase('Fly, Corvus, check the printer.', HAND_OFF_PHRASE), 'Fly, Corvus, check the printer.');
+  assert.equal(withoutTrailingPhrase('Corvus', HAND_OFF_PHRASE), 'Corvus');
+  assert.equal(withoutTrailingPhrase('Compare the evalFly Corvus', HAND_OFF_PHRASE), 'Compare the eval');
+  const trace = new ConversationTrace();
+  trace.heard('Egdod issue fourteen', 100);
+  trace.delegated('a', 200);
+  trace.spoke('Checking.');
+  trace.heard('give me a Chesterton', 300);
+  assert.equal(trace.delegated('b', 400).sent, 'give me a Chesterton');
+  trace.heard('fence analysis. Fly, Corvus.', 500);
+  assert.equal(trace.endsRequest(), true);
+  assert.equal(trace.delegated('c', 600).sent, 'Egdod issue fourteen\ngive me a Chesterton\nfence analysis.');
+  assert.equal(trace.endsRequest(), false);
+  trace.heard('Check the printer', 700);
+  assert.equal(trace.delegated('d', 800).sent, 'Check the printer');
+  trace.heard('and the deck. Fly corvus', 900);
+  assert.equal(trace.delegated('e', 1000).sent, 'Check the printer\nand the deck.');
+  trace.heard('Fly, Corvus.', 1100);
+  assert.equal(trace.delegated('f', 1200).sent, 'Fly, Corvus.');
+  trace.heard('before the sleep', 1300);
+  trace.slept(1400);
+  trace.heard('after it. Fly, Corvus', 1500);
+  assert.equal(trace.delegated('g', 1600).sent, 'after it.');
 });
 
 test('ending voice does not cancel a pending shared request', () => {

@@ -1,3 +1,5 @@
+import { HAND_OFF_PHRASE } from './identity.js';
+
 export function modelToolFields(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   const result = {};
@@ -25,6 +27,19 @@ const phraseKey = (text) => text.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 
 export function includesPhrase(text, phrase) {
   return phraseKey(text).includes(phraseKey(phrase));
+}
+
+export function withoutTrailingPhrase(text, phrase) {
+  let key = phraseKey(phrase);
+  let at = text.length;
+  while (key) {
+    if (!at) return text;
+    const letter = phraseKey(text[--at]);
+    if (!letter) continue;
+    if (!key.endsWith(letter)) return text;
+    key = key.slice(0, -letter.length);
+  }
+  return text.slice(0, at).replace(/[\s,]+$/u, '');
 }
 
 
@@ -341,12 +356,15 @@ function elapsed(ms) {
   return `${count} ${unit}${count === 1 ? '' : 's'}`;
 }
 
+const heardText = (turns) => boundedText(turns.map((text) => text.trim()).filter(Boolean), 8192);
+
 export class ConversationTrace {
   constructor(onChange = () => {}, { entries = [], sleeps = [] } = {}) {
     this.onChange = onChange;
     this.entries = entries;
     this.pendingTurns = [];
     this.pendingEntries = new Set();
+    this.requestFrom = entries.length;
     this.heardAt = 0;
     this.nextSpeechSource = 'model alone';
     this.activeSpeechSource = null;
@@ -393,12 +411,19 @@ export class ConversationTrace {
     while (context.length && new TextEncoder().encode(JSON.stringify(context)).length > 8192) context.shift();
     return context;
   }
+  endsRequest() {
+    const sent = heardText(this.pendingTurns);
+    return withoutTrailingPhrase(sent, HAND_OFF_PHRASE) !== sent;
+  }
   pending(now = Date.now()) {
-    return { sent: boundedText(this.pendingTurns.map((text) => text.trim()).filter(Boolean), 8192), context: this.context(this.pendingEntries), duration_ms: this.heardAt ? now - this.heardAt : 0 };
+    const request = this.endsRequest() && withoutTrailingPhrase(heardText(this.entries.slice(this.requestFrom).filter((item) => item.kind === 'heard').map((item) => item.text)), HAND_OFF_PHRASE);
+    return { sent: request || heardText(this.pendingTurns), context: this.context(this.pendingEntries), duration_ms: this.heardAt ? now - this.heardAt : 0 };
   }
   delegated(id, now = Date.now()) {
+    const complete = this.endsRequest();
     const entry = { kind: 'delegation', id, ...this.pending(now), reply: '', timing: null };
     this.entries.push(entry);
+    if (complete) this.requestFrom = this.entries.length;
     this.pendingTurns = [];
     this.pendingEntries.clear();
     this.heardAt = 0;
@@ -432,6 +457,7 @@ export class ConversationTrace {
   }
   slept(now = Date.now()) {
     this.sleeps.push({ index: this.entries.length, at: now });
+    this.requestFrom = this.entries.length;
     for (const entry of this.entries) {
       if (entry.kind === 'delegation' && !entry.shared && entry.timing === null && !entry.failed) {
         entry.reply = 'cancelled';

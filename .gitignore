@@ -4,3 +4,4 @@ android/build/
 smoke-artifacts/
 docs/puppet.js
 docs/lib/
+__pycache__/

@@ -18,7 +18,13 @@ export async function chromiumExecutable() {
   throw new Error('headless Chromium is required; set CHROMIUM_BIN');
 }
 
-const SLOTS = Number(process.env.VOICE_CHROMIUM_SLOTS) || Math.max(2, Math.floor(availableParallelism() / 2));
+const SLOTS = chromiumSlots(process.env.VOICE_CHROMIUM_SLOTS);
+
+function chromiumSlots(configured) {
+  if (configured === undefined) return Math.max(2, Math.floor(availableParallelism() / 2));
+  if (!/^[1-9]\d*$/.test(configured)) throw new Error(`VOICE_CHROMIUM_SLOTS must be a positive integer, not ${JSON.stringify(configured)}`);
+  return Number(configured);
+}
 
 // Two dozen browsers on 16 cores starved Chromium's timers and it suspended AudioContexts on its own, so every
 // process on the host shares SLOTS. An abstract socket is released by the kernel when its holder dies.
@@ -26,11 +32,15 @@ async function chromiumSlot() {
   for (;;) {
     for (let slot = 0; slot < SLOTS; slot++) {
       const server = createServer();
-      const held = await new Promise(resolve => {
-        server.once('error', () => resolve(false));
+      const held = await new Promise((resolve, reject) => {
+        server.once('error', error => error.code === 'EADDRINUSE' ? resolve(false) : reject(error));
         server.listen(`\0voice-chromium-slot-${slot}`, () => resolve(true));
       });
-      if (held) return () => server.close();
+      if (held) {
+        server.unref();
+        let released = false;
+        return () => { if (!released) { released = true; server.close(); } };
+      }
     }
     await new Promise(resolve => setTimeout(resolve, 100));
   }
@@ -59,10 +69,13 @@ async function spawnChromium(executable, args, release) {
   }));
   let closing;
   const close = () => closing ??= (async () => {
-    if (chrome.pid) chrome.kill('SIGKILL');
-    await exited;
-    await rm(scratch, { recursive: true, force: true });
-    release();
+    try {
+      if (chrome.pid) chrome.kill('SIGKILL');
+      await exited;
+      await rm(scratch, { recursive: true, force: true });
+    } finally {
+      release();
+    }
   })();
   return { scratch, exited, close, devtools: devtools(chrome.stdio[3], chrome.stdio[4], () => stderr), get stderr() { return stderr; } };
 }

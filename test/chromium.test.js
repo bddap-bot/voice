@@ -23,7 +23,11 @@ async function launchFake(browser) {
   let ended = false;
   chrome.exited.then(() => { ended = true; });
   while (!chrome.stderr.includes('\n')) {
-    if (ended) throw await chrome.exited;
+    if (ended) {
+      const failure = await chrome.exited;
+      await chrome.close();
+      throw failure;
+    }
     await delay(10);
   }
   return chrome;
@@ -107,7 +111,6 @@ test('Chromium cleanup removes the profile when spawning fails', async () => {
 });
 
 async function renderTicking(t, tick) {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
   let chrome, server;
   const processes = [];
   const record = async () => { processes.push(...(await chrome.devtools.call('SystemInfo.getProcessInfo')).processInfo); };
@@ -119,6 +122,7 @@ async function renderTicking(t, tick) {
     });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     chrome = await launchChromium({ args: ['--headless=new', '--no-sandbox'] });
+    t.mock.timers.enable({ apis: ['setTimeout'] });
     await record();
     const stdout = await renderDom(chrome, `http://127.0.0.1:${server.address().port}/`, { done: 'document.body.dataset.ticks >= 7', virtualTime: true });
     assert.ok((await readdir(chrome.scratch)).some(name => /^\.?(org\.chromium\.Chromium|com\.google\.Chrome)\./.test(name)), 'Chromium keeps its temporary files in its scratch directory');

@@ -1,7 +1,7 @@
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
+use std::thread::Thread;
 use std::time::{Duration, Instant};
 
 use glam::{Mat4, Quat, Vec3 as V3};
@@ -132,15 +132,19 @@ impl Parts {
     }
 }
 
-fn load(bytes: &[u8]) -> Result<Geometry, String> {
+fn load(bytes: &[u8], stop: &AtomicBool) -> Result<Geometry, String> {
+    let go = || if stop.load(Ordering::SeqCst) { Err("stopped while loading".to_string()) } else { Ok(()) };
     let model = Model::object(bytes)?;
+    go()?;
     let (vertices, triangles) = model.drawn_size();
     if vertices > VERTICES || triangles > TRIANGLES {
         return Err(format!("{vertices} vertices and {triangles} triangles drawn, over {VERTICES} or {TRIANGLES}"));
     }
     let skinned = model.skinned()?;
+    go()?;
     let rest = model.worlds(&model.rest());
     let points = skinned.positions(&skinned.palette(&rest, Mat4::IDENTITY));
+    go()?;
     let (low, high) = bounds(&points);
     let extent = (high - low).max_element();
     if !extent.is_finite() {
@@ -149,6 +153,7 @@ fn load(bytes: &[u8]) -> Result<Geometry, String> {
     let scale = if extent > SIZE { SIZE / extent } else { 1.0 };
     let duration = model.program.as_ref().map_or(0.0, |(_, duration)| *duration);
     let parts = Parts::find(&model, &skinned, &points, (low + high) / 2.0);
+    go()?;
     let anchors = anchors(&model, &skinned, &points, &rest);
     Ok(Geometry { fit: Mat4::from_scale(V3::splat(scale)) * Mat4::from_translation(-(low + high) / 2.0), radius: (high - low).length() * scale / 2.0, model, skinned, duration, parts, anchors })
 }
@@ -164,14 +169,19 @@ struct Exchange {
     data: Option<Vec<u8>>,
 }
 
-fn run(bytes: Vec<u8>, exchange: &Mutex<Exchange>, stop: &AtomicBool) {
-    let mut geometry = match load(&bytes) {
+type Load = fn(&[u8], &AtomicBool) -> Result<Geometry, String>;
+
+fn run(bytes: Vec<u8>, load: Load, exchange: &Mutex<Exchange>, stop: &AtomicBool) {
+    let mut geometry = match load(&bytes, stop) {
         Ok(geometry) => geometry,
         Err(error) => return exchange.lock().unwrap().failed = Some(error),
     };
     let wasm = geometry.model.program.take().map(|(wasm, _)| (wasm, geometry.model.nodes()));
     exchange.lock().unwrap().geometry = Some(geometry);
     let Some((wasm, nodes)) = wasm else { return };
+    if stop.load(Ordering::SeqCst) {
+        return;
+    }
     let mut program = match program::Program::new(&wasm, nodes) {
         Ok(program) => program,
         Err(error) => return exchange.lock().unwrap().failed = Some(error),
@@ -194,29 +204,35 @@ fn run(bytes: Vec<u8>, exchange: &Mutex<Exchange>, stop: &AtomicBool) {
 }
 
 /// An object's thread: it loads the file, then ticks its program, so nothing the object does costs the render thread.
+/// Dropping it never joins: the thread owns all it uses and ends at its next check of `stop`, so a load in progress cannot stall a frame.
 struct Runner {
     exchange: Arc<Mutex<Exchange>>,
     stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
+    thread: Thread,
 }
 
 impl Runner {
-    fn start(bytes: Vec<u8>) -> Result<Runner, String> {
+    fn start(bytes: Vec<u8>, load: Load) -> Result<Runner, String> {
         let exchange = Arc::new(Mutex::new(Exchange::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let (shared, stopped) = (exchange.clone(), stop.clone());
-        let thread = std::thread::Builder::new().name("voice-object".into()).spawn(move || run(bytes, &shared, &stopped)).map_err(|error| format!("object thread: {error}"))?;
-        Ok(Runner { exchange, stop, thread: Some(thread) })
+        let thread = std::thread::Builder::new()
+            .name("voice-object".into())
+            .spawn(move || {
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(bytes, load, &shared, &stopped))).is_err() {
+                    shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).failed = Some("the object's thread panicked".into());
+                    shared.clear_poison();
+                }
+            })
+            .map_err(|error| format!("object thread: {error}"))?;
+        Ok(Runner { exchange, stop, thread: thread.thread().clone() })
     }
 }
 
 impl Drop for Runner {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(thread) = self.thread.take() {
-            thread.thread().unpark();
-            let _ = thread.join();
-        }
+        self.thread.unpark();
     }
 }
 
@@ -309,7 +325,7 @@ fn transformed(model: &Model, transforms: &[Transform]) -> Vec<Mat4> {
     model.worlds(&pose)
 }
 
-/// One shown object; dropping it closes its overlay, frees its GPU resources and joins its program's thread.
+/// One shown object; dropping it closes its overlay, frees its GPU resources and stops its program's thread.
 pub struct Object<S: Surface> {
     /// First, so the overlay closes before the textures it shows are freed.
     surface: S,
@@ -325,7 +341,11 @@ pub struct Object<S: Surface> {
 
 impl<S: Surface> Object<S> {
     pub fn spawn(surface: S, gpu: Rc<Gpu>, bytes: Vec<u8>, budget: Budget, now: Instant) -> Result<Object<S>, String> {
-        Ok(Object { drawn: None, renderer: Renderer::new(gpu, [EYE, EYE], 1.0)?, runner: Runner::start(bytes)?, surface, handling: Handling::new(now), budget, cost: 0.0, frames: 0 })
+        Object::loading(surface, gpu, bytes, load, budget, now)
+    }
+
+    fn loading(surface: S, gpu: Rc<Gpu>, bytes: Vec<u8>, load: Load, budget: Budget, now: Instant) -> Result<Object<S>, String> {
+        Ok(Object { drawn: None, renderer: Renderer::new(gpu, [EYE, EYE], 1.0)?, runner: Runner::start(bytes, load)?, surface, handling: Handling::new(now), budget, cost: 0.0, frames: 0 })
     }
 
     pub fn hide(&mut self) {
@@ -335,9 +355,7 @@ impl<S: Surface> Object<S> {
     /// Live data for the program; only the newest waiting update is kept.
     pub fn feed(&self, data: Vec<u8>) {
         self.runner.exchange.lock().unwrap().data = Some(data);
-        if let Some(thread) = &self.runner.thread {
-            thread.thread().unpark();
-        }
+        self.runner.thread.unpark();
     }
 
     /// Where the node named `name` is now, in the standing universe.
@@ -481,6 +499,9 @@ mod tests {
     static SURFACES: AtomicUsize = AtomicUsize::new(0);
 
     /// The software rasterizer the tests draw on is far slower than a headset's GPU.
+    /// One frame at 90 Hz.
+    const FRAME: Duration = Duration::from_millis(11);
+
     const LOOSE: Budget = Budget { mean: Duration::from_secs(1), frame: Duration::from_secs(5) };
 
     struct Counted;
@@ -764,7 +785,7 @@ mod tests {
             builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position } }] }]));
             builder.set("nodes", nodes);
             edit(&mut builder);
-            load(&builder.glb()).err().expect("refused")
+            load(&builder.glb(), &AtomicBool::new(false)).err().expect("refused")
         };
         let one = serde_json::json!([{ "mesh": 0 }]);
         let claimed = refused(one.clone(), &|builder| {
@@ -835,8 +856,59 @@ mod tests {
         assert_eq!(handling.touch(start + LIFETIME / 2 + LIFETIME, 0.1, None), Some("timed out"));
     }
 
+    #[test]
+    fn an_object_replaced_mid_load_leaves_within_a_frame_and_its_thread_ends_after() {
+        let slow: Load = |bytes, stop| {
+            std::thread::sleep(Duration::from_secs(2));
+            load(bytes, stop)
+        };
+        let gpu = Rc::new(Gpu::new(None).unwrap());
+        let now = Instant::now();
+        let mut slot = Slot::default();
+        slot.show(|| Object::loading(Counted::new(), gpu.clone(), cube(0.2), slow, LOOSE, now));
+        let exchange = Arc::downgrade(&slot.object.as_ref().unwrap().runner.exchange);
+        slot.step(now, &view(None));
+        let started = Instant::now();
+        slot.show(|| Object::loading(Counted::new(), gpu.clone(), cube(0.2), slow, LOOSE, now));
+        slot.step(now, &view(None));
+        slot.clear("session ended");
+        let spent = started.elapsed();
+        assert!(spent < FRAME, "replacing and clearing two loading objects took {spent:?}, over a {FRAME:?} frame");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while exchange.strong_count() > 0 {
+            assert!(Instant::now() < deadline, "the loading thread never ended");
+            std::thread::sleep(TICK);
+        }
+    }
+
+    #[test]
+    fn a_panic_while_loading_fails_the_object_at_once() {
+        let broken: Load = |_, _| panic!("a broken file");
+        let gpu = Rc::new(Gpu::new(None).unwrap());
+        let now = Instant::now();
+        let mut object = Object::loading(Counted::new(), gpu, cube(0.2), broken, LOOSE, now).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let error = loop {
+            assert!(Instant::now() < deadline, "the panic never reached the render thread");
+            if let Err(error) = object.step(now, &view(None)) {
+                break error;
+            }
+            std::thread::sleep(TICK);
+        };
+        assert!(error.contains("panicked"), "{error}");
+    }
+
     fn threads() -> usize {
         std::fs::read_dir("/proc/self/task").unwrap().count()
+    }
+
+    /// Program threads end on their own after their object leaves; waits up to a few seconds for the count to fall to `limit`.
+    fn settled(limit: usize) -> usize {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while threads() > limit && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        threads()
     }
 
     fn resident() -> usize {
@@ -867,7 +939,11 @@ mod tests {
             drawn(slot.object.as_mut().unwrap(), now);
         };
         spawn(&mut slot, start);
+        let warming = Arc::downgrade(&slot.object.as_ref().unwrap().runner.exchange);
         slot.clear("warm-up");
+        while warming.strong_count() > 0 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
         let (surfaces, allocations, threads_before, resident_before) = (SURFACES.load(Ordering::SeqCst), gpu.allocations(), threads(), resident());
         assert_eq!(surfaces, 0);
         let mut peak = 0;
@@ -875,7 +951,7 @@ mod tests {
             let now = start + Duration::from_secs(round);
             spawn(&mut slot, now);
             assert_eq!(SURFACES.load(Ordering::SeqCst), 1, "one overlay while shown");
-            assert!(gpu.allocations() > allocations && threads() <= threads_before + 1);
+            assert!(gpu.allocations() > allocations && settled(threads_before + 1) <= threads_before + 1);
             match round % 4 {
                 0 => {
                     slot.step(now, &view(Some([0.0, 1.2, -0.5])));
@@ -896,7 +972,7 @@ mod tests {
         eprintln!("cleanup: overlays {} gpu allocations {} -> {} threads {} -> {} resident {} -> {} MiB (peak {} MiB)", SURFACES.load(Ordering::SeqCst), allocations, gpu.allocations(), threads_before, threads(), resident_before >> 20, resident() >> 20, peak >> 20);
         assert_eq!(SURFACES.load(Ordering::SeqCst), 0, "every overlay closed");
         assert_eq!(gpu.allocations(), allocations, "every GPU allocation freed");
-        assert_eq!(threads(), threads_before, "every program thread joined");
+        assert_eq!(settled(threads_before), threads_before, "every program thread ended");
         assert!(growth < 24 << 20, "resident memory grew {} MiB over 120 objects", growth >> 20);
     }
 }

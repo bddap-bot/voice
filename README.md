@@ -42,7 +42,7 @@ Hub replies can add markdown, a tappable link, or an image to the adjacent displ
 
 Speech received after a hub reply is tagged “model after hub reply,” a chronological claim rather than proof that the model consumed that reply. The adjacent delegation record remains the authoritative record of what went to the hub and what came back.
 
-Run the page tests with `node --test test/*.test.js`.
+Run the page tests with `node --test test/*.test.js`. Every headless Chromium the tests and smokes start takes one of a host-wide set of slots, half the host's cores (at least two) unless `VOICE_CHROMIUM_SLOTS` says otherwise, and waits for a free one; with two dozen browsers on 16 cores Chromium suspended audio contexts on its own and page timing tests failed.
 
 Run `npm run smoke -- --output smoke-artifacts` for the public browser smoke. It records a pass/fail table, JSON measurements, viewport frames, and a short GIF for phone, laptop, and TV layouts. The workflow uses the checked-in known-failure baseline so new regressions fail the job while open layout findings remain visible in its artifact. With a credential from `voice-web token`, the same measurements run with `--private`; there the driver poses the real puppet directly, since a conversation toggle would open a Live session on the deployed server from a browser without a microphone.
 

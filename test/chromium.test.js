@@ -80,6 +80,25 @@ test('Chromium keeps its config, cache and crash database in its own scratch and
   }
 });
 
+test('Chromium launches past the host-wide slot bound wait until a running browser closes', async () => {
+  const script = `
+    import { launchChromium } from ${JSON.stringify(new URL('../scripts/chromium.mjs', import.meta.url).href)};
+    import { setTimeout as delay } from 'node:timers/promises';
+    const fake = () => launchChromium({ executable: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)', '--'] });
+    const first = await fake();
+    let second;
+    const launching = fake().then(chrome => { second = chrome; });
+    await delay(500);
+    const waited = second === undefined;
+    await first.close();
+    await launching;
+    await second.close();
+    process.stdout.write(JSON.stringify({ waited, launched: second !== undefined }));
+  `;
+  const { stdout } = await execute(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, VOICE_CHROMIUM_SLOTS: '1' } });
+  assert.deepEqual(JSON.parse(stdout), { waited: true, launched: true });
+});
+
 test('Chromium cleanup removes the profile when spawning fails', async () => {
   const browser = await launchChromium({ executable: join(process.cwd(), 'missing-chromium') });
   assert.equal((await browser.exited).code, 'ENOENT');

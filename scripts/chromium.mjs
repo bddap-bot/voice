@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
 import { access, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
+import { createServer } from 'node:net';
+import { availableParallelism } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -16,8 +18,36 @@ export async function chromiumExecutable() {
   throw new Error('headless Chromium is required; set CHROMIUM_BIN');
 }
 
+const SLOTS = Number(process.env.VOICE_CHROMIUM_SLOTS) || Math.max(2, Math.floor(availableParallelism() / 2));
+
+// Two dozen browsers on 16 cores starved Chromium's timers and it suspended AudioContexts on its own, so every
+// process on the host shares SLOTS. An abstract socket is released by the kernel when its holder dies.
+async function chromiumSlot() {
+  for (;;) {
+    for (let slot = 0; slot < SLOTS; slot++) {
+      const server = createServer();
+      const held = await new Promise(resolve => {
+        server.once('error', () => resolve(false));
+        server.listen(`\0voice-chromium-slot-${slot}`, () => resolve(true));
+      });
+      if (held) return () => server.close();
+    }
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+}
+
 export async function launchChromium({ executable, args = [] } = {}) {
   executable ??= await chromiumExecutable();
+  const release = await chromiumSlot();
+  try {
+    return await spawnChromium(executable, args, release);
+  } catch (error) {
+    release();
+    throw error;
+  }
+}
+
+async function spawnChromium(executable, args, release) {
   await mkdir(SCRATCH, { recursive: true });
   const scratch = await mkdtemp(join(SCRATCH, 'chromium-'));
   const chrome = spawn(executable, [...args, `--user-data-dir=${scratch}`, '--remote-debugging-pipe'], { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'], env: { ...process.env, HOME: scratch, XDG_CONFIG_HOME: scratch, XDG_CACHE_HOME: scratch, TMPDIR: scratch, VK_LOADER_DRIVERS_SELECT: '*swiftshader*' } });
@@ -32,6 +62,7 @@ export async function launchChromium({ executable, args = [] } = {}) {
     if (chrome.pid) chrome.kill('SIGKILL');
     await exited;
     await rm(scratch, { recursive: true, force: true });
+    release();
   })();
   return { scratch, exited, close, devtools: devtools(chrome.stdio[3], chrome.stdio[4], () => stderr), get stderr() { return stderr; } };
 }

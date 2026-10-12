@@ -71,6 +71,18 @@ struct Geometry {
     radius: f32,
     duration: f32,
     parts: Parts,
+    anchors: Vec<Option<V3>>,
+}
+
+/// The centre of each node's own and descendants' vertices, in that node's frame, for pointing at it.
+fn anchors(model: &Model, skinned: &Skinned, points: &[V3], rest: &[Mat4]) -> Vec<Option<V3>> {
+    let mut extents = vec![(V3::splat(f32::INFINITY), V3::splat(f32::NEG_INFINITY)); model.nodes()];
+    for (vertex, point) in skinned.vertices.iter().zip(points) {
+        for node in std::iter::successors(Some(skinned.joint_node(vertex.joints[0])), |&node| model.parent(node)) {
+            extents[node] = (extents[node].0.min(*point), extents[node].1.max(*point));
+        }
+    }
+    extents.iter().zip(rest).map(|((low, high), world)| (low.x <= high.x).then(|| world.inverse().transform_point3((*low + *high) / 2.0))).collect()
 }
 
 /// The pieces an object pulls apart into: its top-level nodes, or a lone root's children.
@@ -118,7 +130,8 @@ fn load(bytes: &[u8]) -> Result<Geometry, String> {
     if skinned.indices.len() / 3 > TRIANGLES {
         return Err(format!("{} triangles, over {TRIANGLES}", skinned.indices.len() / 3));
     }
-    let points = skinned.positions(&skinned.palette(&model.worlds(&model.rest()), Mat4::IDENTITY));
+    let rest = model.worlds(&model.rest());
+    let points = skinned.positions(&skinned.palette(&rest, Mat4::IDENTITY));
     let (low, high) = bounds(&points);
     let extent = (high - low).max_element();
     if !extent.is_finite() {
@@ -127,7 +140,8 @@ fn load(bytes: &[u8]) -> Result<Geometry, String> {
     let scale = if extent > SIZE { SIZE / extent } else { 1.0 };
     let duration = model.program.as_ref().map_or(0.0, |(_, duration)| *duration);
     let parts = Parts::find(&model, &skinned, &points, (low + high) / 2.0);
-    Ok(Geometry { fit: Mat4::from_scale(V3::splat(scale)) * Mat4::from_translation(-(low + high) / 2.0), radius: (high - low).length() * scale / 2.0, model, skinned, duration, parts })
+    let anchors = anchors(&model, &skinned, &points, &rest);
+    Ok(Geometry { fit: Mat4::from_scale(V3::splat(scale)) * Mat4::from_translation(-(low + high) / 2.0), radius: (high - low).length() * scale / 2.0, model, skinned, duration, parts, anchors })
 }
 
 /// What passes between the render thread and the object's thread; each side only ever takes the other's latest.
@@ -262,6 +276,9 @@ struct Drawn {
     radius: f32,
     duration: f32,
     parts: Parts,
+    anchors: Vec<Option<V3>>,
+    /// The object's own coordinates to the standing universe, as last drawn.
+    placed: Mat4,
 }
 
 fn transformed(model: &Model, transforms: &[Transform]) -> Vec<Mat4> {
@@ -292,6 +309,14 @@ impl<S: Surface> Object<S> {
         self.surface.hide();
     }
 
+    /// Where the node named `name` is now, in the standing universe.
+    pub fn locate(&self, name: &str) -> Option<Vec3> {
+        let drawn = self.drawn.as_ref()?;
+        let node = drawn.model.named(name)?;
+        let worlds = drawn.parts.spread(&drawn.worlds, self.handling.spread);
+        Some((drawn.placed * worlds[node]).transform_point3(drawn.anchors[node]?).into())
+    }
+
     /// Draws one frame; `Err` names why the object should go.
     pub fn step(&mut self, now: Instant, view: &View) -> Result<(), String> {
         let (geometry, transforms) = {
@@ -305,7 +330,7 @@ impl<S: Surface> Object<S> {
             Some(Ok(geometry)) => {
                 let appearance = self.renderer.appearance(&geometry.model, &geometry.skinned)?;
                 let worlds = geometry.model.worlds(&geometry.model.rest());
-                self.drawn = Some(Drawn { appearance, model: geometry.model, skinned: geometry.skinned, worlds, fit: geometry.fit, radius: geometry.radius, duration: geometry.duration, parts: geometry.parts });
+                self.drawn = Some(Drawn { appearance, model: geometry.model, skinned: geometry.skinned, worlds, fit: geometry.fit, radius: geometry.radius, duration: geometry.duration, parts: geometry.parts, anchors: geometry.anchors, placed: Mat4::IDENTITY });
             }
             Some(Err(error)) => return Err(error),
             None => {}
@@ -328,8 +353,8 @@ impl<S: Surface> Object<S> {
         }
         let quad = facing(view.center, view.head.t);
         let local = quad.inverse();
-        let placed = local.mat4() * Mat4::from_translation(view.center.into()) * turned;
-        drawn.appearance.update(&drawn.skinned.palette(&drawn.parts.spread(&drawn.worlds, self.handling.spread), placed), &drawn.skinned.vertices, &[]);
+        drawn.placed = Mat4::from_translation(view.center.into()) * turned;
+        drawn.appearance.update(&drawn.skinned.palette(&drawn.parts.spread(&drawn.worlds, self.handling.spread), local.mat4() * drawn.placed), &drawn.skinned.vertices, &[]);
         let eyes = view.eyes.map(|eye| eye_projection(local.apply(view.head.then(&eye).t).into(), QUAD / 2.0, QUAD / 2.0));
         let started = Instant::now();
         let mut texture = self.renderer.render(&drawn.appearance, eyes)?;
@@ -383,6 +408,10 @@ impl<S: Surface> Slot<S> {
         if let Some(object) = &mut self.object {
             object.hide();
         }
+    }
+
+    pub fn locate(&self, name: &str) -> Option<Vec3> {
+        self.object.as_ref()?.locate(name)
     }
 
     pub fn step(&mut self, now: Instant, view: &View) {
@@ -604,6 +633,24 @@ mod tests {
         }
         let closed = parts(&object);
         assert!((closed[1] - closed[0] - 0.12).abs() < 1e-3, "withdrawn, they close: {closed:?}");
+    }
+
+    #[test]
+    fn a_named_part_is_located_where_it_is_drawn_spread_and_turned() {
+        let gpu = Rc::new(Gpu::new(None).unwrap());
+        let born = Instant::now();
+        let nodes = serde_json::json!([{ "mesh": 0, "name": "left", "translation": [-0.06, 0.0, 0.0] }, { "mesh": 0, "name": "right", "translation": [0.06, 0.0, 0.0] }]);
+        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None), born).unwrap();
+        drawn(&mut object, born);
+        let center = V3::from(view(None).center);
+        let right = V3::from(object.locate("right").unwrap());
+        assert!(right.abs_diff_eq(center + V3::new(0.06, 0.0, 0.0), 1e-5), "the right cube's centre: {right}");
+        assert_eq!(object.locate("missing"), None);
+        object.handling.spread = 1.0;
+        object.handling.yaw = std::f32::consts::FRAC_PI_2;
+        object.step(born, &view(None)).unwrap();
+        let moved = V3::from(object.locate("right").unwrap());
+        assert!(moved.abs_diff_eq(center + V3::new(0.0, 0.0, -0.12), 1e-5), "spread to 12 cm and turned a quarter: {moved}");
     }
 
     #[test]

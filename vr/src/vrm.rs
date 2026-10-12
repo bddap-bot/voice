@@ -66,6 +66,7 @@ struct Node {
     scale: Vec3,
     mesh: Option<usize>,
     skin: Option<usize>,
+    name: Option<String>,
 }
 
 struct Skin {
@@ -585,7 +586,7 @@ impl Model {
                     Some(matrix) => Mat4::from_cols_array(&floats(matrix, Mat4::IDENTITY.to_cols_array())).to_scale_rotation_translation(),
                     None => (Vec3::from(floats(&node["scale"], [1.0; 3])), Quat::from_array(floats(&node["rotation"], [0.0, 0.0, 0.0, 1.0])), Vec3::from(floats(&node["translation"], [0.0; 3]))),
                 };
-                Node { parent: None, translation, rotation, scale, mesh: index(&node["mesh"]), skin: index(&node["skin"]) }
+                Node { parent: None, translation, rotation, scale, mesh: index(&node["mesh"]), skin: index(&node["skin"]), name: node["name"].as_str().map(str::to_owned) }
             })
             .collect();
         let mut children = vec![Vec::new(); nodes.len()];
@@ -804,6 +805,23 @@ impl Model {
 
     pub fn parent(&self, node: usize) -> Option<usize> {
         self.nodes[node].parent
+    }
+
+    pub fn named(&self, name: &str) -> Option<usize> {
+        self.nodes.iter().position(|node| node.name.as_deref() == Some(name))
+    }
+
+    /// Straightens the right elbow and turns the right upper arm until the hand lies on the line from the shoulder to `target`, both by `weight`.
+    pub fn point_at(&self, pose: &mut Pose, target: Vec3, weight: f32) {
+        let (Some(&upper), Some(&lower), Some(&hand)) = (self.humanoid.get("rightUpperArm"), self.humanoid.get("rightLowerArm"), self.humanoid.get("rightHand")) else { return };
+        pose.rotations[lower] = pose.rotations[lower].slerp(self.nodes[lower].rotation, weight);
+        let worlds = self.worlds(pose);
+        let shoulder = worlds[upper].w_axis.truncate();
+        let (reach, toward) = (worlds[hand].w_axis.truncate() - shoulder, target - shoulder);
+        let (Some(reach), Some(toward)) = (reach.try_normalize(), toward.try_normalize()) else { return };
+        let turn = Quat::IDENTITY.slerp(Quat::from_rotation_arc(reach, toward), weight);
+        let parent = self.nodes[upper].parent.map_or(Quat::IDENTITY, |parent| rotation(&worlds[parent]));
+        pose.rotations[upper] = (parent.inverse() * turn * parent * pose.rotations[upper]).normalize();
     }
 
     pub fn rest(&self) -> Pose {
@@ -1251,6 +1269,27 @@ pub mod tests {
         assert!(parse(serde_json::json!([{ "mesh": 0 }, { "mesh": 5 }]), serde_json::json!({})).unwrap().contains("out of range"));
         assert!(parse(serde_json::json!([{ "mesh": 0 }]), serde_json::json!({ "hips": { "node": 9 } })).unwrap().contains("out of range"));
         assert!(parse(serde_json::json!([{ "mesh": 0 }]), serde_json::json!({ "hips": { "node": 0 } })).is_none());
+    }
+
+    #[test]
+    fn pointing_straightens_the_elbow_and_lays_the_hand_on_the_line_to_the_target() {
+        let mut builder = Builder::new(serde_json::json!({ "VRMC_vrm": { "humanoid": { "humanBones": { "rightUpperArm": { "node": 1 }, "rightLowerArm": { "node": 2 }, "rightHand": { "node": 3 } } } } }));
+        let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position } }] }]));
+        builder.set("nodes", serde_json::json!([{ "mesh": 0, "children": [1] }, { "translation": [-0.2, 1.4, 0.0], "children": [2] }, { "translation": [-0.25, 0.0, 0.0], "children": [3] }, { "translation": [-0.25, 0.0, 0.0] }]));
+        let model = Model::parse(&builder.glb()).unwrap();
+        let mut pose = model.rest();
+        pose.rotations[2] = Quat::from_rotation_z(1.0);
+        let target = Vec3::new(-0.2, 1.4, 1.0);
+        model.point_at(&mut pose, target, 1.0);
+        let worlds = model.worlds(&pose);
+        let [shoulder, elbow, hand] = [1, 2, 3].map(|node| worlds[node].w_axis.truncate());
+        assert!((hand - shoulder).normalize().abs_diff_eq((target - shoulder).normalize(), 1e-4), "the hand {hand} is on the line to {target}");
+        assert!(((hand - shoulder).length() - 0.5).abs() < 1e-4 && (elbow - shoulder).normalize().abs_diff_eq((hand - shoulder).normalize(), 1e-4), "the elbow is straight");
+        let mut half = model.rest();
+        model.point_at(&mut half, target, 0.5);
+        let reach = model.worlds(&half)[3].w_axis.truncate() - shoulder;
+        assert!((reach.angle_between(Vec3::NEG_X) - std::f32::consts::FRAC_PI_4).abs() < 1e-3, "half weight turns half way: {reach}");
     }
 
     #[test]

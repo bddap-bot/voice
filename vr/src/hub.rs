@@ -73,6 +73,7 @@ struct Shown {
     link: Option<String>,
     image: Option<serde::de::IgnoredAny>,
     object: Option<serde::de::IgnoredAny>,
+    point: Option<String>,
 }
 
 /// What a hub reply asks to show, as the page's display card does.
@@ -84,6 +85,15 @@ pub struct Display {
     pub image: Option<Vec<u8>>,
     /// A binary glTF 2 scene; a reply carries an image or an object, never both, so either is the whole trailer.
     pub object: Option<Vec<u8>>,
+    /// The name of a node in the shown object for the puppet to point at while it speaks.
+    pub point: Option<String>,
+}
+
+impl Display {
+    /// Whether it only speaks to the shown object, leaving the panel and the object as they are.
+    pub fn addresses_object(&self) -> bool {
+        self.markdown.is_none() && self.link.is_none() && self.image.is_none() && self.object.is_none()
+    }
 }
 
 enum Turn {
@@ -235,7 +245,7 @@ impl Hub {
         trace.calls.replied(&reply.id, &reply.commentary);
         if let Some(shown) = reply.display.take() {
             let trailer = |carried: bool| (carried && !image.is_empty()).then(|| image.to_vec());
-            self.display = Some(Display { markdown: shown.markdown, link: shown.link, image: trailer(shown.image.is_some()), object: trailer(shown.object.is_some() && shown.image.is_none()) });
+            self.display = Some(Display { markdown: shown.markdown, link: shown.link, image: trailer(shown.image.is_some()), object: trailer(shown.object.is_some() && shown.image.is_none()), point: shown.point });
         }
         let unspoken = (!reply.commentary.is_empty() && self.sleeping).then_some(ASLEEP);
         let mut ack = json!({ "id": reply.id, "stamp": reply.stamp });
@@ -494,6 +504,10 @@ mod tests {
         body.extend(b"glTF\x02\0\0\0");
         f.hub.reply(&body, &mut f.trace, f.now);
         assert_eq!(f.hub.take_display(), Some(Display { markdown: Some("A cube".into()), object: Some(b"glTF\x02\0\0\0".to_vec()), ..Display::default() }));
+        f.reply(json!({ "id": "cube", "stamp": "o2", "commentary": ["This face."], "instructions": [], "display": { "point": "top" } }));
+        let pointed = f.hub.take_display().unwrap();
+        assert_eq!(pointed.point.as_deref(), Some("top"));
+        assert!(pointed.addresses_object(), "a display that only points leaves the panel and the object");
     }
 
     #[test]

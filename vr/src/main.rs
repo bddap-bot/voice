@@ -17,6 +17,7 @@ mod program;
 mod openvr;
 mod panel;
 mod placement;
+mod point;
 mod preview;
 mod vulkan;
 mod vrm;
@@ -164,6 +165,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
     let mut display_image = vulkan::Flat::new(gpu.clone());
     let mut display: Option<[f32; 2]> = None;
     let mut object: object::Slot<openvr::Overlay> = object::Slot::default();
+    let mut pointing = point::Pointing::default();
     let eye_offsets = runtime.eye_offsets();
     let mut meter = Meter::default();
     let epoch = Instant::now();
@@ -241,6 +243,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
             board.reset();
             display = None;
             object.clear("summoned");
+            pointing.stop();
             meter = Meter::default();
         }
         voice.step();
@@ -295,22 +298,27 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
         let mount = under_controller(board.height());
         let board_pose = left.then(&mount);
         board_overlay.place_on(device, &mount);
-        let fresh = voice.take_display().map(|mut shown| {
+        let mut fresh = None;
+        if let Some(mut shown) = voice.take_display() {
+            if let Some(name) = shown.point.take() {
+                pointing.start(name, started);
+            }
+            let in_place = shown.addresses_object();
+            let card = shown.markdown.is_some() || shown.link.is_some() || shown.image.is_some();
             match shown.object.take() {
                 Some(scene) => object.show(|| object::Object::spawn(runtime.create_overlay("voice.object", "Object", object::QUAD, true)?, gpu.clone(), scene, started)),
-                None => object.clear("replaced by a display without one"),
+                None if card => object.clear("replaced by a display without one"),
+                None => {}
             }
-            (shown.markdown.is_some() || shown.link.is_some() || shown.image.is_some()).then(|| panel::draw(&shown))
-        });
-        match &fresh {
-            Some(Some(picture)) => display = Some(panel::size(picture)),
-            Some(None) => {
+            if card {
+                let picture = panel::draw(&shown);
+                display = Some(panel::size(&picture));
+                fresh = Some(picture);
+            } else if !in_place {
                 display = None;
                 display_overlay.hide();
             }
-            None => {}
         }
-        let fresh = fresh.flatten();
         if let Some(size) = display {
             display_overlay.place_on(device, &beside(&mount, [board::WIDTH, board.height()], size));
             if let Some(picture) = fresh {
@@ -398,7 +406,11 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
         let placement = puppet.fit.placement(&puppet.model, &worlds, 0.0);
         puppet.gaze.look(&puppet.model, &mut pose, &worlds, placement.inverse().transform_point3(stand.inverse().apply(head.t).into()), delta);
         puppet.model.express(&mut pose, "blink", puppet.animator.blink());
-        puppet.model.express(&mut pose, "aa", voice.mouth());
+        let mouth = voice.mouth();
+        if let Some((target, weight)) = pointing.step(started, delta, mouth, |name| object.locate(name)) {
+            puppet.model.point_at(&mut pose, placement.inverse().transform_point3(stand.inverse().apply(target).into()), weight);
+        }
+        puppet.model.express(&mut pose, "aa", mouth);
         puppet.springs.step(&puppet.model, &mut pose, stand.mat4() * placement, delta);
         let changed = puppet.skinned.morph(&pose.weights);
         let palette = puppet.skinned.palette(&puppet.model.worlds(&pose), local.then(&stand).mat4() * placement);

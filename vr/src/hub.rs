@@ -89,7 +89,6 @@ pub struct Display {
     pub object: Option<Vec<u8>>,
     /// The name of a node in the shown object for the puppet to point at while it speaks.
     pub point: Option<String>,
-    /// Live data for the shown object's program.
     pub data: Option<String>,
     /// An HTML document, which only the page can run.
     pub html: bool,

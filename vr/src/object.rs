@@ -19,11 +19,19 @@ const EYE: u32 = 512;
 /// The largest side an object is shown at; a smaller one keeps its own size, glTF units being metres.
 pub const SIZE: f32 = 0.25;
 pub const TRIANGLES: usize = 200_000;
-/// How long an object stays once nothing touches it.
+pub const VERTICES: usize = 600_000;
 pub const LIFETIME: Duration = Duration::from_secs(180);
-/// GPU time one object may take a frame; this many frames over it in a row stop the object.
-pub const BUDGET: Duration = Duration::from_millis(8);
-const OVER_BUDGET: u32 = 90;
+/// The render thread's time for one object, mostly the wait for its GPU work, past which it is stopped.
+#[derive(Clone, Copy)]
+pub struct Budget {
+    /// Averaged over about `WINDOW` frames.
+    pub mean: Duration,
+    /// Any one frame after the first `WINDOW`, whose uploads and first draws run long on any device.
+    pub frame: Duration,
+}
+
+pub const BUDGET: Budget = Budget { mean: Duration::from_millis(4), frame: Duration::from_millis(40) };
+const WINDOW: f32 = 45.0;
 /// Tip speed relative to the object that throws it away.
 pub const FLICK: f32 = 1.8;
 const MIN_REACH: f32 = 0.06;
@@ -126,10 +134,11 @@ impl Parts {
 
 fn load(bytes: &[u8]) -> Result<Geometry, String> {
     let model = Model::object(bytes)?;
-    let skinned = model.skinned()?;
-    if skinned.indices.len() / 3 > TRIANGLES {
-        return Err(format!("{} triangles, over {TRIANGLES}", skinned.indices.len() / 3));
+    let (vertices, triangles) = model.drawn_size();
+    if vertices > VERTICES || triangles > TRIANGLES {
+        return Err(format!("{vertices} vertices and {triangles} triangles drawn, over {VERTICES} or {TRIANGLES}"));
     }
+    let skinned = model.skinned()?;
     let rest = model.worlds(&model.rest());
     let points = skinned.positions(&skinned.palette(&rest, Mat4::IDENTITY));
     let (low, high) = bounds(&points);
@@ -147,7 +156,7 @@ fn load(bytes: &[u8]) -> Result<Geometry, String> {
 /// What passes between the render thread and the object's thread; each side only ever takes the other's latest.
 #[derive(Default)]
 struct Exchange {
-    geometry: Option<Result<Geometry, String>>,
+    geometry: Option<Geometry>,
     transforms: Option<Vec<Transform>>,
     failed: Option<String>,
     time: f32,
@@ -156,8 +165,11 @@ struct Exchange {
 }
 
 fn run(bytes: Vec<u8>, exchange: &Mutex<Exchange>, stop: &AtomicBool) {
-    let mut geometry = load(&bytes);
-    let wasm = geometry.as_mut().ok().and_then(|geometry| Some((geometry.model.program.take()?.0, geometry.model.nodes())));
+    let mut geometry = match load(&bytes) {
+        Ok(geometry) => geometry,
+        Err(error) => return exchange.lock().unwrap().failed = Some(error),
+    };
+    let wasm = geometry.model.program.take().map(|(wasm, _)| (wasm, geometry.model.nodes()));
     exchange.lock().unwrap().geometry = Some(geometry);
     let Some((wasm, nodes)) = wasm else { return };
     let mut program = match program::Program::new(&wasm, nodes) {
@@ -218,37 +230,40 @@ pub struct Handling {
     pub slide: f32,
     /// Seconds the timeline has run untouched.
     pub clock: f32,
+    /// Where the tip is inside the object, relative to its centre.
+    pub touching: Option<Vec3>,
     deadline: Instant,
-    last: Option<(Vec3, Instant)>,
+    /// The tip relative to the centre and in the room, when last inside.
+    last: Option<(Vec3, Vec3, Instant)>,
     stepped: Instant,
 }
 
 impl Handling {
     pub fn new(now: Instant) -> Handling {
-        Handling { yaw: 0.0, spread: 0.0, slide: 0.0, clock: 0.0, deadline: now + LIFETIME, last: None, stepped: now }
+        Handling { yaw: 0.0, spread: 0.0, slide: 0.0, clock: 0.0, touching: None, deadline: now + LIFETIME, last: None, stepped: now }
     }
 
-    /// `tip` is relative to the object's centre; a reason when the object should go.
-    pub fn touch(&mut self, now: Instant, radius: f32, tip: Option<Vec3>) -> Option<&'static str> {
+    /// `reach` is the object's radius, at least `MIN_REACH`; `tip` is the tip relative to the object's centre and in the room. A reason when the object should go.
+    pub fn touch(&mut self, now: Instant, reach: f32, tip: Option<(Vec3, Vec3)>) -> Option<&'static str> {
         if now >= self.deadline {
             return Some("timed out");
         }
         let delta = now.saturating_duration_since(self.stepped).as_secs_f32();
         self.stepped = now;
         let previous = self.last.take();
-        let reach = radius.max(MIN_REACH);
-        let tip = tip.filter(|&tip| length(tip) <= reach);
-        let depth = tip.map_or(1.0, |tip| length(tip) / reach);
+        let inside = tip.filter(|&(tip, _)| length(tip) <= reach);
+        self.touching = inside.map(|(tip, _)| tip);
+        let depth = self.touching.map_or(1.0, |tip| length(tip) / reach);
         let target = ((OPENING - depth) / (OPENING - OPEN)).clamp(0.0, 1.0);
         self.spread += (target - self.spread) * (delta * EASE).min(1.0);
-        let Some(tip) = tip else {
+        let Some((tip, room)) = inside else {
             self.clock += delta;
             return None;
         };
         self.deadline = now + LIFETIME;
-        if let Some((before, at)) = previous {
+        if let Some((before, room_before, at)) = previous {
             let seconds = (now - at).as_secs_f32();
-            if seconds > 0.0 && length(sub(tip, before)) / seconds > FLICK {
+            if seconds > 0.0 && length(sub(room, room_before)) / seconds > FLICK {
                 return Some("flicked away");
             }
             self.slide += tip[1] - before[1];
@@ -258,7 +273,7 @@ impl Handling {
                 self.yaw += (turn + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
             }
         }
-        self.last = Some((tip, now));
+        self.last = Some((tip, room, now));
         None
     }
 }
@@ -296,17 +311,21 @@ fn transformed(model: &Model, transforms: &[Transform]) -> Vec<Mat4> {
 
 /// One shown object; dropping it closes its overlay, frees its GPU resources and joins its program's thread.
 pub struct Object<S: Surface> {
+    /// First, so the overlay closes before the textures it shows are freed.
+    surface: S,
     drawn: Option<Drawn>,
     renderer: Renderer,
     runner: Runner,
-    surface: S,
     handling: Handling,
-    over: u32,
+    budget: Budget,
+    /// Seconds the render thread spends on it per frame, a running mean.
+    cost: f32,
+    frames: u32,
 }
 
 impl<S: Surface> Object<S> {
-    pub fn spawn(surface: S, gpu: Rc<Gpu>, bytes: Vec<u8>, now: Instant) -> Result<Object<S>, String> {
-        Ok(Object { drawn: None, renderer: Renderer::new(gpu, [EYE, EYE], 1.0)?, runner: Runner::start(bytes)?, surface, handling: Handling::new(now), over: 0 })
+    pub fn spawn(surface: S, gpu: Rc<Gpu>, bytes: Vec<u8>, budget: Budget, now: Instant) -> Result<Object<S>, String> {
+        Ok(Object { drawn: None, renderer: Renderer::new(gpu, [EYE, EYE], 1.0)?, runner: Runner::start(bytes)?, surface, handling: Handling::new(now), budget, cost: 0.0, frames: 0 })
     }
 
     pub fn hide(&mut self) {
@@ -338,18 +357,13 @@ impl<S: Surface> Object<S> {
             }
             (exchange.geometry.take(), exchange.transforms.take())
         };
-        match geometry {
-            Some(Ok(geometry)) => {
-                let appearance = self.renderer.appearance(&geometry.model, &geometry.skinned)?;
-                let worlds = geometry.model.worlds(&geometry.model.rest());
-                self.drawn = Some(Drawn { appearance, model: geometry.model, skinned: geometry.skinned, worlds, fit: geometry.fit, radius: geometry.radius, duration: geometry.duration, parts: geometry.parts, anchors: geometry.anchors, placed: Mat4::IDENTITY });
-            }
-            Some(Err(error)) => return Err(error),
-            None => {}
+        if let Some(geometry) = geometry {
+            let appearance = self.renderer.appearance(&geometry.model, &geometry.skinned)?;
+            let worlds = geometry.model.worlds(&geometry.model.rest());
+            self.drawn = Some(Drawn { appearance, model: geometry.model, skinned: geometry.skinned, worlds, fit: geometry.fit, radius: geometry.radius, duration: geometry.duration, parts: geometry.parts, anchors: geometry.anchors, placed: Mat4::IDENTITY });
         }
-        let radius = self.drawn.as_ref().map_or(0.0, |drawn| drawn.radius);
-        let offset = view.tip.map(|tip| sub(tip, view.center));
-        if let Some(reason) = self.handling.touch(now, radius, offset) {
+        let reach = self.drawn.as_ref().map_or(0.0, |drawn| drawn.radius).max(MIN_REACH);
+        if let Some(reason) = self.handling.touch(now, reach, view.tip.map(|tip| (sub(tip, view.center), tip))) {
             return Err(reason.into());
         }
         let Some(drawn) = &mut self.drawn else { return Ok(()) };
@@ -360,8 +374,8 @@ impl<S: Surface> Object<S> {
         {
             let mut exchange = self.runner.exchange.lock().unwrap();
             let handling = &self.handling;
-            exchange.time = if drawn.duration > 0.0 { (handling.clock + handling.slide / (2.0 * drawn.radius) * drawn.duration).rem_euclid(drawn.duration) } else { handling.clock };
-            exchange.tip = offset.filter(|&offset| length(offset) <= radius).map(|offset| turned.inverse().transform_point3(offset.into()).into());
+            exchange.time = if drawn.duration > 0.0 { (handling.clock + handling.slide / (2.0 * reach) * drawn.duration).rem_euclid(drawn.duration) } else { handling.clock };
+            exchange.tip = handling.touching.map(|offset| turned.inverse().transform_point3(offset.into()).into());
         }
         let quad = facing(view.center, view.head.t);
         let local = quad.inverse();
@@ -370,9 +384,14 @@ impl<S: Surface> Object<S> {
         let eyes = view.eyes.map(|eye| eye_projection(local.apply(view.head.then(&eye).t).into(), QUAD / 2.0, QUAD / 2.0));
         let started = Instant::now();
         let mut texture = self.renderer.render(&drawn.appearance, eyes)?;
-        self.over = if started.elapsed() > BUDGET { self.over + 1 } else { 0 };
-        if self.over >= OVER_BUDGET {
-            return Err(format!("over its {} ms frame budget for {OVER_BUDGET} frames", BUDGET.as_millis()));
+        let spent = started.elapsed();
+        self.frames += 1;
+        self.cost += (spent.as_secs_f32() - self.cost) / (self.frames as f32).min(WINDOW);
+        if self.frames as f32 > WINDOW && spent > self.budget.frame {
+            return Err(format!("one frame took {} ms, over {} ms", spent.as_millis(), self.budget.frame.as_millis()));
+        }
+        if self.frames as f32 >= WINDOW && self.cost > self.budget.mean.as_secs_f32() {
+            return Err(format!("{:.1} ms a frame, over its {} ms budget", self.cost * 1e3, self.budget.mean.as_millis()));
         }
         self.surface.place_in_world(&quad);
         self.surface.texture(&mut texture)?;
@@ -452,6 +471,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static SURFACES: AtomicUsize = AtomicUsize::new(0);
+
+    /// The software rasterizer the tests draw on is far slower than a headset's GPU.
+    const LOOSE: Budget = Budget { mean: Duration::from_secs(1), frame: Duration::from_secs(5) };
 
     struct Counted;
 
@@ -552,7 +574,7 @@ mod tests {
     fn a_plain_gltf_object_is_drawn_in_both_eyes_shaded_and_fit_to_its_size() {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let now = Instant::now();
-        let mut object = Object::spawn(Counted::new(), gpu, cube(3.0), now).unwrap();
+        let mut object = Object::spawn(Counted::new(), gpu, cube(3.0), LOOSE, now).unwrap();
         drawn(&mut object, now);
         let fit = object.drawn.as_ref().unwrap().radius;
         assert!(fit >= SIZE / 2.0 && fit <= SIZE * 3f32.sqrt() / 2.0, "a turned 3 m cube shows with its largest side at {SIZE} m: radius {fit}");
@@ -570,7 +592,7 @@ mod tests {
             }
             assert!(covered.len() >= 4, "eye {half}: textured, lit and shaded faces give several colours, got {covered:?}");
         }
-        let small = Object::spawn(Counted::new(), Rc::new(Gpu::new(None).unwrap()), cube(0.05), now);
+        let small = Object::spawn(Counted::new(), Rc::new(Gpu::new(None).unwrap()), cube(0.05), LOOSE, now);
         let mut small = small.unwrap();
         drawn(&mut small, now);
         let radius = small.drawn.as_ref().unwrap().radius;
@@ -583,7 +605,7 @@ mod tests {
         let now = Instant::now();
         for (bytes, expected) in [(b"not a model".to_vec(), "glTF"), (Builder::new(serde_json::json!({})).glb(), "no mesh")] {
             let mut slot = Slot::default();
-            slot.show(|| Object::spawn(Counted::new(), gpu.clone(), bytes, now));
+            slot.show(|| Object::spawn(Counted::new(), gpu.clone(), bytes, LOOSE, now));
             let deadline = Instant::now() + Duration::from_secs(10);
             let error = loop {
                 assert!(Instant::now() < deadline);
@@ -599,7 +621,7 @@ mod tests {
     fn a_program_moves_the_object_from_its_own_thread_by_time_and_touch() {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
-        let mut object = Object::spawn(Counted::new(), gpu, scene(0.2, Some((crate::program::tests::FOLLOW, 4.0))), born).unwrap();
+        let mut object = Object::spawn(Counted::new(), gpu, scene(0.2, Some((crate::program::tests::FOLLOW, 4.0))), LOOSE, born).unwrap();
         drawn(&mut object, born);
         object.step(born + Duration::from_secs(5), &view(None)).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -621,7 +643,7 @@ mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
         let nodes = serde_json::json!([{ "mesh": 0, "translation": [-0.06, 0.0, 0.0] }, { "mesh": 0, "translation": [0.06, 0.0, 0.0] }]);
-        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None), born).unwrap();
+        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None), LOOSE, born).unwrap();
         drawn(&mut object, born);
         let radius = object.drawn.as_ref().unwrap().radius;
         let center = view(None).center;
@@ -659,7 +681,7 @@ mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
         let nodes = serde_json::json!([{ "mesh": 0, "name": "left", "translation": [-0.06, 0.0, 0.0] }, { "mesh": 0, "name": "right", "translation": [0.06, 0.0, 0.0] }]);
-        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None), born).unwrap();
+        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None), LOOSE, born).unwrap();
         drawn(&mut object, born);
         let center = V3::from(view(None).center);
         let right = V3::from(object.locate("right").unwrap());
@@ -677,7 +699,7 @@ mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
         let mut slot = Slot::default();
-        slot.show(|| Object::spawn(Counted::new(), gpu, scene(0.2, Some((crate::program::tests::GAUGE, 0.0))), born));
+        slot.show(|| Object::spawn(Counted::new(), gpu, scene(0.2, Some((crate::program::tests::GAUGE, 0.0))), LOOSE, born));
         slot.feed(b"\x05".to_vec());
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -691,11 +713,23 @@ mod tests {
     }
 
     #[test]
+    fn an_object_over_its_budget_is_stopped_after_its_first_frames() {
+        let gpu = Rc::new(Gpu::new(None).unwrap());
+        let now = Instant::now();
+        let tight = Budget { mean: Duration::from_nanos(1), frame: Duration::from_secs(5) };
+        let mut object = Object::spawn(Counted::new(), gpu, cube(0.1), tight, now).unwrap();
+        drawn(&mut object, now);
+        let error = (0..WINDOW as usize).find_map(|_| object.step(now, &view(None)).err()).expect("stopped within its window");
+        assert!(error.contains("budget"), "{error}");
+        assert!(object.frames as f32 >= WINDOW, "not before its first {WINDOW} frames: stopped after {}", object.frames);
+    }
+
+    #[test]
     fn a_program_that_never_returns_is_stopped_without_stalling_the_render_thread() {
         let spin = r#"(module (memory (export "memory") 1) (func (export "tick") (param f32 f32 f32 f32 i32) (result i32) (loop $l (br $l)) (i32.const 0)))"#;
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let now = Instant::now();
-        let mut object = Object::spawn(Counted::new(), gpu, scene(0.2, Some((spin, 0.0))), now).unwrap();
+        let mut object = Object::spawn(Counted::new(), gpu, scene(0.2, Some((spin, 0.0))), LOOSE, now).unwrap();
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut slowest = Duration::ZERO;
         let error = loop {
@@ -715,29 +749,75 @@ mod tests {
     }
 
     #[test]
+    fn a_file_whose_size_is_claimed_rather_than_carried_is_refused_before_it_is_allocated() {
+        let refused = |nodes: serde_json::Value, edit: &dyn Fn(&mut Builder)| {
+            let mut builder = Builder::new(serde_json::json!({}));
+            let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+            builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position } }] }]));
+            builder.set("nodes", nodes);
+            edit(&mut builder);
+            load(&builder.glb()).err().expect("refused")
+        };
+        let one = serde_json::json!([{ "mesh": 0 }]);
+        let claimed = refused(one.clone(), &|builder| {
+            builder.push_accessor(serde_json::json!({ "bufferView": 0, "componentType": 5126, "count": 4_000_000_000_000u64, "type": "VEC3" }));
+            builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": 1 } }] }]));
+        });
+        assert!(claimed.contains("outside its bufferView"), "{claimed}");
+        let unstored = refused(one.clone(), &|builder| {
+            builder.push_accessor(serde_json::json!({ "componentType": 5126, "count": 4_000_000_000_000u64, "type": "VEC3" }));
+            builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": 1 } }] }]));
+        });
+        assert!(unstored.contains("too long"), "{unstored}");
+        let shared = refused(serde_json::Value::Array((0..crate::vrm::OBJECT_NODES).map(|_| serde_json::json!({ "mesh": 0 })).collect()), &|builder| {
+            let corners: Vec<f32> = (0..200 * 3).map(|value| value as f32).collect();
+            let position = builder.accessor("VEC3", &corners);
+            builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position } }] }]));
+        });
+        assert!(shared.contains("vertices"), "one mesh drawn by every node: {shared}");
+        let chain: Vec<serde_json::Value> = (0..100).map(|node| if node < 99 { serde_json::json!({ "mesh": 0, "children": [node + 1] }) } else { serde_json::json!({ "mesh": 0 }) }).collect();
+        assert!(refused(serde_json::Value::Array(chain), &|_| {}).contains("deep"));
+        let huge = refused(one, &|builder| {
+            let mut png = Vec::new();
+            image::RgbaImage::new(1, 1).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+            png[16..24].copy_from_slice(&[0, 0, 0x75, 0x30, 0, 0, 0x75, 0x30]);
+            let view = builder.view(&png);
+            builder.set("images", serde_json::json!([{ "bufferView": view, "mimeType": "image/png" }]));
+            builder.set("textures", serde_json::json!([{ "source": 0 }]));
+            builder.set("materials", serde_json::json!([{ "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } } }]));
+            builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": 0 }, "material": 0 }] }]));
+        });
+        assert!(huge.contains("image 0"), "a 30000-texel header is refused from the header: {huge}");
+    }
+
+    #[test]
     fn stirring_the_tip_inside_turns_the_object_and_a_flick_throws_it_away() {
         let start = Instant::now();
         let mut handling = Handling::new(start);
+        let still = |tip: Vec3| Some((tip, tip));
         let frame = Duration::from_millis(11);
         let mut now = start;
         for step in 0..=45 {
             let angle = step as f32 * std::f32::consts::FRAC_PI_2 / 45.0;
-            assert_eq!(handling.touch(now, 0.1, Some([0.08 * angle.sin(), 0.0, 0.08 * angle.cos()])), None);
+            assert_eq!(handling.touch(now, 0.1, still([0.08 * angle.sin(), 0.0, 0.08 * angle.cos()])), None);
             now += frame;
         }
         assert!((handling.yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-3, "a quarter turn of the tip turns it a quarter: {}", handling.yaw);
-        assert_eq!(handling.touch(now, 0.1, Some([0.5, 0.0, 0.0])), None, "outside its reach nothing happens");
+        assert_eq!(handling.touch(now, 0.1, still([0.5, 0.0, 0.0])), None, "outside its reach nothing happens");
         now += frame;
-        assert_eq!(handling.touch(now, 0.1, Some([0.0, 0.0, 0.0])), None);
+        assert_eq!(handling.touch(now, 0.1, still([0.0, 0.0, 0.0])), None);
         now += frame;
-        assert_eq!(handling.touch(now, 0.1, Some([0.03, 0.0, 0.0])), Some("flicked away"), "3 cm in 11 ms is past {FLICK} m/s");
+        assert_eq!(handling.touch(now, 0.1, Some(([0.03, 0.0, 0.0], [0.0; 3]))), None, "the object carried 3 cm past a still tip is not a flick");
+        now += frame;
+        assert_eq!(handling.touch(now, 0.1, Some(([0.0, 0.0, 0.0], [0.03, 0.0, 0.0]))), Some("flicked away"), "the tip moving 3 cm in 11 ms is past {FLICK} m/s");
     }
 
     #[test]
     fn an_untouched_object_times_out_and_a_touch_restarts_its_lifetime() {
         let start = Instant::now();
         let mut handling = Handling::new(start);
-        assert_eq!(handling.touch(start + LIFETIME / 2, 0.1, Some([0.0, 0.05, 0.0])), None);
+        let still = |tip: Vec3| Some((tip, tip));
+        assert_eq!(handling.touch(start + LIFETIME / 2, 0.1, still([0.0, 0.05, 0.0])), None);
         assert_eq!(handling.touch(start + LIFETIME, 0.1, None), None, "the touch restarted it");
         assert_eq!(handling.touch(start + LIFETIME / 2 + LIFETIME, 0.1, None), Some("timed out"));
     }
@@ -770,7 +850,7 @@ mod tests {
         let mut slot: Slot<Counted> = Slot::default();
         let start = Instant::now();
         let spawn = |slot: &mut Slot<Counted>, now: Instant| {
-            slot.show(|| Object::spawn(Counted::new(), gpu.clone(), bytes[now.duration_since(start).as_secs() as usize % 5 % 2].clone(), now));
+            slot.show(|| Object::spawn(Counted::new(), gpu.clone(), bytes[now.duration_since(start).as_secs() as usize % 5 % 2].clone(), LOOSE, now));
             drawn(slot.object.as_mut().unwrap(), now);
         };
         spawn(&mut slot, start);

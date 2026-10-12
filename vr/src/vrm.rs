@@ -194,7 +194,6 @@ pub struct Pose {
 }
 
 impl Pose {
-    /// Replaces one node's local transform.
     pub fn place(&mut self, node: usize, translation: Vec3, rotation: Quat, scale: Vec3) {
         (self.translations[node], self.rotations[node], self.scales[node]) = (translation, rotation, scale);
     }
@@ -212,10 +211,14 @@ struct Document<'a> {
     object: bool,
 }
 
-/// The glTF extension naming an object's program.
 pub const PROGRAM: &str = "VOICE_program";
-/// The largest texture side an object may carry.
 pub const OBJECT_TEXTURE: u32 = 2048;
+pub const OBJECT_IMAGES: usize = 8;
+pub const OBJECT_NODES: usize = 4096;
+/// Deep enough for any machine or skeleton, shallow enough that walking every vertex's ancestors stays cheap.
+pub const OBJECT_DEPTH: usize = 64;
+/// Values an accessor with no buffer view may claim; it costs memory its file never paid for.
+const UNSTORED: usize = 1 << 24;
 /// How much darker than lit an object's unlit side is; puppets without MToon stay flat as three-vrm draws them.
 const OBJECT_SHADE: f32 = 0.15;
 /// Objects shade smoothly so their form reads; MToon's default is a near-hard terminator.
@@ -361,13 +364,21 @@ impl Document<'_> {
         }
         let offset = index(&view["byteOffset"]).unwrap_or(0);
         let length = index(&view["byteLength"]).ok_or("bufferView without byteLength")?;
-        Ok((self.binary.get(offset..offset + length).ok_or("bufferView outside the buffer")?, index(&view["byteStride"])))
+        let end = offset.checked_add(length).ok_or("bufferView outside the buffer")?;
+        Ok((self.binary.get(offset..end).ok_or("bufferView outside the buffer")?, index(&view["byteStride"])))
     }
 
     fn elements(&self, view: usize, offset: usize, kind: u64, components: usize, count: usize) -> Result<Vec<f64>, String> {
         let size = Self::component_size(kind)?;
         let (bytes, stride) = self.view(view)?;
         let stride = stride.unwrap_or(size * components);
+        if stride < size * components {
+            return Err("a byteStride shorter than its element".into());
+        }
+        let span = count.checked_sub(1).map_or(Some(0), |last| last.checked_mul(stride)?.checked_add(size * components)?.checked_add(offset));
+        if span.is_none_or(|span| span > bytes.len()) {
+            return Err("accessor outside its bufferView".into());
+        }
         let mut out = Vec::with_capacity(count * components);
         for element in 0..count {
             for component in 0..components {
@@ -393,7 +404,7 @@ impl Document<'_> {
         let count = index(&accessor["count"]).ok_or("accessor without count")?;
         let mut values = match index(&accessor["bufferView"]) {
             Some(view) => self.elements(view, index(&accessor["byteOffset"]).unwrap_or(0), kind, components, count)?,
-            None => vec![0.0; count * components],
+            None => vec![0.0; count.checked_mul(components).filter(|&values| values <= UNSTORED).ok_or("an accessor without a bufferView is too long")?],
         };
         if let Some(sparse) = accessor.get("sparse") {
             let changed = index(&sparse["count"]).ok_or("sparse without count")?;
@@ -430,11 +441,12 @@ impl Document<'_> {
         let entry = &self.json["images"][image];
         if self.object {
             let (bytes, _) = self.view(index(&entry["bufferView"]).ok_or("image without bufferView")?)?;
-            let decoded = image::load_from_memory(bytes).map_err(|error| format!("image {image}: {error}"))?;
-            if decoded.width().max(decoded.height()) > OBJECT_TEXTURE {
-                return Err(format!("image {image} is {}x{}, over {OBJECT_TEXTURE} on a side", decoded.width(), decoded.height()));
+            let reader = || image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().map_err(|error| format!("image {image}: {error}"));
+            let (width, height) = reader()?.into_dimensions().map_err(|error| format!("image {image}: {error}"))?;
+            if width.max(height) > OBJECT_TEXTURE {
+                return Err(format!("image {image} is {width}x{height}, over {OBJECT_TEXTURE} on a side"));
             }
-            let rgba = decoded.into_rgba8();
+            let rgba = reader()?.decode().map_err(|error| format!("image {image}: {error}"))?.into_rgba8();
             return Ok(Image { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() });
         }
         if entry["mimeType"].as_str() != Some("image/webp") {
@@ -719,6 +731,12 @@ impl Model {
                 return Err("the node hierarchy has a cycle".into());
             }
         }
+        if object && nodes.len() > OBJECT_NODES {
+            return Err(format!("{} nodes, over {OBJECT_NODES}", nodes.len()));
+        }
+        if object && (0..nodes.len()).any(|start| std::iter::successors(Some(start), |&node| nodes[node].parent).nth(OBJECT_DEPTH).is_some()) {
+            return Err(format!("a node more than {OBJECT_DEPTH} deep"));
+        }
         if nodes.iter().any(|node| node.mesh.is_some_and(|mesh| mesh >= meshes.len())) || humanoid.values().any(|&node| node >= nodes.len()) {
             return Err("a node or bone index is out of range".into());
         }
@@ -729,6 +747,9 @@ impl Model {
         let mut used: Vec<usize> = materials.iter().flat_map(|material| [material.base_image, material.shade_image, material.outline.as_ref().and_then(|outline| outline.width_image)]).flatten().collect();
         used.sort_unstable();
         used.dedup();
+        if object && used.len() > OBJECT_IMAGES {
+            return Err(format!("{} textures, over {OBJECT_IMAGES}", used.len()));
+        }
         let mut decoded: HashMap<usize, usize> = HashMap::new();
         let mut images = Vec::new();
         for image in used {
@@ -801,6 +822,11 @@ impl Model {
 
     pub fn nodes(&self) -> usize {
         self.nodes.len()
+    }
+
+    /// The vertices and triangles skinning would write out, every node that shares a mesh counted again.
+    pub fn drawn_size(&self) -> (usize, usize) {
+        self.nodes.iter().filter_map(|node| node.mesh).flat_map(|mesh| &self.meshes[mesh].primitives).fold((0, 0), |(vertices, triangles), primitive| (vertices + primitive.positions.len(), triangles + primitive.indices.len() / 3))
     }
 
     pub fn parent(&self, node: usize) -> Option<usize> {
@@ -1058,7 +1084,6 @@ impl Skinned {
         self.joints.len()
     }
 
-    /// The node a palette joint follows.
     pub fn joint_node(&self, joint: u16) -> usize {
         self.joints[joint as usize].0
     }

@@ -6,7 +6,6 @@ use crate::placement::Vec3;
 const QUIET: Duration = Duration::from_millis(1500);
 /// How long it points when the reply that asked is never spoken.
 const UNSPOKEN: Duration = Duration::from_secs(10);
-/// The mouth opening that counts as speaking.
 const SPEAKING: f32 = 0.05;
 /// How quickly the arm moves to and from pointing, per second.
 const EASE: f32 = 6.0;
@@ -32,7 +31,7 @@ impl Pointing {
         *self = Pointing::default();
     }
 
-    /// The target and how fully to point at it this frame; `locate` finds a part of the shown object by name.
+    /// The target and how fully to point at it this frame; `locate` finds a part of the shown object by name, and finds nothing while the object loads.
     pub fn step(&mut self, now: Instant, delta: f32, mouth: f32, locate: impl FnOnce(&str) -> Option<Vec3>) -> Option<(Vec3, f32)> {
         if let (Some(name), Some(since)) = (&self.name, self.since) {
             if mouth > SPEAKING {
@@ -44,9 +43,10 @@ impl Pointing {
                 Some(quiet) => now - quiet >= QUIET,
                 None => !self.spoke && now - since >= UNSPOKEN,
             };
-            match locate(name).filter(|_| !over) {
-                Some(target) => self.target = Some(target),
-                None => self.name = None,
+            if over {
+                self.name = None;
+            } else if let Some(target) = locate(name) {
+                self.target = Some(target);
             }
         }
         let wanted = self.name.is_some() as u8 as f32;
@@ -82,11 +82,12 @@ mod tests {
     }
 
     #[test]
-    fn it_stops_for_a_missing_part_and_after_an_unspoken_reply() {
+    fn it_waits_for_a_part_still_loading_and_stops_after_an_unspoken_reply() {
         let start = Instant::now();
         let mut pointing = Pointing::default();
-        pointing.start("nothing".into(), start);
-        assert_eq!(pointing.step(start, 0.011, 0.5, |_| None), None);
+        pointing.start("gear".into(), start);
+        assert_eq!(pointing.step(start, 0.011, 0.5, |_| None), None, "nothing to point at while the object loads");
+        assert!(pointing.step(start, 0.5, 0.5, |_| Some([0.0; 3])).is_some(), "it points once the part appears");
         pointing.start("gear".into(), start);
         assert!(pointing.step(start + Duration::from_secs(1), 1.0, 0.0, |_| Some([0.0; 3])).is_some());
         assert!(pointing.step(start + UNSPOKEN, 1.0, 0.0, |_| Some([0.0; 3])).is_none(), "an unspoken reply's pointing ends after {UNSPOKEN:?}");

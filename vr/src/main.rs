@@ -300,14 +300,15 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
         board_overlay.place_on(device, &mount);
         let mut fresh = None;
         if let Some(mut shown) = voice.take_display() {
+            let in_place = shown.addresses_object();
+            let about_object = shown.point.is_some() || shown.data.is_some();
             if let Some(name) = shown.point.take() {
                 pointing.start(name, started);
             }
-            let in_place = shown.addresses_object();
             let card = shown.markdown.is_some() || shown.link.is_some() || shown.image.is_some();
             match shown.object.take() {
-                Some(scene) => object.show(|| object::Object::spawn(runtime.create_overlay("voice.object", "Object", object::QUAD, true)?, gpu.clone(), scene, started)),
-                None if card => object.clear("replaced by a display without one"),
+                Some(scene) => object.show(|| object::Object::spawn(runtime.create_overlay("voice.object", "Object", object::QUAD, true)?, gpu.clone(), scene, object::BUDGET, started)),
+                None if card && !about_object => object.clear("replaced by a display without one"),
                 None => {}
             }
             if let Some(data) = shown.data.take() {

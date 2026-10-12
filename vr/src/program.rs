@@ -1,13 +1,11 @@
 use wasmi::{Config, Engine, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TrapCode, TypedFunc};
 
-/// The most linear memory a program may grow to.
 pub const MEMORY: usize = 16 << 20;
 /// Instructions a program may run per tick, and for its start function; running out stops the object.
 pub const FUEL: u64 = 2_000_000;
 /// Floats per node in what `tick` returns: translation xyz, rotation quaternion xyzw, scale xyz.
 pub const STRIDE: usize = 10;
 
-/// One node's local transform as a program sets it.
 pub type Transform = [f32; STRIDE];
 
 /// An object's WebAssembly program: no imports, a `memory` export, `tick(time, x, y, z, touching) -> pointer`, and optionally `data(length) -> pointer` for live data.

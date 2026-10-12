@@ -67,7 +67,6 @@ impl Gpu {
         self.allocations.set(self.allocations.get() - 1);
     }
 
-    /// Device memory allocations not yet freed.
     pub fn allocations(&self) -> usize {
         self.allocations.get()
     }

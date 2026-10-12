@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn a_link_is_drawn_in_link_ink_below_the_text() {
-        let picture = draw(&Display { markdown: None, link: Some("https://example.com".into()), image: None });
+        let picture = draw(&Display { markdown: None, link: Some("https://example.com".into()), image: None, object: None });
         assert_eq!(picture.height, 2 * PADDING + Kind::Link.height());
         let inked: Vec<[u8; 4]> = (0..picture.width).flat_map(|x| (0..picture.height).map(move |y| (x, y))).map(|(x, y)| at(&picture, x, y)).filter(|texel| *texel != at(&picture, 0, 0)).collect();
         assert!(!inked.is_empty() && inked.iter().all(|texel| *texel == LINK));
@@ -267,11 +267,11 @@ mod tests {
     #[test]
     fn a_picture_fills_the_width_below_the_text_and_long_text_leaves_it_half() {
         let red = [200, 0, 0, 255];
-        let picture = draw(&Display { markdown: Some("Chart".into()), link: None, image: Some(png(40, 20, red)) });
+        let picture = draw(&Display { markdown: Some("Chart".into()), link: None, image: Some(png(40, 20, red)), object: None });
         let width = picture.width - 2 * PADDING;
         assert_eq!(picture.height, 2 * PADDING + Kind::Text.height() + width / 2);
         assert_eq!(at(&picture, picture.width / 2, PADDING + Kind::Text.height() + width / 4), red);
-        let tall = draw(&Display { markdown: Some("words ".repeat(2000)), link: None, image: Some(png(10, 40, red)) });
+        let tall = draw(&Display { markdown: Some("words ".repeat(2000)), link: None, image: Some(png(10, 40, red)), object: None });
         assert!(size(&tall)[1] <= MAX_HEIGHT);
         assert_eq!(at(&tall, tall.width / 2, tall.height - PADDING - 4), red);
         assert_eq!(at(&tall, tall.width / 2, tall.height / 2 + 8), red, "text stops at half");
@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn an_unreadable_image_leaves_the_text() {
-        let picture = draw(&Display { markdown: Some("Hi".into()), link: None, image: Some(b"not an image".to_vec()) });
+        let picture = draw(&Display { markdown: Some("Hi".into()), link: None, image: Some(b"not an image".to_vec()), object: None });
         assert_eq!(picture.height, 2 * PADDING + Kind::Text.height());
     }
 }

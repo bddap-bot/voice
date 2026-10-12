@@ -465,12 +465,12 @@ impl Appearance {
 
 }
 
-fn destroy(device: &ash::Device, texture: &Texture) {
+fn destroy(gpu: &Gpu, texture: &Texture) {
     unsafe {
-        device.destroy_image_view(texture.view, None);
-        device.destroy_image(texture.image, None);
-        device.free_memory(texture.memory, None);
+        gpu.device.destroy_image_view(texture.view, None);
+        gpu.device.destroy_image(texture.image, None);
     }
+    gpu.free_memory(texture.memory);
 }
 
 impl Drop for Appearance {
@@ -482,7 +482,7 @@ impl Drop for Appearance {
                 self.gpu.free_buffer(buffer);
             }
             for texture in &self.textures {
-                destroy(device, texture);
+                destroy(&self.gpu, texture);
             }
             device.destroy_descriptor_pool(self.descriptors, None);
         }
@@ -497,9 +497,10 @@ impl Drop for Renderer {
             for target in &self.targets {
                 device.destroy_fence(target.fence, None);
                 device.destroy_framebuffer(target.framebuffer, None);
-                destroy(device, &target.texture);
+                device.free_command_buffers(self.gpu.pool, &[target.commands]);
+                destroy(&self.gpu, &target.texture);
             }
-            destroy(device, &self.depth);
+            destroy(&self.gpu, &self.depth);
             for &pipeline in self.pipelines.values() {
                 device.destroy_pipeline(pipeline, None);
             }

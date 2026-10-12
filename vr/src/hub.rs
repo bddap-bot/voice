@@ -72,6 +72,7 @@ struct Shown {
     markdown: Option<String>,
     link: Option<String>,
     image: Option<serde::de::IgnoredAny>,
+    object: Option<serde::de::IgnoredAny>,
 }
 
 /// What a hub reply asks to show, as the page's display card does.
@@ -81,6 +82,8 @@ pub struct Display {
     pub link: Option<String>,
     /// The encoded PNG, JPEG, GIF or WebP.
     pub image: Option<Vec<u8>>,
+    /// A binary glTF 2 scene; a reply carries an image or an object, never both, so either is the whole trailer.
+    pub object: Option<Vec<u8>>,
 }
 
 enum Turn {
@@ -231,7 +234,8 @@ impl Hub {
         eprintln!("hub reply {} ({}): {:?}{}", reply.id, reply.stamp, reply.commentary, if reply.instructions.is_empty() { "" } else { " with instructions" });
         trace.calls.replied(&reply.id, &reply.commentary);
         if let Some(shown) = reply.display.take() {
-            self.display = Some(Display { markdown: shown.markdown, link: shown.link, image: (shown.image.is_some() && !image.is_empty()).then(|| image.to_vec()) });
+            let trailer = |carried: bool| (carried && !image.is_empty()).then(|| image.to_vec());
+            self.display = Some(Display { markdown: shown.markdown, link: shown.link, image: trailer(shown.image.is_some()), object: trailer(shown.object.is_some() && shown.image.is_none()) });
         }
         let unspoken = (!reply.commentary.is_empty() && self.sleeping).then_some(ASLEEP);
         let mut ack = json!({ "id": reply.id, "stamp": reply.stamp });
@@ -467,7 +471,7 @@ mod tests {
         f.reply(json!({ "id": "slow", "stamp": "push_1", "commentary": [], "instructions": [], "display": { "markdown": "chart" } }));
         assert!(f.told().is_empty());
         assert!(f.hub.waiting.contains("slow"));
-        assert_eq!(f.hub.take_display(), Some(Display { markdown: Some("chart".into()), link: None, image: None }));
+        assert_eq!(f.hub.take_display(), Some(Display { markdown: Some("chart".into()), ..Display::default() }));
         assert_eq!(f.hub.take_display(), None);
         let line = json!({ "id": "slow", "stamp": "reply_1", "commentary": ["Four jobs are queued."], "instructions": [], "display": { "link": "https://example.com/q", "image": { "mime": "image/png" } } });
         let mut body = format!("{line}\n").into_bytes();
@@ -476,8 +480,20 @@ mod tests {
         f.collect();
         assert_eq!(f.told(), [speakable(json!("slow"), "Four jobs are queued.")]);
         assert!(f.hub.waiting.is_empty());
-        assert_eq!(f.hub.take_display(), Some(Display { markdown: None, link: Some("https://example.com/q".into()), image: Some(vec![0x89, b'P', b'N', b'G', b'\n', 0]) }));
+        assert_eq!(f.hub.take_display(), Some(Display { link: Some("https://example.com/q".into()), image: Some(vec![0x89, b'P', b'N', b'G', b'\n', 0]), ..Display::default() }));
         assert!(f.frames("hub-ack").iter().all(|ack| ack.get("unspoken").is_none()));
+    }
+
+    #[test]
+    fn an_object_display_carries_the_trailer_as_its_scene() {
+        let mut f = Fixture::new();
+        f.hear("Show me a cube.");
+        f.delegate("cube");
+        let line = json!({ "id": "cube", "stamp": "o1", "commentary": ["Here it is."], "instructions": [], "display": { "markdown": "A cube", "object": { "mime": "model/gltf-binary" } } });
+        let mut body = format!("{line}\n").into_bytes();
+        body.extend(b"glTF\x02\0\0\0");
+        f.hub.reply(&body, &mut f.trace, f.now);
+        assert_eq!(f.hub.take_display(), Some(Display { markdown: Some("A cube".into()), object: Some(b"glTF\x02\0\0\0".to_vec()), ..Display::default() }));
     }
 
     #[test]

@@ -198,7 +198,15 @@ pub struct Humanoid {
 struct Document<'a> {
     json: Value,
     binary: &'a [u8],
+    object: bool,
 }
+
+/// The largest texture side an object may carry.
+pub const OBJECT_TEXTURE: u32 = 2048;
+/// How much darker than lit an object's unlit side is; puppets without MToon stay flat as three-vrm draws them.
+const OBJECT_SHADE: f32 = 0.45;
+/// Objects shade smoothly so their form reads; MToon's default is a near-hard terminator.
+const OBJECT_TOONY: f32 = 0.2;
 
 fn chunks(bytes: &[u8]) -> Result<(Value, &[u8]), String> {
     let word = |at: usize| bytes.get(at..at + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize).ok_or("truncated glTF binary");
@@ -394,6 +402,15 @@ impl Document<'_> {
 
     fn image(&self, image: usize) -> Result<Image, String> {
         let entry = &self.json["images"][image];
+        if self.object {
+            let (bytes, _) = self.view(index(&entry["bufferView"]).ok_or("image without bufferView")?)?;
+            let decoded = image::load_from_memory(bytes).map_err(|error| format!("image {image}: {error}"))?;
+            if decoded.width().max(decoded.height()) > OBJECT_TEXTURE {
+                return Err(format!("image {image} is {}x{}, over {OBJECT_TEXTURE} on a side", decoded.width(), decoded.height()));
+            }
+            let rgba = decoded.into_rgba8();
+            return Ok(Image { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() });
+        }
         if entry["mimeType"].as_str() != Some("image/webp") {
             return Err(format!("image {image} is {}, but rendered textures are packed as lossless WebP", entry["mimeType"]));
         }
@@ -484,16 +501,17 @@ fn material_one(document: &Document, material: &Value) -> Material {
         Some("screenCoordinates") => Some(OutlineWidth::Screen),
         _ => None,
     };
+    let unlit = if document.object { OBJECT_SHADE } else { 1.0 };
     Material {
         base,
         base_image,
-        shade: if lit { [base[0], base[1], base[2]] } else { floats(&toon["shadeColorFactor"], [0.0; 3]) },
+        shade: if lit { [base[0] * unlit, base[1] * unlit, base[2] * unlit] } else { floats(&toon["shadeColorFactor"], [0.0; 3]) },
         shade_image: if lit { base_image } else { document.texture_image(&toon["shadeMultiplyTexture"]["index"]) },
         alpha,
         depth_write,
         double_sided: material["doubleSided"].as_bool() == Some(true),
         shading_shift: number(&toon["shadingShiftFactor"], 0.0),
-        shading_toony: number(&toon["shadingToonyFactor"], 0.9),
+        shading_toony: number(&toon["shadingToonyFactor"], if lit && document.object { OBJECT_TOONY } else { 0.9 }),
         equalization: number(&toon["giEqualizationFactor"], 0.9),
         queue,
         outline: width.map(|width| Outline {
@@ -508,8 +526,17 @@ fn material_one(document: &Document, material: &Value) -> Material {
 
 impl Model {
     pub fn parse(bytes: &[u8]) -> Result<Model, String> {
+        Model::read(bytes, false)
+    }
+
+    /// A plain binary glTF 2 scene: PNG, JPEG or WebP textures, and VRM extensions optional.
+    pub fn object(bytes: &[u8]) -> Result<Model, String> {
+        Model::read(bytes, true)
+    }
+
+    fn read(bytes: &[u8], object: bool) -> Result<Model, String> {
         let (json, binary) = chunks(bytes)?;
-        let document = Document { json, binary };
+        let document = Document { json, binary, object };
         let json = &document.json;
         let extensions = &json["extensions"];
         let (version, humanoid): (Version, HashMap<String, usize>) = if let Some(vrm) = extensions.get("VRMC_vrm") {
@@ -518,6 +545,8 @@ impl Model {
         } else if let Some(vrm) = extensions.get("VRM") {
             let bones = vrm["humanoid"]["humanBones"].as_array().ok_or("VRM without humanBones")?;
             (Version::Zero, bones.iter().filter_map(|bone| Some((bone_one(bone["bone"].as_str()?), index(&bone["node"])?))).collect())
+        } else if object {
+            (Version::One, HashMap::new())
         } else {
             return Err("file is not a VRM puppet".into());
         };
@@ -670,7 +699,7 @@ impl Model {
             return Err("a node or bone index is out of range".into());
         }
         if !nodes.iter().any(|node| node.mesh.is_some()) {
-            return Err("the puppet has no mesh".into());
+            return Err("the file has no mesh".into());
         }
 
         let mut used: Vec<usize> = materials.iter().flat_map(|material| [material.base_image, material.shade_image, material.outline.as_ref().and_then(|outline| outline.width_image)]).flatten().collect();

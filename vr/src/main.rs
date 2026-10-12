@@ -12,6 +12,7 @@ mod voice;
 mod gesture;
 mod hub;
 mod motion;
+mod object;
 mod openvr;
 mod panel;
 mod placement;
@@ -46,6 +47,8 @@ const QUAD: f32 = 0.4;
 const HEIGHT: f32 = 0.3;
 const MARGIN: f32 = 0.03;
 const FLOOR: f32 = -QUAD / 2.0 + MARGIN;
+/// Where an object's centre sits in the puppet quad's frame: right of the figure, about chest high.
+const OBJECT_BESIDE: [f32; 3] = [object::SIZE / 2.0 + 0.1, 0.0, 0.0];
 const DORMANT_POLL: Duration = Duration::from_micros(11_111);
 const SPOTTER_RETRY: Duration = Duration::from_secs(10);
 
@@ -159,6 +162,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
     let mut display_overlay = runtime.create_overlay("voice.display", "Display", panel::WIDTH, false)?;
     let mut display_image = vulkan::Flat::new(gpu.clone());
     let mut display: Option<[f32; 2]> = None;
+    let mut object: object::Slot<openvr::Overlay> = object::Slot::default();
     let eye_offsets = runtime.eye_offsets();
     let mut meter = Meter::default();
     let epoch = Instant::now();
@@ -235,6 +239,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
             puppet.gaze = Gaze::default();
             board.reset();
             display = None;
+            object.clear("summoned");
             meter = Meter::default();
         }
         voice.step();
@@ -242,6 +247,11 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
             act(&mut puppet.animator, &action);
         }
         let (true, Some(head), Some(left), Some(device)) = (voice.awake(), head, hand(Hand::Left), runtime.hand_index(Hand::Left)) else {
+            if voice.awake() {
+                object.hide();
+            } else {
+                object.clear("the session ended");
+            }
             overlay.hide();
             board_overlay.hide();
             marker_overlay.hide();
@@ -284,10 +294,22 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
         let mount = under_controller(board.height());
         let board_pose = left.then(&mount);
         board_overlay.place_on(device, &mount);
-        let fresh = voice.take_display().map(|shown| panel::draw(&shown));
-        if let Some(picture) = &fresh {
-            display = Some(panel::size(picture));
+        let fresh = voice.take_display().map(|mut shown| {
+            match shown.object.take() {
+                Some(scene) => object.show(|| object::Object::spawn(runtime.create_overlay("voice.object", "Object", object::QUAD, true)?, gpu.clone(), scene, started)),
+                None => object.clear("replaced by a display without one"),
+            }
+            (shown.markdown.is_some() || shown.link.is_some() || shown.image.is_some()).then(|| panel::draw(&shown))
+        });
+        match &fresh {
+            Some(Some(picture)) => display = Some(panel::size(picture)),
+            Some(None) => {
+                display = None;
+                display_overlay.hide();
+            }
+            None => {}
         }
+        let fresh = fresh.flatten();
         if let Some(size) = display {
             display_overlay.place_on(device, &beside(&mount, [board::WIDTH, board.height()], size));
             if let Some(picture) = fresh {
@@ -296,6 +318,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
             }
         }
         let right = hand(Hand::Right).zip(right_device);
+        object.step(started, &object::View { center: quad.apply(OBJECT_BESIDE), head, eyes: eye_offsets, tip: right.map(|(right, _)| right.apply(tip)) });
         let touch = board.touch(right.map(|(right, _)| local_tip(&board_pose, &right, tip)));
         if let Some([x, y]) = touch.crossing {
             eprintln!("board crossed at ({x:.3}, {y:.3}) m: {}", touch.press.map_or("none".to_owned(), |press| format!("{press:?}")));

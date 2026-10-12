@@ -18,6 +18,7 @@ pub struct Gpu {
     pub queue: vk::Queue,
     pub family: u32,
     pub pool: vk::CommandPool,
+    allocations: std::cell::Cell<usize>,
 }
 
 pub fn vk_error(context: &str) -> impl Fn(vk::Result) -> String + '_ {
@@ -45,7 +46,7 @@ impl Gpu {
         let device = unsafe { instance.create_device(physical, &vk::DeviceCreateInfo::default().queue_create_infos(&queues).enabled_extension_names(&device_names), None) }.map_err(vk_error("vkCreateDevice"))?;
         let queue = unsafe { device.get_device_queue(family, 0) };
         let pool = unsafe { device.create_command_pool(&vk::CommandPoolCreateInfo::default().queue_family_index(family).flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER), None) }.map_err(vk_error("vkCreateCommandPool"))?;
-        Ok(Gpu { _entry: entry, instance, physical, device, queue, family, pool })
+        Ok(Gpu { _entry: entry, instance, physical, device, queue, family, pool, allocations: Default::default() })
     }
 
     pub fn memory_type(&self, bits: u32, flags: vk::MemoryPropertyFlags) -> Result<u32, String> {
@@ -55,10 +56,26 @@ impl Gpu {
             .ok_or_else(|| format!("no memory type with {flags:?}"))
     }
 
+    fn allocate(&self, requirements: vk::MemoryRequirements, flags: vk::MemoryPropertyFlags) -> Result<vk::DeviceMemory, String> {
+        let memory = unsafe { self.device.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(requirements.size).memory_type_index(self.memory_type(requirements.memory_type_bits, flags)?), None) }.map_err(vk_error("vkAllocateMemory"))?;
+        self.allocations.set(self.allocations.get() + 1);
+        Ok(memory)
+    }
+
+    pub fn free_memory(&self, memory: vk::DeviceMemory) {
+        unsafe { self.device.free_memory(memory, None) };
+        self.allocations.set(self.allocations.get() - 1);
+    }
+
+    /// Device memory allocations not yet freed.
+    pub fn allocations(&self) -> usize {
+        self.allocations.get()
+    }
+
     pub fn image(&self, info: &vk::ImageCreateInfo) -> Result<(vk::Image, vk::DeviceMemory), String> {
         let image = unsafe { self.device.create_image(info, None) }.map_err(vk_error("vkCreateImage"))?;
         let requirements = unsafe { self.device.get_image_memory_requirements(image) };
-        let memory = unsafe { self.device.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(requirements.size).memory_type_index(self.memory_type(requirements.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)?), None) }.map_err(vk_error("vkAllocateMemory"))?;
+        let memory = self.allocate(requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
         unsafe { self.device.bind_image_memory(image, memory, 0) }.map_err(vk_error("vkBindImageMemory"))?;
         Ok((image, memory))
     }
@@ -67,7 +84,7 @@ impl Gpu {
         let buffer = unsafe { self.device.create_buffer(&vk::BufferCreateInfo::default().size(size.max(4)).usage(usage), None) }.map_err(vk_error("vkCreateBuffer"))?;
         let requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
         let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-        let memory = unsafe { self.device.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(requirements.size).memory_type_index(self.memory_type(requirements.memory_type_bits, host)?), None) }.map_err(vk_error("vkAllocateMemory"))?;
+        let memory = self.allocate(requirements, host)?;
         unsafe { self.device.bind_buffer_memory(buffer, memory, 0) }.map_err(vk_error("vkBindBufferMemory"))?;
         let mapped = unsafe { self.device.map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()) }.map_err(vk_error("vkMapMemory"))? as *mut u8;
         Ok((buffer, memory, mapped))
@@ -77,8 +94,8 @@ impl Gpu {
         unsafe {
             self.device.unmap_memory(memory);
             self.device.destroy_buffer(buffer, None);
-            self.device.free_memory(memory, None);
         }
+        self.free_memory(memory);
     }
 
     pub fn once(&self, record: impl FnOnce(vk::CommandBuffer)) -> Result<(), String> {
@@ -176,7 +193,7 @@ impl Flat {
             let _ = self.gpu.device.device_wait_idle();
             for (image, memory) in self.images.drain(..) {
                 self.gpu.device.destroy_image(image, None);
-                self.gpu.device.free_memory(memory, None);
+                self.gpu.free_memory(memory);
             }
         }
     }

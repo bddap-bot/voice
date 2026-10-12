@@ -69,7 +69,7 @@ impl Pose {
         let inverse = Pose { r, t: [0.0; 3] };
         Pose { t: scale(inverse.rotate(self.t), -1.0), ..inverse }
     }
-    fn from_axes(x: Vec3, y: Vec3, z: Vec3, t: Vec3) -> Pose {
+    pub fn from_axes(x: Vec3, y: Vec3, z: Vec3, t: Vec3) -> Pose {
         Pose { r: [[x[0], y[0], z[0]], [x[1], y[1], z[1]], [x[2], y[2], z[2]]], t }
     }
     pub fn mat4(&self) -> glam::Mat4 {

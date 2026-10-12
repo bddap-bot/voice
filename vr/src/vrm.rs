@@ -802,6 +802,10 @@ impl Model {
         self.nodes.len()
     }
 
+    pub fn parent(&self, node: usize) -> Option<usize> {
+        self.nodes[node].parent
+    }
+
     pub fn rest(&self) -> Pose {
         Pose { rotations: self.nodes.iter().map(|node| node.rotation).collect(), translations: self.nodes.iter().map(|node| node.translation).collect(), scales: self.nodes.iter().map(|node| node.scale).collect(), weights: self.meshes.iter().map(|mesh| mesh.weights.clone()).collect() }
     }
@@ -1034,6 +1038,11 @@ impl Skinned {
 
     pub fn joints(&self) -> usize {
         self.joints.len()
+    }
+
+    /// The node a palette joint follows.
+    pub fn joint_node(&self, joint: u16) -> usize {
+        self.joints[joint as usize].0
     }
 }
 

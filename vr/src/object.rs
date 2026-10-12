@@ -27,6 +27,13 @@ const OVER_BUDGET: u32 = 90;
 /// Tip speed relative to the object that throws it away.
 pub const FLICK: f32 = 1.8;
 const MIN_REACH: f32 = 0.06;
+/// The tip's depth, as a fraction of the object's radius, where its parts start to spread and where they are fully apart.
+const OPENING: f32 = 0.5;
+const OPEN: f32 = 0.2;
+/// How far apart fully spread parts are, as a multiple of their resting distance from the centre.
+const SPREAD: f32 = 1.0;
+/// How quickly the spread follows the tip, per second.
+const EASE: f32 = 8.0;
 /// Below this horizontal distance from the axis the tip's bearing is noise, so it does not turn the object.
 const AXIS: f32 = 0.02;
 
@@ -63,6 +70,46 @@ struct Geometry {
     fit: Mat4,
     radius: f32,
     duration: f32,
+    parts: Parts,
+}
+
+/// The pieces an object pulls apart into: its top-level nodes, or a lone root's children.
+#[derive(Default)]
+struct Parts {
+    of: Vec<Option<usize>>,
+    /// Each part's centre less the object's, in the object's own coordinates.
+    offsets: Vec<V3>,
+}
+
+impl Parts {
+    fn find(model: &Model, skinned: &Skinned, points: &[V3], centre: V3) -> Parts {
+        let roots = (0..model.nodes()).filter(|&node| model.parent(node).is_none()).count();
+        let depth = (roots == 1) as usize;
+        let chain = |node: usize| std::iter::successors(Some(node), |&at| model.parent(at)).collect::<Vec<_>>();
+        let mut keys = Vec::new();
+        let of: Vec<Option<usize>> = (0..model.nodes())
+            .map(|node| {
+                let chain = chain(node);
+                let key = *chain.get(chain.len().checked_sub(depth + 1)?)?;
+                Some(keys.iter().position(|&known| known == key).unwrap_or_else(|| {
+                    keys.push(key);
+                    keys.len() - 1
+                }))
+            })
+            .collect();
+        let mut extents = vec![(V3::splat(f32::INFINITY), V3::splat(f32::NEG_INFINITY)); keys.len()];
+        for (vertex, point) in skinned.vertices.iter().zip(points) {
+            if let Some(part) = of[skinned.joint_node(vertex.joints[0])] {
+                extents[part] = (extents[part].0.min(*point), extents[part].1.max(*point));
+            }
+        }
+        let offsets = extents.iter().map(|(low, high)| if low.x <= high.x { (*low + *high) / 2.0 - centre } else { V3::ZERO }).collect();
+        Parts { of, offsets }
+    }
+
+    fn spread(&self, worlds: &[Mat4], amount: f32) -> Vec<Mat4> {
+        worlds.iter().zip(&self.of).map(|(world, part)| part.map_or(*world, |part| Mat4::from_translation(self.offsets[part] * amount * SPREAD) * *world)).collect()
+    }
 }
 
 fn load(bytes: &[u8]) -> Result<Geometry, String> {
@@ -71,14 +118,16 @@ fn load(bytes: &[u8]) -> Result<Geometry, String> {
     if skinned.indices.len() / 3 > TRIANGLES {
         return Err(format!("{} triangles, over {TRIANGLES}", skinned.indices.len() / 3));
     }
-    let (low, high) = bounds(&skinned.positions(&skinned.palette(&model.worlds(&model.rest()), Mat4::IDENTITY)));
+    let points = skinned.positions(&skinned.palette(&model.worlds(&model.rest()), Mat4::IDENTITY));
+    let (low, high) = bounds(&points);
     let extent = (high - low).max_element();
     if !extent.is_finite() {
         return Err("the object has no finite extent".into());
     }
     let scale = if extent > SIZE { SIZE / extent } else { 1.0 };
     let duration = model.program.as_ref().map_or(0.0, |(_, duration)| *duration);
-    Ok(Geometry { fit: Mat4::from_scale(V3::splat(scale)) * Mat4::from_translation(-(low + high) / 2.0), radius: (high - low).length() * scale / 2.0, model, skinned, duration })
+    let parts = Parts::find(&model, &skinned, &points, (low + high) / 2.0);
+    Ok(Geometry { fit: Mat4::from_scale(V3::splat(scale)) * Mat4::from_translation(-(low + high) / 2.0), radius: (high - low).length() * scale / 2.0, model, skinned, duration, parts })
 }
 
 /// What passes between the render thread and the object's thread; each side only ever takes the other's latest.
@@ -142,15 +191,23 @@ impl Drop for Runner {
 }
 
 /// Position-only handling: the tip inside the object turns it about its vertical axis by the tip's bearing, a fast tip throws it away, and untouched it leaves after `LIFETIME`.
+/// Pushing the tip deep into it spreads its parts until the tip withdraws, and sliding the tip up or down inside it scrubs its timeline, which holds still while touched.
 pub struct Handling {
     pub yaw: f32,
+    /// How far apart its parts are, 0 to 1.
+    pub spread: f32,
+    /// Vertical travel of the tip while touching, in metres.
+    pub slide: f32,
+    /// Seconds the timeline has run untouched.
+    pub clock: f32,
     deadline: Instant,
     last: Option<(Vec3, Instant)>,
+    stepped: Instant,
 }
 
 impl Handling {
     pub fn new(now: Instant) -> Handling {
-        Handling { yaw: 0.0, deadline: now + LIFETIME, last: None }
+        Handling { yaw: 0.0, spread: 0.0, slide: 0.0, clock: 0.0, deadline: now + LIFETIME, last: None, stepped: now }
     }
 
     /// `tip` is relative to the object's centre; a reason when the object should go.
@@ -158,14 +215,25 @@ impl Handling {
         if now >= self.deadline {
             return Some("timed out");
         }
+        let delta = now.saturating_duration_since(self.stepped).as_secs_f32();
+        self.stepped = now;
         let previous = self.last.take();
-        let tip = tip.filter(|&tip| length(tip) <= radius.max(MIN_REACH))?;
+        let reach = radius.max(MIN_REACH);
+        let tip = tip.filter(|&tip| length(tip) <= reach);
+        let depth = tip.map_or(1.0, |tip| length(tip) / reach);
+        let target = ((OPENING - depth) / (OPENING - OPEN)).clamp(0.0, 1.0);
+        self.spread += (target - self.spread) * (delta * EASE).min(1.0);
+        let Some(tip) = tip else {
+            self.clock += delta;
+            return None;
+        };
         self.deadline = now + LIFETIME;
         if let Some((before, at)) = previous {
             let seconds = (now - at).as_secs_f32();
             if seconds > 0.0 && length(sub(tip, before)) / seconds > FLICK {
                 return Some("flicked away");
             }
+            self.slide += tip[1] - before[1];
             let horizontal = |v: Vec3| v[0].hypot(v[2]);
             if horizontal(before) > AXIS && horizontal(tip) > AXIS {
                 let turn = tip[0].atan2(tip[2]) - before[0].atan2(before[2]);
@@ -193,6 +261,7 @@ struct Drawn {
     fit: Mat4,
     radius: f32,
     duration: f32,
+    parts: Parts,
 }
 
 fn transformed(model: &Model, transforms: &[Transform]) -> Vec<Mat4> {
@@ -211,13 +280,12 @@ pub struct Object<S: Surface> {
     runner: Runner,
     surface: S,
     handling: Handling,
-    born: Instant,
     over: u32,
 }
 
 impl<S: Surface> Object<S> {
     pub fn spawn(surface: S, gpu: Rc<Gpu>, bytes: Vec<u8>, now: Instant) -> Result<Object<S>, String> {
-        Ok(Object { drawn: None, renderer: Renderer::new(gpu, [EYE, EYE], 1.0)?, runner: Runner::start(bytes)?, surface, handling: Handling::new(now), born: now, over: 0 })
+        Ok(Object { drawn: None, renderer: Renderer::new(gpu, [EYE, EYE], 1.0)?, runner: Runner::start(bytes)?, surface, handling: Handling::new(now), over: 0 })
     }
 
     pub fn hide(&mut self) {
@@ -237,7 +305,7 @@ impl<S: Surface> Object<S> {
             Some(Ok(geometry)) => {
                 let appearance = self.renderer.appearance(&geometry.model, &geometry.skinned)?;
                 let worlds = geometry.model.worlds(&geometry.model.rest());
-                self.drawn = Some(Drawn { appearance, model: geometry.model, skinned: geometry.skinned, worlds, fit: geometry.fit, radius: geometry.radius, duration: geometry.duration });
+                self.drawn = Some(Drawn { appearance, model: geometry.model, skinned: geometry.skinned, worlds, fit: geometry.fit, radius: geometry.radius, duration: geometry.duration, parts: geometry.parts });
             }
             Some(Err(error)) => return Err(error),
             None => {}
@@ -254,14 +322,14 @@ impl<S: Surface> Object<S> {
         let turned = Mat4::from_rotation_y(self.handling.yaw) * drawn.fit;
         {
             let mut exchange = self.runner.exchange.lock().unwrap();
-            let elapsed = (now - self.born).as_secs_f32();
-            exchange.time = if drawn.duration > 0.0 { elapsed % drawn.duration } else { elapsed };
+            let handling = &self.handling;
+            exchange.time = if drawn.duration > 0.0 { (handling.clock + handling.slide / (2.0 * drawn.radius) * drawn.duration).rem_euclid(drawn.duration) } else { handling.clock };
             exchange.tip = offset.filter(|&offset| length(offset) <= radius).map(|offset| turned.inverse().transform_point3(offset.into()).into());
         }
         let quad = facing(view.center, view.head.t);
         let local = quad.inverse();
         let placed = local.mat4() * Mat4::from_translation(view.center.into()) * turned;
-        drawn.appearance.update(&drawn.skinned.palette(&drawn.worlds, placed), &drawn.skinned.vertices, &[]);
+        drawn.appearance.update(&drawn.skinned.palette(&drawn.parts.spread(&drawn.worlds, self.handling.spread), placed), &drawn.skinned.vertices, &[]);
         let eyes = view.eyes.map(|eye| eye_projection(local.apply(view.head.then(&eye).t).into(), QUAD / 2.0, QUAD / 2.0));
         let started = Instant::now();
         let mut texture = self.renderer.render(&drawn.appearance, eyes)?;
@@ -368,6 +436,10 @@ mod tests {
 
     /// The cube as node 0, run by `program` when given; node 1 is an empty the program may move.
     fn scene(side: f32, program: Option<(&str, f32)>) -> Vec<u8> {
+        built(side, serde_json::json!([{ "mesh": 0, "rotation": [0.3, 0.3, 0.0, 0.906] }, {}]), program)
+    }
+
+    fn built(side: f32, nodes: serde_json::Value, program: Option<(&str, f32)>) -> Vec<u8> {
         let mut builder = Builder::new(serde_json::json!({}));
         let h = side / 2.0;
         let mut positions = Vec::new();
@@ -403,7 +475,7 @@ mod tests {
         builder.set("images", serde_json::json!([{ "bufferView": view, "mimeType": "image/png" }]));
         builder.set("textures", serde_json::json!([{ "source": 0 }]));
         builder.set("materials", serde_json::json!([{ "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } } }]));
-        builder.set("nodes", serde_json::json!([{ "mesh": 0, "rotation": [0.3, 0.3, 0.0, 0.906] }, {}]));
+        builder.set("nodes", nodes);
         if let Some((text, duration)) = program {
             let view = builder.view(&crate::program::tests::wasm(text));
             builder.set("extensions", serde_json::json!({ crate::vrm::PROGRAM: { "bufferView": view, "duration": duration } }));
@@ -481,6 +553,7 @@ mod tests {
         let born = Instant::now();
         let mut object = Object::spawn(Counted::new(), gpu, scene(0.2, Some((crate::program::tests::FOLLOW, 4.0))), born).unwrap();
         drawn(&mut object, born);
+        object.step(born + Duration::from_secs(5), &view(None)).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         let center = view(None).center;
         let mut moved = Vec::new();
@@ -491,8 +564,46 @@ mod tests {
             moved = [0, 1].map(|node| drawn.worlds[node].w_axis.truncate()).into_iter().filter(|at| at.length() > 1e-6).collect();
             std::thread::sleep(TICK);
         }
-        assert!((moved[0].x - 1.0).abs() < 1e-5, "time wraps at the 4 s timeline: node 0 at {}", moved[0]);
+        assert!((moved[0].x - 1.0).abs() < 1e-5, "time wraps at the 4 s timeline and holds while touched: node 0 at {}", moved[0]);
         assert!(moved[1].y > 0.0 && moved[1].x.abs() < 1e-4, "the touch above the centre reaches node 1 in the object's coordinates: {}", moved[1]);
+    }
+
+    #[test]
+    fn sliding_the_tip_up_scrubs_the_timeline_and_pushing_it_deep_spreads_the_parts() {
+        let gpu = Rc::new(Gpu::new(None).unwrap());
+        let born = Instant::now();
+        let nodes = serde_json::json!([{ "mesh": 0, "translation": [-0.06, 0.0, 0.0] }, { "mesh": 0, "translation": [0.06, 0.0, 0.0] }]);
+        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None), born).unwrap();
+        drawn(&mut object, born);
+        let radius = object.drawn.as_ref().unwrap().radius;
+        let center = view(None).center;
+        let at = |dy: f32| view(Some([center[0] + 0.3 * radius, center[1] + dy, center[2]]));
+        let frame = Duration::from_millis(11);
+        let mut now = born;
+        for step in 0..=20 {
+            object.step(now, &at(step as f32 * radius / 40.0)).unwrap();
+            now += frame;
+        }
+        assert!((object.handling.slide - radius / 2.0).abs() < 1e-4, "slid {} for half a radius of {radius}", object.handling.slide);
+        assert_eq!(object.handling.clock, 0.0, "the timeline holds while touched");
+        object.step(now, &view(None)).unwrap();
+        now += frame;
+        for _ in 0..60 {
+            object.step(now, &view(Some(center))).unwrap();
+            now += frame;
+        }
+        let parts = |object: &Object<Counted>| {
+            let drawn = object.drawn.as_ref().unwrap();
+            drawn.parts.spread(&drawn.worlds, object.handling.spread).iter().map(|world| world.w_axis.x).collect::<Vec<_>>()
+        };
+        let apart = parts(&object);
+        assert!(object.handling.spread > 0.99 && (apart[1] - apart[0] - 0.24).abs() < 1e-3, "the two cubes 12 cm apart spread to 24 cm: {apart:?}");
+        for _ in 0..60 {
+            object.step(now, &view(None)).unwrap();
+            now += frame;
+        }
+        let closed = parts(&object);
+        assert!((closed[1] - closed[0] - 0.12).abs() < 1e-3, "withdrawn, they close: {closed:?}");
     }
 
     #[test]
@@ -505,9 +616,12 @@ mod tests {
         let mut slowest = Duration::ZERO;
         let error = loop {
             assert!(Instant::now() < deadline, "the program was never stopped");
+            let uploaded = object.drawn.is_some();
             let started = Instant::now();
             let stepped = object.step(now, &view(None));
-            slowest = slowest.max(started.elapsed());
+            if uploaded {
+                slowest = slowest.max(started.elapsed());
+            }
             if let Err(error) = stepped {
                 break error;
             }

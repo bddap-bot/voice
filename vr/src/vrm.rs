@@ -204,7 +204,7 @@ struct Document<'a> {
 /// The largest texture side an object may carry.
 pub const OBJECT_TEXTURE: u32 = 2048;
 /// How much darker than lit an object's unlit side is; puppets without MToon stay flat as three-vrm draws them.
-const OBJECT_SHADE: f32 = 0.45;
+const OBJECT_SHADE: f32 = 0.15;
 /// Objects shade smoothly so their form reads; MToon's default is a near-hard terminator.
 const OBJECT_TOONY: f32 = 0.2;
 
@@ -289,6 +289,19 @@ fn look_at(version: Version, extensions: &Value) -> LookAt {
             LookAt { moves: look.is_object(), expression, offset, inner: map("lookAtHorizontalInner"), outer: map("lookAtHorizontalOuter"), down: map("lookAtVerticalDown"), up: map("lookAtVerticalUp") }
         }
     }
+}
+
+/// Area-weighted vertex normals, for a primitive that carries none.
+fn smooth_normals(positions: &[Vec3], indices: &[u32]) -> Vec<Vec3> {
+    let mut normals = vec![Vec3::ZERO; positions.len()];
+    for triangle in indices.chunks_exact(3) {
+        let [a, b, c] = [0, 1, 2].map(|corner| triangle[corner] as usize);
+        let face = (positions[b] - positions[a]).cross(positions[c] - positions[a]);
+        for vertex in [a, b, c] {
+            normals[vertex] += face;
+        }
+    }
+    normals.into_iter().map(|normal| normal.try_normalize().unwrap_or(Vec3::Z)).collect()
 }
 
 fn rotation(world: &Mat4) -> Quat {
@@ -600,10 +613,7 @@ impl Model {
                         let attributes = &primitive["attributes"];
                         let positions = document.vec3s(index(&attributes["POSITION"]).ok_or("primitive without POSITION")?)?;
                         let count = positions.len();
-                        let normals = match index(&attributes["NORMAL"]) {
-                            Some(accessor) => document.vec3s(accessor)?,
-                            None => vec![Vec3::Z; count],
-                        };
+                        let normals = index(&attributes["NORMAL"]).map(|accessor| document.vec3s(accessor)).transpose()?;
                         let uvs = match index(&attributes["TEXCOORD_0"]) {
                             Some(accessor) => document.accessor(accessor)?.0.chunks_exact(2).map(|v| Vec2::new(v[0] as f32, v[1] as f32)).collect(),
                             None => vec![Vec2::ZERO; count],
@@ -620,9 +630,10 @@ impl Model {
                             Some(accessor) => document.accessor(accessor)?.0.into_iter().map(|value| value as u32).collect(),
                             None => (0..count as u32).collect(),
                         };
-                        if indices.iter().any(|&vertex| vertex as usize >= count) || [normals.len(), uvs.len()].iter().any(|&length| length != count) {
+                        if indices.iter().any(|&vertex| vertex as usize >= count) || normals.as_ref().is_some_and(|normals| normals.len() != count) || uvs.len() != count {
                             return Err("primitive attributes disagree in length".to_owned());
                         }
+                        let normals = normals.unwrap_or_else(|| smooth_normals(&positions, &indices));
                         let targets = primitive["targets"]
                             .as_array()
                             .unwrap_or(&empty)
@@ -1161,6 +1172,22 @@ pub mod tests {
         builder.set("textures", serde_json::json!([{ "extensions": { "EXT_texture_webp": { "source": image } } }]));
         builder.set("materials", serde_json::json!([{ "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } }, "alphaMode": "MASK", "extensions": { "VRMC_materials_mtoon": { "shadeColorFactor": [0.5, 0.5, 0.5] } } }]));
         builder.glb()
+    }
+
+    #[test]
+    fn a_plain_gltf_without_normals_gets_them_from_its_faces_and_a_puppet_still_needs_vrm() {
+        let mut builder = Builder::new(serde_json::json!({}));
+        let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0]);
+        let indices = builder.indices(&[0, 1, 2, 0, 1, 3]);
+        builder.set("nodes", serde_json::json!([{ "mesh": 0 }]));
+        builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position }, "indices": indices }] }]));
+        let bytes = builder.glb();
+        assert_eq!(Model::parse(&bytes).err().as_deref(), Some("file is not a VRM puppet"));
+        let skinned = Model::object(&bytes).unwrap().skinned().unwrap();
+        let normals: Vec<[f32; 3]> = skinned.vertices.iter().map(|vertex| vertex.normal.map(|value| (value * 1e3).round() / 1e3)).collect();
+        let diagonal = std::f32::consts::FRAC_1_SQRT_2;
+        let d = (diagonal * 1e3).round() / 1e3;
+        assert_eq!(normals, [[0.0, d, d], [0.0, d, d], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]]);
     }
 
     #[test]

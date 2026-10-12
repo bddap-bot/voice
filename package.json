@@ -10,6 +10,8 @@
     "smoke:ci": "npm run smoke -- --output smoke-artifacts --baseline test/smoke-baseline.json",
     "predev": "npm run build",
     "dev": "node scripts/dev.mjs",
+    "preidle-cost": "npm run build",
+    "idle-cost": "node scripts/idle-cost.mjs",
     "presmoke:wake-replies": "npm run build",
     "smoke:wake-replies": "node scripts/wake-reply-smoke.mjs",
     "presmoke:delegated-reply": "npm run build",

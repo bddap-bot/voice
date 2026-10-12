@@ -115,9 +115,7 @@ test('an avatar loads and renders Standing before any clip exists', async () => 
     renders = 0;
     Object.assign(runtime, { clock: { getDelta: () => 0 }, renderer: { render: () => renders++ } });
     for (const method of ['updateBasePose', 'updatePose', 'updateFace', 'recordAnimation']) runtime[method] = () => {};
-    const frame = globalThis.requestAnimationFrame;
-    globalThis.requestAnimationFrame = () => 1;
-    try { runtime.animate(0); } finally { globalThis.requestAnimationFrame = frame; }
+    runtime.animate(0);
     assert.equal(renders, 1);
   } finally {
     globalThis.ProgressEvent = progress;

@@ -1,7 +1,7 @@
 import { readFile, readdir } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
-import { launchChromium, openPage } from './chromium.mjs';
+import { SWIFTSHADER, launchChromium, livePageArgs, openPage } from './chromium.mjs';
 
 const root = path.resolve(new URL('..', import.meta.url).pathname);
 const flag = (name, fallback) => { const at = process.argv.indexOf(name); return at >= 0 ? process.argv[at + 1] : fallback; };
@@ -9,7 +9,7 @@ const seconds = Number(flag('--seconds', 20));
 const settle = Number(flag('--settle', 6));
 const variants = flag('--variants', 'both,puppet,spotter,neither').split(',');
 const TICK = 100;
-const BROWSER = ['--headless=new', '--no-sandbox', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required', '--window-size=412,915'];
+const BROWSER = [...livePageArgs({ width: 412, height: 915 }), ...SWIFTSHADER];
 
 const harness = `<!doctype html><meta charset="utf-8"><style>body{margin:0;background:#111}canvas{width:100vw;height:100vh;display:block}</style><canvas id="puppet"></canvas>
 <script>globalThis.__idle = { frames: 0, events: [], ready: false }; addEventListener('error', (event) => __idle.events.push({ error: String(event.message) })); addEventListener('unhandledrejection', (event) => __idle.events.push({ error: String(event.reason?.stack ?? event.reason) }));</script>
@@ -66,13 +66,13 @@ async function serve() {
   return { url: `http://127.0.0.1:${server.address().port}/`, close: () => server.close() };
 }
 
-async function stat(file) { try { return await readFile(file, 'utf8'); } catch { return null; } }
+async function readOrNull(file) { try { return await readFile(file, 'utf8'); } catch { return null; } }
 
 async function descendants(scratch) {
   const processes = [];
   for (const name of await readdir('/proc')) {
     if (!/^\d+$/.test(name)) continue;
-    const [text, cmdline] = await Promise.all([stat(`/proc/${name}/stat`), stat(`/proc/${name}/cmdline`)]);
+    const [text, cmdline] = await Promise.all([readOrNull(`/proc/${name}/stat`), readOrNull(`/proc/${name}/cmdline`)]);
     if (!text || !cmdline) continue;
     processes.push({ pid: Number(name), ppid: Number(text.slice(text.lastIndexOf(')') + 2).split(' ')[1]), cmdline: cmdline.split(/[\0 ]/) });
   }
@@ -95,13 +95,24 @@ async function threadTicks(processes) {
     let tasks = [];
     try { tasks = await readdir(`/proc/${pid}/task`); } catch { continue; }
     for (const tid of tasks) {
-      const [text, comm, status] = await Promise.all([stat(`/proc/${pid}/task/${tid}/stat`), stat(`/proc/${pid}/task/${tid}/comm`), stat(`/proc/${pid}/task/${tid}/status`)]);
+      const [text, comm, status] = await Promise.all([readOrNull(`/proc/${pid}/task/${tid}/stat`), readOrNull(`/proc/${pid}/task/${tid}/comm`), readOrNull(`/proc/${pid}/task/${tid}/status`)]);
       if (!text || !comm || !status) continue;
       const fields = text.slice(text.lastIndexOf(')') + 2).split(' ');
-      ticks.set(tid, { key: `${kind} ${comm.trim().replace(/\d+$/, '#')}`, cpu: Number(fields[11]) + Number(fields[12]), wakes: Number(/voluntary_ctxt_switches:\s*(\d+)/.exec(status)[1]) });
+      ticks.set(tid, { key: `${kind} ${Number(tid) === pid ? 'main' : comm.trim().replace(/\d+$/, '#')}`, cpu: Number(fields[11]) + Number(fields[12]), wakes: Number(/voluntary_ctxt_switches:\s*(\d+)/.exec(status)[1]) });
     }
   }
   return ticks;
+}
+
+async function until(evaluate, expression, failure) {
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    const [value, error] = await evaluate(`[${expression}, globalThis.__idle?.events.find((event) => event.error)?.error]`).catch(() => []);
+    if (error) throw new Error(error);
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  throw new Error(failure);
 }
 
 async function measure(server, variant) {
@@ -112,11 +123,7 @@ async function measure(server, variant) {
   try {
     const { evaluate, call } = await openPage(chrome.devtools.call);
     await call('Page.navigate', { url: `${server.url}?${params}` });
-    const deadline = Date.now() + 30000;
-    while (!await evaluate('globalThis.__idle?.ready === true').catch(() => false)) {
-      if (Date.now() > deadline) throw new Error(`${variant}: harness never became ready`);
-      await new Promise((resolve) => setTimeout(resolve, 200));
-    }
+    await until(evaluate, 'globalThis.__idle?.ready', `${variant}: the harness never became ready`);
     await new Promise((resolve) => setTimeout(resolve, settle * 1000));
     const processes = await descendants(chrome.scratch);
     const before = await threadTicks(processes);
@@ -135,7 +142,7 @@ async function measure(server, variant) {
       threads[key] = { cpu: total.cpu + (cpu - was.cpu) * 1000 / TICK / elapsed, wakes: total.wakes + (wakes - was.wakes) / elapsed };
     }
     const groups = {
-      main: (key) => key === 'renderer chromium',
+      main: (key) => key === 'renderer main',
       wakeWorker: (key) => key === 'renderer DedicatedWorker',
       audio: (key) => key.startsWith('utility:audio') || /^renderer (Realtime AudioW|AudioInputDevic|AudioOutputDevi)/.test(key),
       gpu: (key) => key.startsWith('gpu-process'),
@@ -152,16 +159,7 @@ async function phrase(server) {
   try {
     const { evaluate, call } = await openPage(chrome.devtools.call);
     await call('Page.navigate', { url: `${server.url}?puppet&spotter&phrase` });
-    const deadline = Date.now() + 30000;
-    while (Date.now() < deadline) {
-      const events = await evaluate('globalThis.__idle?.events ?? []').catch(() => []);
-      const error = events.find((event) => event.error);
-      if (error) throw new Error(error.error);
-      const wake = events.find((event) => event.wake);
-      if (wake) return wake;
-      await new Promise((resolve) => setTimeout(resolve, 200));
-    }
-    throw new Error(`the wake phrase did not fire: ${JSON.stringify(await evaluate('globalThis.__idle'))}`);
+    return await until(evaluate, 'globalThis.__idle?.events.find((event) => event.wake)', 'the wake phrase did not fire');
   } finally { await chrome.close(); }
 }
 

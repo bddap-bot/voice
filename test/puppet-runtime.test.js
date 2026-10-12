@@ -665,11 +665,7 @@ test('each animation event reports the weights its frame rendered across a gestu
   });
   runtime.playClip('idle', 'idle');
   runtime.gesture('nod');
-  const frame = globalThis.requestAnimationFrame;
-  globalThis.requestAnimationFrame = () => 1;
-  try {
-    for (let step = 0; step < 90; step++) runtime.animate(step * 1000 / 60);
-  } finally { globalThis.requestAnimationFrame = frame; }
+  for (let step = 0; step < 90; step++) runtime.animate(step * 1000 / 60);
   assert.equal(runtime.clipAction.getClip().name, 'idle', 'the nod must have handed over to idle');
   assert.ok(events.length > 10);
   for (const { clips, hip_height } of events) {

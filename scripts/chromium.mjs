@@ -113,6 +113,8 @@ function devtools(input, output, stderr) {
   };
 }
 
+export const SWIFTSHADER = ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'];
+
 export const livePageArgs = ({ width, height }) => ['--headless=new', '--no-sandbox', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--hide-scrollbars', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required', `--window-size=${width},${height}`];
 
 export async function openPage(call, url = 'about:blank') {

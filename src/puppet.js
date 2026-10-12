@@ -12,6 +12,7 @@ const CLIP_GESTURES = new Set(['nod', 'shrug', 'think', 'wave', 'no', 'laugh', '
 const ACTIVE_FPS = 60;
 const RESTING_FPS = 15;
 const FRAME_SLACK = 1;
+const ease = (perFrame, delta) => 1 - (1 - perFrame) ** (delta * ACTIVE_FPS);
 const IDLE_CLIPS = { stand: ['idle', 'idle-2', 'idle-3'], sit: ['sit-idle', 'sit-idle-2'] };
 
 const GAZE_POINTS = {
@@ -439,14 +440,14 @@ export class PuppetRuntime {
     this.mixer.update(delta);
     this.head?.base.copy(this.head.node.quaternion);
   }
-  updateMood(manager) {
+  updateMood(manager, delta = 1 / ACTIVE_FPS) {
     const mood = MOOD_TABLE[this.moodName];
     for (const expression of manager.expressions) {
       const name = expression.expressionName.toLowerCase();
-      if (MOOD_EXPRESSIONS.includes(name)) expression.weight = THREE.MathUtils.lerp(expression.weight, mood?.[name] ?? 0, 0.12);
+      if (MOOD_EXPRESSIONS.includes(name)) expression.weight = THREE.MathUtils.lerp(expression.weight, mood?.[name] ?? 0, ease(0.12, delta));
     }
   }
-  updateFace(now) {
+  updateFace(now, delta = 1 / ACTIVE_FPS) {
     const manager = this.vrm?.expressionManager;
     if (manager) {
       if (!this.sleeping && now >= this.nextBlink && !this.blinkStart) this.blinkStart = now;
@@ -456,12 +457,12 @@ export class PuppetRuntime {
         this.blinkStart = 0;
         this.nextBlink = now + 2200 + Math.random() * 4200;
       }
-      this.updateMood(manager);
-      this.updateMouth(manager, now);
+      this.updateMood(manager, delta);
+      this.updateMouth(manager, now, delta);
     }
-    this.updateGaze(now);
+    this.updateGaze(now, delta);
   }
-  updateGaze(now) {
+  updateGaze(now, delta = 1 / ACTIVE_FPS) {
     if (!this.vrm?.lookAt) return;
     if (this.gazeMode !== 'camera' && now >= this.gazeUntil) {
       this.gazeMode = 'camera';
@@ -474,7 +475,7 @@ export class PuppetRuntime {
       }
       this.gazeDestination.fromArray(GAZE_POINTS.camera).add(this.saccade);
     } else if (this.gazeMode !== 'camera') this.gazeDestination.fromArray(GAZE_POINTS[this.gazeMode]);
-    this.gazePoint.lerp(this.gazeDestination, 0.08);
+    this.gazePoint.lerp(this.gazeDestination, ease(0.08, delta));
     this.gazeTarget.position.copy(this.gazePoint);
     const head = this.head?.node;
     if (!head) return;
@@ -483,7 +484,7 @@ export class PuppetRuntime {
     this.gazeRotation.setFromEuler(new THREE.Euler(pitch, yaw, 0));
     head.quaternion.multiply(this.gazeRotation);
   }
-  updateMouth(manager, now = performance.now()) {
+  updateMouth(manager, now = performance.now(), delta = 1 / ACTIVE_FPS) {
     let targets;
     if (this.audio) {
       this.audio.analyser.getByteTimeDomainData(this.audio.waveform);
@@ -493,7 +494,7 @@ export class PuppetRuntime {
       targets = loudnessViseme(name, this.audio.waveform);
     }
     for (const name of VISEMES) {
-      this.mouthValues[name] = THREE.MathUtils.lerp(this.mouthValues[name], targets?.[name] ?? 0, 0.65);
+      this.mouthValues[name] = THREE.MathUtils.lerp(this.mouthValues[name], targets?.[name] ?? 0, ease(0.65, delta));
       manager.setValue(name, this.mouthValues[name]);
     }
   }
@@ -537,7 +538,7 @@ export class PuppetRuntime {
     const delta = Math.min(this.clock.getDelta(), 0.1);
     this.updatePose(now);
     this.updateBasePose(delta);
-    this.updateFace(now);
+    this.updateFace(now, delta);
     if (this.vrm) this.plantFeet();
     this.vrm?.update(delta);
     this.recordAnimation();

@@ -310,6 +310,9 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
                 None if card => object.clear("replaced by a display without one"),
                 None => {}
             }
+            if let Some(data) = shown.data.take() {
+                object.feed(data.into_bytes());
+            }
             if card {
                 let picture = panel::draw(&shown);
                 display = Some(panel::size(&picture));

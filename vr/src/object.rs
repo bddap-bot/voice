@@ -152,6 +152,7 @@ struct Exchange {
     failed: Option<String>,
     time: f32,
     tip: Option<Vec3>,
+    data: Option<Vec<u8>>,
 }
 
 fn run(bytes: Vec<u8>, exchange: &Mutex<Exchange>, stop: &AtomicBool) {
@@ -164,10 +165,13 @@ fn run(bytes: Vec<u8>, exchange: &Mutex<Exchange>, stop: &AtomicBool) {
         Err(error) => return exchange.lock().unwrap().failed = Some(error),
     };
     while !stop.load(Ordering::SeqCst) {
-        let (time, tip) = {
-            let exchange = exchange.lock().unwrap();
-            (exchange.time, exchange.tip)
+        let (time, tip, data) = {
+            let mut exchange = exchange.lock().unwrap();
+            (exchange.time, exchange.tip, exchange.data.take())
         };
+        if let Err(error) = data.map_or(Ok(()), |data| program.feed(&data)) {
+            return exchange.lock().unwrap().failed = Some(error);
+        }
         match program.tick(time, tip) {
             Ok(Some(transforms)) => exchange.lock().unwrap().transforms = Some(transforms),
             Ok(None) => {}
@@ -309,6 +313,14 @@ impl<S: Surface> Object<S> {
         self.surface.hide();
     }
 
+    /// Live data for the program; only the newest waiting update is kept.
+    pub fn feed(&self, data: Vec<u8>) {
+        self.runner.exchange.lock().unwrap().data = Some(data);
+        if let Some(thread) = &self.runner.thread {
+            thread.thread().unpark();
+        }
+    }
+
     /// Where the node named `name` is now, in the standing universe.
     pub fn locate(&self, name: &str) -> Option<Vec3> {
         let drawn = self.drawn.as_ref()?;
@@ -412,6 +424,13 @@ impl<S: Surface> Slot<S> {
 
     pub fn locate(&self, name: &str) -> Option<Vec3> {
         self.object.as_ref()?.locate(name)
+    }
+
+    pub fn feed(&self, data: Vec<u8>) {
+        match &self.object {
+            Some(object) => object.feed(data),
+            None => eprintln!("live data with no object shown"),
+        }
     }
 
     pub fn step(&mut self, now: Instant, view: &View) {
@@ -651,6 +670,24 @@ mod tests {
         object.step(born, &view(None)).unwrap();
         let moved = V3::from(object.locate("right").unwrap());
         assert!(moved.abs_diff_eq(center + V3::new(0.0, 0.0, -0.12), 1e-5), "spread to 12 cm and turned a quarter: {moved}");
+    }
+
+    #[test]
+    fn live_data_fed_to_a_shown_object_moves_it_from_the_program_thread() {
+        let gpu = Rc::new(Gpu::new(None).unwrap());
+        let born = Instant::now();
+        let mut slot = Slot::default();
+        slot.show(|| Object::spawn(Counted::new(), gpu, scene(0.2, Some((crate::program::tests::GAUGE, 0.0))), born));
+        slot.feed(b"\x05".to_vec());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(Instant::now() < deadline, "the data never reached the drawing");
+            slot.step(born, &view(None));
+            if slot.object.as_ref().unwrap().drawn.as_ref().is_some_and(|drawn| drawn.worlds[0].w_axis.x == 5.0) {
+                break;
+            }
+            std::thread::sleep(TICK);
+        }
     }
 
     #[test]

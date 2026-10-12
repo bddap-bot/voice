@@ -74,6 +74,7 @@ struct Shown {
     image: Option<serde::de::IgnoredAny>,
     object: Option<serde::de::IgnoredAny>,
     point: Option<String>,
+    data: Option<String>,
 }
 
 /// What a hub reply asks to show, as the page's display card does.
@@ -87,6 +88,8 @@ pub struct Display {
     pub object: Option<Vec<u8>>,
     /// The name of a node in the shown object for the puppet to point at while it speaks.
     pub point: Option<String>,
+    /// Live data for the shown object's program.
+    pub data: Option<String>,
 }
 
 impl Display {
@@ -245,7 +248,7 @@ impl Hub {
         trace.calls.replied(&reply.id, &reply.commentary);
         if let Some(shown) = reply.display.take() {
             let trailer = |carried: bool| (carried && !image.is_empty()).then(|| image.to_vec());
-            self.display = Some(Display { markdown: shown.markdown, link: shown.link, image: trailer(shown.image.is_some()), object: trailer(shown.object.is_some() && shown.image.is_none()), point: shown.point });
+            self.display = Some(Display { markdown: shown.markdown, link: shown.link, image: trailer(shown.image.is_some()), object: trailer(shown.object.is_some() && shown.image.is_none()), point: shown.point, data: shown.data });
         }
         let unspoken = (!reply.commentary.is_empty() && self.sleeping).then_some(ASLEEP);
         let mut ack = json!({ "id": reply.id, "stamp": reply.stamp });

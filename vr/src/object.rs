@@ -425,6 +425,14 @@ impl<S: Surface> Object<S> {
         Ok(())
     }
 
+    /// Its render cost as the budget sees it, for the log.
+    fn cost(&self) -> String {
+        match self.frames as f32 - WINDOW {
+            measured if measured > 0.0 => format!("{:.2} ms a frame over its last {} frames, budget {} ms", self.cost * 1e3, measured.min(WINDOW), self.budget.mean.as_millis()),
+            _ => format!("{} frames drawn, too few to measure", self.frames),
+        }
+    }
+
     #[cfg(test)]
     fn read(&self) -> Result<Vec<u8>, String> {
         self.renderer.read()
@@ -444,8 +452,8 @@ impl<S: Surface> Default for Slot<S> {
 
 impl<S: Surface> Slot<S> {
     pub fn clear(&mut self, why: &str) {
-        if self.object.take().is_some() {
-            eprintln!("object gone: {why}");
+        if let Some(object) = self.object.take() {
+            eprintln!("object gone: {why}; {}", object.cost());
         }
     }
 
@@ -488,6 +496,42 @@ impl<S: Surface> Slot<S> {
     fn shown(&self) -> bool {
         self.object.is_some()
     }
+}
+
+/// A surface that shows nothing, for drawing an object offscreen.
+pub struct Offscreen;
+
+impl Surface for Offscreen {
+    fn place_in_world(&self, _: &Pose) {}
+    fn texture(&self, _: &mut openvr_sys::VRVulkanTextureData_t) -> Result<(), String> {
+        Ok(())
+    }
+    fn show(&mut self) {}
+    fn hide(&mut self) {}
+}
+
+/// Draws a file offscreen as the overlay draws an object half a metre ahead, one frame a tick, until `frames` frames are drawn; the last third with the tip at its centre, so its parts spread.
+/// The overlay's own log line reports its cost; `Err` when the object was refused or removed.
+pub fn measure(gpu: Rc<Gpu>, bytes: Vec<u8>, frames: u32, budget: Budget) -> Result<(), String> {
+    let axes = |t| Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], t);
+    let center = [0.0, 1.2, -0.5];
+    let mut slot = Slot::default();
+    slot.show(|| Object::spawn(Offscreen, gpu, bytes, budget, Instant::now()));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let Some(object) = &slot.object else { return Err("the object was refused or removed".into()) };
+        if object.frames >= frames {
+            break;
+        }
+        if object.drawn.is_none() && Instant::now() > deadline {
+            return Err("the object did not load within a minute".into());
+        }
+        let tip = (object.frames >= frames * 2 / 3).then_some(center);
+        slot.step(Instant::now(), &View { center, head: axes([0.0, 1.2, 0.0]), eyes: [axes([-0.032, 0.0, 0.0]), axes([0.032, 0.0, 0.0])], tip });
+        std::thread::sleep(TICK);
+    }
+    slot.clear("measured");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -751,6 +795,16 @@ mod tests {
         let error = (0..2 * WINDOW as usize).find_map(|_| object.step(now, &view(None)).err()).expect("stopped within its window");
         assert!(error.contains("budget"), "{error}");
         assert_eq!(object.frames as f32, 2.0 * WINDOW, "measured only after its first {WINDOW} frames, then over a window of them");
+    }
+
+    #[test]
+    fn measuring_draws_a_file_offscreen_and_fails_when_the_overlay_would_remove_it() {
+        let gpu = Rc::new(Gpu::new(None).unwrap());
+        let frames = 2 * WINDOW as u32 + 5;
+        measure(gpu.clone(), cube(0.1), frames, LOOSE).unwrap();
+        let error = measure(gpu.clone(), cube(0.1), frames, Budget { mean: Duration::ZERO, frame: Duration::from_secs(5) }).unwrap_err();
+        assert!(error.contains("removed"), "{error}");
+        assert!(measure(gpu, b"not a model".to_vec(), frames, LOOSE).is_err(), "a file that is no object is refused");
     }
 
     #[test]

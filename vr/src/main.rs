@@ -475,9 +475,11 @@ fn run() -> Result<(), String> {
     let config = directory("XDG_CONFIG_HOME", ".config");
     let state = directory("XDG_STATE_HOME", ".local/state");
     std::fs::create_dir_all(&state).map_err(|error| format!("{}: {error}", state.display()))?;
-    if let [_, mode, recording] = &std::env::args().collect::<Vec<_>>()[..] {
-        if mode == "replay" {
-            return replay(&state, recording);
+    if let [_, mode, file] = &std::env::args().collect::<Vec<_>>()[..] {
+        match mode.as_str() {
+            "replay" => return replay(&state, file),
+            "object" => return object::measure(Rc::new(vulkan::Gpu::new(None)?), std::fs::read(file).map_err(|error| format!("{file}: {error}"))?, 900, object::BUDGET),
+            _ => {}
         }
     }
     let token_file = config.join("token");

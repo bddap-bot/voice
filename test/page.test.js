@@ -6,7 +6,6 @@ import { gzipSync } from 'node:zlib';
 import { IDENTITY, INACTIVITY_MS, SIGN_OFF, WAKE_PHRASE, WOKEN } from '../docs/identity.js';
 import { WIDTH, WINDOW } from '../docs/wake.js';
 import { MODEL } from '../docs/speaker.js';
-import { ACTION_INSTRUCTIONS } from '../docs/puppet-drivers.js';
 import { launchChromium, openPage, renderDom } from '../scripts/chromium.mjs';
 import { assessSmoke, canvasAspectMatches, clipClearsStage, evidenceRegion, installSmokeMeasurements, smokeLimits, smokeStatusText, smokeViewports } from './smoke-measurements.js';
 
@@ -1865,7 +1864,7 @@ test('the wake phrase carries earlier turns and a completed-sleep marker into on
   `);
   assert.equal(result.offers, 1);
   assert.deepEqual(result.offer, ['id', 'sdp', 'instructions', 'context', 'wake']);
-  assert.deepEqual(result.instructions, [IDENTITY, ACTION_INSTRUCTIONS]);
+  assert.deepEqual(result.instructions, [IDENTITY]);
   assert.equal(result.context.length, 1);
   assert.equal(result.context[0].speaker, 'user');
   assert.match(result.context[0].text, /^Context: Archived transcripts of completed conversations, oldest first/);

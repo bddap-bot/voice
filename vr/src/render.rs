@@ -734,7 +734,7 @@ mod tests {
         use glam::Quat;
         assert!(crate::played("wave") && crate::played("idle"), "the overlay loads the gesture clips beside its idles");
         let replay = &crate::action::tests::replays()[0];
-        let (_, decisions) = crate::action::tests::replay(replay);
+        let decisions = crate::action::tests::replay(replay);
         assert!(decisions.iter().any(|action| action.name == "wave"), "the page waves at this transcript: {decisions:?}");
         let model = Model::parse(include_bytes!("../golden/figure.vrm")).unwrap();
         let standing = model.standing();

@@ -130,97 +130,40 @@ function completedSentences(text) {
   return { sentences, pending: text.slice(start) };
 }
 
-const ACTION_KINDS = new Map(['gesture', 'mood'].flatMap((kind) => Object.keys(LABELS[kind]).map((name) => [name, kind])));
-const BRACKETED = /\s*\[([^[\]]*)\]/g;
-const LONGEST_TOKEN = 40;
-const bracketed = (kind) => Object.keys(LABELS[kind]).map((name) => `[${name}]`).join(', ');
-
-export const ACTION_INSTRUCTIONS = `Your body is an animated figure. When you make a gesture or show a mood, write its token in square brackets at the point in the sentence where it happens, for example "[nod] Yes, that works." Gestures: ${bracketed('gesture')}. Moods: ${bracketed('mood')}. Use only these tokens, and only where the action fits. The page acts them out and never shows them; speak everything else as usual.`;
-
 export class TranscriptActionDriver {
-  constructor(apply, classifier = new EmbeddingActionClassifier(), timing = {}, compare = () => {}) {
+  constructor(apply, classifier = new EmbeddingActionClassifier(), timing = {}) {
     this.apply = apply;
     this.classifier = classifier;
-    this.compare = compare;
     this.now = timing.now ?? (() => performance.now());
     this.schedule = timing.schedule ?? ((apply, delay) => setTimeout(apply, delay));
     this.minimumMs = timing.minimumMs ?? 900;
     this.epoch = 0;
     this.pending = '';
-    this.held = '';
-    this.annotations = [];
     this.nextAt = 0;
     this.tail = Promise.resolve();
   }
   push(delta, playAt = this.now()) {
-    let text = this.held + delta;
-    const open = text.lastIndexOf('[');
-    this.held = open >= 0 && !text.includes(']', open) && text.length - open <= LONGEST_TOKEN ? text.slice(open) : '';
-    text = text.slice(0, text.length - this.held.length);
-    let spoken = '';
-    let last = 0;
-    for (const match of text.matchAll(BRACKETED)) {
-      spoken += this.speak(text.slice(last, match.index), playAt);
-      this.annotate(match[1], playAt);
-      last = match.index + match[0].length;
-    }
-    return spoken + this.speak(text.slice(last), playAt);
-  }
-  speak(text, playAt) {
-    this.pending += text;
+    this.pending += delta;
     const { sentences, pending } = completedSentences(this.pending);
     this.pending = pending;
-    for (const sentence of sentences) this.sentence(sentence, playAt);
-    return text;
+    for (const sentence of sentences) if (sentence.replace(/[.!?\s]/g, '')) this.dispatch(sentence.trim(), playAt);
   }
-  annotate(raw, playAt) {
-    const name = raw.trim().toLowerCase().replace(/\s+/g, '-');
-    const kind = ACTION_KINDS.get(name);
-    if (!kind) return this.apply({ kind: 'unknown', name, source: 'bracket' }, { token: raw, playAtMinusNow: 0 });
-    this.annotations.push({ kind, name });
-    return this.run(async () => ({ kind, name, source: 'bracket' }), playAt, { token: raw });
-  }
-  sentence(raw, playAt = this.now()) {
-    const annotations = this.annotations;
-    this.annotations = [];
-    if (!raw.replace(/[.!?\s]/g, '')) return;
-    const text = raw.trim();
-    if (!annotations.length) return this.dispatch(text, playAt);
-    const epoch = this.epoch;
-    return this.classifier.classify(text).then((choice) => {
-      if (epoch === this.epoch) this.compare({ sentence: text, annotations, classifier: choice });
-    }, () => {});
-  }
-  endTurn() {
-    const text = this.pending;
-    this.pending = '';
-    this.held = '';
-    if (this.annotations.length && text.trim()) return this.sentence(text);
-    this.annotations = [];
-  }
-  dispatch(text, playAt = this.now()) {
-    return this.run(async () => ({ ...await this.classifier.classify(text), source: 'classifier' }), playAt, { sentence: text });
-  }
-  run(produce, playAt, detail) {
+  dispatch(sentence, playAt) {
     const epoch = this.epoch;
     const operation = this.tail.then(async () => {
-      const result = await produce();
-      if (epoch !== this.epoch) return result;
+      const action = await this.classifier.classify(sentence);
+      if (epoch !== this.epoch) return;
       const at = Math.max(playAt, this.nextAt, this.now());
       this.nextAt = at + this.minimumMs;
       const playAtMinusNow = Math.max(0, at - this.now());
       await new Promise((resolve) => this.schedule(resolve, playAtMinusNow));
-      if (epoch === this.epoch) this.apply(result, { ...detail, playAtMinusNow });
-      return result;
+      if (epoch === this.epoch) this.apply(action, { sentence, playAtMinusNow });
     });
     this.tail = operation.catch(() => {});
-    return operation;
   }
   reset() {
     this.epoch++;
     this.pending = '';
-    this.held = '';
-    this.annotations = [];
     this.nextAt = 0;
   }
 }

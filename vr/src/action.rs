@@ -9,11 +9,10 @@ use serde::Deserialize;
 use tract_onnx::prelude::*;
 use unicode_normalization::UnicodeNormalization;
 
-/// docs/puppet-drivers.js as its golden records it: the instructions, labels and posture override the page sends and classifies with.
+/// docs/puppet-drivers.js as its golden records it: the labels and posture override the page classifies with.
 const PAGE: &str = include_str!("../golden/actions.json");
 /// The page driver's `minimumMs` between two actions.
 const MINIMUM: Duration = Duration::from_millis(900);
-const LONGEST_TOKEN: usize = 40;
 const MAX_TOKENS: usize = 512;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
@@ -22,7 +21,6 @@ pub enum Kind {
     None,
     Gesture,
     Mood,
-    Unknown,
 }
 
 #[derive(Deserialize)]
@@ -40,7 +38,6 @@ struct Posture {
 
 #[derive(Deserialize)]
 struct Page {
-    instructions: String,
     labels: Vec<Label>,
     posture: Posture,
 }
@@ -50,30 +47,18 @@ fn page() -> &'static Page {
     PARSED.get_or_init(|| serde_json::from_str(PAGE).expect("vr/golden/actions.json"))
 }
 
-/// The page's ACTION_INSTRUCTIONS, appended at session start as the page does.
-pub fn instructions() -> &'static str {
-    &page().instructions
-}
-
 /// The gestures the page can play; each is a clip of the same name in the catalog.
 pub fn gestures() -> impl Iterator<Item = &'static str> {
     page().labels.iter().filter(|label| label.kind == Kind::Gesture).map(|label| label.name.as_str())
 }
 
-fn action_kind(name: &str) -> Option<Kind> {
-    let mut kinds = page().labels.iter().filter(|label| label.name == name && matches!(label.kind, Kind::Gesture | Kind::Mood));
-    kinds.next().map(|label| label.kind)
-}
-
 /// One decision, as the page's driver hands it to `applyTranscriptAction`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Action {
-    pub source: &'static str,
     pub kind: Kind,
     pub name: String,
-    pub score: Option<f32>,
-    /// The classified sentence, or the bracketed token as written.
-    pub said: String,
+    pub score: f32,
+    pub sentence: String,
 }
 
 /// The page's BERT tokenizer for the embedding model: BertNormalizer, BertPreTokenizer, WordPiece, then `[CLS] … [SEP]`.
@@ -291,19 +276,10 @@ impl Classifier {
     }
 }
 
-/// A step of the page's driver, in order: a bracketed token acts directly, a plain sentence goes to the classifier.
-#[derive(Debug, PartialEq)]
-enum Step {
-    Act(Action),
-    Classify(String),
-}
-
-/// The page's TranscriptActionDriver over Live's output transcript: bracketed tokens, held across deltas, and completed sentences.
+/// The page's TranscriptActionDriver over Live's output transcript: completed sentences.
 #[derive(Default)]
 struct Driver {
     pending: String,
-    held: String,
-    annotated: bool,
 }
 
 fn completed_sentences(text: &str) -> (Vec<&str>, &str) {
@@ -325,63 +301,14 @@ fn completed_sentences(text: &str) -> (Vec<&str>, &str) {
 }
 
 impl Driver {
-    /// Takes one output delta; returns the text spoken aloud, without its bracketed tokens.
-    fn push(&mut self, delta: &str, steps: &mut Vec<Step>) -> String {
-        static BRACKETED: OnceLock<Regex> = OnceLock::new();
-        let bracketed = BRACKETED.get_or_init(|| Regex::new(r"\s*\[([^\[\]]*)\]").unwrap());
-        let mut text = std::mem::take(&mut self.held) + delta;
-        if let Some(open) = text.rfind('[') {
-            if !text[open..].contains(']') && text[open..].encode_utf16().count() <= LONGEST_TOKEN {
-                self.held = text.split_off(open);
-            }
-        }
-        let mut spoken = String::new();
-        let mut last = 0;
-        for found in bracketed.captures_iter(&text) {
-            let whole = found.get(0).unwrap();
-            spoken += &self.speak(&text[last..whole.start()], steps);
-            self.annotate(&found[1], steps);
-            last = whole.end();
-        }
-        spoken + &self.speak(&text[last..], steps)
-    }
-
-    fn speak(&mut self, text: &str, steps: &mut Vec<Step>) -> String {
-        self.pending.push_str(text);
+    /// Takes one output delta; returns the sentences it completed.
+    fn push(&mut self, delta: &str) -> Vec<String> {
+        self.pending.push_str(delta);
         let pending = std::mem::take(&mut self.pending);
         let (sentences, rest) = completed_sentences(&pending);
-        for sentence in sentences {
-            self.sentence(sentence, steps);
-        }
+        let sentences = sentences.into_iter().filter(|sentence| !sentence.chars().all(|char| matches!(char, '.' | '!' | '?') || char.is_whitespace())).map(|sentence| sentence.trim().to_owned()).collect();
         self.pending = rest.to_owned();
-        text.to_owned()
-    }
-
-    fn annotate(&mut self, raw: &str, steps: &mut Vec<Step>) {
-        let name = raw.trim().to_lowercase().split_whitespace().collect::<Vec<_>>().join("-");
-        let kind = action_kind(&name);
-        if kind.is_some() {
-            self.annotated = true;
-        }
-        steps.push(Step::Act(Action { source: "bracket", kind: kind.unwrap_or(Kind::Unknown), name, score: None, said: raw.to_owned() }));
-    }
-
-    /// A sentence the model annotated itself is only compared on the page, never acted on twice.
-    fn sentence(&mut self, raw: &str, steps: &mut Vec<Step>) {
-        let annotated = std::mem::take(&mut self.annotated);
-        if raw.chars().all(|char| matches!(char, '.' | '!' | '?') || char.is_whitespace()) {
-            return;
-        }
-        if !annotated {
-            steps.push(Step::Classify(raw.trim().to_owned()));
-        }
-    }
-
-    /// The user spoke: an unfinished sentence is dropped, as the page drops it.
-    fn end_turn(&mut self) {
-        self.pending.clear();
-        self.held.clear();
-        self.annotated = false;
+        sentences
     }
 }
 
@@ -389,37 +316,32 @@ impl Driver {
 pub struct Actions {
     driver: Driver,
     epoch: u64,
-    requests: Sender<(u64, Step)>,
+    requests: Sender<(u64, String)>,
     decisions: Receiver<(u64, Action)>,
     due: VecDeque<Action>,
     next: Option<Instant>,
 }
 
-fn serve(load: impl FnOnce() -> Result<Classifier, String>, requests: Receiver<(u64, Step)>, decisions: Sender<(u64, Action)>) {
+fn serve(load: impl FnOnce() -> Result<Classifier, String>, requests: Receiver<(u64, String)>, decisions: Sender<(u64, Action)>) {
     let mut classifier = None;
     let mut load = Some(load);
-    for (epoch, step) in requests {
-        let action = match step {
-            Step::Act(action) => action,
-            Step::Classify(sentence) => {
-                if let Some(load) = load.take() {
-                    let started = Instant::now();
-                    match load() {
-                        Ok(loaded) => {
-                            eprintln!("action classifier loaded in {:.1} s", started.elapsed().as_secs_f32());
-                            classifier = Some(loaded);
-                        }
-                        Err(error) => eprintln!("speech-driven actions are off: {error}"),
-                    }
+    for (epoch, sentence) in requests {
+        if let Some(load) = load.take() {
+            let started = Instant::now();
+            match load() {
+                Ok(loaded) => {
+                    eprintln!("action classifier loaded in {:.1} s", started.elapsed().as_secs_f32());
+                    classifier = Some(loaded);
                 }
-                let Some(classifier) = &classifier else { continue };
-                match classifier.classify(&sentence) {
-                    Ok((kind, name, score)) => Action { source: "classifier", kind, name: name.to_owned(), score: Some(score), said: sentence },
-                    Err(error) => {
-                        eprintln!("{error}");
-                        continue;
-                    }
-                }
+                Err(error) => eprintln!("speech-driven actions are off: {error}"),
+            }
+        }
+        let Some(classifier) = &classifier else { continue };
+        let action = match classifier.classify(&sentence) {
+            Ok((kind, name, score)) => Action { kind, name: name.to_owned(), score, sentence },
+            Err(error) => {
+                eprintln!("{error}");
+                continue;
             }
         };
         if decisions.send((epoch, action)).is_err() {
@@ -445,18 +367,11 @@ impl Actions {
         Actions { driver: Driver::default(), epoch: 0, requests, decisions, due: VecDeque::new(), next: None }
     }
 
-    /// One output transcript delta; returns what was spoken, without bracketed tokens.
-    pub fn spoke(&mut self, delta: &str) -> String {
-        let mut steps = Vec::new();
-        let spoken = self.driver.push(delta, &mut steps);
-        for step in steps {
-            let _ = self.requests.send((self.epoch, step));
+    /// One output transcript delta.
+    pub fn spoke(&mut self, delta: &str) {
+        for sentence in self.driver.push(delta) {
+            let _ = self.requests.send((self.epoch, sentence));
         }
-        spoken
-    }
-
-    pub fn heard(&mut self) {
-        self.driver.end_turn();
     }
 
     /// The conversation ended: pending decisions are dropped, as the page's reset drops them.
@@ -496,17 +411,12 @@ pub mod tests {
 
     #[derive(Deserialize)]
     struct Applied {
-        source: String,
-        kind: Kind,
-        name: String,
-        sentence: Option<String>,
-        token: Option<String>,
+        sentence: String,
     }
 
     #[derive(Deserialize)]
     pub struct Replay {
-        pub events: Vec<(String, String)>,
-        spoken: Vec<String>,
+        pub events: Vec<String>,
         actions: Vec<Applied>,
     }
 
@@ -561,17 +471,12 @@ pub mod tests {
     }
 
     /// Runs a recorded transcript through the overlay's actions; every decision is returned in order.
-    pub fn replay(replay: &Replay) -> (Vec<String>, Vec<Action>) {
+    pub fn replay(replay: &Replay) -> Vec<Action> {
         let mut actions = Actions::with(|| Classifier::load(&model_directory()?));
-        let mut spoken = Vec::new();
         let mut decided = Vec::new();
         let mut now = Instant::now();
-        for (speaker, delta) in &replay.events {
-            if speaker == "heard" {
-                actions.heard();
-            } else {
-                spoken.push(actions.spoke(delta));
-            }
+        for delta in &replay.events {
+            actions.spoke(delta);
         }
         let deadline = Instant::now() + Duration::from_secs(120);
         let expected = replay.actions.len();
@@ -582,44 +487,49 @@ pub mod tests {
                 None => std::thread::sleep(Duration::from_millis(5)),
             }
         }
-        (spoken, decided)
+        decided
     }
 
     #[test]
     fn recorded_transcripts_act_as_the_page_acted_on_them() {
         for replay in golden().replays {
-            let (spoken, decided) = super::tests::replay(&replay);
-            assert_eq!(spoken, replay.spoken);
+            let decided = super::tests::replay(&replay);
             let cases = golden().cases;
             assert_eq!(decided.len(), replay.actions.len(), "{decided:?}");
             for (action, applied) in decided.iter().zip(&replay.actions) {
-                assert_eq!((action.source, &action.said), (applied.source.as_str(), applied.sentence.as_ref().or(applied.token.as_ref()).unwrap()));
-                match &applied.sentence {
-                    Some(sentence) => assert!(agrees(cases.iter().find(|case| &case.text == sentence).unwrap(), action.kind, &action.name, action.score.unwrap()), "{action:?}"),
-                    None => assert_eq!((action.kind, &action.name), (applied.kind, &applied.name)),
-                }
+                assert_eq!(action.sentence, applied.sentence);
+                assert!(agrees(cases.iter().find(|case| case.text == applied.sentence).unwrap(), action.kind, &action.name, action.score), "{action:?}");
             }
         }
     }
 
     #[test]
     fn decisions_are_spaced_by_the_pages_minimum_and_a_reset_drops_them() {
-        let mut actions = Actions::with(|| Err("no model".into()));
-        actions.spoke("[wave] [nod] Hi");
+        let directory = model_directory().unwrap();
+        let mut actions = Actions::with(move || Classifier::load(&directory));
+        let decided = |actions: &mut Actions, now: Instant| {
+            let deadline = Instant::now() + Duration::from_secs(120);
+            while Instant::now() < deadline {
+                if let Some(action) = actions.take(now) {
+                    return Some(action.sentence);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            None
+        };
+        actions.spoke("Yes. No idea. Hm");
         let start = Instant::now() + Duration::from_secs(1);
-        std::thread::sleep(Duration::from_millis(50));
-        assert_eq!(actions.take(start).map(|action| action.name), Some("wave".into()));
+        assert_eq!(decided(&mut actions, start), Some("Yes.".into()));
         assert_eq!(actions.take(start + MINIMUM / 2), None);
-        assert_eq!(actions.take(start + MINIMUM).map(|action| action.name), Some("nod".into()));
-        actions.spoke("[shrug]");
+        assert_eq!(decided(&mut actions, start + MINIMUM), Some("No idea.".into()));
+        actions.spoke("m.");
         actions.reset();
-        std::thread::sleep(Duration::from_millis(50));
-        assert_eq!(actions.take(start + MINIMUM * 3), None, "a reset drops a decision still in flight");
+        actions.spoke("Okay.");
+        assert_eq!(decided(&mut actions, start + MINIMUM * 3), Some("Okay.".into()), "a reset drops a decision still in flight");
     }
 
     #[test]
     fn the_page_reaches_a_wave_and_every_gesture_has_a_name() {
         assert!(gestures().any(|name| name == "wave"));
-        assert!(instructions().contains("[wave]"));
     }
 }

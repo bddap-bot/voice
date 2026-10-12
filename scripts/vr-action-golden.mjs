@@ -1,6 +1,6 @@
 import { writeFileSync } from 'node:fs';
 import { AutoTokenizer, pipeline } from '@huggingface/transformers';
-import { ACTION_INSTRUCTIONS, EMBEDDING_MODEL, EmbeddingActionClassifier, LABELS, POSTURE, TranscriptActionDriver, independentEmbedder } from '../docs/puppet-drivers.js';
+import { EMBEDDING_MODEL, EmbeddingActionClassifier, LABELS, POSTURE, TranscriptActionDriver, independentEmbedder } from '../docs/puppet-drivers.js';
 import { evaluation } from '../test/action-evaluation.js';
 
 const out = new URL('../vr/golden/actions.json', import.meta.url).pathname;
@@ -20,26 +20,22 @@ for (const text of texts) {
   const [, second] = classifier.centroids.map(({ centroid }) => cosine(vector, centroid)).sort((a, b) => b - a);
   cases.push({ text, ids: Array.from(tokenizer(text).input_ids.data, Number), kind, name, score: +score.toFixed(6), margin: +(kind === 'none' && score === 1 ? 1 : score - second).toFixed(6) });
 }
-// Live's output and input transcript deltas as the overlay received them, asked for a little wave before the overlay acted on speech; then a bracketed reply split across deltas.
+// Live's output transcript deltas as the overlay received them, asked for a little wave before the overlay acted on speech.
 const transcripts = [
-  [['spoke', ' Sure,'], ['spoke', ' asking.'], ['spoke', ' Hi there'], ['spoke', '!'], ['spoke', " Here's"], ['spoke', ' a little'], ['spoke', ' wave'], ['spoke', ' for you'], ['spoke', '.'], ['heard', ' Okay']],
-  [['spoke', ' [wa'], ['spoke', 've] Hello'], ['spoke', ' again.'], ['spoke', ' [shrug]'], ['spoke', ' [bogus] Maybe.'], ['heard', ' Hm'], ['spoke', ' [nod] Right'], ['heard', ' ok']],
+  [' Sure,', ' asking.', ' Hi there', '!', " Here's", ' a little', ' wave', ' for you', '.'],
 ];
 const replays = [];
 for (const events of transcripts) {
   const actions = [];
-  const spoken = [];
-  const driver = new TranscriptActionDriver((action, timing) => actions.push({ source: action.source, kind: action.kind, name: action.name, ...(timing.sentence ? { sentence: timing.sentence } : { token: timing.token }) }), classifier, { now: () => 0, minimumMs: 0, schedule: (apply) => apply() });
-  for (const [speaker, delta] of events) {
-    if (speaker === 'heard') driver.endTurn();
-    else spoken.push(driver.push(delta));
+  const driver = new TranscriptActionDriver((action, timing) => actions.push({ sentence: timing.sentence }), classifier, { now: () => 0, minimumMs: 0, schedule: (apply) => apply() });
+  for (const delta of events) {
+    driver.push(delta);
     await driver.tail;
   }
-  replays.push({ events, spoken, actions });
+  replays.push({ events, actions });
 }
 writeFileSync(out, JSON.stringify({
   about: 'docs/puppet-drivers.js on the real embedding model under onnxruntime-node, each case with its margin over the runner-up label: written by scripts/vr-action-golden.mjs, read and compared by the overlay host build',
-  instructions: ACTION_INSTRUCTIONS,
   labels: Object.entries(LABELS).flatMap(([kind, labels]) => Object.entries(labels).map(([name, examples]) => ({ kind, name, examples }))),
   posture: { source: POSTURE.source, flags: POSTURE.flags },
   cases,

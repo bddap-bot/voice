@@ -1,6 +1,5 @@
 {
  "about": "docs/puppet-drivers.js on the real embedding model under onnxruntime-node, each case with its margin over the runner-up label: written by scripts/vr-action-golden.mjs, read and compared by the overlay host build",
- "instructions": "Your body is an animated figure. When you make a gesture or show a mood, write its token in square brackets at the point in the sentence where it happens, for example \"[nod] Yes, that works.\" Gestures: [nod], [shrug], [think], [wave], [no], [laugh], [clap], [bow], [thumbs-up], [stretch], [look-around]. Moods: [neutral], [apologetic], [surprised], [amused], [pleased], [sad], [angry], [puzzled], [skeptical], [thinking], [alert], [sleepy], [relaxed], [curious]. Use only these tokens, and only where the action fits. The page acts them out and never shows them; speak everything else as usual.",
  "labels": [
   {
    "kind": "none",
@@ -1962,48 +1961,6 @@
  "replays": [
   {
    "events": [
-    [
-     "spoke",
-     " Sure,"
-    ],
-    [
-     "spoke",
-     " asking."
-    ],
-    [
-     "spoke",
-     " Hi there"
-    ],
-    [
-     "spoke",
-     "!"
-    ],
-    [
-     "spoke",
-     " Here's"
-    ],
-    [
-     "spoke",
-     " a little"
-    ],
-    [
-     "spoke",
-     " wave"
-    ],
-    [
-     "spoke",
-     " for you"
-    ],
-    [
-     "spoke",
-     "."
-    ],
-    [
-     "heard",
-     " Okay"
-    ]
-   ],
-   "spoken": [
     " Sure,",
     " asking.",
     " Hi there",
@@ -2016,92 +1973,13 @@
    ],
    "actions": [
     {
-     "source": "classifier",
-     "kind": "gesture",
-     "name": "look-around",
      "sentence": "Sure, asking."
     },
     {
-     "source": "classifier",
-     "kind": "gesture",
-     "name": "wave",
      "sentence": "Hi there!"
     },
     {
-     "source": "classifier",
-     "kind": "gesture",
-     "name": "look-around",
      "sentence": "Here's a little wave for you."
-    }
-   ]
-  },
-  {
-   "events": [
-    [
-     "spoke",
-     " [wa"
-    ],
-    [
-     "spoke",
-     "ve] Hello"
-    ],
-    [
-     "spoke",
-     " again."
-    ],
-    [
-     "spoke",
-     " [shrug]"
-    ],
-    [
-     "spoke",
-     " [bogus] Maybe."
-    ],
-    [
-     "heard",
-     " Hm"
-    ],
-    [
-     "spoke",
-     " [nod] Right"
-    ],
-    [
-     "heard",
-     " ok"
-    ]
-   ],
-   "spoken": [
-    " ",
-    " Hello",
-    " again.",
-    "",
-    " Maybe.",
-    " Right"
-   ],
-   "actions": [
-    {
-     "source": "bracket",
-     "kind": "gesture",
-     "name": "wave",
-     "token": "wave"
-    },
-    {
-     "source": "bracket",
-     "kind": "gesture",
-     "name": "shrug",
-     "token": "shrug"
-    },
-    {
-     "source": "bracket",
-     "kind": "unknown",
-     "name": "bogus",
-     "token": "bogus"
-    },
-    {
-     "source": "bracket",
-     "kind": "gesture",
-     "name": "nod",
-     "token": "nod"
     }
    ]
   }

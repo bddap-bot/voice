@@ -214,14 +214,13 @@ impl Voice {
                 }
                 session::Event::Heard(delta) => {
                     eprintln!("heard {delta:?}");
-                    self.actions.heard();
                     self.trace.heard(&delta, Instant::now());
                     awake.hub.heard(&delta, &self.trace, Instant::now());
                     awake.activity = Instant::now();
                 }
                 session::Event::Spoke(delta) => {
                     eprintln!("spoke {delta:?}");
-                    let delta = self.actions.spoke(&delta);
+                    self.actions.spoke(&delta);
                     self.trace.spoke(&delta);
                     awake.hub.spoke();
                     awake.activity = Instant::now();

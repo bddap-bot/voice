@@ -131,10 +131,9 @@ fn act(animator: &mut Animator, action: &action::Action) {
         action::Kind::Gesture if animator.gesture(&action.name) => "played",
         action::Kind::Gesture => "refused, no clip",
         action::Kind::Mood => "not drawn",
-        action::Kind::None | action::Kind::Unknown => "ignored",
+        action::Kind::None => "ignored",
     };
-    let score = action.score.map_or(String::new(), |score| format!(" {score:.3}"));
-    eprintln!("action {:?} {}{score} from {} {:?}: {outcome}", action.kind, action.name, action.source, action.said);
+    eprintln!("action {:?} {} {:.3} from {:?}: {outcome}", action.kind, action.name, action.score, action.sentence);
 }
 
 fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(), String> {

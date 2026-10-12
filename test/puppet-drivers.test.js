@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ACTION_INSTRUCTIONS, EmbeddingActionClassifier, LABELS, TranscriptActionDriver, keywordMood } from '../docs/puppet-drivers.js';
+import { EmbeddingActionClassifier, TranscriptActionDriver, keywordMood } from '../docs/puppet-drivers.js';
 
 const vectors = { yes: [1, 0], agree: [1, 0], sorry: [0, 1], mistake: [0, 1] };
 const loadEmbedder = async () => async (texts) => texts.map((text) => {
@@ -67,7 +67,7 @@ test('applied actions include sentence and audio scheduling evidence', async () 
   const driver = new TranscriptActionDriver((action, timing) => applied.push({ action, timing }), classifier, { now: () => now, minimumMs: 0, schedule: (apply, delay) => { now += delay; apply(); } });
   driver.push('Waving hello.', 250);
   await driver.tail;
-  assert.deepEqual(applied, [{ action: { kind: 'gesture', name: 'wave', score: 1, source: 'classifier' }, timing: { sentence: 'Waving hello.', playAtMinusNow: 150 } }]);
+  assert.deepEqual(applied, [{ action: { kind: 'gesture', name: 'wave', score: 1 }, timing: { sentence: 'Waving hello.', playAtMinusNow: 150 } }]);
 });
 
 test('transcript-ahead actions wait for audio and retain a minimum spoken-order dwell', async () => {
@@ -87,57 +87,6 @@ test('transcript-ahead actions wait for audio and retain a minimum spoken-order 
   scheduled.shift().apply();
   await driver.tail;
   assert.deepEqual(applied, ['pleased', 'sad']);
-});
-
-test('bracketed tokens split across deltas play at their audio time, leave the spoken text, and replace the classifier for their sentence', async () => {
-  const applied = [];
-  const compared = [];
-  const classified = [];
-  const classifier = { classify: async (text) => { classified.push(text); return { kind: 'gesture', name: 'shrug', score: 0.5 }; } };
-  const driver = new TranscriptActionDriver((action, timing) => applied.push({ action, timing }), classifier, { now: () => 0, minimumMs: 0, schedule: (apply) => apply() }, (comparison) => compared.push(comparison));
-  const spoken = [driver.push('[no', 100), driver.push('d] Yes, [Thumbs Up] that', 200), driver.push(' works. Maybe.', 300)];
-  await driver.tail;
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(spoken, ['', ' Yes, that', ' works. Maybe.']);
-  assert.deepEqual(applied.map(({ action }) => [action.source, action.kind, action.name]), [['bracket', 'gesture', 'nod'], ['bracket', 'gesture', 'thumbs-up'], ['classifier', 'gesture', 'shrug']]);
-  assert.deepEqual(applied.map(({ timing }) => timing.playAtMinusNow), [200, 200, 300]);
-  assert.deepEqual(classified, ['Yes, that works.', 'Maybe.']);
-  assert.deepEqual(compared, [{ sentence: 'Yes, that works.', annotations: [{ kind: 'gesture', name: 'nod' }, { kind: 'gesture', name: 'thumbs-up' }], classifier: { kind: 'gesture', name: 'shrug', score: 0.5 } }]);
-});
-
-test('unknown bracketed tokens are stripped and logged without displacing the classifier', async () => {
-  const applied = [];
-  const classifier = { classify: async () => ({ kind: 'mood', name: 'amused' }) };
-  const driver = new TranscriptActionDriver((action, timing) => applied.push([action.source, action.kind, action.name, timing.token]), classifier, { minimumMs: 0, schedule: (apply) => apply() });
-  assert.equal(driver.push('Ha [tongue click] fine.'), 'Ha fine.');
-  await driver.tail;
-  assert.deepEqual(applied, [['bracket', 'unknown', 'tongue-click', 'tongue click'], ['classifier', 'mood', 'amused', undefined]]);
-});
-
-test('the end of a turn compares its unpunctuated annotated tail and leaves nothing for the next turn', async () => {
-  const applied = [];
-  const compared = [];
-  const classifier = { classify: async (text) => ({ kind: 'mood', name: text === 'Sure thing' ? 'pleased' : 'sad' }) };
-  const driver = new TranscriptActionDriver((action) => applied.push([action.source, action.name]), classifier, { minimumMs: 0, schedule: (apply) => apply() }, (comparison) => compared.push([comparison.sentence, comparison.classifier.name]));
-  driver.push('[nod] Sure thing');
-  driver.endTurn();
-  driver.push('Fine. [shrug] [wav');
-  driver.endTurn();
-  driver.push('Next one.');
-  await driver.tail;
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(compared, [['Sure thing', 'pleased']]);
-  assert.deepEqual(applied, [['bracket', 'nod'], ['classifier', 'sad'], ['bracket', 'shrug'], ['classifier', 'sad']]);
-});
-
-test('an unclosed bracket longer than any token is spoken text', () => {
-  const driver = new TranscriptActionDriver(() => {}, { classify: async () => ({ kind: 'none', name: 'neutral' }) });
-  assert.equal(driver.push('A [b'), 'A ');
-  assert.equal(driver.push('x'.repeat(40)), '[b' + 'x'.repeat(40));
-});
-
-test('the action instructions name every gesture and mood token', () => {
-  for (const kind of ['gesture', 'mood']) for (const name of Object.keys(LABELS[kind])) assert.ok(ACTION_INSTRUCTIONS.includes(`[${name}]`), name);
 });
 
 for (const outcome of ['missing', 'null', 'reject', 'throw', 'available']) {

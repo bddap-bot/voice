@@ -11,7 +11,6 @@ use str0m::media::{Direction, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event as RtcEvent, IceConnectionState, Input, Output, Rtc};
 
-use crate::action;
 use crate::audio::{Audio, PlaybackBuffer, RATE};
 use crate::conversation::Wake;
 use crate::identity::identity;
@@ -147,7 +146,7 @@ impl Link {
         let mut body = serde_json::to_value(&wake).unwrap();
         body["id"] = id.clone().into();
         body["sdp"] = offer.to_sdp_string().into();
-        body["instructions"] = json!([identity().instructions, action::instructions()]);
+        body["instructions"] = json!([identity().instructions]);
         relay.post("offer", Some(&body))?;
         let frames = relay.listen();
         let result = self.answer(&frames, &id, &mut audio, &mut capturing).and_then(|sdp| {

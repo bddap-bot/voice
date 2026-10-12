@@ -2,7 +2,7 @@ import { Microphone } from './microphone.js';
 import wbgInit, { init as wasmInit, connect, send_only, recv } from './relay/botq_dash_wasm.js';
 import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, SessionClock, TranscriptBatcher, contextEvent, errorEvent, includesPhrase, modelToolFields, formatElapsed, formatStartError, isOfferFor, shareFrame, usageLimit } from './live.js';
 import { PuppetChannel } from './puppet-client.js';
-import { ACTION_INSTRUCTIONS, TranscriptActionDriver, webGpuAdapter } from './puppet-drivers.js';
+import { TranscriptActionDriver, webGpuAdapter } from './puppet-drivers.js';
 import { StageTrace, traceStages } from './stage-trace.js';
 import { LivePlayback } from './live-playback.js';
 import { audioDiagnostics } from './audio-diagnostics.js';
@@ -71,14 +71,14 @@ let learning;
 const shareWaiters = new Map();
 function applyTranscriptAction(action, timing) {
   const pose = puppetRuntime?.poseName ?? null;
-  let outcome = action.kind === 'none' || action.kind === 'unknown' ? 'ignored' : puppetRuntime ? 'played' : 'refused';
+  let outcome = action.kind === 'none' ? 'ignored' : puppetRuntime ? 'played' : 'refused';
   if (outcome === 'played' && action.kind === 'mood') puppetRuntime.mood(action.name);
   else if (outcome === 'played' && action.kind === 'gesture') {
     if (!puppetRuntime.gesture(action.name)) outcome = 'refused';
   }
-  recordSession('transcript-action', JSON.stringify({ source: action.source, sentence: timing.sentence, token: timing.token, action: `${action.kind}:${action.name}`, score: action.score, pose, outcome, playAtMinusNow: timing.playAtMinusNow }));
+  recordSession('transcript-action', JSON.stringify({ sentence: timing.sentence, action: `${action.kind}:${action.name}`, score: action.score, pose, outcome, playAtMinusNow: timing.playAtMinusNow }));
 }
-const actionDriver = new TranscriptActionDriver(applyTranscriptAction, undefined, undefined, ({ sentence, annotations, classifier }) => recordSession('transcript-action-compare', JSON.stringify({ sentence, annotations: annotations.map(({ kind, name }) => `${kind}:${name}`), classifier: `${classifier.kind}:${classifier.name}`, score: classifier.score })));
+const actionDriver = new TranscriptActionDriver(applyTranscriptAction);
 const hubWaiting = new Set();
 const hubReplies = [];
 let hubTurn = null;
@@ -935,7 +935,6 @@ function onLiveEvent(message, source) {
     clearTimeout(requestEnd);
     if (trace.endsRequest() && !conversation?.sleeping) requestEnd = setTimeout(() => handOff(`turn_${crypto.randomUUID()}`), UNANSWERED_MS);
     conversation?.transcript?.add('user', delta);
-    actionDriver.endTurn();
     if (/[\p{L}\p{N}]/u.test(delta)) {
       clearTimeout(unanswered);
       if (hubWaiting.size && !conversation?.sleeping) unanswered = setTimeout(() => handOff(`turn_${crypto.randomUUID()}`), UNANSWERED_MS);
@@ -965,11 +964,12 @@ function presentTranscript(event) {
     const delay = Math.max(0, (event.start_ms ?? audioNow) - audioNow);
     stageTrace?.outputTranscript(delay);
     const playAt = performance.now() + delay;
-    const spoken = actionDriver.push(event.delta ?? '', playAt);
-    trace.spoke(spoken, event.start_ms, event.end_ms);
-    puppetRuntime?.speak(spoken, playAt);
-    conversation?.transcript?.add('model', event.delta ?? '');
-    const said = (conversation?.said ?? '') + spoken;
+    const delta = event.delta ?? '';
+    actionDriver.push(delta, playAt);
+    trace.spoke(delta, event.start_ms, event.end_ms);
+    puppetRuntime?.speak(delta, playAt);
+    conversation?.transcript?.add('model', delta);
+    const said = (conversation?.said ?? '') + delta;
     if (conversation) conversation.said = said.slice(-4 * SIGN_OFF.length);
     if (conversation) conversation.replyUnspoken = false;
     if (conversation?.pendingStanding && !conversation.settling) {
@@ -1182,7 +1182,7 @@ async function startConversation() {
     attempt.offerId = crypto.randomUUID();
     const answerPromise = waitForAnswer(attempt.offerId);
     attempt.offered = true;
-    await sendFrame(`offer\n${JSON.stringify({ id: attempt.offerId, sdp: attempt.pc.localDescription.sdp, instructions: [IDENTITY, ACTION_INSTRUCTIONS], ...trace.wake() })}`);
+    await sendFrame(`offer\n${JSON.stringify({ id: attempt.offerId, sdp: attempt.pc.localDescription.sdp, instructions: [IDENTITY], ...trace.wake() })}`);
     if (attempt.cancelled) {
       cancelOffer(attempt);
       return;

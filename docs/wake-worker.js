@@ -17,8 +17,8 @@ async function start(model) {
 }
 
 onmessage = ({ data }) => {
-  if (data.model) return void start(data.model).catch(fail);
-  queue = queue.then(async () => {
+  start(data.model).catch(fail);
+  data.chunks.onmessage = ({ data }) => queue = queue.then(async () => {
     const event = detect && await detect(data);
     if (event) postMessage(event);
   }).catch(fail);

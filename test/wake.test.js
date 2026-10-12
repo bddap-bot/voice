@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import test from 'node:test';
 import { WAKE_PHRASE } from '../docs/identity.js';
 import { CHUNK, RATE, WIDTH, WINDOW, WakeDecision, WakeFeatures, headScore, loadHead, wakeFeatures } from '../docs/wake.js';
@@ -145,4 +147,9 @@ test('a model with missing or mismatched weights is refused', () => {
   const valid = { phrase: WAKE_PHRASE, threshold: 0.9, b2: 0, mean: encoded(inputs), scale: encoded(inputs), w1: encoded(inputs * 2), b1: encoded(2), w2: encoded(2) };
   assert.doesNotThrow(() => loadHead(valid));
   for (const broken of [{ ...valid, w1: encoded(inputs) }, { ...valid, w2: encoded(3) }, { ...valid, threshold: 1 }, { ...valid, b2: undefined }, { ...valid, mean: encoded(10) }, { ...valid, scale: undefined }, { ...valid, b1: 'not base64!' }]) assert.throws(() => loadHead(broken), /invalid wake model/);
+});
+
+test('the wake phrase fires through the page spotter while the asleep puppet draws', async () => {
+  const { stdout } = await promisify(execFile)(process.execPath, [fileURLToPath(new URL('../scripts/idle-cost.mjs', import.meta.url)), '--phrase'], { timeout: 90000 });
+  assert.ok(JSON.parse(stdout).phrase.wake >= 0.999, stdout);
 });

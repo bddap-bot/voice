@@ -137,11 +137,12 @@ export async function startWakeSpotter(stream, heard, model) {
   audioDiagnostics()?.context(context, 'wake-context');
   await context.audioWorklet.addModule(new URL('./wake-worklet.js', import.meta.url));
   const worker = new Worker(new URL('./wake-worker.js', import.meta.url), { type: 'module' });
-  worker.postMessage({ model });
+  const chunks = new MessageChannel();
+  worker.postMessage({ model, chunks: chunks.port2 }, [chunks.port2]);
   const capture = new AudioWorkletNode(context, 'wake-capture', { numberOfOutputs: 0 });
+  capture.port.postMessage(chunks.port1, [chunks.port1]);
   const source = context.createMediaStreamSource(stream);
   source.connect(capture);
-  capture.port.onmessage = ({ data }) => worker.postMessage(data, [data.buffer]);
   worker.onmessage = ({ data }) => heard(data);
   worker.onerror = (event) => heard({ error: event.message || 'wake worker failed' });
   if (context.state === 'suspended') for (const type of ['pointerdown', 'keydown']) addEventListener(type, () => { if (context.state === 'suspended') context.resume(); }, { once: true });

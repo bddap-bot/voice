@@ -9,6 +9,9 @@ const VISEMES = ['aa', 'ih', 'ou', 'ee', 'oh'];
 const MOOD_EXPRESSIONS = ['happy', 'angry', 'sad', 'relaxed', 'surprised'];
 
 const CLIP_GESTURES = new Set(['nod', 'shrug', 'think', 'wave', 'no', 'laugh', 'clap', 'bow', 'thumbs-up', 'stretch', 'look-around']);
+const ACTIVE_FPS = 60;
+const RESTING_FPS = 15;
+const FRAME_SLACK = 1;
 const IDLE_CLIPS = { stand: ['idle', 'idle-2', 'idle-3'], sit: ['sit-idle', 'sit-idle-2'] };
 
 const GAZE_POINTS = {
@@ -183,12 +186,13 @@ export class PuppetRuntime {
     this.resize = new ResizeObserver(() => this.fit());
     this.resize.observe(canvas);
     this.fit();
-    this.animate = this.animate.bind(this);
+    this.tick = this.tick.bind(this);
     this.frame = 0;
+    this.drawn = -Infinity;
     this.start();
   }
   start() {
-    if (!this.frame) this.frame = requestAnimationFrame(this.animate);
+    if (!this.frame) this.frame = requestAnimationFrame(this.tick);
   }
   pause() {
     cancelAnimationFrame(this.frame);
@@ -519,8 +523,18 @@ export class PuppetRuntime {
     const hipHeight = hips ? Number(hips.getWorldPosition(new THREE.Vector3()).y.toFixed(4)) : null;
     this.onAnimation({ clips, hip_height: hipHeight });
   }
+  resting() {
+    return this.sleeping && (!this.clipAction || this.clipAction.getClip() === this.clips.get(this.idleClip));
+  }
+  tick(now) {
+    this.frame = requestAnimationFrame(this.tick);
+    const interval = 1000 / (this.resting() ? RESTING_FPS : ACTIVE_FPS);
+    if (now < this.drawn + interval - FRAME_SLACK) return;
+    this.drawn = Math.max(this.drawn + interval, now - interval);
+    this.animate(now);
+  }
   animate(now = performance.now()) {
-    const delta = Math.min(this.clock.getDelta(), 0.05);
+    const delta = Math.min(this.clock.getDelta(), 0.1);
     this.updatePose(now);
     this.updateBasePose(delta);
     this.updateFace(now);
@@ -528,7 +542,6 @@ export class PuppetRuntime {
     this.vrm?.update(delta);
     this.recordAnimation();
     if (this.vrm) this.renderer.render(this.scene, this.camera);
-    this.frame = requestAnimationFrame(this.animate);
   }
   dispose() {
     this.pause();

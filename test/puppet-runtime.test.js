@@ -679,3 +679,36 @@ test('each animation event reports the weights its frame rendered across a gestu
     assert.ok(Math.abs(hip_height - idle) < 1e-3, `reported ${JSON.stringify(clips)} but rendered hip height ${hip_height}`);
   }
 });
+
+test('the puppet draws at most 60 frames a second, and 15 while it rests asleep in an idle', () => {
+  const idle = new THREE.AnimationClip('sit-idle', 1, []);
+  const sit = new THREE.AnimationClip('sit', 1, []);
+  let draws = 0;
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+    sleeping: false, drawn: -Infinity, clips: new Map([['sit', sit], ['sit-idle', idle]]), idleClip: 'sit-idle',
+    clipAction: { getClip: () => idle },
+    animate() { draws++; },
+  });
+  const frame = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = () => 1;
+  let time = 0;
+  const second = (hz) => {
+    for (let step = 0; step < hz; step++) runtime.tick(time += 1000 / hz);
+    draws = 0;
+    for (let step = 0; step < hz; step++) runtime.tick(time += 1000 / hz);
+    return draws;
+  };
+  try {
+    for (const hz of [60, 90, 120, 144]) assert.equal(second(hz), 60, `${hz} Hz awake`);
+    runtime.sleeping = true;
+    assert.equal(second(120), 15, 'asleep in its idle');
+    runtime.clipAction = { getClip: () => sit };
+    assert.equal(second(120), 60, 'asleep while sitting down');
+    runtime.clipAction = { getClip: () => idle };
+    second(120);
+    runtime.sleeping = false;
+    draws = 0;
+    runtime.tick(time += 1000 / 60);
+    assert.equal(draws, 1, 'waking draws on the next display frame');
+  } finally { globalThis.requestAnimationFrame = frame; }
+});

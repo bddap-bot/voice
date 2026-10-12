@@ -58,6 +58,15 @@ impl Program {
         self.memory.write(&mut self.store, at as u32 as usize, bytes).map_err(|_| format!("data returned {at}, outside its memory"))
     }
 
+    /// Instructions the last call ran, the start function's until the first.
+    pub fn spent(&self) -> u64 {
+        FUEL - self.store.get_fuel().unwrap_or(FUEL)
+    }
+
+    pub fn memory(&self) -> usize {
+        self.memory.data_size(&self.store)
+    }
+
     /// Runs one tick; `tip` is the touch point in the object's own coordinates. `None` keeps the last transforms.
     pub fn tick(&mut self, time: f32, tip: Option<[f32; 3]>) -> Result<Option<Vec<Transform>>, String> {
         self.store.set_fuel(FUEL).map_err(refused)?;

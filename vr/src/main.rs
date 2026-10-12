@@ -1,5 +1,6 @@
 mod action;
 mod audio;
+mod bench;
 mod board;
 mod calls;
 mod chosen;
@@ -472,14 +473,16 @@ fn replay(state: &std::path::Path, recording: &str) -> Result<(), String> {
 }
 
 fn run() -> Result<(), String> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|mode| mode == "object") {
+        return bench::run(&args[2..]);
+    }
     let config = directory("XDG_CONFIG_HOME", ".config");
     let state = directory("XDG_STATE_HOME", ".local/state");
     std::fs::create_dir_all(&state).map_err(|error| format!("{}: {error}", state.display()))?;
-    if let [_, mode, file] = &std::env::args().collect::<Vec<_>>()[..] {
-        match mode.as_str() {
-            "replay" => return replay(&state, file),
-            "object" => return object::measure(Rc::new(vulkan::Gpu::new(None)?), std::fs::read(file).map_err(|error| format!("{file}: {error}"))?, 900, object::BUDGET),
-            _ => {}
+    if let [_, mode, recording] = &args[..] {
+        if mode == "replay" {
+            return replay(&state, recording);
         }
     }
     let token_file = config.join("token");

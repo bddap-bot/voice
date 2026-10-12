@@ -136,6 +136,8 @@ pub struct Model {
     look_at: LookAt,
     rest_turns: Vec<Quat>,
     rig: Rig,
+    /// An object's program: its WebAssembly module and the length of its timeline in seconds, zero for none.
+    pub program: Option<(Vec<u8>, f32)>,
 }
 
 #[repr(C)]
@@ -186,7 +188,15 @@ pub struct Skinned {
 pub struct Pose {
     rotations: Vec<Quat>,
     translations: Vec<Vec3>,
+    scales: Vec<Vec3>,
     pub weights: Vec<Vec<f32>>,
+}
+
+impl Pose {
+    /// Replaces one node's local transform.
+    pub fn place(&mut self, node: usize, translation: Vec3, rotation: Quat, scale: Vec3) {
+        (self.translations[node], self.rotations[node], self.scales[node]) = (translation, rotation, scale);
+    }
 }
 
 #[derive(Clone, Default)]
@@ -201,6 +211,8 @@ struct Document<'a> {
     object: bool,
 }
 
+/// The glTF extension naming an object's program.
+pub const PROGRAM: &str = "VOICE_program";
 /// The largest texture side an object may carry.
 pub const OBJECT_TEXTURE: u32 = 2048;
 /// How much darker than lit an object's unlit side is; puppets without MToon stay flat as three-vrm draws them.
@@ -755,7 +767,15 @@ impl Model {
             humanoid.contains_key("leftEye") || humanoid.contains_key("rightEye")
         };
         let rig = Rig::parse(version, extensions, &nodes, &children);
-        let mut model = Model { version, nodes, meshes, skins, materials, images, humanoid, expressions, look_at, rest_turns: Vec::new(), rig };
+        let program = match &extensions[PROGRAM] {
+            Value::Null => None,
+            program if object => {
+                let (bytes, _) = document.view(index(&program["bufferView"]).ok_or("program without bufferView")?)?;
+                Some((bytes.to_vec(), number(&program["duration"], 0.0).max(0.0)))
+            }
+            _ => None,
+        };
+        let mut model = Model { version, nodes, meshes, skins, materials, images, humanoid, expressions, look_at, rest_turns: Vec::new(), rig, program };
         model.rest_turns = model.worlds(&model.rest()).iter().map(rotation).collect();
         Ok(model)
     }
@@ -775,11 +795,15 @@ impl Model {
     }
 
     fn local(&self, pose: &Pose, node: usize) -> Mat4 {
-        Mat4::from_scale_rotation_translation(self.nodes[node].scale, pose.rotations[node], pose.translations[node])
+        Mat4::from_scale_rotation_translation(pose.scales[node], pose.rotations[node], pose.translations[node])
+    }
+
+    pub fn nodes(&self) -> usize {
+        self.nodes.len()
     }
 
     pub fn rest(&self) -> Pose {
-        Pose { rotations: self.nodes.iter().map(|node| node.rotation).collect(), translations: self.nodes.iter().map(|node| node.translation).collect(), weights: self.meshes.iter().map(|mesh| mesh.weights.clone()).collect() }
+        Pose { rotations: self.nodes.iter().map(|node| node.rotation).collect(), translations: self.nodes.iter().map(|node| node.translation).collect(), scales: self.nodes.iter().map(|node| node.scale).collect(), weights: self.meshes.iter().map(|mesh| mesh.weights.clone()).collect() }
     }
 
     pub fn standing(&self) -> Humanoid {

@@ -1,12 +1,14 @@
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use glam::{Mat4, Vec3 as V3};
+use glam::{Mat4, Quat, Vec3 as V3};
 
 use crate::openvr::Overlay;
 use crate::placement::{facing, length, sub, Pose, Vec3};
+use crate::program::{self, Transform};
 use crate::render::{eye_projection, Appearance, Renderer};
 use crate::vrm::{bounds, Model, Skinned};
 use crate::vulkan::Gpu;
@@ -51,12 +53,16 @@ impl Surface for Overlay<'_> {
     }
 }
 
-/// What a program publishes for the render thread to draw.
+/// The interval between program ticks, about one display frame.
+const TICK: Duration = Duration::from_millis(11);
+
+/// What the object's thread loads for the render thread to draw.
 struct Geometry {
     model: Model,
     skinned: Skinned,
     fit: Mat4,
     radius: f32,
+    duration: f32,
 }
 
 fn load(bytes: &[u8]) -> Result<Geometry, String> {
@@ -71,31 +77,65 @@ fn load(bytes: &[u8]) -> Result<Geometry, String> {
         return Err("the object has no finite extent".into());
     }
     let scale = if extent > SIZE { SIZE / extent } else { 1.0 };
-    Ok(Geometry { fit: Mat4::from_scale(V3::splat(scale)) * Mat4::from_translation(-(low + high) / 2.0), radius: (high - low).length() * scale / 2.0, model, skinned })
+    let duration = model.program.as_ref().map_or(0.0, |(_, duration)| *duration);
+    Ok(Geometry { fit: Mat4::from_scale(V3::splat(scale)) * Mat4::from_translation(-(low + high) / 2.0), radius: (high - low).length() * scale / 2.0, model, skinned, duration })
 }
 
-/// An object's program, run on a thread of its own so nothing it does costs the render thread; the render thread only takes what it last published.
-struct Program {
-    published: Arc<Mutex<Option<Result<Geometry, String>>>>,
+/// What passes between the render thread and the object's thread; each side only ever takes the other's latest.
+#[derive(Default)]
+struct Exchange {
+    geometry: Option<Result<Geometry, String>>,
+    transforms: Option<Vec<Transform>>,
+    failed: Option<String>,
+    time: f32,
+    tip: Option<Vec3>,
+}
+
+fn run(bytes: Vec<u8>, exchange: &Mutex<Exchange>, stop: &AtomicBool) {
+    let mut geometry = load(&bytes);
+    let wasm = geometry.as_mut().ok().and_then(|geometry| Some((geometry.model.program.take()?.0, geometry.model.nodes())));
+    exchange.lock().unwrap().geometry = Some(geometry);
+    let Some((wasm, nodes)) = wasm else { return };
+    let mut program = match program::Program::new(&wasm, nodes) {
+        Ok(program) => program,
+        Err(error) => return exchange.lock().unwrap().failed = Some(error),
+    };
+    while !stop.load(Ordering::SeqCst) {
+        let (time, tip) = {
+            let exchange = exchange.lock().unwrap();
+            (exchange.time, exchange.tip)
+        };
+        match program.tick(time, tip) {
+            Ok(Some(transforms)) => exchange.lock().unwrap().transforms = Some(transforms),
+            Ok(None) => {}
+            Err(error) => return exchange.lock().unwrap().failed = Some(error),
+        }
+        std::thread::park_timeout(TICK);
+    }
+}
+
+/// An object's thread: it loads the file, then ticks its program, so nothing the object does costs the render thread.
+struct Runner {
+    exchange: Arc<Mutex<Exchange>>,
+    stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
-impl Program {
-    fn start(bytes: Vec<u8>) -> Result<Program, String> {
-        let published = Arc::new(Mutex::new(None));
-        let slot = published.clone();
-        let thread = std::thread::Builder::new().name("voice-object".into()).spawn(move || *slot.lock().unwrap() = Some(load(&bytes))).map_err(|error| format!("object thread: {error}"))?;
-        Ok(Program { published, thread: Some(thread) })
-    }
-
-    fn take(&mut self) -> Option<Result<Geometry, String>> {
-        self.published.lock().unwrap().take()
+impl Runner {
+    fn start(bytes: Vec<u8>) -> Result<Runner, String> {
+        let exchange = Arc::new(Mutex::new(Exchange::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (shared, stopped) = (exchange.clone(), stop.clone());
+        let thread = std::thread::Builder::new().name("voice-object".into()).spawn(move || run(bytes, &shared, &stopped)).map_err(|error| format!("object thread: {error}"))?;
+        Ok(Runner { exchange, stop, thread: Some(thread) })
     }
 }
 
-impl Drop for Program {
+impl Drop for Runner {
     fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
         if let Some(thread) = self.thread.take() {
+            thread.thread().unpark();
             let _ = thread.join();
         }
     }
@@ -147,25 +187,37 @@ pub struct View {
 
 struct Drawn {
     appearance: Appearance,
+    model: Model,
     skinned: Skinned,
     worlds: Vec<Mat4>,
     fit: Mat4,
     radius: f32,
+    duration: f32,
+}
+
+fn transformed(model: &Model, transforms: &[Transform]) -> Vec<Mat4> {
+    let mut pose = model.rest();
+    for (node, transform) in transforms.iter().enumerate() {
+        let rotation = glam::Vec4::from_slice(&transform[3..7]).try_normalize().map_or(Quat::IDENTITY, Quat::from_vec4);
+        pose.place(node, V3::from_slice(&transform[..3]), rotation, V3::from_slice(&transform[7..]));
+    }
+    model.worlds(&pose)
 }
 
 /// One shown object; dropping it closes its overlay, frees its GPU resources and joins its program's thread.
 pub struct Object<S: Surface> {
     drawn: Option<Drawn>,
     renderer: Renderer,
-    program: Program,
+    runner: Runner,
     surface: S,
     handling: Handling,
+    born: Instant,
     over: u32,
 }
 
 impl<S: Surface> Object<S> {
     pub fn spawn(surface: S, gpu: Rc<Gpu>, bytes: Vec<u8>, now: Instant) -> Result<Object<S>, String> {
-        Ok(Object { drawn: None, renderer: Renderer::new(gpu, [EYE, EYE], 1.0)?, program: Program::start(bytes)?, surface, handling: Handling::new(now), over: 0 })
+        Ok(Object { drawn: None, renderer: Renderer::new(gpu, [EYE, EYE], 1.0)?, runner: Runner::start(bytes)?, surface, handling: Handling::new(now), born: now, over: 0 })
     }
 
     pub fn hide(&mut self) {
@@ -174,25 +226,41 @@ impl<S: Surface> Object<S> {
 
     /// Draws one frame; `Err` names why the object should go.
     pub fn step(&mut self, now: Instant, view: &View) -> Result<(), String> {
-        if self.drawn.is_none() {
-            match self.program.take() {
-                Some(Ok(geometry)) => {
-                    let appearance = self.renderer.appearance(&geometry.model, &geometry.skinned)?;
-                    let worlds = geometry.model.worlds(&geometry.model.rest());
-                    self.drawn = Some(Drawn { appearance, skinned: geometry.skinned, worlds, fit: geometry.fit, radius: geometry.radius });
-                }
-                Some(Err(error)) => return Err(error),
-                None => {}
+        let (geometry, transforms) = {
+            let mut exchange = self.runner.exchange.lock().unwrap();
+            if let Some(failed) = exchange.failed.take() {
+                return Err(failed);
             }
+            (exchange.geometry.take(), exchange.transforms.take())
+        };
+        match geometry {
+            Some(Ok(geometry)) => {
+                let appearance = self.renderer.appearance(&geometry.model, &geometry.skinned)?;
+                let worlds = geometry.model.worlds(&geometry.model.rest());
+                self.drawn = Some(Drawn { appearance, model: geometry.model, skinned: geometry.skinned, worlds, fit: geometry.fit, radius: geometry.radius, duration: geometry.duration });
+            }
+            Some(Err(error)) => return Err(error),
+            None => {}
         }
         let radius = self.drawn.as_ref().map_or(0.0, |drawn| drawn.radius);
-        if let Some(reason) = self.handling.touch(now, radius, view.tip.map(|tip| sub(tip, view.center))) {
+        let offset = view.tip.map(|tip| sub(tip, view.center));
+        if let Some(reason) = self.handling.touch(now, radius, offset) {
             return Err(reason.into());
         }
         let Some(drawn) = &mut self.drawn else { return Ok(()) };
+        if let Some(transforms) = transforms {
+            drawn.worlds = transformed(&drawn.model, &transforms);
+        }
+        let turned = Mat4::from_rotation_y(self.handling.yaw) * drawn.fit;
+        {
+            let mut exchange = self.runner.exchange.lock().unwrap();
+            let elapsed = (now - self.born).as_secs_f32();
+            exchange.time = if drawn.duration > 0.0 { elapsed % drawn.duration } else { elapsed };
+            exchange.tip = offset.filter(|&offset| length(offset) <= radius).map(|offset| turned.inverse().transform_point3(offset.into()).into());
+        }
         let quad = facing(view.center, view.head.t);
         let local = quad.inverse();
-        let placed = local.mat4() * Mat4::from_translation(view.center.into()) * Mat4::from_rotation_y(self.handling.yaw) * drawn.fit;
+        let placed = local.mat4() * Mat4::from_translation(view.center.into()) * turned;
         drawn.appearance.update(&drawn.skinned.palette(&drawn.worlds, placed), &drawn.skinned.vertices, &[]);
         let eyes = view.eyes.map(|eye| eye_projection(local.apply(view.head.then(&eye).t).into(), QUAD / 2.0, QUAD / 2.0));
         let started = Instant::now();
@@ -295,6 +363,11 @@ mod tests {
 
     /// A cube `side` metres across with a 64-texel PNG texture, as a generic glTF exporter writes one.
     fn cube(side: f32) -> Vec<u8> {
+        scene(side, None)
+    }
+
+    /// The cube as node 0, run by `program` when given; node 1 is an empty the program may move.
+    fn scene(side: f32, program: Option<(&str, f32)>) -> Vec<u8> {
         let mut builder = Builder::new(serde_json::json!({}));
         let h = side / 2.0;
         let mut positions = Vec::new();
@@ -330,7 +403,11 @@ mod tests {
         builder.set("images", serde_json::json!([{ "bufferView": view, "mimeType": "image/png" }]));
         builder.set("textures", serde_json::json!([{ "source": 0 }]));
         builder.set("materials", serde_json::json!([{ "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } } }]));
-        builder.set("nodes", serde_json::json!([{ "mesh": 0, "rotation": [0.3, 0.3, 0.0, 0.906] }]));
+        builder.set("nodes", serde_json::json!([{ "mesh": 0, "rotation": [0.3, 0.3, 0.0, 0.906] }, {}]));
+        if let Some((text, duration)) = program {
+            let view = builder.view(&crate::program::tests::wasm(text));
+            builder.set("extensions", serde_json::json!({ crate::vrm::PROGRAM: { "bufferView": view, "duration": duration } }));
+        }
         builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position, "NORMAL": normal, "TEXCOORD_0": uv }, "indices": index, "material": 0 }] }]));
         builder.glb()
     }
@@ -399,6 +476,47 @@ mod tests {
     }
 
     #[test]
+    fn a_program_moves_the_object_from_its_own_thread_by_time_and_touch() {
+        let gpu = Rc::new(Gpu::new(None).unwrap());
+        let born = Instant::now();
+        let mut object = Object::spawn(Counted::new(), gpu, scene(0.2, Some((crate::program::tests::FOLLOW, 4.0))), born).unwrap();
+        drawn(&mut object, born);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let center = view(None).center;
+        let mut moved = Vec::new();
+        while moved.len() < 2 {
+            assert!(Instant::now() < deadline, "the program never published");
+            object.step(born + Duration::from_secs(5), &view(Some([center[0], center[1] + 0.05, center[2]]))).unwrap();
+            let drawn = object.drawn.as_ref().unwrap();
+            moved = [0, 1].map(|node| drawn.worlds[node].w_axis.truncate()).into_iter().filter(|at| at.length() > 1e-6).collect();
+            std::thread::sleep(TICK);
+        }
+        assert!((moved[0].x - 1.0).abs() < 1e-5, "time wraps at the 4 s timeline: node 0 at {}", moved[0]);
+        assert!(moved[1].y > 0.0 && moved[1].x.abs() < 1e-4, "the touch above the centre reaches node 1 in the object's coordinates: {}", moved[1]);
+    }
+
+    #[test]
+    fn a_program_that_never_returns_is_stopped_without_stalling_the_render_thread() {
+        let spin = r#"(module (memory (export "memory") 1) (func (export "tick") (param f32 f32 f32 f32 i32) (result i32) (loop $l (br $l)) (i32.const 0)))"#;
+        let gpu = Rc::new(Gpu::new(None).unwrap());
+        let now = Instant::now();
+        let mut object = Object::spawn(Counted::new(), gpu, scene(0.2, Some((spin, 0.0))), now).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut slowest = Duration::ZERO;
+        let error = loop {
+            assert!(Instant::now() < deadline, "the program was never stopped");
+            let started = Instant::now();
+            let stepped = object.step(now, &view(None));
+            slowest = slowest.max(started.elapsed());
+            if let Err(error) = stepped {
+                break error;
+            }
+        };
+        assert!(error.contains("budget"), "{error}");
+        assert!(slowest < Duration::from_millis(200), "a frame took {slowest:?} while the program spun");
+    }
+
+    #[test]
     fn stirring_the_tip_inside_turns_the_object_and_a_flick_throws_it_away() {
         let start = Instant::now();
         let mut handling = Handling::new(start);
@@ -450,13 +568,13 @@ mod tests {
             return;
         }
         let gpu = Rc::new(Gpu::new(None).unwrap());
-        let bytes = cube(0.2);
+        let bytes = [cube(0.2), scene(0.2, Some((crate::program::tests::FOLLOW, 0.0)))];
         let mut slot: Slot<Counted> = Slot::default();
+        let start = Instant::now();
         let spawn = |slot: &mut Slot<Counted>, now: Instant| {
-            slot.show(|| Object::spawn(Counted::new(), gpu.clone(), bytes.clone(), now));
+            slot.show(|| Object::spawn(Counted::new(), gpu.clone(), bytes[now.duration_since(start).as_secs() as usize % 5 % 2].clone(), now));
             drawn(slot.object.as_mut().unwrap(), now);
         };
-        let start = Instant::now();
         spawn(&mut slot, start);
         slot.clear("warm-up");
         let (surfaces, allocations, threads_before, resident_before) = (SURFACES.load(Ordering::SeqCst), gpu.allocations(), threads(), resident());

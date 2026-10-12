@@ -13,6 +13,7 @@ mod gesture;
 mod hub;
 mod motion;
 mod object;
+mod program;
 mod openvr;
 mod panel;
 mod placement;

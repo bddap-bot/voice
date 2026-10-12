@@ -209,6 +209,7 @@ struct Document<'a> {
     json: Value,
     binary: &'a [u8],
     object: bool,
+    unstored: std::cell::Cell<usize>,
 }
 
 pub const PROGRAM: &str = "VOICE_program";
@@ -217,7 +218,7 @@ pub const OBJECT_IMAGES: usize = 8;
 pub const OBJECT_NODES: usize = 4096;
 /// Deep enough for any machine or skeleton, shallow enough that walking every vertex's ancestors stays cheap.
 pub const OBJECT_DEPTH: usize = 64;
-/// Values an accessor with no buffer view may claim; it costs memory its file never paid for.
+/// Values an accessor with no buffer view may claim, and all of an object's together, each read counted again; they cost memory their file never paid for. Puppet exporters share one sparse accessor across many morph targets, so a puppet's are not totalled.
 const UNSTORED: usize = 1 << 24;
 /// How much darker than lit an object's unlit side is; puppets without MToon stay flat as three-vrm draws them.
 const OBJECT_SHADE: f32 = 0.15;
@@ -404,7 +405,17 @@ impl Document<'_> {
         let count = index(&accessor["count"]).ok_or("accessor without count")?;
         let mut values = match index(&accessor["bufferView"]) {
             Some(view) => self.elements(view, index(&accessor["byteOffset"]).unwrap_or(0), kind, components, count)?,
-            None => vec![0.0; count.checked_mul(components).filter(|&values| values <= UNSTORED).ok_or("an accessor without a bufferView is too long")?],
+            None => {
+                let values = count.checked_mul(components).filter(|&values| values <= UNSTORED).ok_or("an accessor without a bufferView claims too many values")?;
+                if self.object {
+                    let total = self.unstored.get() + values;
+                    if total > UNSTORED {
+                        return Err("accessors without a bufferView claim too many values".into());
+                    }
+                    self.unstored.set(total);
+                }
+                vec![0.0; values]
+            }
         };
         if let Some(sparse) = accessor.get("sparse") {
             let changed = index(&sparse["count"]).ok_or("sparse without count")?;
@@ -574,7 +585,7 @@ impl Model {
 
     fn read(bytes: &[u8], object: bool) -> Result<Model, String> {
         let (json, binary) = chunks(bytes)?;
-        let document = Document { json, binary, object };
+        let document = Document { json, binary, object, unstored: Default::default() };
         let json = &document.json;
         let extensions = &json["extensions"];
         let (version, humanoid): (Version, HashMap<String, usize>) = if let Some(vrm) = extensions.get("VRMC_vrm") {
@@ -719,6 +730,12 @@ impl Model {
                 return Err("vertex joint outside its skin".into());
             }
         }
+        if object && nodes.len() > OBJECT_NODES {
+            return Err(format!("{} nodes, over {OBJECT_NODES}", nodes.len()));
+        }
+        if object && (0..nodes.len()).any(|start| std::iter::successors(Some(start), |&node| nodes[node].parent).nth(OBJECT_DEPTH).is_some()) {
+            return Err(format!("a node more than {OBJECT_DEPTH} deep"));
+        }
         for start in 0..nodes.len() {
             let mut node = start;
             for _ in 0..=nodes.len() {
@@ -730,12 +747,6 @@ impl Model {
             if nodes[node].parent.is_some() {
                 return Err("the node hierarchy has a cycle".into());
             }
-        }
-        if object && nodes.len() > OBJECT_NODES {
-            return Err(format!("{} nodes, over {OBJECT_NODES}", nodes.len()));
-        }
-        if object && (0..nodes.len()).any(|start| std::iter::successors(Some(start), |&node| nodes[node].parent).nth(OBJECT_DEPTH).is_some()) {
-            return Err(format!("a node more than {OBJECT_DEPTH} deep"));
         }
         if nodes.iter().any(|node| node.mesh.is_some_and(|mesh| mesh >= meshes.len())) || humanoid.values().any(|&node| node >= nodes.len()) {
             return Err("a node or bone index is out of range".into());

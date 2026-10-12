@@ -26,11 +26,11 @@ pub const LIFETIME: Duration = Duration::from_secs(180);
 pub struct Budget {
     /// Averaged over about `WINDOW` frames.
     pub mean: Duration,
-    /// Any one frame after the first `WINDOW`, whose uploads and first draws run long on any device.
     pub frame: Duration,
 }
 
 pub const BUDGET: Budget = Budget { mean: Duration::from_millis(4), frame: Duration::from_millis(40) };
+/// Frames before either limit applies: uploads and first draws run long on any device.
 const WINDOW: f32 = 45.0;
 /// Tip speed relative to the object that throws it away.
 pub const FLICK: f32 = 1.8;
@@ -383,17 +383,25 @@ impl<S: Surface> Object<S> {
         drawn.appearance.update(&drawn.skinned.palette(&drawn.parts.spread(&drawn.worlds, self.handling.spread), local.mat4() * drawn.placed), &drawn.skinned.vertices, &[]);
         let eyes = view.eyes.map(|eye| eye_projection(local.apply(view.head.then(&eye).t).into(), QUAD / 2.0, QUAD / 2.0));
         let started = Instant::now();
-        let mut texture = self.renderer.render(&drawn.appearance, eyes)?;
+        let texture = self.renderer.render(&drawn.appearance, eyes)?;
         let spent = started.elapsed();
         self.frames += 1;
-        self.cost += (spent.as_secs_f32() - self.cost) / (self.frames as f32).min(WINDOW);
-        if self.frames as f32 > WINDOW && spent > self.budget.frame {
+        let measured = self.frames as f32 - WINDOW;
+        if measured <= 0.0 {
+            return self.show(texture, &quad);
+        }
+        if spent > self.budget.frame {
             return Err(format!("one frame took {} ms, over {} ms", spent.as_millis(), self.budget.frame.as_millis()));
         }
-        if self.frames as f32 >= WINDOW && self.cost > self.budget.mean.as_secs_f32() {
+        self.cost += (spent.as_secs_f32() - self.cost) / measured.min(WINDOW);
+        if measured >= WINDOW && self.cost > self.budget.mean.as_secs_f32() {
             return Err(format!("{:.1} ms a frame, over its {} ms budget", self.cost * 1e3, self.budget.mean.as_millis()));
         }
-        self.surface.place_in_world(&quad);
+        self.show(texture, &quad)
+    }
+
+    fn show(&mut self, mut texture: openvr_sys::VRVulkanTextureData_t, quad: &Pose) -> Result<(), String> {
+        self.surface.place_in_world(quad);
         self.surface.texture(&mut texture)?;
         self.surface.show();
         Ok(())
@@ -719,9 +727,9 @@ mod tests {
         let tight = Budget { mean: Duration::from_nanos(1), frame: Duration::from_secs(5) };
         let mut object = Object::spawn(Counted::new(), gpu, cube(0.1), tight, now).unwrap();
         drawn(&mut object, now);
-        let error = (0..WINDOW as usize).find_map(|_| object.step(now, &view(None)).err()).expect("stopped within its window");
+        let error = (0..2 * WINDOW as usize).find_map(|_| object.step(now, &view(None)).err()).expect("stopped within its window");
         assert!(error.contains("budget"), "{error}");
-        assert!(object.frames as f32 >= WINDOW, "not before its first {WINDOW} frames: stopped after {}", object.frames);
+        assert_eq!(object.frames as f32, 2.0 * WINDOW, "measured only after its first {WINDOW} frames, then over a window of them");
     }
 
     #[test]
@@ -768,7 +776,12 @@ mod tests {
             builder.push_accessor(serde_json::json!({ "componentType": 5126, "count": 4_000_000_000_000u64, "type": "VEC3" }));
             builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": 1 } }] }]));
         });
-        assert!(unstored.contains("too long"), "{unstored}");
+        assert!(unstored.contains("too many values"), "{unstored}");
+        let repeated = refused(serde_json::json!([{ "mesh": 0 }]), &|builder| {
+            builder.push_accessor(serde_json::json!({ "componentType": 5126, "count": (1 << 24) / 3 / 2, "type": "VEC3" }));
+            builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": 1 } }, { "attributes": { "POSITION": 1 } }, { "attributes": { "POSITION": 1 } }] }]));
+        });
+        assert!(repeated.contains("too many values"), "one unstored accessor read three times counts three times: {repeated}");
         let shared = refused(serde_json::Value::Array((0..crate::vrm::OBJECT_NODES).map(|_| serde_json::json!({ "mesh": 0 })).collect()), &|builder| {
             let corners: Vec<f32> = (0..200 * 3).map(|value| value as f32).collect();
             let position = builder.accessor("VEC3", &corners);

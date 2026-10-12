@@ -24,7 +24,7 @@ pub struct Pointing {
 impl Pointing {
     pub fn start(&mut self, name: String, now: Instant) {
         eprintln!("pointing at {name:?}");
-        *self = Pointing { name: Some(name), since: Some(now), weight: self.weight, target: self.target, ..Pointing::default() };
+        *self = Pointing { name: Some(name), since: Some(now), weight: self.weight, ..Pointing::default() };
     }
 
     pub fn stop(&mut self) {

@@ -1375,6 +1375,22 @@ function report(image) {
   assert.equal(result.storage, 'kept');
 });
 
+test('the html frame writes nothing when embedded without a sandbox', async () => {
+  const { result, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  const frame = document.createElement('iframe');
+  frame.src = 'frame.html';
+  document.body.append(frame);
+  await new Promise((resolve) => frame.addEventListener('load', resolve, { once: true }));
+  frame.contentWindow.postMessage('<!doctype html><p id="written">written</p>', '*');
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  document.body.dataset.result = JSON.stringify({ origin: frame.contentWindow.origin, written: Boolean(frame.contentDocument.querySelector('#written')) });
+});
+`);
+  assert.deepEqual(result, { origin: result?.origin, written: false }, stderr);
+  assert.notEqual(result.origin, 'null');
+});
+
 for (const size of ['720,1280', '1440,900']) test(`the delegation log keeps its newest entry in view at ${size}`, async () => {
   const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {

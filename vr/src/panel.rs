@@ -16,6 +16,8 @@ const INK: [u8; 4] = [240, 240, 240, 255];
 const LINK: [u8; 4] = [142, 171, 255, 255];
 const CODE: [u8; 4] = [214, 200, 150, 255];
 
+const ON_THE_PAGE: &str = "Shown on the page";
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Kind {
     Text,
@@ -114,6 +116,9 @@ fn wrap(text: &str, columns: usize) -> Vec<String> {
 }
 
 fn lines(display: &Display, width: u32) -> Vec<Line> {
+    if display.html {
+        return vec![Line { kind: Kind::Link, text: ON_THE_PAGE.into() }];
+    }
     let mut out: Vec<Line> = Vec::new();
     let mut push = |kind: Kind, text: &str| {
         let text = ascii(text);
@@ -281,5 +286,14 @@ mod tests {
     fn an_unreadable_image_leaves_the_text() {
         let picture = draw(&Display { markdown: Some("Hi".into()), image: Some(b"not an image".to_vec()), ..Display::default() });
         assert_eq!(picture.height, 2 * PADDING + Kind::Text.height());
+    }
+
+    #[test]
+    fn an_html_display_says_where_it_is_shown_instead_of_drawing_blank() {
+        let html = Display { html: true, ..Display::default() };
+        assert_eq!(lines(&html, (WIDTH * PIXELS_PER_METRE) as u32), [Line { kind: Kind::Link, text: ON_THE_PAGE.into() }]);
+        let picture = draw(&html);
+        assert_eq!(picture.height, 2 * PADDING + Kind::Link.height());
+        assert!((0..picture.width).any(|x| (0..picture.height).any(|y| at(&picture, x, y) == LINK)));
     }
 }

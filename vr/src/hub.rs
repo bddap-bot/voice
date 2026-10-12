@@ -75,6 +75,7 @@ struct Shown {
     object: Option<serde::de::IgnoredAny>,
     point: Option<String>,
     data: Option<String>,
+    html: Option<serde::de::IgnoredAny>,
 }
 
 /// What a hub reply asks to show, as the page's display card does.
@@ -90,12 +91,14 @@ pub struct Display {
     pub point: Option<String>,
     /// Live data for the shown object's program.
     pub data: Option<String>,
+    /// An HTML document, which only the page can run.
+    pub html: bool,
 }
 
 impl Display {
     /// Whether it only speaks to the shown object, leaving the panel and the object as they are.
     pub fn addresses_object(&self) -> bool {
-        self.markdown.is_none() && self.link.is_none() && self.image.is_none() && self.object.is_none()
+        self.markdown.is_none() && self.link.is_none() && self.image.is_none() && self.object.is_none() && !self.html
     }
 }
 
@@ -247,8 +250,12 @@ impl Hub {
         eprintln!("hub reply {} ({}): {:?}{}", reply.id, reply.stamp, reply.commentary, if reply.instructions.is_empty() { "" } else { " with instructions" });
         trace.calls.replied(&reply.id, &reply.commentary);
         if let Some(shown) = reply.display.take() {
-            let trailer = |carried: bool| (carried && !image.is_empty()).then(|| image.to_vec());
-            self.display = Some(Display { markdown: shown.markdown, link: shown.link, image: trailer(shown.image.is_some()), object: trailer(shown.object.is_some() && shown.image.is_none()), point: shown.point, data: shown.data });
+            self.display = Some(if shown.html.is_some() {
+                Display { html: true, ..Display::default() }
+            } else {
+                let trailer = |carried: bool| (carried && !image.is_empty()).then(|| image.to_vec());
+                Display { markdown: shown.markdown, link: shown.link, image: trailer(shown.image.is_some()), object: trailer(shown.object.is_some() && shown.image.is_none()), point: shown.point, data: shown.data, html: false }
+            });
         }
         let unspoken = (!reply.commentary.is_empty() && self.sleeping).then_some(ASLEEP);
         let mut ack = json!({ "id": reply.id, "stamp": reply.stamp });
@@ -494,6 +501,8 @@ mod tests {
         assert_eq!(f.told(), [speakable(json!("slow"), "Four jobs are queued.")]);
         assert!(f.hub.waiting.is_empty());
         assert_eq!(f.hub.take_display(), Some(Display { link: Some("https://example.com/q".into()), image: Some(vec![0x89, b'P', b'N', b'G', b'\n', 0]), ..Display::default() }));
+        f.reply(json!({ "id": "slow", "stamp": "html_1", "commentary": [], "instructions": [], "display": { "html": "<!doctype html><p>chart</p>", "markdown": "ignored" } }));
+        assert_eq!(f.hub.take_display(), Some(Display { html: true, ..Display::default() }));
         assert!(f.frames("hub-ack").iter().all(|ack| ack.get("unspoken").is_none()));
     }
 

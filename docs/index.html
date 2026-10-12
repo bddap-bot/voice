@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' blob: https://huggingface.co https://*.hf.co https://*.iroh.link wss://*.iroh.link https://*.iroh.link. wss://*.iroh.link.; img-src 'self' blob:; media-src blob:; object-src 'none'; base-uri 'none';">
+<meta http-equiv="Content-Security-Policy" content="script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' blob: https://huggingface.co https://*.hf.co https://*.iroh.link wss://*.iroh.link https://*.iroh.link. wss://*.iroh.link.; img-src 'self' blob:; media-src blob:; frame-src 'self'; object-src 'none'; base-uri 'none';">
 <title>voice</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
@@ -45,6 +45,10 @@
   .display-item a { color: #8eabff; }
   .display-item .mermaid svg { display: block; max-width: 100%; height: auto; margin: 0 auto; }
   .display-item .chart { position: relative; height: 220px; }
+  #display-items { container-type: size; }
+  #display-items:has(> .frame) { overflow: hidden; }
+  .display-item.frame { flex: none; height: 100cqh; padding: 0; overflow: hidden; }
+  .display-item.frame iframe { display: block; width: 100%; height: 100%; border: 0; }
   .display-item .math-block, .display-item .mermaid { overflow-x: auto; }
   .display-item pre { overflow-x: auto; }
   .turn, .usage { padding: 11px 12px; background: #1b1b1e; border-radius: 8px; overflow-wrap: anywhere; }

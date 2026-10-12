@@ -81,6 +81,7 @@ function applyTranscriptAction(action, timing) {
 const actionDriver = new TranscriptActionDriver(applyTranscriptAction);
 const hubWaiting = new Set();
 const hubReplies = [];
+let cuedDisplay = null;
 let hubTurn = null;
 let stageTrace;
 const traces = new EventBatcher((spans) => sendFrame(`spans\n${JSON.stringify({ spans })}`));
@@ -971,6 +972,7 @@ function liveClosed(payload) {
 function presentTranscript(event) {
     clearTimeout(unanswered);
     stayAwake();
+    showCuedDisplay();
     hubTurn?.spoke();
     const audioNow = $('speaker').currentTime * 1000;
     const delay = Math.max(0, (event.start_ms ?? audioNow) - audioNow);
@@ -1043,15 +1045,24 @@ async function receiveHub(raw) {
   if (result.instructions.length) standBy(result.instructions);
   await sendFrame(`hub-ack\n${JSON.stringify({ id: result.id, stamp: result.stamp, unspoken })}`);
 }
+function showCuedDisplay() {
+  const show = cuedDisplay;
+  cuedDisplay = null;
+  show?.();
+}
 function presentHubReply({ result, image }) {
-  if (result.display) showDisplay(result.display, image);
+  const current = conversation;
+  const spoken = result.commentary.length && current && !current.sleeping;
+  if (result.display) {
+    const show = () => showDisplay(result.display, image);
+    if (spoken) cuedDisplay = show;
+    else show();
+  }
   if (!result.commentary.length && !result.instructions.length) return null;
   finishHubWait(result.id);
   trace.hub(result.id, result.commentary, result.timing_ms);
   stageTrace?.hubReplied(result.id);
-  if (!result.commentary.length) return null;
-  const current = conversation;
-  if (!current || current.sleeping) return null;
+  if (!spoken) return null;
   const owner = current.audioOwner;
   const delegation = owner.delegations.has(result.id) ? result.id : null;
   current.replyUnspoken = true;
@@ -1064,7 +1075,7 @@ async function playHubReplies() {
     while (hubReplies.length) {
       let owner;
       const turn = new Promise((resolve) => {
-        const timer = setTimeout(resolve, HUB_TURN_START_MS);
+        const timer = setTimeout(() => { showCuedDisplay(); resolve(); }, HUB_TURN_START_MS);
         hubTurn = {
           started: false,
           spoke() {
@@ -1108,6 +1119,7 @@ function paintOff() {
   clearTimeout(unanswered);
   clearTimeout(requestEnd);
   interruptHubReplies('conversation ended');
+  cuedDisplay = null;
   actionDriver.reset();
   clearTimeout(inactivity);
   puppetRuntime?.waiting(false);

@@ -64,7 +64,7 @@ pub extern "C" fn tick(time: f32, _x: f32, _y: f32, _z: f32, _touching: i32) -> 
 
 ## In this overlay
 
-A hub reply's display item may carry an object. The overlay draws it just right of the puppet, facing the wearer, until the next display item that carries another object, or a card that neither points nor carries data. Its pointer is the right controller's tip, by position alone; its radius below is the bounding sphere's, at least 6 cm.
+A hub reply's display item may carry an object. Live speaks follow-ups in order, and each reply's display item (object, card, image, pointing, data) takes the screen when Live starts speaking that reply, like the next slide; a follow-up dropped because the user spoke never shows its item, and a reply Live never speaks shows its item when its turn times out. The overlay draws the object just right of the puppet, facing the wearer, until the next display item that carries another object, or a card that neither points nor carries data. Its pointer is the right controller's tip, by position alone; its radius below is the bounding sphere's, at least 6 cm.
 
 - Moving the tip around the object's vertical axis while inside turns it. A flick of the tip faster than 1.8 m/s throws it away.
 - With the tip closer to the centre than half the radius, the object's parts (its top-level nodes, or a lone root's children) spread away from its centre, fully apart at a fifth of the radius, and close again as the tip withdraws.

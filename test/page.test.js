@@ -2738,7 +2738,7 @@ test('a woken session receives only the fresh hub reply', async () => {
   assert.deepEqual(result.appended, [['delegation.context.append', 'speakable', 'fresh', 'The test beacon is violet.']]);
 });
 
-test('a first hub reply reaches the model as it arrives, even mid-utterance; each follow-up waits until the model has spoken the reply before it, and barge-in drops the follow-ups still waiting', async () => {
+test('a first hub reply reaches the model as it arrives, even mid-utterance; each follow-up waits until the model has spoken the reply before it and shows its display only once the model starts speaking it, and barge-in drops the follow-ups still waiting with their displays', async () => {
   const result = await runWakePage(`
     const { LivePlayback } = await import('/live-playback.js');
     const quiet = [];
@@ -2751,7 +2751,7 @@ test('a first hub reply reaches the model as it arrives, even mid-utterance; eac
     hear(' While that runs, let me tell you');
     replyFromHub('first', 'ordered_first', ['First part.', 'Second part.'], 5, { first: true });
     replyFromHub('first', 'ordered_second', ['Slide two.'], 5, { display: { markdown: 'Slide two picture' } });
-    replyFromHub('first', 'ordered_third', ['Slide three.']);
+    replyFromHub('first', 'ordered_third', ['Slide three.'], 5, { display: { markdown: 'Slide three picture' } });
     replyFromHub('other', 'ordered_other', ['Other answer.'], 5, { first: true });
     await until(() => globalThis.hubAcks?.includes('ordered_other'));
     const held = { replies: replies(), shown: shown().includes('Slide two picture') };
@@ -2762,14 +2762,18 @@ test('a first hub reply reaches the model as it arrives, even mid-utterance; eac
     await until(() => replies().length === 4);
     const next = { replies: replies().slice(3), shown: shown().includes('Slide two picture') };
     say('Slide two.');
+    const spoken = shown().includes('Slide two picture');
     hear('Stop there.');
     await until(() => sessionEvents('hub-reply-dropped').length);
-    return { held, quiets, next, final: replies().length, dropped: sessionEvents('hub-reply-dropped').map((event) => JSON.parse(event.detail)), acks: hubAcks, log: document.querySelector('#log').innerText.includes('hub reply: First part. Second part. Slide two.') };
+    say('Okay.');
+    return { held, quiets, next, spoken, third: shown().includes('Slide three picture'), final: replies().length, dropped: sessionEvents('hub-reply-dropped').map((event) => JSON.parse(event.detail)), acks: hubAcks, log: document.querySelector('#log').innerText.includes('hub reply: First part. Second part. Slide two.') };
   `);
   assert.deepEqual(result, {
     held: { replies: [['first', 'First part.'], ['first', 'Second part.'], [null, 'Other answer.']], shown: false },
     quiets: 1,
-    next: { replies: [['first', 'Slide two.']], shown: true },
+    next: { replies: [['first', 'Slide two.']], shown: false },
+    spoken: true,
+    third: false,
     final: 4,
     dropped: [{ id: 'first', stamp: 'ordered_third', reason: 'barge-in' }],
     acks: ['ordered_first', 'ordered_second', 'ordered_third', 'ordered_other'],

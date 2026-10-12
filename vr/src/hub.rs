@@ -65,6 +65,8 @@ struct Reply {
     commentary: Vec<String>,
     instructions: Vec<String>,
     display: Option<Shown>,
+    #[serde(skip)]
+    shown: Option<Display>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -134,6 +136,8 @@ pub struct Hub {
     audio_seconds: f64,
     standing_at: f64,
     sleeping: bool,
+    /// A presented reply's display, shown once the model starts speaking it.
+    cued: Option<Display>,
     display: Option<Display>,
 }
 
@@ -211,6 +215,7 @@ impl Hub {
 
     pub fn spoke(&mut self) {
         self.unanswered = None;
+        self.show_cued();
         if matches!(self.turn, Some(Turn::Awaiting(_))) {
             self.turn = Some(Turn::Speaking);
             self.listen = true;
@@ -249,7 +254,7 @@ impl Hub {
         eprintln!("hub reply {} ({}): {:?}{}", reply.id, reply.stamp, reply.commentary, if reply.instructions.is_empty() { "" } else { " with instructions" });
         trace.calls.replied(&reply.id, &reply.commentary);
         if let Some(shown) = reply.display.take() {
-            self.display = Some(if shown.html.is_some() {
+            reply.shown = Some(if shown.html.is_some() {
                 Display { html: true, ..Display::default() }
             } else {
                 let trailer = |carried: bool| (carried && !image.is_empty()).then(|| image.to_vec());
@@ -274,14 +279,28 @@ impl Hub {
         self.out.push(Command::Frame("hub-ack", ack));
     }
 
-    /// Appends a reply's commentary; true when Live was told something to speak.
-    fn present(&mut self, reply: Reply, trace: &mut Trace) -> bool {
+    fn show_cued(&mut self) {
+        if let Some(display) = self.cued.take() {
+            self.display = Some(display);
+        }
+    }
+
+    /// Appends a reply's commentary and cues its display for when the model speaks it; true when Live was told something to speak.
+    fn present(&mut self, mut reply: Reply, trace: &mut Trace) -> bool {
+        let spoken = !reply.commentary.is_empty() && !self.sleeping;
+        if let Some(display) = reply.shown.take() {
+            if spoken {
+                self.cued = Some(display);
+            } else {
+                self.display = Some(display);
+            }
+        }
         if reply.commentary.is_empty() && reply.instructions.is_empty() {
             return false;
         }
         self.waiting.remove(&reply.id);
         trace.hub_replied();
-        if reply.commentary.is_empty() || self.sleeping {
+        if !spoken {
             return false;
         }
         let owned = self.owned.contains(&reply.id).then_some(reply.id.as_str());
@@ -362,6 +381,7 @@ impl Hub {
                 Turn::Awaiting(deadline) => now >= *deadline,
                 Turn::Speaking => quiet,
             } {
+                self.show_cued();
                 self.turn = None;
                 self.play(trace, now);
             }
@@ -499,7 +519,10 @@ mod tests {
         f.collect();
         assert_eq!(f.told(), [speakable(json!("slow"), "Four jobs are queued.")]);
         assert!(f.hub.waiting.is_empty());
+        assert_eq!(f.hub.take_display(), None, "a spoken reply's display waits for its speech");
+        f.speak("Four jobs");
         assert_eq!(f.hub.take_display(), Some(Display { link: Some("https://example.com/q".into()), image: Some(vec![0x89, b'P', b'N', b'G', b'\n', 0]), ..Display::default() }));
+        f.wait(TURN_QUIET, true);
         f.reply(json!({ "id": "slow", "stamp": "html_1", "commentary": [], "instructions": [], "display": { "html": "<!doctype html><p>chart</p>", "markdown": "ignored" } }));
         assert_eq!(f.hub.take_display(), Some(Display { html: true, ..Display::default() }));
         assert!(f.frames("hub-ack").iter().all(|ack| ack.get("unspoken").is_none()));
@@ -514,11 +537,48 @@ mod tests {
         let mut body = format!("{line}\n").into_bytes();
         body.extend(b"glTF\x02\0\0\0");
         f.hub.reply(&body, &mut f.trace, f.now);
+        f.speak("Here it is.");
         assert_eq!(f.hub.take_display(), Some(Display { markdown: Some("A cube".into()), object: Some(b"glTF\x02\0\0\0".to_vec()), ..Display::default() }));
         f.reply(json!({ "id": "cube", "stamp": "o2", "commentary": ["This face."], "instructions": [], "display": { "point": "top" } }));
+        f.wait(TURN_QUIET, true);
+        f.speak("This face.");
         let pointed = f.hub.take_display().unwrap();
         assert_eq!(pointed.point.as_deref(), Some("top"));
         assert!(pointed.addresses_object(), "a display that only points leaves the panel and the object");
+    }
+
+    #[test]
+    fn follow_up_displays_play_like_slides_each_shown_as_its_speech_starts_and_one_dropped_by_barge_in_is_never_shown() {
+        let mut f = Fixture::new();
+        let object = |stamp: &str, text: &str, scene: &[u8]| {
+            let line = json!({ "id": "tour", "stamp": stamp, "commentary": [text], "instructions": [], "display": { "object": { "mime": "model/gltf-binary" } } });
+            let mut body = format!("{line}\n").into_bytes();
+            body.extend(scene);
+            body
+        };
+        f.hear("Show me the tour.");
+        f.delegate("tour");
+        for (stamp, text, scene) in [("caffeine", "This is caffeine.", b"caffeine"), ("saddle", "This is a saddle.", b"saddle__"), ("gauge", "This is a gauge.", b"gauge___")] {
+            f.hub.reply(&object(stamp, text, scene), &mut f.trace, f.now);
+            f.collect();
+        }
+        let shown = |f: &mut Fixture| f.hub.take_display().and_then(|display| display.object);
+        assert_eq!(shown(&mut f), None, "nothing shows before the model speaks");
+        f.speak("This is");
+        assert_eq!(shown(&mut f), Some(b"caffeine".to_vec()));
+        f.speak(" caffeine.");
+        f.wait(Duration::from_millis(100), false);
+        assert_eq!(shown(&mut f), None, "the next slide waits while the model still speaks this one");
+        f.wait(TURN_QUIET, true);
+        assert_eq!(f.told()[1..], [speakable(json!("tour"), "This is a saddle.")]);
+        assert_eq!(shown(&mut f), None, "a follow-up told to the model shows nothing until its speech starts");
+        f.speak("This is a saddle.");
+        assert_eq!(shown(&mut f), Some(b"saddle__".to_vec()));
+        f.hear("Stop.");
+        f.wait(TURN_START, true);
+        f.speak("Okay.");
+        assert_eq!(shown(&mut f), None, "the follow-up the barge-in dropped never shows");
+        assert_eq!(f.told().len(), 2);
     }
 
     #[test]

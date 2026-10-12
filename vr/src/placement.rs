@@ -95,7 +95,7 @@ pub fn on_controller(hand: &Pose) -> Pose {
 }
 
 /// How long a set-down avatar keeps riding the controller before it stays where it is.
-pub const SETTLE: Duration = Duration::from_secs(1);
+pub const SETTLE: Duration = Duration::from_secs(5);
 
 /// Where the avatar stands: on the controller, riding it a moment longer after a set-down press, or left in the world.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -226,15 +226,17 @@ mod tests {
         let settled = SETTLE.as_secs_f32();
         let left = anchor.stand(at(settled), &hand(settled));
         assert_eq!(left, on_controller(&hand(settled)), "stays where it rode to");
-        for seconds in [1.5, 3.0, 9.0] {
+        for seconds in [0.5, 2.0, 8.0].map(|after| settled + after) {
             assert_eq!(anchor.stand(at(seconds), &hand(seconds)), left, "held while the controller moves");
         }
-        anchor.toggle(at(10.0));
+        let back = settled + 9.0;
+        anchor.toggle(at(back));
         assert_eq!(anchor, Anchor::Riding);
-        assert_eq!(anchor.stand(at(10.0), &hand(10.0)), on_controller(&hand(10.0)), "back on the controller");
-        anchor.toggle(at(11.0));
-        anchor.toggle(at(11.5));
-        assert_eq!(anchor.stand(at(13.0), &hand(13.0)), on_controller(&hand(13.0)), "a second press while settling keeps it riding");
+        assert_eq!(anchor.stand(at(back), &hand(back)), on_controller(&hand(back)), "back on the controller");
+        anchor.toggle(at(back + 1.0));
+        anchor.toggle(at(back + 1.5));
+        let after = back + 1.0 + settled + 1.0;
+        assert_eq!(anchor.stand(at(after), &hand(after)), on_controller(&hand(after)), "a second press while settling keeps it riding");
     }
 
     #[test]

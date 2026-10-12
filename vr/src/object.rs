@@ -336,6 +336,8 @@ pub struct Object<S: Surface> {
     budget: Budget,
     /// Seconds the render thread spends on it per frame, a running mean.
     cost: f32,
+    /// Its slowest frame past the warm-up, in seconds.
+    worst: f32,
     frames: u32,
 }
 
@@ -345,7 +347,7 @@ impl<S: Surface> Object<S> {
     }
 
     fn loading(surface: S, gpu: Rc<Gpu>, bytes: Vec<u8>, load: Load, budget: Budget, now: Instant) -> Result<Object<S>, String> {
-        Ok(Object { drawn: None, renderer: Renderer::new(gpu, [EYE, EYE], 1.0)?, runner: Runner::start(bytes, load)?, surface, handling: Handling::new(now), budget, cost: 0.0, frames: 0 })
+        Ok(Object { drawn: None, renderer: Renderer::new(gpu, [EYE, EYE], 1.0)?, runner: Runner::start(bytes, load)?, surface, handling: Handling::new(now), budget, cost: 0.0, worst: 0.0, frames: 0 })
     }
 
     pub fn hide(&mut self) {
@@ -408,10 +410,11 @@ impl<S: Surface> Object<S> {
         if measured <= 0.0 {
             return self.show(texture, &quad);
         }
+        self.cost += (spent.as_secs_f32() - self.cost) / measured.min(WINDOW);
+        self.worst = self.worst.max(spent.as_secs_f32());
         if spent > self.budget.frame {
             return Err(format!("one frame took {} ms, over {} ms", spent.as_millis(), self.budget.frame.as_millis()));
         }
-        self.cost += (spent.as_secs_f32() - self.cost) / measured.min(WINDOW);
         if measured >= WINDOW && self.cost > self.budget.mean.as_secs_f32() {
             return Err(format!("{:.1} ms a frame, over its {} ms budget", self.cost * 1e3, self.budget.mean.as_millis()));
         }
@@ -428,7 +431,7 @@ impl<S: Surface> Object<S> {
     /// Its render cost as the budget sees it, for the log.
     pub fn cost(&self) -> String {
         match self.frames as f32 - WINDOW {
-            measured if measured > 0.0 => format!("{:.2} ms a frame over its last {} frames, budget {} ms", self.cost * 1e3, measured.min(WINDOW), self.budget.mean.as_millis()),
+            measured if measured > 0.0 => format!("running mean {:.2} ms a frame, worst {:.2} ms over {measured} frames, budget {} ms mean and {} ms a frame", self.cost * 1e3, self.worst * 1e3, self.budget.mean.as_millis(), self.budget.frame.as_millis()),
             _ => format!("{} frames drawn, too few to measure", self.frames),
         }
     }
@@ -764,6 +767,18 @@ pub mod tests {
             }
             std::thread::sleep(TICK);
         }
+    }
+
+    #[test]
+    fn an_object_removed_on_one_slow_frame_logs_that_frame_s_cost() {
+        let gpu = Rc::new(Gpu::new(None).unwrap());
+        let now = Instant::now();
+        let mut object = Object::spawn(Counted::new(), gpu, cube(0.1), Budget { mean: Duration::from_secs(5), frame: Duration::ZERO }, now).unwrap();
+        drawn(&mut object, now);
+        let error = (0..2 * WINDOW as usize).find_map(|_| object.step(now, &view(None)).err()).expect("stopped on its first measured frame");
+        assert!(error.contains("one frame"), "{error}");
+        let logged = object.cost();
+        assert!(logged.starts_with("running mean") && !logged.contains("mean 0.00 ms") && !logged.contains("worst 0.00 ms"), "{logged}");
     }
 
     #[test]

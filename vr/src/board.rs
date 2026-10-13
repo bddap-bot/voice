@@ -77,6 +77,40 @@ pub struct Touch {
     pub marker: Option<Vec3>,
 }
 
+/// A fingertip pressing a face: a press is the tip crossing the face from in front; it fires once, and the next needs the tip drawn back.
+#[derive(Default)]
+pub struct Contact {
+    armed: bool,
+}
+
+impl Contact {
+    pub fn reset(&mut self) {
+        self.armed = false;
+    }
+
+    /// Where the tip, in the face's frame (x right, y up, z toward the viewer), crossed the face's plane, anywhere on it.
+    pub fn crossing(&mut self, tip: Option<Vec3>) -> Option<[f32; 2]> {
+        let Some([x, y, z]) = tip else {
+            self.armed = false;
+            return None;
+        };
+        if z > RELEASE {
+            self.armed = true;
+            return None;
+        }
+        if !self.armed || z > CONTACT {
+            return None;
+        }
+        self.armed = false;
+        Some([x, y])
+    }
+}
+
+/// The tip held at a face of `[width, height]` once through it, while over the face and near or through it.
+pub fn marker_at([width, height]: [f32; 2], tip: Option<Vec3>) -> Option<Vec3> {
+    tip.filter(|&[x, y, z]| x.abs() <= width / 2.0 && y.abs() <= height / 2.0 && z <= NEAR).map(|[x, y, z]| [x, y, z.max(0.0)])
+}
+
 pub struct Board {
     previews: Vec<Option<Vec<u8>>>,
     /// When the appearance library was last revealed, while it shows.
@@ -88,19 +122,19 @@ pub struct Board {
     pub muted: bool,
     pub voice: VoiceId,
     pub anchor: Anchor,
-    armed: bool,
+    contact: Contact,
     hover: Option<Press>,
     dirty: bool,
 }
 
 impl Board {
     pub fn new(appearances: usize, active: usize) -> Board {
-        Board { previews: vec![None; appearances], library: None, log: false, calls: Calls::default(), active, pending: None, muted: false, voice: VoiceId::default(), anchor: Anchor::Riding, armed: false, hover: None, dirty: true }
+        Board { previews: vec![None; appearances], library: None, log: false, calls: Calls::default(), active, pending: None, muted: false, voice: VoiceId::default(), anchor: Anchor::Riding, contact: Contact::default(), hover: None, dirty: true }
     }
 
     /// As summoned: a hand already at the board must withdraw before it presses, and the appearance library is hidden.
     pub fn reset(&mut self) {
-        self.armed = false;
+        self.contact.reset();
         self.hover = None;
         self.library = None;
         self.log = false;
@@ -202,14 +236,12 @@ impl Board {
     }
 
     /// The right controller's touch point in the board's frame (x right, y up, z toward the viewer), or None while untracked.
-    /// A press is the tip crossing the board's face from in front; it fires once, and the next needs the tip drawn back.
     /// Crossing the face's plane beside the board disarms it too, so sliding on from the edge presses nothing.
     pub fn touch(&mut self, tip: Option<Vec3>) -> Touch {
-        let crossing = self.contact(tip);
+        let crossing = self.contact.crossing(tip);
         let press = crossing.and_then(|[x, y]| self.under(x, y));
-        let [half_width, half_height] = [WIDTH / 2.0, self.height() / 2.0];
-        let marker = tip.filter(|&[x, y, z]| x.abs() <= half_width && y.abs() <= half_height && z <= NEAR).map(|[x, y, z]| [x, y, z.max(0.0)]);
-        let hover = marker.filter(|_| self.armed).and_then(|[x, y, _]| self.under(x, y));
+        let marker = marker_at([WIDTH, self.height()], tip);
+        let hover = marker.filter(|_| self.contact.armed).and_then(|[x, y, _]| self.under(x, y));
         if hover != self.hover {
             self.hover = hover;
             self.dirty = true;
@@ -219,22 +251,6 @@ impl Board {
 
     fn under(&self, x: f32, y: f32) -> Option<Press> {
         Some(self.buttons().into_iter().find(|button| button.contains(x, y))?.press)
-    }
-
-    fn contact(&mut self, tip: Option<Vec3>) -> Option<[f32; 2]> {
-        let Some([x, y, z]) = tip else {
-            self.armed = false;
-            return None;
-        };
-        if z > RELEASE {
-            self.armed = true;
-            return None;
-        }
-        if !self.armed || z > CONTACT {
-            return None;
-        }
-        self.armed = false;
-        Some([x, y])
     }
 
     pub fn mark(&mut self) {

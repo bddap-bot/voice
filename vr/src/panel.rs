@@ -1,7 +1,8 @@
 use image::imageops::FilterType;
 
-use crate::board::Canvas;
+use crate::board::{marker_at, Canvas, Contact};
 use crate::hub::Display;
+use crate::placement::Vec3;
 
 pub const WIDTH: f32 = 0.3;
 const PIXELS_PER_METRE: f32 = 2000.0;
@@ -15,6 +16,10 @@ const BACKGROUND: [u8; 4] = [18, 18, 22, 210];
 const INK: [u8; 4] = [240, 240, 240, 255];
 const LINK: [u8; 4] = [142, 171, 255, 255];
 const CODE: [u8; 4] = [214, 200, 150, 255];
+const TRACK: [u8; 4] = [52, 52, 60, 255];
+const THUMB: [u8; 4] = [150, 150, 160, 255];
+/// The position bar's width, in the right padding.
+const BAR: u32 = 4;
 
 const ON_THE_PAGE: &str = "Shown on the page";
 
@@ -46,11 +51,6 @@ impl Kind {
 struct Line {
     kind: Kind,
     text: String,
-}
-
-/// The panel's extent in metres.
-pub fn size(picture: &Canvas) -> [f32; 2] {
-    [WIDTH, picture.height as f32 / PIXELS_PER_METRE]
 }
 
 /// The font's ASCII for what a reply's text commonly carries beyond it.
@@ -174,44 +174,120 @@ fn fitted(encoded: &[u8], [width, height]: [u32; 2]) -> Result<(Vec<u8>, [u32; 2
     Ok((rgba, size))
 }
 
-/// The page's display card for one reply: its text, its link, then its picture; at most `MAX_HEIGHT` tall, text cut short to leave the picture half.
-pub fn draw(display: &Display) -> Canvas {
-    let width = (WIDTH * PIXELS_PER_METRE) as u32;
-    let inside = (MAX_HEIGHT * PIXELS_PER_METRE) as u32 - 2 * PADDING;
-    let image = display.image.as_deref();
-    let mut lines = lines(display, width);
-    let budget = if image.is_some() { inside / 2 } else { inside };
-    let mut used = 0;
-    let fits = lines.iter().take_while(|line| {
-        used += line.kind.height();
-        used <= budget
-    }).count();
-    if fits < lines.len() {
-        lines.truncate(fits);
-        if let Some(last) = lines.last_mut() {
-            let keep = columns(last.kind, width).saturating_sub(2);
-            last.text = last.text.chars().take(keep).collect::<String>().trim_end().to_owned() + "..";
+/// The page's display card for one reply: its text, its link, then its picture; at most `MAX_HEIGHT` tall, the picture kept to its lower half.
+/// Text longer than one view reads a view at a time: a fingertip press on the lower half shows the next, on the upper half the one before.
+pub struct Card {
+    lines: Vec<Line>,
+    /// Each view's first line; a view runs to the next one's.
+    views: Vec<usize>,
+    view: usize,
+    text: u32,
+    picture: Option<(Vec<u8>, [u32; 2])>,
+    contact: Contact,
+    dirty: bool,
+}
+
+/// What a fingertip did at the card this frame.
+pub struct Touch {
+    pub turned: bool,
+    pub marker: Option<Vec3>,
+}
+
+impl Card {
+    pub fn new(display: &Display) -> Card {
+        let width = (WIDTH * PIXELS_PER_METRE) as u32;
+        let inside = (MAX_HEIGHT * PIXELS_PER_METRE) as u32 - 2 * PADDING;
+        let image = display.image.as_deref();
+        let lines = lines(display, width);
+        let budget = if image.is_some() { inside / 2 } else { inside };
+        let mut views = vec![0];
+        let mut used = 0;
+        for (index, line) in lines.iter().enumerate() {
+            used += line.kind.height();
+            if used > budget && index > *views.last().unwrap() {
+                views.push(index);
+                used = line.kind.height();
+            }
         }
+        let mut card = Card { lines, views, view: 0, text: 0, picture: None, contact: Contact::default(), dirty: true };
+        card.text = (0..card.views.len()).map(|view| card.shown_in(view).iter().map(|line| line.kind.height()).sum()).max().unwrap_or(0);
+        card.picture = image.and_then(|encoded| match fitted(encoded, [width - 2 * PADDING, inside - card.text]) {
+            Ok(fitted) => Some(fitted),
+            Err(error) => {
+                tracing::warn!("display image not shown: {error}");
+                None
+            }
+        });
+        card
     }
-    let text: u32 = lines.iter().map(|line| line.kind.height()).sum();
-    let picture = image.and_then(|encoded| match fitted(encoded, [width - 2 * PADDING, inside - text]) {
-        Ok(fitted) => Some(fitted),
-        Err(error) => {
-            tracing::warn!("display image not shown: {error}");
-            None
+
+    fn shown_in(&self, view: usize) -> &[Line] {
+        let end = self.views.get(view + 1).copied().unwrap_or(self.lines.len());
+        &self.lines[self.views[view]..end]
+    }
+
+    fn height(&self) -> u32 {
+        2 * PADDING + self.text + self.picture.as_ref().map_or(0, |(_, [_, height])| *height)
+    }
+
+    /// The card's extent in metres, the same for every view.
+    pub fn size(&self) -> [f32; 2] {
+        [WIDTH, self.height() as f32 / PIXELS_PER_METRE]
+    }
+
+    pub fn views(&self) -> usize {
+        self.views.len()
+    }
+
+    /// Shows the view `by` away from this one, if there is one.
+    pub fn turn(&mut self, by: isize) -> bool {
+        let Some(view) = self.view.checked_add_signed(by).filter(|&view| view < self.views.len()) else { return false };
+        self.view = view;
+        self.dirty = true;
+        true
+    }
+
+    /// As shown afresh: a hand already at the card must withdraw before it turns a view.
+    pub fn reset(&mut self) {
+        self.contact.reset();
+        self.dirty = true;
+    }
+
+    /// The right controller's touch point in the card's frame (x right, y up, z toward the viewer), or None while untracked.
+    pub fn touch(&mut self, tip: Option<Vec3>) -> Touch {
+        let [width, height] = self.size();
+        let turned = match self.contact.crossing(tip) {
+            Some([x, y]) if x.abs() <= width / 2.0 && y.abs() <= height / 2.0 => self.turn(if y < 0.0 { 1 } else { -1 }),
+            _ => false,
+        };
+        Touch { turned, marker: marker_at([width, height], tip) }
+    }
+
+    /// The shown view's premultiplied RGBA image, top row first, when it changed since the last call.
+    pub fn take_image(&mut self) -> Option<Canvas> {
+        std::mem::take(&mut self.dirty).then(|| self.image())
+    }
+
+    fn image(&self) -> Canvas {
+        let width = (WIDTH * PIXELS_PER_METRE) as u32;
+        let mut canvas = Canvas::new(width, self.height(), BACKGROUND);
+        let mut y = PADDING;
+        for line in self.shown_in(self.view) {
+            canvas.text([PADDING, y], &line.text.chars().collect::<Vec<_>>(), line.kind.scale(), line.kind.ink());
+            y += line.kind.height();
         }
-    });
-    let height = 2 * PADDING + text + picture.as_ref().map_or(0, |(_, [_, height])| *height);
-    let mut canvas = Canvas::new(width, height, BACKGROUND);
-    let mut y = PADDING;
-    for line in &lines {
-        canvas.text([PADDING, y], &line.text.chars().collect::<Vec<_>>(), line.kind.scale(), line.kind.ink());
-        y += line.kind.height();
+        if self.views.len() > 1 {
+            let [left, right] = [width - (PADDING + BAR) / 2, width - (PADDING - BAR) / 2];
+            let along = |line: usize| PADDING + (line as u64 * self.text as u64 / self.lines.len() as u64) as u32;
+            let end = self.views.get(self.view + 1).copied().unwrap_or(self.lines.len());
+            canvas.fill([left, PADDING, right, PADDING + self.text], TRACK);
+            canvas.fill([left, along(self.views[self.view]), right, along(end)], THUMB);
+        }
+        if let Some((rgba, size)) = &self.picture {
+            canvas.over([(width - size[0]) / 2, PADDING + self.text], *size, rgba);
+        }
+        canvas
     }
-    if let Some((rgba, size)) = &picture {
-        canvas.over([(width - size[0]) / 2, y], *size, rgba);
-    }
-    canvas
 }
 
 #[cfg(test)]
@@ -226,6 +302,10 @@ mod tests {
         let mut encoded = Vec::new();
         image::RgbaImage::from_pixel(width, height, image::Rgba(rgba)).write_to(&mut std::io::Cursor::new(&mut encoded), image::ImageFormat::Png).unwrap();
         encoded
+    }
+
+    fn draw(display: &Display) -> Canvas {
+        Card::new(display).image()
     }
 
     fn at(picture: &Canvas, x: u32, y: u32) -> [u8; 4] {
@@ -276,8 +356,9 @@ mod tests {
         let width = picture.width - 2 * PADDING;
         assert_eq!(picture.height, 2 * PADDING + Kind::Text.height() + width / 2);
         assert_eq!(at(&picture, picture.width / 2, PADDING + Kind::Text.height() + width / 4), red);
-        let tall = draw(&Display { markdown: Some("words ".repeat(2000)), image: Some(png(10, 40, red)), ..Display::default() });
-        assert!(size(&tall)[1] <= MAX_HEIGHT);
+        let tall = Card::new(&Display { markdown: Some("words ".repeat(2000)), image: Some(png(10, 40, red)), ..Display::default() });
+        assert!(tall.size()[1] <= MAX_HEIGHT);
+        let tall = tall.image();
         assert_eq!(at(&tall, tall.width / 2, tall.height - PADDING - 4), red);
         assert_eq!(at(&tall, tall.width / 2, tall.height / 2 + 8), red, "text stops at half");
     }
@@ -295,5 +376,56 @@ mod tests {
         let picture = draw(&html);
         assert_eq!(picture.height, 2 * PADDING + Kind::Link.height());
         assert!((0..picture.width).any(|x| (0..picture.height).any(|y| at(&picture, x, y) == LINK)));
+    }
+
+    fn press(card: &mut Card, y: f32) -> bool {
+        card.touch(Some([0.0, y, 0.05]));
+        let turned = card.touch(Some([0.0, y, 0.0])).turned;
+        card.touch(None);
+        turned
+    }
+
+    #[test]
+    fn a_card_longer_than_one_view_reads_to_its_last_line_by_pressing_its_lower_half() {
+        let markdown: String = (1..=120).map(|n| format!("Line {n} of the draft.\n\n")).collect();
+        let mut card = Card::new(&Display { markdown: Some(markdown), ..Display::default() });
+        assert!(card.views() > 2);
+        let size = card.size();
+        assert!(size[1] <= MAX_HEIGHT);
+        let mut read: Vec<String> = Vec::new();
+        let mut views = 0;
+        loop {
+            let image = card.take_image().expect("each view is drawn");
+            assert_eq!([image.width, image.height], [(size[0] * PIXELS_PER_METRE) as u32, (size[1] * PIXELS_PER_METRE).round() as u32], "every view the same size");
+            read.extend(card.shown_in(card.view).iter().map(|line| line.text.clone()).filter(|text| !text.is_empty()));
+            views += 1;
+            if !press(&mut card, -size[1] / 4.0) {
+                break;
+            }
+        }
+        assert_eq!(views, card.views());
+        assert_eq!(read, (1..=120).map(|n| format!("Line {n} of the draft.")).collect::<Vec<_>>(), "every line once, none cut");
+        let last = card.image();
+        let row = PADDING + card.shown_in(card.view).iter().map(|line| line.kind.height()).sum::<u32>() - Kind::Text.height() + 4;
+        assert!((PADDING..last.width / 2).any(|x| at(&last, x, row) == INK), "the last line is inked");
+        assert!(!press(&mut card, -size[1] / 4.0), "the last view stays");
+        assert!(press(&mut card, size[1] / 4.0), "the upper half goes back");
+        assert_eq!(card.view, card.views() - 2);
+    }
+
+    #[test]
+    fn a_press_beside_the_card_or_without_drawing_back_turns_nothing_and_one_view_has_no_bar() {
+        let markdown: String = (1..=120).map(|n| format!("Line {n}\n")).collect();
+        let mut card = Card::new(&Display { markdown: Some(markdown), ..Display::default() });
+        let [width, height] = card.size();
+        assert!(!press(&mut card, -height), "below the card");
+        assert!(!card.touch(Some([width, -height / 4.0, 0.05])).turned && !card.touch(Some([width, -height / 4.0, 0.0])).turned, "beside the card");
+        card.touch(Some([0.0, -height / 4.0, 0.05]));
+        assert!(card.touch(Some([0.0, -height / 4.0, 0.0])).turned);
+        assert!(!card.touch(Some([0.0, -height / 4.0, 0.0])).turned, "held at the face turns once");
+        let full = card.image();
+        assert!((0..full.height).any(|y| at(&full, full.width - PADDING / 2, y) == THUMB));
+        let short = draw(&Display { markdown: Some("Hi".into()), ..Display::default() });
+        assert!((0..short.height).all(|y| at(&short, short.width - PADDING / 2, y) == at(&short, 0, 0)));
     }
 }

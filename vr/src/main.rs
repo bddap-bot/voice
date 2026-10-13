@@ -179,7 +179,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
     marker_overlay.texture(&mut marker_texture.upload(&board::marker_image())?)?;
     let mut display_overlay = runtime.create_overlay("voice.display", "Display", panel::WIDTH, false)?;
     let mut display_image = vulkan::Flat::new(gpu.clone());
-    let mut display: Option<[f32; 2]> = None;
+    let mut card: Option<panel::Card> = None;
     let mut object: object::Slot<openvr::Overlay> = object::Slot::default();
     let mut pointing = point::Pointing::default();
     let eye_offsets = runtime.eye_offsets();
@@ -259,7 +259,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             voice.summon();
             puppet.gaze = Gaze::default();
             board.reset();
-            display = None;
+            card = None;
             object.clear("summoned");
             pointing.stop();
             meter = Meter::default();
@@ -278,6 +278,9 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             board_overlay.hide();
             marker_overlay.hide();
             display_overlay.hide();
+            if let Some(card) = &mut card {
+                card.reset();
+            }
             board.reset();
             reveal.reset();
             puppet.springs.reset();
@@ -318,17 +321,16 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         let mount = under_controller(board.height());
         let board_pose = left.then(&mount);
         board_overlay.place_on(device, &mount);
-        let mut fresh = None;
         if let Some(mut shown) = voice.take_display() {
             let in_place = shown.addresses_object();
             let about_object = shown.point.is_some() || shown.data.is_some() || shown.hold.is_some();
             if let Some(name) = shown.point.take() {
                 pointing.start(name, started);
             }
-            let card = shown.card();
+            let carded = shown.card();
             match shown.object.take() {
                 Some(scene) => object.show(|| object::Object::spawn(runtime.create_overlay("voice.object", "Object", object::QUAD, true)?, gpu.clone(), scene, object::BUDGET, started)),
-                None if card && !about_object => object.clear("replaced by a display without one"),
+                None if carded && !about_object => object.clear("replaced by a display without one"),
                 None => {}
             }
             if let Some(data) = shown.data.take() {
@@ -337,20 +339,11 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             if let Some(hold) = shown.hold.take() {
                 object.hold(hold);
             }
-            if card {
-                let picture = panel::draw(&shown);
-                display = Some(panel::size(&picture));
-                fresh = Some(picture);
+            if carded {
+                card = Some(panel::Card::new(&shown));
             } else if !in_place {
-                display = None;
+                card = None;
                 display_overlay.hide();
-            }
-        }
-        if let Some(size) = display {
-            display_overlay.place_on(device, &beside(&mount, [board::WIDTH, board.height()], size));
-            if let Some(picture) = fresh {
-                display_overlay.texture(&mut display_image.upload(&picture)?)?;
-                display_overlay.show();
             }
         }
         let right = hand(Hand::Right).zip(right_device);
@@ -359,14 +352,28 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         if let Some([x, y]) = touch.crossing {
             tracing::info!("board crossed at ({x:.3}, {y:.3}) m: {}", touch.press.map_or("none".to_owned(), |press| format!("{press:?}")));
         }
-        match (touch.marker, right) {
-            (Some(at), Some((right, right_device))) => {
-                marker_overlay.place_on(right_device, &marker(&board_pose, &right, at));
+        let mut touched = touch.marker.map(|at| (board_pose, at));
+        let mut turned = false;
+        if let Some(card) = &mut card {
+            let placed = beside(&mount, [board::WIDTH, board.height()], card.size());
+            let card_pose = left.then(&placed);
+            display_overlay.place_on(device, &placed);
+            let touch = card.touch(right.map(|(right, _)| local_tip(&card_pose, &right, tip)));
+            turned = touch.turned;
+            touched = touched.or(touch.marker.map(|at| (card_pose, at)));
+            if let Some(picture) = card.take_image() {
+                display_overlay.texture(&mut display_image.upload(&picture)?)?;
+                display_overlay.show();
+            }
+        }
+        match (touched, right) {
+            (Some((face, at)), Some((right, right_device))) => {
+                marker_overlay.place_on(right_device, &marker(&face, &right, at));
                 marker_overlay.show();
             }
             _ => marker_overlay.hide(),
         }
-        if let (Some(_), Some((_, right_device))) = (touch.press, right) {
+        if let (true, Some((_, right_device))) = (touch.press.is_some() || turned, right) {
             runtime.pulse(right_device);
         }
         match touch.press {
@@ -503,21 +510,29 @@ fn replay(state: &std::path::Path, recording: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// A markdown file drawn as the display card and held `seconds` before the headset at the nearest a window is seen from, to check a card on the device without a session.
+/// A markdown file drawn as the display card, each view in turn held `seconds` before the headset at the nearest a window is seen from, to check a card on the device without a session.
 fn card(args: &[String]) -> Result<(), String> {
     let usage = "usage: voice-vr card <file.md> <seconds>";
     let [file, seconds] = args else { return Err(usage.into()) };
     let seconds: u64 = seconds.parse().map_err(|_| usage)?;
     let markdown = std::fs::read_to_string(file).map_err(|error| format!("{file}: {error}"))?;
-    let picture = panel::draw(&hub::Display { markdown: Some(markdown), ..hub::Display::default() });
+    let mut card = panel::Card::new(&hub::Display { markdown: Some(markdown), ..hub::Display::default() });
     let gpu = Rc::new(vulkan::Gpu::new(Some(Runtime::init()?))?);
     let runtime = gpu.vr.as_ref().expect("the card's device was made for SteamVR");
     let mut image = vulkan::Flat::new(gpu.clone());
     let mut overlay = runtime.create_overlay("voice.card", "Card", panel::WIDTH, false)?;
     overlay.place_on(openvr_sys::k_unTrackedDeviceIndex_Hmd as u32, &Pose { r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], t: [0.0, 0.0, -0.35] });
-    overlay.texture(&mut image.upload(&picture)?)?;
-    overlay.show();
-    std::thread::sleep(Duration::from_secs(seconds));
+    for view in 1.. {
+        if let Some(picture) = card.take_image() {
+            overlay.texture(&mut image.upload(&picture)?)?;
+        }
+        overlay.show();
+        tracing::info!("view {view} of {}", card.views());
+        std::thread::sleep(Duration::from_secs(seconds));
+        if !card.turn(1) {
+            break;
+        }
+    }
     Ok(())
 }
 

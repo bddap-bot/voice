@@ -2,6 +2,6 @@
 import (pkgs.fetchFromGitHub {
   owner = "bddap-bot";
   repo = "wunderkammer-objects";
-  rev = "196b379e524376dd77e6bff68d8af0e7402650ba";
-  sha256 = "1amrvykfwd0afxjqx3lr5hbir0znzfrr5q4r2d6ybzw8kf660yip";
+  rev = "3af95a72dbf73465f3e18f3a3e11c3f6206e63af";
+  sha256 = "0gc4hfyxa48gvndv4lwpalnfgw1xvpw0np9b8llpmq9cx64h9amq";
 }) { inherit pkgs; }

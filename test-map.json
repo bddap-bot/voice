@@ -3,12 +3,13 @@
   "rules": [
     {
       "paths": [
-        "vr/samples/**"
+        "vr/objects.nix",
+        "vr/check-objects.sh"
       ],
       "tests": [
-        "bash vr/samples/check.sh"
+        "bash vr/check-objects.sh"
       ],
-      "why": "the sample objects build from their generators and each loads and runs within its program budget through the overlay host's own object path"
+      "why": "every object of the pinned wunderkammer-objects builds and loads and runs within its program budget through the overlay host's own object path"
     },
     {
       "paths": [

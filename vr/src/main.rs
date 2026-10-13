@@ -57,11 +57,6 @@ const PAD: f32 = 0.1;
 const DORMANT_POLL: Duration = Duration::from_micros(11_111);
 const SPOTTER_RETRY: Duration = Duration::from_secs(10);
 
-/// Where an object's centre sits in the hand-held puppet's quad frame for a puppet `size` times hand size: right of the figure, about chest high.
-fn object_beside(size: f32) -> Vec3 {
-    [object::SIZE / 2.0 + 0.1 * size, 0.0, 0.0]
-}
-
 /// A grown puppet's window: wide enough for both eyes to see every joint of `worlds` with `PAD` of its height around each.
 fn grown_window(worlds: &[glam::Mat4], body: glam::Mat4, size: f32, head: Vec3, eyes: &[Vec3]) -> (Pose, f32) {
     let joints: Vec<Vec3> = worlds.iter().map(|world| body.transform_point3(world.w_axis.truncate()).into()).collect();
@@ -355,7 +350,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
             }
         }
         let right = hand(Hand::Right).zip(right_device);
-        object.step(started, &object::View { center: figure.apply(object_beside(size)), head, eyes: eye_offsets, tip: right.map(|(right, _)| right.apply(tip)) });
+        object.step(started, &object::View { stand, size, head, eyes: eye_offsets, tip: right.map(|(right, _)| right.apply(tip)) });
         let touch = board.touch(right.map(|(right, _)| local_tip(&board_pose, &right, tip)));
         if let Some([x, y]) = touch.crossing {
             eprintln!("board crossed at ({x:.3}, {y:.3}) m: {}", touch.press.map_or("none".to_owned(), |press| format!("{press:?}")));

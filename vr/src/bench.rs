@@ -93,8 +93,9 @@ fn program(bytes: &[u8], data: Option<&str>) -> Result<(), String> {
 fn frames(gpu: Rc<Gpu>, bytes: &[u8], options: &Options, budget: Budget) -> Result<(), String> {
     let viewer = Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], VIEWER);
     let eye = Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0; 3]);
-    let center = crate::object_beside(1.0);
-    let view = |tip: Option<Vec3>| View { center, head: viewer, eyes: [eye, eye], tip };
+    let stand = Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, crate::FLOOR, 0.0]);
+    let view = |tip: Option<Vec3>| View { stand, size: 1.0, head: viewer, eyes: [eye, eye], tip };
+    let center = view(None).center();
     let started = Instant::now();
     let mut object = Object::spawn(Offscreen, gpu.clone(), bytes.to_vec(), budget, started)?;
     if let Some(data) = &options.data {
@@ -223,9 +224,10 @@ mod tests {
         frames(Rc::new(Gpu::new(None).unwrap()), &crate::object::tests::cube(0.2), &options(Path::new("cube.glb"), Some(&directory)), loose).unwrap();
         let picture = image::open(directory.join("beside.png")).unwrap().to_rgb8();
         let column = |x: f32| ((x - WINDOW[0]) * PIXELS_PER_METRE) as u32;
-        let row = ((WINDOW[3] - crate::object_beside(1.0)[1]) * PIXELS_PER_METRE) as u32;
+        let [x, y, _] = crate::placement::add(crate::object::beside(1.0), [0.0, crate::FLOOR, 0.0]);
+        let row = ((WINDOW[3] - y) * PIXELS_PER_METRE) as u32;
         let drawn = |from: f32, to: f32| (column(from)..column(to)).filter(|&x| picture.get_pixel(x, row).0.iter().any(|&channel| channel > 80)).count();
-        assert!(drawn(crate::object_beside(1.0)[0] - 0.03, crate::object_beside(1.0)[0] + 0.03) > 50, "the cube shows at the object's place");
+        assert!(drawn(x - 0.03, x + 0.03) > 50, "the cube shows at the object's place");
         assert!(drawn(WINDOW[0], -0.15) == 0, "nothing shows left of the puppet");
         assert!(directory.join("spread.png").exists());
         std::fs::remove_dir_all(&directory).unwrap();

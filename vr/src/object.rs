@@ -317,12 +317,25 @@ impl Handling {
     }
 }
 
-/// Where the viewer and the right controller's tip are this frame, in the standing universe.
+/// Where an object's centre sits in the frame of a puppet `size` times hand size: right of the figure as it faces you, about chest high.
+pub fn beside(size: f32) -> Vec3 {
+    [SIZE / 2.0 + 0.1 * size, -crate::FLOOR * size, 0.0]
+}
+
+/// Where the puppet stands and the viewer and the right controller's tip are this frame, in the standing universe.
 pub struct View {
-    pub center: Vec3,
+    pub stand: Pose,
+    pub size: f32,
     pub head: Pose,
     pub eyes: [Pose; 2],
     pub tip: Option<Vec3>,
+}
+
+impl View {
+    /// Fixed to the puppet's frame alone, so walking around a set-down puppet shows the object's other sides.
+    pub fn center(&self) -> Vec3 {
+        self.stand.apply(beside(self.size))
+    }
 }
 
 struct Drawn {
@@ -419,7 +432,8 @@ impl<S: Surface> Object<S> {
             self.drawn = Some(Drawn { appearance, model: geometry.model, skinned: geometry.skinned, worlds, fit: geometry.fit, radius: geometry.radius, duration: geometry.duration, parts: geometry.parts, anchors: geometry.anchors, placed: Mat4::IDENTITY });
         }
         let reach = self.drawn.as_ref().map_or(0.0, |drawn| drawn.radius).max(MIN_REACH);
-        if let Some(reason) = self.handling.touch(now, reach, view.tip.map(|tip| (sub(tip, view.center), tip))) {
+        let center = view.center();
+        if let Some(reason) = self.handling.touch(now, reach, view.tip.map(|tip| (sub(tip, center), tip))) {
             return Err(reason.into());
         }
         let Some(drawn) = &mut self.drawn else { return Ok(()) };
@@ -437,9 +451,9 @@ impl<S: Surface> Object<S> {
                 self.runner.thread.unpark();
             }
         }
-        let quad = facing(view.center, view.head.t);
+        let quad = facing(center, view.head.t);
         let local = quad.inverse();
-        drawn.placed = Mat4::from_translation(view.center.into()) * turned;
+        drawn.placed = Mat4::from_translation(center.into()) * turned;
         drawn.appearance.update(&drawn.skinned.palette(&drawn.parts.spread(&drawn.worlds, self.handling.spread), local.mat4() * drawn.placed), &drawn.skinned.vertices, &[]);
         let eyes = view.eyes.map(|eye| eye_projection(local.apply(view.head.then(&eye).t).into(), QUAD / 2.0, QUAD / 2.0));
         let started = Instant::now();
@@ -668,7 +682,8 @@ pub mod tests {
 
     fn view(tip: Option<Vec3>) -> View {
         let eye = |x| Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [x, 0.0, 0.0]);
-        View { center: [0.0, 1.2, -0.5], head: Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.3, 0.0]), eyes: [eye(-0.032), eye(0.032)], tip }
+        let stand = Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], sub([0.0, 1.2, -0.5], beside(1.0)));
+        View { stand, size: 1.0, head: Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.3, 0.0]), eyes: [eye(-0.032), eye(0.032)], tip }
     }
 
     /// Steps until the program has published and the object is drawn once.
@@ -737,7 +752,7 @@ pub mod tests {
         drawn(&mut object, born);
         object.step(born + Duration::from_secs(5), &view(None)).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
-        let center = view(None).center;
+        let center = view(None).center();
         let mut moved = Vec::new();
         while moved.len() < 2 {
             assert!(Instant::now() < deadline, "the program never published");
@@ -758,7 +773,7 @@ pub mod tests {
         let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None), LOOSE, born).unwrap();
         drawn(&mut object, born);
         let radius = object.drawn.as_ref().unwrap().radius;
-        let center = view(None).center;
+        let center = view(None).center();
         let at = |dy: f32| view(Some([center[0] + 0.3 * radius, center[1] + dy, center[2]]));
         let frame = Duration::from_millis(11);
         let mut now = born;
@@ -817,7 +832,7 @@ pub mod tests {
             }
             std::thread::sleep(TICK);
         }
-        let center = view(None).center;
+        let center = view(None).center();
         let radius = slot.object.as_ref().unwrap().drawn.as_ref().unwrap().radius;
         for step in 0..=10 {
             slot.step(now, &view(Some([center[0] + 0.3 * radius, center[1] + step as f32 * radius / 20.0, center[2]])));
@@ -841,7 +856,7 @@ pub mod tests {
         let nodes = serde_json::json!([{ "mesh": 0, "name": "left", "translation": [-0.06, 0.0, 0.0] }, { "mesh": 0, "name": "right", "translation": [0.06, 0.0, 0.0] }]);
         let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None), LOOSE, born).unwrap();
         drawn(&mut object, born);
-        let center = V3::from(view(None).center);
+        let center = V3::from(view(None).center());
         let right = V3::from(object.locate("right").unwrap());
         assert!(right.abs_diff_eq(center + V3::new(0.06, 0.0, 0.0), 1e-5), "the right cube's centre: {right}");
         assert_eq!(object.locate("missing"), None);
@@ -850,6 +865,38 @@ pub mod tests {
         object.step(born, &view(None)).unwrap();
         let moved = V3::from(object.locate("right").unwrap());
         assert!(moved.abs_diff_eq(center + V3::new(0.0, 0.0, -0.12), 1e-5), "spread to 12 cm and turned a quarter: {moved}");
+    }
+
+    #[test]
+    fn walking_around_a_set_down_puppet_leaves_its_object_where_it_was_put() {
+        use crate::placement::{on_controller, Anchor};
+        let gpu = Rc::new(Gpu::new(None).unwrap());
+        let born = Instant::now();
+        let nodes = serde_json::json!([{ "mesh": 0, "name": "left", "translation": [-0.06, 0.0, 0.0] }, { "mesh": 0, "name": "right", "translation": [0.06, 0.0, 0.0] }]);
+        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None), LOOSE, born).unwrap();
+        drawn(&mut object, born);
+        let hand = |angle: f32, at: Vec3| Pose::from_axes([angle.cos(), 0.0, -angle.sin()], [0.0, 1.0, 0.0], [angle.sin(), 0.0, angle.cos()], at);
+        let held = on_controller(&hand(0.7, [0.3, 1.0, -0.6]));
+        let floor = hand(-1.2, [0.5, 0.0, -1.1]);
+        for (set_down, size) in [(Anchor::Stuck(held), 1.0), (Anchor::Grounded(floor), 5.0)] {
+            let mut anchor = set_down;
+            let pose = anchor.stand(born, &hand(0.0, [0.0; 3]), [0.0; 3]);
+            let place = pose.apply(beside(size));
+            let mut placed = Vec::new();
+            for step in 0..8 {
+                let around = step as f32 * std::f32::consts::TAU / 8.0;
+                let head = facing([place[0] + 0.8 * around.sin(), place[1] + 0.4, place[2] + 0.8 * around.cos()], place);
+                let stand = anchor.stand(born, &hand(around, head.t), head.t);
+                let eye = |x| Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [x, 0.0, 0.0]);
+                object.step(born, &View { stand, size, head, eyes: [eye(-0.032), eye(0.032)], tip: None }).unwrap();
+                placed.push((object.drawn.as_ref().unwrap().placed, V3::from(object.locate("right").unwrap())));
+            }
+            let (first, right) = placed[0];
+            for (step, (matrix, part)) in placed.iter().enumerate() {
+                assert!(matrix.abs_diff_eq(first, 1e-5) && part.abs_diff_eq(right, 1e-5), "{size}x: seen from the {step}th eighth of the way around, the object stays put: {matrix} {part} against {first} {right}");
+            }
+            assert!(right.abs_diff_eq(V3::from(place) + V3::new(0.06, 0.0, 0.0), 1e-5), "{size}x: beside the puppet where it was set down: {right}");
+        }
     }
 
     #[test]

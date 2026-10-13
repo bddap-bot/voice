@@ -101,6 +101,11 @@ impl Display {
     pub fn addresses_object(&self) -> bool {
         self.markdown.is_none() && self.link.is_none() && self.image.is_none() && self.object.is_none() && !self.html
     }
+
+    /// Whether it carries a card for the panel.
+    pub fn card(&self) -> bool {
+        self.markdown.is_some() || self.link.is_some() || self.image.is_some() || self.html
+    }
 }
 
 enum Turn {
@@ -525,6 +530,9 @@ mod tests {
         f.wait(TURN_QUIET, true);
         f.reply(json!({ "id": "slow", "stamp": "html_1", "commentary": [], "instructions": [], "display": { "html": "<!doctype html><p>chart</p>", "markdown": "ignored" } }));
         assert_eq!(f.hub.take_display(), Some(Display { html: true, ..Display::default() }));
+        assert!(Display { html: true, ..Display::default() }.card(), "an html display still gets a card saying where it is shown");
+        assert!(Display { markdown: Some("Draft".into()), ..Display::default() }.card());
+        assert!(!Display { point: Some("gear".into()), ..Display::default() }.card());
         assert!(f.frames("hub-ack").iter().all(|ack| ack.get("unspoken").is_none()));
     }
 

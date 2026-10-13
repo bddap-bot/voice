@@ -326,7 +326,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
             if let Some(name) = shown.point.take() {
                 pointing.start(name, started);
             }
-            let card = shown.markdown.is_some() || shown.link.is_some() || shown.image.is_some();
+            let card = shown.card();
             match shown.object.take() {
                 Some(scene) => object.show(|| object::Object::spawn(runtime.create_overlay("voice.object", "Object", object::QUAD, true)?, gpu.clone(), scene, object::BUDGET, started)),
                 None if card && !about_object => object.clear("replaced by a display without one"),

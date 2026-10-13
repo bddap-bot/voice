@@ -7,6 +7,7 @@ An object is a binary glTF 2 file (`.glb`, `model/gltf-binary`) that a VR host d
 - The host draws every node's triangle meshes with their base colour factor and optional PNG, JPEG or WebP base colour texture, honouring `alphaMode` and `doubleSided`. It ignores skins, morph targets, glTF animations, cameras and lights.
 - Units are metres. The object's size is the box around its vertices under the nodes' own transforms, before any program runs. An object whose box is larger than 25 cm on its longest side is shrunk to that; a smaller one keeps its size.
 - A primitive without normals gets smooth normals from its faces.
+- A file whose parts are meant to pull apart for a closer look says so with a top-level `"extensions": { "VOICE_spread": {} }`, listed in `extensionsUsed`; how a host spreads them is its own.
 - The host refuses a file with more than 4096 nodes, a node more than 64 levels deep, more than 600,000 vertices or 200,000 triangles drawn (a mesh is counted once for every node that draws it), more than 8 textures, or a texture over 2048 texels on its longer side.
 
 ## Program
@@ -25,14 +26,14 @@ tick(time: f32, x: f32, y: f32, z: f32, touching: i32) -> i32
 ```
 
 - The host calls `tick` about 90 times a second on a thread of its own, never on the thread that draws. The drawing thread uses whatever `tick` last returned, so a slow program makes its object move less smoothly, never the rest of the scene. Until `tick` first returns records, the nodes keep their own transforms.
-- `time` is in seconds. When `duration` is above zero it wraps to zero at `duration`.
+- `time` is in seconds and never wraps, so it can grow past `duration` or, scrubbed back, go below zero. A program whose motion repeats repeats it itself.
 - `touching` is 1 while the user's pointer is inside the object's bounding sphere, the sphere around the box above (this overlay enlarges a sphere smaller than 6 cm in radius to 6 cm). `x`, `y`, `z` are then the pointer in the object's own coordinates, the space its nodes are defined in, before any shrinking; they are 0 when `touching` is 0.
 - Returning 0 keeps the previous transforms. Any other value is the address in `memory` of one record per glTF node, in node order, each ten little-endian `f32`: translation x, y, z; rotation quaternion x, y, z, w; scale x, y, z. Each record replaces that node's whole local transform.
 - Live data: a module may also export `data(length: i32) -> i32`. When the host receives new data for the object, from a source it defines, it calls `data` with the length in bytes and writes the bytes at the returned address, or drops them if it returns 0. The next `tick` sees them. Only the newest waiting update is delivered.
 - Device feed: `"feed": "device"` in the extension asks for the readings of the device the host runs on, delivered through `data` once a second, the first a second after the program starts. A host without them delivers nothing.
 - This host lets each `tick` and `data` call, and the module's start function, run 2,000,000 instructions as its interpreter counts them, and lets memory grow to 16 MiB. A program that runs past either, traps, returns an address whose records or data do not fit in its memory, or returns a record holding a value that is not finite is stopped, and its object is removed from view.
 
-A program for a file of four nodes that circles nodes 1, 2 and 3 around the object's origin, 3, 2 and 1 times every four seconds, so the 4-second `duration` above loops without a jump. Build it with `rustc --edition 2021 --target wasm32-unknown-unknown --crate-type cdylib -O -C panic=abort orbit.rs`:
+A program for a file of four nodes that circles nodes 1, 2 and 3 around the object's origin, 3, 2 and 1 times every four seconds. Build it with `rustc --edition 2021 --target wasm32-unknown-unknown --crate-type cdylib -O -C panic=abort orbit.rs`:
 
 ```rust
 #![no_std]
@@ -81,7 +82,7 @@ This overlay reads Linux's `/proc` and `/sys`: GPU time and memory come from the
 A hub reply's display item may carry an object. Live speaks follow-ups in order, and each reply's display item (object, card, image, pointing, data) takes the screen when Live starts speaking that reply, like the next slide; a follow-up dropped because the user spoke never shows its item, and a reply Live never speaks shows its item when its turn times out. The overlay draws the object just right of the puppet in the puppet's own frame, so once the puppet is set down the object stays put in the room and walking around it shows its other sides, until the next display item that carries another object, or a card that neither points nor carries data. Its pointer is the right controller's tip, by position alone; its radius below is the bounding sphere's, at least 6 cm.
 
 - Moving the tip around the object's vertical axis while inside turns it. A flick of the tip faster than 1.8 m/s throws it away.
-- With the tip closer to the centre than half the radius, the object's parts (its top-level nodes, or a lone root's children) spread away from its centre, fully apart at a fifth of the radius, and close again as the tip withdraws.
+- In a file that carries `VOICE_spread`, with the tip closer to the centre than half the radius, the object's parts (its top-level nodes, or a lone root's children) spread away from its centre to twice their resting distance, fully apart at a fifth of the radius, and close again as the tip withdraws. Other files never spread.
 - While the tip is inside, `time` stands still, and sliding the tip up or down by the sphere's diameter moves it through one whole `duration`.
 - A reply may name a node of the shown object: while the puppet speaks that reply, it points its right arm at the centre of that node and its descendants, wherever the program, the spread and the turn have put it. A reply may also carry live data, which the overlay delivers to the shown object's `data`; neither replaces the object.
 - A reply may hold the shown object's timeline: `time` stands at the seconds it names, wrapped at `duration`, until a reply lets it run on from there or the object leaves; the tip still scrubs it. A hold and live data in one reply reach the program on the same `tick`, so a program that reads its data against `time` pauses where the data puts it.

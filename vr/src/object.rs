@@ -39,8 +39,6 @@ const MIN_REACH: f32 = 0.06;
 /// The tip's depth, as a fraction of the object's radius, where its parts start to spread and where they are fully apart.
 const OPENING: f32 = 0.5;
 const OPEN: f32 = 0.2;
-/// How far apart fully spread parts are, as a multiple of their resting distance from the centre.
-const SPREAD: f32 = 1.0;
 /// How quickly the spread follows the tip, per second.
 const EASE: f32 = 8.0;
 /// Below this horizontal distance from the axis the tip's bearing is noise, so it does not turn the object.
@@ -94,8 +92,7 @@ fn anchors(model: &Model, skinned: &Skinned, points: &[V3], rest: &[Mat4]) -> Ve
     extents.iter().zip(rest).map(|((low, high), world)| (low.x <= high.x).then(|| world.inverse().transform_point3((*low + *high) / 2.0))).collect()
 }
 
-/// The pieces an object pulls apart into: its top-level nodes, or a lone root's children.
-#[derive(Default)]
+/// The pieces an object that spreads pulls apart into: its top-level nodes, or a lone root's children.
 struct Parts {
     of: Vec<Option<usize>>,
     /// Each part's centre less the object's, in the object's own coordinates.
@@ -104,6 +101,9 @@ struct Parts {
 
 impl Parts {
     fn find(model: &Model, skinned: &Skinned, points: &[V3], centre: V3) -> Parts {
+        if !model.spreads {
+            return Parts { of: vec![None; model.nodes()], offsets: Vec::new() };
+        }
         let roots = (0..model.nodes()).filter(|&node| model.parent(node).is_none()).count();
         let depth = (roots == 1) as usize;
         let chain = |node: usize| std::iter::successors(Some(node), |&at| model.parent(at)).collect::<Vec<_>>();
@@ -129,7 +129,7 @@ impl Parts {
     }
 
     fn spread(&self, worlds: &[Mat4], amount: f32) -> Vec<Mat4> {
-        worlds.iter().zip(&self.of).map(|(world, part)| part.map_or(*world, |part| Mat4::from_translation(self.offsets[part] * amount * SPREAD) * *world)).collect()
+        worlds.iter().zip(&self.of).map(|(world, part)| part.map_or(*world, |part| Mat4::from_translation(self.offsets[part] * amount) * *world)).collect()
     }
 }
 
@@ -252,7 +252,7 @@ impl Drop for Runner {
 }
 
 /// Position-only handling: the tip inside the object turns it about its vertical axis by the tip's bearing, a fast tip throws it away, and neither touched nor fed live data it leaves after `LIFETIME`.
-/// Pushing the tip deep into it spreads its parts until the tip withdraws, and sliding the tip up or down inside it scrubs its timeline, which holds still while touched.
+/// Pushing the tip deep into an object that spreads spreads its parts until the tip withdraws, and sliding the tip up or down inside it scrubs its timeline, which holds still while touched.
 pub struct Handling {
     pub yaw: f32,
     /// How far apart its parts are, 0 to 1.
@@ -444,7 +444,7 @@ impl<S: Surface> Object<S> {
         {
             let mut exchange = self.runner.exchange.lock().unwrap();
             let handling = &self.handling;
-            exchange.time = if drawn.duration > 0.0 { (handling.clock + handling.slide / (2.0 * reach) * drawn.duration).rem_euclid(drawn.duration) } else { handling.clock };
+            exchange.time = handling.clock + handling.slide / (2.0 * reach) * drawn.duration;
             exchange.tip = handling.touching.map(|offset| turned.inverse().transform_point3(offset.into()).into());
             if let Some(data) = self.data.take() {
                 exchange.data = Some(data);
@@ -624,15 +624,15 @@ pub mod tests {
 
     /// The cube as node 0, run by `program` when given; node 1 is an empty the program may move.
     fn scene(side: f32, program: Option<(&str, f32)>) -> Vec<u8> {
-        built(side, serde_json::json!([{ "mesh": 0, "rotation": [0.3, 0.3, 0.0, 0.906] }, {}]), program)
+        built(side, serde_json::json!([{ "mesh": 0, "rotation": [0.3, 0.3, 0.0, 0.906] }, {}]), program, false)
     }
 
-    fn built(side: f32, nodes: serde_json::Value, program: Option<(&str, f32)>) -> Vec<u8> {
-        built_with(side, nodes, program, serde_json::json!({}))
+    fn built(side: f32, nodes: serde_json::Value, program: Option<(&str, f32)>, spreads: bool) -> Vec<u8> {
+        built_with(side, nodes, program, spreads, serde_json::json!({}))
     }
 
     /// `declared` adds to the program's extension object.
-    fn built_with(side: f32, nodes: serde_json::Value, program: Option<(&str, f32)>, declared: serde_json::Value) -> Vec<u8> {
+    fn built_with(side: f32, nodes: serde_json::Value, program: Option<(&str, f32)>, spreads: bool, declared: serde_json::Value) -> Vec<u8> {
         let mut builder = Builder::new(serde_json::json!({}));
         let h = side / 2.0;
         let mut positions = Vec::new();
@@ -669,12 +669,17 @@ pub mod tests {
         builder.set("textures", serde_json::json!([{ "source": 0 }]));
         builder.set("materials", serde_json::json!([{ "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } } }, { "pbrMetallicRoughness": { "baseColorFactor": [0.2, 0.4, 0.8, 1.0] } }]));
         builder.set("nodes", nodes);
+        let mut extensions = serde_json::json!({});
         if let Some((text, duration)) = program {
             let view = builder.view(&crate::program::tests::wasm(text));
             let mut extension = serde_json::json!({ "bufferView": view, "duration": duration });
             extension.as_object_mut().unwrap().extend(declared.as_object().unwrap().clone());
-            builder.set("extensions", serde_json::json!({ crate::vrm::PROGRAM: extension }));
+            extensions[crate::vrm::PROGRAM] = extension;
         }
+        if spreads {
+            extensions[crate::vrm::SPREAD] = serde_json::json!({});
+        }
+        builder.set("extensions", extensions);
         let mesh = |material: usize| serde_json::json!({ "primitives": [{ "attributes": { "POSITION": position, "NORMAL": normal, "TEXCOORD_0": uv }, "indices": index, "material": material }] });
         builder.set("meshes", serde_json::json!([mesh(0), mesh(1)]));
         builder.glb()
@@ -761,7 +766,7 @@ pub mod tests {
             moved = [0, 1].map(|node| drawn.worlds[node].w_axis.truncate()).into_iter().filter(|at| at.length() > 1e-6).collect();
             std::thread::sleep(TICK);
         }
-        assert!((moved[0].x - 1.0).abs() < 1e-5, "time wraps at the 4 s timeline and holds while touched: node 0 at {}", moved[0]);
+        assert!((moved[0].x - 5.0).abs() < 1e-5, "time runs on past the 4 s timeline and holds while touched: node 0 at {}", moved[0]);
         assert!(moved[1].y > 0.0 && moved[1].x.abs() < 1e-4, "the touch above the centre reaches node 1 in the object's coordinates: {}", moved[1]);
     }
 
@@ -770,7 +775,7 @@ pub mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
         let nodes = serde_json::json!([{ "mesh": 0, "translation": [-0.06, 0.0, 0.0] }, { "mesh": 0, "translation": [0.06, 0.0, 0.0] }]);
-        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None), LOOSE, born).unwrap();
+        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None, true), LOOSE, born).unwrap();
         drawn(&mut object, born);
         let radius = object.drawn.as_ref().unwrap().radius;
         let center = view(None).center();
@@ -850,11 +855,28 @@ pub mod tests {
     }
 
     #[test]
+    fn a_file_that_does_not_spread_keeps_its_parts_in_place_with_the_tip_deep() {
+        let gpu = Rc::new(Gpu::new(None).unwrap());
+        let born = Instant::now();
+        let nodes = serde_json::json!([{ "mesh": 0, "translation": [-0.06, 0.0, 0.0] }, { "mesh": 0, "translation": [0.06, 0.0, 0.0] }]);
+        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None, false), LOOSE, born).unwrap();
+        drawn(&mut object, born);
+        let mut now = born;
+        for _ in 0..60 {
+            object.step(now, &view(Some(view(None).center()))).unwrap();
+            now += Duration::from_millis(11);
+        }
+        let drawn = object.drawn.as_ref().unwrap();
+        let apart: Vec<f32> = drawn.parts.spread(&drawn.worlds, object.handling.spread).iter().map(|world| world.w_axis.x).collect();
+        assert!((apart[1] - apart[0] - 0.12).abs() < 1e-5, "the two cubes stay 12 cm apart: {apart:?}");
+    }
+
+    #[test]
     fn a_named_part_is_located_where_it_is_drawn_spread_and_turned() {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
         let nodes = serde_json::json!([{ "mesh": 0, "name": "left", "translation": [-0.06, 0.0, 0.0] }, { "mesh": 0, "name": "right", "translation": [0.06, 0.0, 0.0] }]);
-        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None), LOOSE, born).unwrap();
+        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None, true), LOOSE, born).unwrap();
         drawn(&mut object, born);
         let center = V3::from(view(None).center());
         let right = V3::from(object.locate("right").unwrap());
@@ -873,7 +895,7 @@ pub mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
         let nodes = serde_json::json!([{ "mesh": 0, "name": "left", "translation": [-0.06, 0.0, 0.0] }, { "mesh": 0, "name": "right", "translation": [0.06, 0.0, 0.0] }]);
-        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None), LOOSE, born).unwrap();
+        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None, true), LOOSE, born).unwrap();
         drawn(&mut object, born);
         let hand = |angle: f32, at: Vec3| Pose::from_axes([angle.cos(), 0.0, -angle.sin()], [0.0, 1.0, 0.0], [angle.sin(), 0.0, angle.cos()], at);
         let held = on_controller(&hand(0.7, [0.3, 1.0, -0.6]));
@@ -921,7 +943,7 @@ pub mod tests {
     fn an_object_that_asks_for_the_device_feed_reads_this_machine_and_stays_while_fed() {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
-        let bytes = built_with(0.2, serde_json::json!([{ "mesh": 0 }]), Some((crate::program::tests::GAUGE, 0.0)), serde_json::json!({ "feed": "device" }));
+        let bytes = built_with(0.2, serde_json::json!([{ "mesh": 0 }]), Some((crate::program::tests::GAUGE, 0.0)), false, serde_json::json!({ "feed": "device" }));
         let mut object = Object::spawn(Counted::new(), gpu, bytes, LOOSE, born).unwrap();
         let cores = std::fs::read_to_string("/proc/stat").unwrap().lines().filter(|line| line.starts_with("cpu") && line.as_bytes()[3].is_ascii_digit()).count();
         let late = born + LIFETIME - Duration::from_secs(1);
@@ -942,7 +964,7 @@ pub mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let now = Instant::now();
         let nodes: Vec<serde_json::Value> = (0..500).map(|at| serde_json::json!({ "mesh": at % 2, "translation": [at as f32 * 0.001, 0.0, 0.0] })).collect();
-        let mut object = Object::spawn(Counted::new(), gpu, built(0.001, serde_json::Value::Array(nodes), None), LOOSE, now).unwrap();
+        let mut object = Object::spawn(Counted::new(), gpu, built(0.001, serde_json::Value::Array(nodes), None, false), LOOSE, now).unwrap();
         drawn(&mut object, now);
         let draws = &object.drawn.as_ref().unwrap().skinned.draws;
         assert_eq!(draws.iter().map(|draw| (draw.material, draw.count)).collect::<Vec<_>>(), [(0, 250 * 36), (1, 250 * 36)]);

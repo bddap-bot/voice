@@ -180,6 +180,8 @@ pub struct Model {
     rest_turns: Vec<Quat>,
     rig: Rig,
     pub program: Option<ObjectProgram>,
+    /// Whether the object's parts spread apart when the pointer pushes deep into it.
+    pub spreads: bool,
 }
 
 pub struct ObjectProgram {
@@ -262,6 +264,7 @@ struct Document<'a> {
 }
 
 pub const PROGRAM: &str = "VOICE_program";
+pub const SPREAD: &str = "VOICE_spread";
 pub const OBJECT_TEXTURE: u32 = 2048;
 pub const OBJECT_IMAGES: usize = 8;
 pub const OBJECT_NODES: usize = 4096;
@@ -857,7 +860,8 @@ impl Model {
             }
             _ => None,
         };
-        let mut model = Model { version, nodes, meshes, skins, materials, images, humanoid, expressions, look_at, rest_turns: Vec::new(), rig, program };
+        let spreads = object && extensions[SPREAD].is_object();
+        let mut model = Model { version, nodes, meshes, skins, materials, images, humanoid, expressions, look_at, rest_turns: Vec::new(), rig, program, spreads };
         model.rest_turns = model.worlds(&model.rest()).iter().map(rotation).collect();
         Ok(model)
     }

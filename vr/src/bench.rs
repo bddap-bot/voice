@@ -66,7 +66,7 @@ fn program(bytes: &[u8], data: Option<&str>) -> Result<(), String> {
     let model = Model::object(bytes)?;
     let (vertices, triangles) = model.drawn_size();
     println!("scene: {} nodes, {vertices} vertices, {triangles} triangles drawn", model.nodes());
-    let Some((wasm, duration)) = &model.program else {
+    let Some(crate::vrm::ObjectProgram { wasm, duration, .. }) = &model.program else {
         println!("program: none");
         return Ok(());
     };

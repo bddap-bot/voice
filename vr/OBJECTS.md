@@ -29,6 +29,7 @@ tick(time: f32, x: f32, y: f32, z: f32, touching: i32) -> i32
 - `touching` is 1 while the user's pointer is inside the object's bounding sphere, the sphere around the box above (this overlay enlarges a sphere smaller than 6 cm in radius to 6 cm). `x`, `y`, `z` are then the pointer in the object's own coordinates, the space its nodes are defined in, before any shrinking; they are 0 when `touching` is 0.
 - Returning 0 keeps the previous transforms. Any other value is the address in `memory` of one record per glTF node, in node order, each ten little-endian `f32`: translation x, y, z; rotation quaternion x, y, z, w; scale x, y, z. Each record replaces that node's whole local transform.
 - Live data: a module may also export `data(length: i32) -> i32`. When the host receives new data for the object, from a source it defines, it calls `data` with the length in bytes and writes the bytes at the returned address, or drops them if it returns 0. The next `tick` sees them. Only the newest waiting update is delivered.
+- Device feed: `"feed": "device"` in the extension asks for the readings of the device the host runs on, delivered through `data` once a second, the first a second after the program starts. A host without them delivers nothing.
 - This host lets each `tick` and `data` call, and the module's start function, run 2,000,000 instructions as its interpreter counts them, and lets memory grow to 16 MiB. A program that runs past either, traps, returns an address whose records or data do not fit in its memory, or returns a record holding a value that is not finite is stopped, and its object is removed from view.
 
 A program for a file of four nodes that circles nodes 1, 2 and 3 around the object's origin, 3, 2 and 1 times every four seconds, so the 4-second `duration` above loops without a jump. Build it with `rustc --edition 2021 --target wasm32-unknown-unknown --crate-type cdylib -O -C panic=abort orbit.rs`:
@@ -62,6 +63,19 @@ pub extern "C" fn tick(time: f32, _x: f32, _y: f32, _z: f32, _touching: i32) -> 
 }
 ```
 
+### Device feed
+
+Little-endian, each reading over the second since the last; a reading the device does not offer is 0.
+
+| bytes | what |
+|---|---|
+| `u32` C, `u32` P | cores, processes listed |
+| 8 × `f32` | memory total and available in bytes; GPU busy 0 to 1, summed over its engines; GPU memory allocated in bytes; GPU clock and its maximum in Hz; the hottest CPU and GPU temperatures in °C |
+| C × 3 `f32` | per core: busy 0 to 1, clock and its maximum in Hz |
+| P × (3 `f32`, 16 bytes) | the busiest processes, busiest first: cores busy (1.5 is one and a half cores), resident bytes, GPU busy 0 to 1, and the name, NUL-padded UTF-8 |
+
+This overlay reads Linux's `/proc` and `/sys`: GPU time and memory come from the DRM clients' fdinfo of processes it may read (its own user's), found again every ten seconds; it lists the eight busiest processes.
+
 ## In this overlay
 
 A hub reply's display item may carry an object. Live speaks follow-ups in order, and each reply's display item (object, card, image, pointing, data) takes the screen when Live starts speaking that reply, like the next slide; a follow-up dropped because the user spoke never shows its item, and a reply Live never speaks shows its item when its turn times out. The overlay draws the object just right of the puppet, facing the wearer, until the next display item that carries another object, or a card that neither points nor carries data. Its pointer is the right controller's tip, by position alone; its radius below is the bounding sphere's, at least 6 cm.
@@ -70,7 +84,7 @@ A hub reply's display item may carry an object. Live speaks follow-ups in order,
 - With the tip closer to the centre than half the radius, the object's parts (its top-level nodes, or a lone root's children) spread away from its centre, fully apart at a fifth of the radius, and close again as the tip withdraws.
 - While the tip is inside, `time` stands still, and sliding the tip up or down by the sphere's diameter moves it through one whole `duration`.
 - A reply may name a node of the shown object: while the puppet speaks that reply, it points its right arm at the centre of that node and its descendants, wherever the program, the spread and the turn have put it. A reply may also carry live data, which the overlay delivers to the shown object's `data`; neither replaces the object.
-- The object is removed when untouched for three minutes, replaced, when the session ends, or when, after its first 45 frames, its own rendering averages over 4 ms a frame or takes over 40 ms in one; removing it closes its overlay, frees its GPU memory and stops its thread, which ends without the drawing thread waiting on it, even mid-load.
+- The object is removed when neither touched nor fed live data for three minutes, replaced, when the session ends, or when, after its first 45 frames, its own rendering averages over 4 ms a frame or takes over 40 ms in one; removing it closes its overlay, frees its GPU memory and stops its thread, which ends without the drawing thread waiting on it, even mid-load.
 
 ## Measuring an object
 

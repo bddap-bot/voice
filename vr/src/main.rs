@@ -5,6 +5,7 @@ mod board;
 mod calls;
 mod chosen;
 mod conversation;
+mod device;
 mod gaze;
 mod identity;
 mod session;

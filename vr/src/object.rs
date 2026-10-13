@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use glam::{Mat4, Quat, Vec3 as V3};
 
+use crate::device;
 use crate::openvr::Overlay;
 use crate::placement::{facing, length, sub, Pose, Vec3};
 use crate::program::{self, Transform};
@@ -150,7 +151,7 @@ fn load(bytes: &[u8], stop: &AtomicBool) -> Result<Geometry, String> {
         return Err("the object has no finite extent".into());
     }
     let scale = if extent > SIZE { SIZE / extent } else { 1.0 };
-    let duration = model.program.as_ref().map_or(0.0, |(_, duration)| *duration);
+    let duration = model.program.as_ref().map_or(0.0, |program| program.duration);
     let parts = Parts::find(&model, &skinned, &points, (low + high) / 2.0);
     go()?;
     let anchors = anchors(&model, &skinned, &points, &rest);
@@ -166,6 +167,8 @@ struct Exchange {
     time: f32,
     tip: Option<Vec3>,
     data: Option<Vec<u8>>,
+    /// Live data reached the program since the render thread last looked.
+    fed: bool,
 }
 
 type Load = fn(&[u8], &AtomicBool) -> Result<Geometry, String>;
@@ -175,23 +178,35 @@ fn run(bytes: Vec<u8>, load: Load, exchange: &Mutex<Exchange>, stop: &AtomicBool
         Ok(geometry) => geometry,
         Err(error) => return exchange.lock().unwrap().failed = Some(error),
     };
-    let wasm = geometry.model.program.take().map(|(wasm, _)| (wasm, geometry.model.nodes()));
+    let declared = geometry.model.program.take().map(|declared| (declared, geometry.model.nodes()));
     exchange.lock().unwrap().geometry = Some(geometry);
-    let Some((wasm, nodes)) = wasm else { return };
+    let Some((declared, nodes)) = declared else { return };
     if stop.load(Ordering::SeqCst) {
         return;
     }
-    let mut program = match program::Program::new(&wasm, nodes) {
+    let mut program = match program::Program::new(&declared.wasm, nodes) {
         Ok(program) => program,
         Err(error) => return exchange.lock().unwrap().failed = Some(error),
     };
+    let mut device = declared.device_feed.then(|| (device::Device::new(), Instant::now()));
     while !stop.load(Ordering::SeqCst) {
         let (time, tip, data) = {
             let mut exchange = exchange.lock().unwrap();
             (exchange.time, exchange.tip, exchange.data.take())
         };
-        if let Err(error) = data.map_or(Ok(()), |data| program.feed(&data)) {
-            return exchange.lock().unwrap().failed = Some(error);
+        let data = data.or_else(|| {
+            let (device, sampled) = device.as_mut()?;
+            if sampled.elapsed() < device::PERIOD {
+                return None;
+            }
+            *sampled = Instant::now();
+            Some(device.sample())
+        });
+        if let Some(data) = data {
+            if let Err(error) = program.feed(&data) {
+                return exchange.lock().unwrap().failed = Some(error);
+            }
+            exchange.lock().unwrap().fed = true;
         }
         match program.tick(time, tip) {
             Ok(Some(transforms)) => exchange.lock().unwrap().transforms = Some(transforms),
@@ -235,7 +250,7 @@ impl Drop for Runner {
     }
 }
 
-/// Position-only handling: the tip inside the object turns it about its vertical axis by the tip's bearing, a fast tip throws it away, and untouched it leaves after `LIFETIME`.
+/// Position-only handling: the tip inside the object turns it about its vertical axis by the tip's bearing, a fast tip throws it away, and neither touched nor fed live data it leaves after `LIFETIME`.
 /// Pushing the tip deep into it spreads its parts until the tip withdraws, and sliding the tip up or down inside it scrubs its timeline, which holds still while touched.
 pub struct Handling {
     pub yaw: f32,
@@ -256,6 +271,10 @@ pub struct Handling {
 impl Handling {
     pub fn new(now: Instant) -> Handling {
         Handling { yaw: 0.0, spread: 0.0, slide: 0.0, clock: 0.0, touching: None, deadline: now + LIFETIME, last: None, stepped: now }
+    }
+
+    pub fn renew(&mut self, now: Instant) {
+        self.deadline = now + LIFETIME;
     }
 
     /// `reach` is the object's radius, at least `MIN_REACH`; `tip` is the tip relative to the object's centre and in the room. A reason when the object should go.
@@ -369,13 +388,16 @@ impl<S: Surface> Object<S> {
 
     /// Draws one frame; `Err` names why the object should go.
     pub fn step(&mut self, now: Instant, view: &View) -> Result<(), String> {
-        let (geometry, transforms) = {
+        let (geometry, transforms, fed) = {
             let mut exchange = self.runner.exchange.lock().unwrap();
             if let Some(failed) = exchange.failed.take() {
                 return Err(failed);
             }
-            (exchange.geometry.take(), exchange.transforms.take())
+            (exchange.geometry.take(), exchange.transforms.take(), std::mem::take(&mut exchange.fed))
         };
+        if fed {
+            self.handling.renew(now);
+        }
         if let Some(geometry) = geometry {
             let appearance = self.renderer.appearance(&geometry.model, &geometry.skinned)?;
             let worlds = geometry.model.worlds(&geometry.model.rest());
@@ -566,6 +588,11 @@ pub mod tests {
     }
 
     fn built(side: f32, nodes: serde_json::Value, program: Option<(&str, f32)>) -> Vec<u8> {
+        built_with(side, nodes, program, serde_json::json!({}))
+    }
+
+    /// `declared` adds to the program's extension object.
+    fn built_with(side: f32, nodes: serde_json::Value, program: Option<(&str, f32)>, declared: serde_json::Value) -> Vec<u8> {
         let mut builder = Builder::new(serde_json::json!({}));
         let h = side / 2.0;
         let mut positions = Vec::new();
@@ -604,7 +631,9 @@ pub mod tests {
         builder.set("nodes", nodes);
         if let Some((text, duration)) = program {
             let view = builder.view(&crate::program::tests::wasm(text));
-            builder.set("extensions", serde_json::json!({ crate::vrm::PROGRAM: { "bufferView": view, "duration": duration } }));
+            let mut extension = serde_json::json!({ "bufferView": view, "duration": duration });
+            extension.as_object_mut().unwrap().extend(declared.as_object().unwrap().clone());
+            builder.set("extensions", serde_json::json!({ crate::vrm::PROGRAM: extension }));
         }
         builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position, "NORMAL": normal, "TEXCOORD_0": uv }, "indices": index, "material": 0 }] }]));
         builder.glb()
@@ -766,6 +795,38 @@ pub mod tests {
             }
             std::thread::sleep(TICK);
         }
+    }
+
+    #[test]
+    fn an_object_that_asks_for_the_device_feed_reads_this_machine_and_stays_while_fed() {
+        let gpu = Rc::new(Gpu::new(None).unwrap());
+        let born = Instant::now();
+        let bytes = built_with(0.2, serde_json::json!([{ "mesh": 0 }]), Some((crate::program::tests::GAUGE, 0.0)), serde_json::json!({ "feed": "device" }));
+        let mut object = Object::spawn(Counted::new(), gpu, bytes, LOOSE, born).unwrap();
+        let cores = std::fs::read_to_string("/proc/stat").unwrap().lines().filter(|line| line.starts_with("cpu") && line.as_bytes()[3].is_ascii_digit()).count();
+        let late = born + LIFETIME - Duration::from_secs(1);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(Instant::now() < deadline, "the device's readings never reached the drawing");
+            object.step(late, &view(None)).unwrap();
+            if object.drawn.as_ref().is_some_and(|drawn| drawn.worlds[0].w_axis.x == (cores % 256) as f32) {
+                break;
+            }
+            std::thread::sleep(TICK);
+        }
+        object.step(late + LIFETIME / 2, &view(None)).expect("fed live data, it outlives its untouched lifetime");
+    }
+
+    #[test]
+    fn many_nodes_of_one_material_draw_in_one_call() {
+        let gpu = Rc::new(Gpu::new(None).unwrap());
+        let now = Instant::now();
+        let nodes: Vec<serde_json::Value> = (0..500).map(|at| serde_json::json!({ "mesh": 0, "translation": [at as f32 * 0.001, 0.0, 0.0] })).collect();
+        let mut object = Object::spawn(Counted::new(), gpu, built(0.001, serde_json::Value::Array(nodes), None), LOOSE, now).unwrap();
+        drawn(&mut object, now);
+        let drawn = object.drawn.as_ref().unwrap();
+        assert_eq!(drawn.skinned.draws.len(), 1);
+        assert_eq!(drawn.skinned.draws[0].count, 500 * 36);
     }
 
     #[test]

@@ -137,8 +137,15 @@ pub struct Model {
     look_at: LookAt,
     rest_turns: Vec<Quat>,
     rig: Rig,
-    /// An object's program: its WebAssembly module and the length of its timeline in seconds, zero for none.
-    pub program: Option<(Vec<u8>, f32)>,
+    pub program: Option<ObjectProgram>,
+}
+
+pub struct ObjectProgram {
+    pub wasm: Vec<u8>,
+    /// The timeline's length in seconds, zero for none.
+    pub duration: f32,
+    /// Whether it asked for the device's own resource readings as live data.
+    pub device_feed: bool,
 }
 
 #[repr(C)]
@@ -804,7 +811,7 @@ impl Model {
             Value::Null => None,
             program if object => {
                 let (bytes, _) = document.view(index(&program["bufferView"]).ok_or("program without bufferView")?)?;
-                Some((bytes.to_vec(), number(&program["duration"], 0.0).max(0.0)))
+                Some(ObjectProgram { wasm: bytes.to_vec(), duration: number(&program["duration"], 0.0).max(0.0), device_feed: program["feed"] == "device" })
             }
             _ => None,
         };
@@ -1013,6 +1020,13 @@ impl Model {
         }
         let queue = |draw: &Draw| self.materials[draw.material].queue;
         draws.sort_by_key(queue);
+        draws.dedup_by(|next, run| {
+            let joins = next.material == run.material && run.first + run.count == next.first;
+            if joins {
+                run.count += next.count;
+            }
+            joins
+        });
         let mut touched: Vec<u32> = morphs.iter().flat_map(|morph| morph.deltas.iter().map(|delta| delta.slot)).collect();
         touched.sort_unstable();
         touched.dedup();

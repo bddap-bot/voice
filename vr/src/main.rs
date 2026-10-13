@@ -498,10 +498,30 @@ fn replay(state: &std::path::Path, recording: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A markdown file drawn as the display card and held `seconds` before the headset at the nearest a window is seen from, to check a card on the device without a session.
+fn card(args: &[String]) -> Result<(), String> {
+    let usage = "usage: voice-vr card <file.md> <seconds>";
+    let [file, seconds] = args else { return Err(usage.into()) };
+    let seconds: u64 = seconds.parse().map_err(|_| usage)?;
+    let markdown = std::fs::read_to_string(file).map_err(|error| format!("{file}: {error}"))?;
+    let picture = panel::draw(&hub::Display { markdown: Some(markdown), ..hub::Display::default() });
+    let runtime = Runtime::init()?;
+    let mut image = vulkan::Flat::new(Rc::new(vulkan::Gpu::new(Some(&runtime))?));
+    let mut overlay = runtime.create_overlay("voice.card", "Card", panel::WIDTH, false)?;
+    overlay.place_on(openvr_sys::k_unTrackedDeviceIndex_Hmd as u32, &Pose { r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], t: [0.0, 0.0, -0.35] });
+    overlay.texture(&mut image.upload(&picture)?)?;
+    overlay.show();
+    std::thread::sleep(Duration::from_secs(seconds));
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).is_some_and(|mode| mode == "object") {
         return bench::run(&args[2..]);
+    }
+    if args.get(1).is_some_and(|mode| mode == "card") {
+        return card(&args[2..]);
     }
     let config = directory("XDG_CONFIG_HOME", ".config");
     let state = directory("XDG_STATE_HOME", ".local/state");

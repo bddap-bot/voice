@@ -134,7 +134,7 @@ fn load(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer) -> Result<P
         }
     }
     let idles = clips.keys().filter(|name| IDLES.contains(&name.as_str())).count();
-    eprintln!("appearance {} with {idles} standing idle clips and gestures {:?}", avatar.id, clips.keys().filter(|name| !IDLES.contains(&name.as_str())).collect::<Vec<_>>());
+    eprintln!("appearance {} with {idles} standing idle clips, gestures {:?}, {} spring joints at gravity {}", avatar.id, clips.keys().filter(|name| !IDLES.contains(&name.as_str())).collect::<Vec<_>>(), model.spring_joints(), vrm::spring::GRAVITY);
     let skinned = model.skinned()?;
     let fit = Fit::new(&model, &skinned, HEIGHT);
     let height = (HEIGHT / fit.scale).clamp(FULL_HEIGHT[0], FULL_HEIGHT[1]);

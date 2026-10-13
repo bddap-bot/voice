@@ -41,11 +41,10 @@ use gesture::{Recognizer, Templates};
 use relay::{Avatar, Relay, Token};
 use reveal::Reveal;
 use voice::Voice;
-use render::{eye_projection, Appearance, Renderer};
+use render::{eye_projection, eye_texels, Appearance, Renderer};
 use vrm::spring::Springs;
 use vrm::{Fit, Humanoid, Model, Skinned};
 
-const EYE: u32 = 768;
 const QUAD: f32 = 0.4;
 const HEIGHT: f32 = 0.3;
 const MARGIN: f32 = 0.03;
@@ -163,7 +162,8 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
     let gesture_file = state.join("gesture.json");
     let mut recognizer = Recognizer::new(Templates::parse(&std::fs::read(&gesture_file).map_err(|error| format!("{}: {error}", gesture_file.display()))?)?);
     let gpu = Rc::new(vulkan::Gpu::new(Some(runtime))?);
-    let mut renderer = Renderer::new(gpu.clone(), [EYE, EYE], HEIGHT / render::PAGE_HEIGHT)?;
+    eprintln!("display {:.0} px/rad, windows sized for {:.0} px/rad at {} m: puppet {} texels per eye, object {}", runtime.display_density(), render::DISPLAY_DENSITY, render::NEAREST, eye_texels(QUAD), eye_texels(object::QUAD));
+    let mut renderer = Renderer::new(gpu.clone(), [eye_texels(QUAD); 2], HEIGHT / render::PAGE_HEIGHT)?;
     let cache = state.join("assets");
     let mut relay = Relay::connect(token, &cache)?;
     let catalog = relay.catalog()?;

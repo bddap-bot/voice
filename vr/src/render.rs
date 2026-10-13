@@ -13,6 +13,10 @@ const RING: usize = 3;
 const NEAR: f32 = 0.01;
 pub const PAGE_HEIGHT: f32 = 2.7;
 const FAR: f32 = 10.0;
+/// The Frame's display: 2160 pixels across a 110° field per eye, in pixels per radian.
+pub const DISPLAY_DENSITY: f32 = 2160.0 / (110.0 * std::f32::consts::PI / 180.0);
+/// The closest a window is seen from: the puppet held up on the hand.
+pub const NEAREST: f32 = 0.35;
 
 const VERTEX_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vertex.spv"));
 const FRAGMENT_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fragment.spv"));
@@ -55,6 +59,11 @@ enum Cull {
     None,
     Back,
     Front,
+}
+
+/// Texels across one eye's image of a window `width` metres wide, as dense as the display at the window's centre seen from `NEAREST`.
+pub fn eye_texels(width: f32) -> u32 {
+    (DISPLAY_DENSITY * width / NEAREST).ceil() as u32
 }
 
 pub fn eye_projection(eye: Vec3, half_width: f32, half_height: f32) -> Option<Mat4> {

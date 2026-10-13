@@ -92,6 +92,15 @@ impl Runtime {
         [sys::EVREye_Eye_Left, sys::EVREye_Eye_Right].map(|eye| Pose::from_m34(&call!(self.system, GetEyeToHeadTransform, eye).m))
     }
 
+    /// The left eye's recommended render width over its horizontal field, in pixels per radian.
+    pub fn display_density(&self) -> f32 {
+        let (mut width, mut height) = (0, 0);
+        call!(self.system, GetRecommendedRenderTargetSize, &mut width, &mut height);
+        let (mut left, mut right, mut top, mut bottom) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        call!(self.system, GetProjectionRaw, sys::EVREye_Eye_Left, &mut left, &mut right, &mut top, &mut bottom);
+        width as f32 / (right.atan() - left.atan())
+    }
+
     pub fn hand_index(&self, hand: Hand) -> Option<u32> {
         let role = match hand {
             Hand::Left => sys::ETrackedControllerRole_TrackedControllerRole_LeftHand,

@@ -9,13 +9,12 @@ use glam::{Mat4, Quat, Vec3 as V3};
 use crate::openvr::Overlay;
 use crate::placement::{facing, length, sub, Pose, Vec3};
 use crate::program::{self, Transform};
-use crate::render::{eye_projection, Appearance, Renderer};
+use crate::render::{eye_projection, eye_texels, Appearance, Renderer};
 use crate::vrm::{bounds, Model, Skinned};
 use crate::vulkan::Gpu;
 
 /// The overlay quad an object is drawn on; wider than the object so its near side is not cut off.
 pub const QUAD: f32 = 0.4;
-const EYE: u32 = 512;
 /// The largest side an object is shown at; a smaller one keeps its own size, glTF units being metres.
 pub const SIZE: f32 = 0.25;
 pub const TRIANGLES: usize = 200_000;
@@ -347,7 +346,7 @@ impl<S: Surface> Object<S> {
     }
 
     fn loading(surface: S, gpu: Rc<Gpu>, bytes: Vec<u8>, load: Load, budget: Budget, now: Instant) -> Result<Object<S>, String> {
-        Ok(Object { drawn: None, renderer: Renderer::new(gpu, [EYE, EYE], 1.0)?, runner: Runner::start(bytes, load)?, surface, handling: Handling::new(now), budget, cost: 0.0, worst: 0.0, frames: 0 })
+        Ok(Object { drawn: None, renderer: Renderer::new(gpu, [eye_texels(QUAD); 2], 1.0)?, runner: Runner::start(bytes, load)?, surface, handling: Handling::new(now), budget, cost: 0.0, worst: 0.0, frames: 0 })
     }
 
     pub fn hide(&mut self) {
@@ -636,12 +635,12 @@ pub mod tests {
         let fit = object.drawn.as_ref().unwrap().radius;
         assert!(fit >= SIZE / 2.0 && fit <= SIZE * 3f32.sqrt() / 2.0, "a turned 3 m cube shows with its largest side at {SIZE} m: radius {fit}");
         let pixels = object.read().unwrap();
-        let width = 2 * EYE as usize;
+        let eye = eye_texels(QUAD) as usize;
         for half in 0..2 {
             let mut covered = std::collections::HashSet::new();
-            for y in 0..EYE as usize {
-                for x in 0..EYE as usize {
-                    let at = (y * width + half * EYE as usize + x) * 4;
+            for y in 0..eye {
+                for x in 0..eye {
+                    let at = (y * 2 * eye + half * eye + x) * 4;
                     if pixels[at + 3] > 0 {
                         covered.insert([pixels[at] / 32, pixels[at + 1] / 32, pixels[at + 2] / 32]);
                     }

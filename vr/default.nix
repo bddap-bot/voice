@@ -23,24 +23,49 @@ let
     fangjun-test-sr-1 = { path = "test/fangjun-test-sr-1.wav"; sha256 = "9175e523081bf6a630ce72a55b05f92148eaafaf58cbbbe743686cd81c50848e"; };
     speaker2_a_en = { path = "test/3d-speaker/speaker2_a_en_16k.wav"; sha256 = "a723c134978a17fe12ca2374d0281a8003a56fa44ff9d2249a08791714983362"; };
   }));
-  host = target: target.rustPlatform.buildRustPackage {
+  host = target: let
+    common = {
+      version = "0.1.0";
+      cargoRoot = "vr";
+      buildAndTestSubdir = "vr";
+      cargoLock.lockFile = ./Cargo.lock;
+      nativeBuildInputs = [ target.buildPackages.cmake target.rustPlatform.bindgenHook ];
+      dontUseCmakeConfigure = true;
+    };
+    # Keyed on the manifest alone, so every worktree and edit reuses one compile of the crate graph per target.
+    deps = target.rustPlatform.buildRustPackage (common // {
+      pname = "voice-vr-deps";
+      src = pkgs.runCommand "source" { } ''
+        mkdir -p $out/vr/src
+        cp ${./Cargo.toml} $out/vr/Cargo.toml
+        cp ${./Cargo.lock} $out/vr/Cargo.lock
+        echo 'fn main() {}' > $out/vr/src/main.rs
+        echo 'fn main() {}' > $out/vr/build.rs
+      '';
+      dontCargoInstall = true;
+      installPhase = ''
+        find target \( -name 'voice-vr*' -o -name 'voice_vr*' \) -prune -exec rm -rf {} +
+        cp -r target $out
+      '';
+    });
+  in target.rustPlatform.buildRustPackage (common // {
     pname = "voice-vr";
-    version = "0.1.0";
     src = pkgs.lib.fileset.toSource {
       root = ./..;
       fileset = pkgs.lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./build.rs ./src ./shaders ./golden ../docs/poses/standing.json ../docs/identity.js ../docs/live.js ../docs/speaker.js ../docs/wake/melspectrogram.onnx ../docs/wake/embedding_model.onnx ../scripts/wake-demo.json ../test/fixtures/delegated-reply-capture.json ];
     };
-    cargoRoot = "vr";
-    buildAndTestSubdir = "vr";
-    cargoLock.lockFile = ./Cargo.lock;
-    nativeBuildInputs = [ target.buildPackages.cmake target.rustPlatform.bindgenHook ];
-    dontUseCmakeConfigure = true;
+    preBuild = ''
+      # Cargo reads a dependency newer than its dependent as rebuilt; the store's one mtime keeps copy order out of that test.
+      cp -r --preserve=timestamps ${deps} target
+      chmod -R u+w target
+      find "$NIX_BUILD_TOP/cargo-vendor-dir" -exec touch -h -d @1 {} +
+    '';
     preCheck = ''
       export LD_LIBRARY_PATH=${pkgs.vulkan-loader}/lib
       export VK_ICD_FILENAMES=${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.${pkgs.stdenv.hostPlatform.parsed.cpu.name}.json
       export VOICE_VR_SPEAKER_MODEL=${speakerModel} VOICE_VR_SPEECH=${speech} VOICE_VR_ACTION_MODEL=${actionModel}
     '';
-  };
+  });
   native = host pkgs;
   aarch64 = host pkgs.pkgsCross.aarch64-multiplatform;
   runtimeLibraries = pkgs.lib.makeLibraryPath [ pkgs.vulkan-loader pkgs.libglvnd pkgs.libuuid ];

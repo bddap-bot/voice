@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use openvr::{Runtime, Signal};
 use board::{Board, Press};
-use placement::{beside, facing, local_tip, marker, under_controller, Anchor, Hand, Pose, Vec3, TIP};
+use placement::{beside, facing, local_tip, marker, under_controller, window, Anchor, Glide, Hand, Pose, Vec3, TIP};
 use gaze::Gaze;
 use motion::{Animator, Clip, Random, IDLES};
 use gesture::{Recognizer, Templates};
@@ -50,10 +50,23 @@ const QUAD: f32 = 0.4;
 const HEIGHT: f32 = 0.3;
 const MARGIN: f32 = 0.03;
 const FLOOR: f32 = -QUAD / 2.0 + MARGIN;
-/// Where an object's centre sits in the puppet quad's frame: right of the figure, about chest high.
-const OBJECT_BESIDE: [f32; 3] = [object::SIZE / 2.0 + 0.1, 0.0, 0.0];
+/// The tallest and shortest a model may stand set down full size, against a model whose units are not metres.
+const FULL_HEIGHT: [f32; 2] = [0.5, 2.5];
+/// How far a grown puppet's surface reaches past its joints, over its height: the crown of the head past the head joint.
+const PAD: f32 = 0.1;
 const DORMANT_POLL: Duration = Duration::from_micros(11_111);
 const SPOTTER_RETRY: Duration = Duration::from_secs(10);
+
+/// Where an object's centre sits in the hand-held puppet's quad frame for a puppet `size` times hand size: right of the figure, about chest high.
+fn object_beside(size: f32) -> Vec3 {
+    [object::SIZE / 2.0 + 0.1 * size, 0.0, 0.0]
+}
+
+/// A grown puppet's window: wide enough for both eyes to see every joint of `worlds` with `PAD` of its height around each.
+fn grown_window(worlds: &[glam::Mat4], body: glam::Mat4, size: f32, head: Vec3, eyes: &[Vec3]) -> (Pose, f32) {
+    let joints: Vec<Vec3> = worlds.iter().map(|world| body.transform_point3(world.w_axis.truncate()).into()).collect();
+    window(&joints, PAD * HEIGHT * size, head, eyes)
+}
 
 fn directory(variable: &str, fallback: &str) -> PathBuf {
     std::env::var_os(variable).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").expect("HOME")).join(fallback)).join("voice-vr")
@@ -92,6 +105,8 @@ struct Puppet {
     model: Model,
     skinned: Skinned,
     fit: Fit,
+    /// Its own height over the hand-held `HEIGHT`: how much it grows set down on the floor.
+    full: f32,
     standing: Humanoid,
     animator: Animator,
     gaze: Gaze,
@@ -122,8 +137,10 @@ fn load(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer) -> Result<P
     eprintln!("appearance {} with {idles} standing idle clips and gestures {:?}", avatar.id, clips.keys().filter(|name| !IDLES.contains(&name.as_str())).collect::<Vec<_>>());
     let skinned = model.skinned()?;
     let fit = Fit::new(&model, &skinned, HEIGHT);
+    let height = (HEIGHT / fit.scale).clamp(FULL_HEIGHT[0], FULL_HEIGHT[1]);
+    eprintln!("appearance {} stands {height:.2} m full size", avatar.id);
     let drawn = renderer.appearance(&model, &skinned)?;
-    Ok(Puppet { model, skinned, fit, standing, animator: Animator::new(clips, Random::seeded()), gaze: Gaze::default(), springs: Springs::default(), drawn })
+    Ok(Puppet { model, skinned, fit, full: height / HEIGHT, standing, animator: Animator::new(clips, Random::seeded()), gaze: Gaze::default(), springs: Springs::default(), drawn })
 }
 
 /// The catalog clips the overlay plays: its idles and every gesture the page's classifier can reach.
@@ -173,6 +190,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
     let mut last = epoch;
     let mut pressing: Option<(u32, Vec3)> = None;
     let mut anchor = Anchor::Riding;
+    let mut glide = Glide::default();
     let mut calibration = (epoch, String::new());
     let mut voice = Voice::new(token.clone(), cache.clone(), state.join("voiceprint.json"));
     let wake_file = state.join("wake.json");
@@ -283,10 +301,11 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
             }
         }
         let tip = pressing.filter(|&(known, _)| Some(known) == right_device).map_or(TIP, |(_, tip)| tip);
-        let stand = anchor.stand(started, &left);
-        let quad = facing(stand.apply([0.0, -FLOOR, 0.0]), head.t);
+        let held = anchor.stand(started, &left, head.t);
+        let (stand, size) = glide.step(started, held, if anchor.grounded() { puppet.full } else { 1.0 });
+        let figure = facing(stand.apply([0.0, -FLOOR * size, 0.0]), head.t);
         board.tick(started);
-        if reveal.hold(started, hand(Hand::Right).map(|right| local_tip(&stand, &right, tip))) {
+        if reveal.hold(started, hand(Hand::Right).map(|right| placement::scale(local_tip(&stand, &right, tip), 1.0 / size))) {
             eprintln!("appearance library revealed");
             board.reveal(started);
             if previews.is_none() {
@@ -332,7 +351,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
             }
         }
         let right = hand(Hand::Right).zip(right_device);
-        object.step(started, &object::View { center: quad.apply(OBJECT_BESIDE), head, eyes: eye_offsets, tip: right.map(|(right, _)| right.apply(tip)) });
+        object.step(started, &object::View { center: figure.apply(object_beside(size)), head, eyes: eye_offsets, tip: right.map(|(right, _)| right.apply(tip)) });
         let touch = board.touch(right.map(|(right, _)| local_tip(&board_pose, &right, tip)));
         if let Some([x, y]) = touch.crossing {
             eprintln!("board crossed at ({x:.3}, {y:.3}) m: {}", touch.press.map_or("none".to_owned(), |press| format!("{press:?}")));
@@ -405,26 +424,32 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
         if let Some(idle) = puppet.animator.update(delta) {
             eprintln!("idle {idle}");
         }
-        let local = quad.inverse();
         let mut pose = puppet.model.pose(&puppet.animator.humanoid(&puppet.standing, puppet.model.rest_hips()));
         let worlds = puppet.model.worlds(&pose);
-        let placement = puppet.fit.placement(&puppet.model, &worlds, 0.0);
-        puppet.gaze.look(&puppet.model, &mut pose, &worlds, placement.inverse().transform_point3(stand.inverse().apply(head.t).into()), delta);
+        let body = stand.mat4() * glam::Mat4::from_scale(glam::Vec3::splat(size)) * puppet.fit.placement(&puppet.model, &worlds, 0.0);
+        let to_model = body.inverse();
+        puppet.gaze.look(&puppet.model, &mut pose, &worlds, to_model.transform_point3(head.t.into()), delta);
         puppet.model.express(&mut pose, "blink", puppet.animator.blink());
         let mouth = voice.mouth();
         if let Some((target, weight)) = pointing.step(started, delta, mouth, |name| object.locate(name)) {
-            puppet.model.point_at(&mut pose, placement.inverse().transform_point3(stand.inverse().apply(target).into()), weight);
+            puppet.model.point_at(&mut pose, to_model.transform_point3(target.into()), weight);
         }
         puppet.model.express(&mut pose, "aa", mouth);
-        puppet.springs.step(&puppet.model, &mut pose, stand.mat4() * placement, delta);
+        puppet.springs.step(&puppet.model, &mut pose, body, delta);
+        let posed = puppet.model.worlds(&pose);
+        let eye_points = eye_offsets.map(|eye: Pose| head.then(&eye).t);
+        let (quad, half) = if size > 1.0 { grown_window(&posed, body, size, head.t, &eye_points) } else { (figure, QUAD / 2.0) };
+        let local = quad.inverse();
         let changed = puppet.skinned.morph(&pose.weights);
-        let palette = puppet.skinned.palette(&puppet.model.worlds(&pose), local.then(&stand).mat4() * placement);
+        let palette = puppet.skinned.palette(&posed, local.mat4() * body);
         puppet.drawn.update(&palette, &puppet.skinned.vertices, &changed);
         match anchor {
-            Anchor::Stuck(_) => overlay.place_in_world(&quad),
+            Anchor::Stuck(_) | Anchor::Grounded(_) => overlay.place_in_world(&quad),
             _ => overlay.place_on(device, &left.inverse().then(&quad)),
         }
-        let eyes = eye_offsets.map(|eye: Pose| eye_projection(local.apply(head.then(&eye).t).into(), QUAD / 2.0, QUAD / 2.0));
+        overlay.resize(2.0 * half);
+        renderer.outline_scale = HEIGHT * size / render::PAGE_HEIGHT;
+        let eyes = eye_points.map(|eye| eye_projection(local.apply(eye).into(), half, half));
         overlay.texture(&mut renderer.render(&puppet.drawn, eyes)?)?;
         overlay.show();
         meter.frame(interval, started.elapsed());

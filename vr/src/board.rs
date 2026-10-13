@@ -267,7 +267,7 @@ impl Board {
                 Press::SetDown => match self.anchor {
                     Anchor::Riding => (BUTTON, "Set down".to_owned()),
                     Anchor::Settling(_) => (PENDING, "Set down".to_owned()),
-                    Anchor::Stuck(_) => (ACTIVE, "Pick up".to_owned()),
+                    Anchor::Stuck(_) | Anchor::Grounded(_) => (ACTIVE, "Pick up".to_owned()),
                 },
                 Press::Appearance(index) => {
                     let fill = if self.pending == Some(index) {

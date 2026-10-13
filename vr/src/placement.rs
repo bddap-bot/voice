@@ -96,13 +96,18 @@ pub fn on_controller(hand: &Pose) -> Pose {
 
 /// How long a set-down avatar keeps riding the controller before it stays where it is.
 pub const SETTLE: Duration = Duration::from_secs(5);
+/// A set-down avatar brought this close to the floor (y = 0 in the standing universe) stands on it at full scale.
+pub const GROUND: f32 = 0.3;
+/// How long the avatar takes to grow on the floor or shrink back onto the controller.
+pub const GLIDE: Duration = Duration::from_millis(600);
 
-/// Where the avatar stands: on the controller, riding it a moment longer after a set-down press, or left in the world.
+/// Where the avatar stands: on the controller, riding it a moment longer after a set-down press, left in the world at hand size, or full size on the floor.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Anchor {
     Riding,
     Settling(Instant),
     Stuck(Pose),
+    Grounded(Pose),
 }
 
 impl Anchor {
@@ -114,18 +119,76 @@ impl Anchor {
         };
     }
 
-    /// The avatar's frame this frame, staying at the pose it rode to once `SETTLE` has passed.
-    pub fn stand(&mut self, now: Instant, hand: &Pose) -> Pose {
+    pub fn grounded(&self) -> bool {
+        matches!(self, Anchor::Grounded(_))
+    }
+
+    /// The avatar's frame this frame: settling, it stands on the floor facing `viewer` once brought within `GROUND` of it, else stays at the pose it rode to once `SETTLE` has passed.
+    pub fn stand(&mut self, now: Instant, hand: &Pose, viewer: Vec3) -> Pose {
         match *self {
-            Anchor::Stuck(pose) => pose,
-            Anchor::Settling(until) if now >= until => {
+            Anchor::Stuck(pose) | Anchor::Grounded(pose) => pose,
+            Anchor::Settling(until) => {
                 let pose = on_controller(hand);
-                *self = Anchor::Stuck(pose);
-                pose
+                if pose.t[1] < GROUND {
+                    let floor = upright([pose.t[0], 0.0, pose.t[2]], viewer, pose.axis(2));
+                    *self = Anchor::Grounded(floor);
+                    floor
+                } else {
+                    if now >= until {
+                        *self = Anchor::Stuck(pose);
+                    }
+                    pose
+                }
             }
-            _ => on_controller(hand),
+            Anchor::Riding => on_controller(hand),
         }
     }
+}
+
+/// Upright at `at`, facing `viewer` across the floor, or along `otherwise` when the viewer is straight overhead.
+fn upright(at: Vec3, viewer: Vec3, otherwise: Vec3) -> Pose {
+    let level = |v: Vec3| [v[0], 0.0, v[2]];
+    let toward = level(sub(viewer, at));
+    let z = if length(toward) > 1e-3 { normalize(toward) } else if length(level(otherwise)) > 1e-3 { normalize(level(otherwise)) } else { [0.0, 0.0, 1.0] };
+    Pose::from_axes(cross([0.0, 1.0, 0.0], z), [0.0, 1.0, 0.0], z, at)
+}
+
+/// Eases the avatar between its places and sizes: a change of size glides from wherever it was shown over `GLIDE`; otherwise it follows its stand exactly.
+#[derive(Default)]
+pub struct Glide {
+    shown: Option<(Pose, f32)>,
+    aim: f32,
+    from: Option<(Pose, f32, Instant)>,
+}
+
+impl Glide {
+    /// The pose and size to show for a stand of `pose` at `size` times hand size.
+    pub fn step(&mut self, now: Instant, pose: Pose, size: f32) -> (Pose, f32) {
+        if let Some((shown, at)) = self.shown.filter(|_| size != self.aim) {
+            self.from = Some((shown, at, now));
+        }
+        self.aim = size;
+        let shown = match self.from {
+            Some((from, at, start)) if now < start + GLIDE => {
+                let t = (now - start).as_secs_f32() / GLIDE.as_secs_f32();
+                let t = t * t * (3.0 - 2.0 * t);
+                (between(&from, &pose, t), at * (size / at).powf(t))
+            }
+            _ => {
+                self.from = None;
+                (pose, size)
+            }
+        };
+        self.shown = Some(shown);
+        shown
+    }
+}
+
+fn between(from: &Pose, to: &Pose, t: f32) -> Pose {
+    let rotation = |pose: &Pose| glam::Quat::from_mat4(&pose.mat4());
+    let turned = glam::Mat3::from_quat(rotation(from).slerp(rotation(to), t));
+    let [x, y, z] = [turned.x_axis, turned.y_axis, turned.z_axis].map(|axis| axis.to_array());
+    Pose::from_axes(x, y, z, add(from.t, scale(sub(to.t, from.t), t)))
 }
 
 /// The board under the controller, its face toward the floor while the controller is held upright: turned over, it reads with its top away from the elbow.
@@ -145,6 +208,30 @@ pub fn facing(at: Vec3, viewer: Vec3) -> Pose {
     let side = cross([0.0, 1.0, 0.0], z);
     let x = if length(side) < 1e-3 { [1.0, 0.0, 0.0] } else { normalize(side) };
     Pose::from_axes(x, cross(z, x), z, at)
+}
+
+/// A window's widest useful half width over its distance from the viewer: past this it lies outside the headset's view.
+const VIEW: f32 = 1.5;
+
+/// A window through the middle of `points` facing `head`, and the half width that shows every ball of `pad` around them to each of `eyes`, but no wider than the view from `head`.
+pub fn window(points: &[Vec3], pad: f32, head: Vec3, eyes: &[Vec3]) -> (Pose, f32) {
+    let (low, high) = points.iter().fold(([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]), |(low, high), point| (std::array::from_fn(|axis| low[axis].min(point[axis])), std::array::from_fn(|axis| high[axis].max(point[axis]))));
+    let middle = scale(add(low, high), 0.5);
+    let window = facing(middle, head);
+    let local = window.inverse();
+    let widest = VIEW * length(sub(head, middle));
+    let half = eyes.iter().map(|&eye| local.apply(eye)).flat_map(|eye| {
+        points.iter().map(move |&point| {
+            let point = local.apply(point);
+            let depth = eye[2] - point[2];
+            if depth <= pad {
+                return f32::INFINITY;
+            }
+            let t = eye[2] / depth;
+            (eye[0] + (point[0] - eye[0]) * t).abs().max((eye[1] + (point[1] - eye[1]) * t).abs()) + pad * eye[2] / (depth - pad)
+        })
+    });
+    (window, half.fold(0.0, f32::max).min(widest))
 }
 
 /// Where the right controller's touch point is in the board's frame.
@@ -219,24 +306,70 @@ mod tests {
         let at = |seconds: f32| start + Duration::from_secs_f32(seconds);
         let hand = |seconds: f32| turned(seconds, [seconds, 1.0, -0.3]);
         let mut anchor = Anchor::Riding;
-        assert_eq!(anchor.stand(at(0.0), &hand(0.0)), on_controller(&hand(0.0)));
+        assert_eq!(anchor.stand(at(0.0), &hand(0.0), VIEWER), on_controller(&hand(0.0)));
         anchor.toggle(at(0.0));
         let late = SETTLE.as_secs_f32() - 0.01;
-        assert_eq!(anchor.stand(at(late), &hand(late)), on_controller(&hand(late)), "still riding just before it settles");
+        assert_eq!(anchor.stand(at(late), &hand(late), VIEWER), on_controller(&hand(late)), "still riding just before it settles");
         let settled = SETTLE.as_secs_f32();
-        let left = anchor.stand(at(settled), &hand(settled));
+        let left = anchor.stand(at(settled), &hand(settled), VIEWER);
         assert_eq!(left, on_controller(&hand(settled)), "stays where it rode to");
         for seconds in [0.5, 2.0, 8.0].map(|after| settled + after) {
-            assert_eq!(anchor.stand(at(seconds), &hand(seconds)), left, "held while the controller moves");
+            assert_eq!(anchor.stand(at(seconds), &hand(seconds), VIEWER), left, "held while the controller moves");
         }
         let back = settled + 9.0;
         anchor.toggle(at(back));
         assert_eq!(anchor, Anchor::Riding);
-        assert_eq!(anchor.stand(at(back), &hand(back)), on_controller(&hand(back)), "back on the controller");
+        assert_eq!(anchor.stand(at(back), &hand(back), VIEWER), on_controller(&hand(back)), "back on the controller");
         anchor.toggle(at(back + 1.0));
         anchor.toggle(at(back + 1.5));
         let after = back + 1.0 + settled + 1.0;
-        assert_eq!(anchor.stand(at(after), &hand(after)), on_controller(&hand(after)), "a second press while settling keeps it riding");
+        assert_eq!(anchor.stand(at(after), &hand(after), VIEWER), on_controller(&hand(after)), "a second press while settling keeps it riding");
+    }
+
+    const VIEWER: Vec3 = [0.0, 1.6, 0.0];
+
+    #[test]
+    fn a_puppet_set_down_near_the_floor_stands_on_it_facing_the_viewer_until_picked_up() {
+        let start = Instant::now();
+        let mut anchor = Anchor::Riding;
+        anchor.toggle(start);
+        let high = turned(0.4, [0.5, 1.0, -0.5]);
+        assert_eq!(anchor.stand(start, &high, VIEWER), on_controller(&high), "rides while held high");
+        let low = turned(0.4, [0.5, GROUND - 0.1, -0.5]);
+        let floor = anchor.stand(start + Duration::from_secs(1), &low, VIEWER);
+        assert!(anchor.grounded());
+        assert!(close(floor.t, [on_controller(&low).t[0], 0.0, on_controller(&low).t[2]]), "feet on the floor below the controller: {:?}", floor.t);
+        assert!(close(floor.axis(1), [0.0, 1.0, 0.0]), "upright");
+        assert!(close(floor.axis(2), normalize([-floor.t[0], 0.0, -floor.t[2]])), "facing the viewer across the floor");
+        assert_eq!(anchor.stand(start + SETTLE * 2, &high, VIEWER), floor, "stays as the controller rises");
+        anchor.toggle(start + SETTLE * 3);
+        assert_eq!(anchor.stand(start + SETTLE * 3, &high, VIEWER), on_controller(&high), "picked up");
+        anchor.toggle(start);
+        assert_eq!(anchor.stand(start + SETTLE, &high, VIEWER), on_controller(&high));
+        assert!(!anchor.grounded(), "set down above the floor it stays hand size");
+        assert_eq!(anchor.stand(start + SETTLE * 2, &low, VIEWER), on_controller(&high), "and stays put when the controller drops afterwards");
+    }
+
+    #[test]
+    fn a_change_of_size_glides_from_where_it_was_shown_then_follows_exactly() {
+        let start = Instant::now();
+        let at = |seconds: f32| start + Duration::from_secs_f32(seconds);
+        let (hand, floor) = (turned(0.0, [0.0, 1.0, -0.3]), turned(1.0, [0.4, 0.0, -0.8]));
+        let mut glide = Glide::default();
+        assert_eq!(glide.step(at(0.0), hand, 1.0), (hand, 1.0));
+        let same = |a: &Pose, b: &Pose| close(a.t, b.t) && (0..3).all(|column| close(a.axis(column), b.axis(column)));
+        let (pose, size) = glide.step(at(0.0), floor, 6.0);
+        assert!(same(&pose, &hand) && size == 1.0, "starts where it was");
+        let half = GLIDE.as_secs_f32() / 2.0;
+        let (pose, size) = glide.step(at(half), floor, 6.0);
+        assert!(close(pose.t, [0.2, 0.5, -0.55]), "halfway there: {:?}", pose.t);
+        assert!((size - 6.0f32.sqrt()).abs() < 1e-4, "halfway in proportion: {size}");
+        assert!(close(pose.axis(1), [0.0, 1.0, 0.0]) && close(pose.axis(0), turned(0.5, [0.0; 3]).axis(0)), "turned halfway");
+        assert_eq!(glide.step(start + GLIDE, floor, 6.0), (floor, 6.0));
+        let moved = turned(0.2, [0.1, 1.1, -0.3]);
+        let (pose, size) = glide.step(at(5.0), moved, 1.0);
+        assert!(same(&pose, &floor) && size == 6.0, "picking up glides back from the floor");
+        assert_eq!(glide.step(at(5.0) + GLIDE, moved, 1.0), (moved, 1.0), "then rides exactly");
     }
 
     #[test]
@@ -266,6 +399,36 @@ mod tests {
         let near = |pose: &Pose, [width, height]: [f32; 2]| pose.apply([-width / 2.0, -height / 2.0, 0.0]);
         let gap = sub(near(&panel, size), board.apply([board_size[0] / 2.0, -board_size[1] / 2.0, 0.0]));
         assert!(close(gap, [SIDE_GAP, 0.0, 0.0]), "a gap to the right, near edges level: {gap:?}");
+    }
+
+    #[test]
+    fn a_window_holds_every_point_of_a_box_seen_by_either_eye_until_it_would_outgrow_the_view() {
+        let (low, high) = ([-0.8, 0.0, -0.3], [0.8, 1.7, 0.2]);
+        let corners: Vec<Vec3> = (0..8).map(|k| [if k & 1 == 0 { low[0] } else { high[0] }, if k & 2 == 0 { low[1] } else { high[1] }, if k & 4 == 0 { low[2] } else { high[2] }]).collect();
+        let middle = scale(add(low, high), 0.5);
+        for head in [[0.0, 1.6, 2.0], [0.0, 1.6, 1.0], [1.2, 1.6, 0.4], [0.3, 0.8, 1.1]] {
+            let eyes = [add(head, [-0.032, 0.0, 0.0]), add(head, [0.032, 0.0, 0.0])];
+            let (window, half) = window(&corners, 0.0, head, &eyes);
+            assert!(close(window.t, middle) && close(window.axis(2), normalize(sub(head, middle))), "through the middle, facing the head");
+            assert!(half < VIEW * length(sub(head, middle)), "seen from {head:?} the box fits");
+            let local = window.inverse();
+            for eye in eyes.map(|eye| local.apply(eye)) {
+                for step in 0..500 {
+                    let mix = |axis: usize, k: f32| low[axis] + (high[axis] - low[axis]) * (k * (step as f32 + 1.0)).fract();
+                    let point = local.apply([mix(0, 0.618), mix(1, 0.414), mix(2, 0.732)]);
+                    let t = eye[2] / (eye[2] - point[2]);
+                    let [x, y] = [eye[0] + (point[0] - eye[0]) * t, eye[1] + (point[1] - eye[1]) * t];
+                    assert!(x.abs() <= half + 1e-4 && y.abs() <= half + 1e-4, "seen from {head:?}, a point of the box lands inside: ({x}, {y}) against {half}");
+                }
+            }
+        }
+        let close_by = [0.0, 1.6, 0.3];
+        let (_, half) = window(&corners, 0.0, close_by, &[close_by]);
+        assert_eq!(half, VIEW * length(sub(close_by, middle)), "a head inside the box's reach gets the whole view and no more");
+        let head = [0.0, 1.0, 3.0];
+        let (_, bare) = window(&[[0.0, 1.0, 0.0]], 0.0, head, &[head]);
+        let (_, padded) = window(&[[0.0, 1.0, 0.0]], 0.2, head, &[head]);
+        assert!(bare.abs() < 1e-6 && padded > 0.2 && padded < 0.22, "a ball's outline grows a little nearer: {padded}");
     }
 
     #[test]

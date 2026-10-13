@@ -107,7 +107,7 @@ pub struct Renderer {
     layout: vk::PipelineLayout,
     pipelines: HashMap<PipelineKey, vk::Pipeline>,
     sampler: vk::Sampler,
-    outline_scale: f32,
+    pub outline_scale: f32,
     next: usize,
     last: Option<usize>,
 }
@@ -462,7 +462,6 @@ impl Appearance {
             unsafe { target.add(vertex as usize).write(vertices[vertex as usize]) };
         }
     }
-
 }
 
 fn destroy(gpu: &Gpu, texture: &Texture) {

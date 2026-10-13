@@ -151,7 +151,7 @@ impl Runtime {
         call!(self.overlay, SetOverlayFlag, handle, sys::VROverlayFlags_SideBySide_Parallel, stereo);
         call!(self.overlay, SetOverlayFlag, handle, sys::VROverlayFlags_IsPremultiplied, true);
         call!(self.overlay, SetOverlayWidthInMeters, handle, width);
-        Ok(Overlay { runtime: self, handle, shown: false })
+        Ok(Overlay { runtime: self, handle, shown: false, width })
     }
 }
 
@@ -169,6 +169,7 @@ pub struct Overlay<'a> {
     runtime: &'a Runtime,
     handle: sys::VROverlayHandle_t,
     shown: bool,
+    width: f32,
 }
 
 impl Overlay<'_> {
@@ -180,6 +181,13 @@ impl Overlay<'_> {
     pub fn place_in_world(&self, pose: &Pose) {
         let mut matrix = sys::HmdMatrix34_t { m: pose.to_m34() };
         call!(self.runtime.overlay, SetOverlayTransformAbsolute, self.handle, sys::ETrackingUniverseOrigin_TrackingUniverseStanding, &mut matrix);
+    }
+
+    pub fn resize(&mut self, width: f32) {
+        if width != self.width {
+            call!(self.runtime.overlay, SetOverlayWidthInMeters, self.handle, width);
+            self.width = width;
+        }
     }
 
     pub fn above_others(&self) {

@@ -587,10 +587,6 @@ pub mod tests {
 
     static SURFACES: AtomicUsize = AtomicUsize::new(0);
 
-    /// The software rasterizer the tests draw on is far slower than a headset's GPU.
-    /// One frame at 90 Hz.
-    const FRAME: Duration = Duration::from_millis(11);
-
     const LOOSE: Budget = Budget { mean: Duration::from_secs(1), frame: Duration::from_secs(5) };
 
     struct Counted;
@@ -1097,27 +1093,55 @@ pub mod tests {
         assert_eq!(handling.touch(start + LIFETIME / 2 + LIFETIME, 0.1, None), Some("timed out"));
     }
 
+    /// Holds every gated load until the test opens it, so a frame that waited on a loader would see it end.
+    static GATE: (Mutex<bool>, std::sync::Condvar) = (Mutex::new(false), std::sync::Condvar::new());
+
+    struct Watched(Arc<AtomicBool>);
+
+    impl Drop for Watched {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl Surface for Watched {
+        fn place_in_world(&self, _: &Pose) {}
+        fn texture(&self, _: &mut openvr_sys::VRVulkanTextureData_t) -> Result<(), String> {
+            Ok(())
+        }
+        fn show(&mut self) {}
+        fn hide(&mut self) {}
+    }
+
     #[test]
     fn an_object_replaced_mid_load_leaves_within_a_frame_and_its_thread_ends_after() {
-        let slow: Load = |bytes, stop| {
-            std::thread::sleep(Duration::from_secs(2));
+        let gated: Load = |bytes, stop| {
+            let (open, opened) = &GATE;
+            let _ = opened.wait_timeout_while(open.lock().unwrap(), Duration::from_secs(10), |open| !*open).unwrap();
             load(bytes, stop)
         };
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let now = Instant::now();
         let mut slot = Slot::default();
-        slot.show(|| Object::loading(Counted::new(), gpu.clone(), cube(0.2), slow, LOOSE, now));
-        let exchange = Arc::downgrade(&slot.object.as_ref().unwrap().runner.exchange);
+        let mut shown = |slot: &mut Slot<Watched>| {
+            let gone = Arc::new(AtomicBool::new(false));
+            slot.show(|| Object::loading(Watched(gone.clone()), gpu.clone(), cube(0.2), gated, LOOSE, now));
+            (gone, Arc::downgrade(&slot.object.as_ref().unwrap().runner.exchange))
+        };
+        let (first, first_exchange) = shown(&mut slot);
         slot.step(now, &view(None));
-        let started = Instant::now();
-        slot.show(|| Object::loading(Counted::new(), gpu.clone(), cube(0.2), slow, LOOSE, now));
+        let (second, second_exchange) = shown(&mut slot);
+        assert!(first.load(Ordering::SeqCst), "the replaced object left in the frame that replaced it");
+        assert!(!second.load(Ordering::SeqCst));
         slot.step(now, &view(None));
         slot.clear("session ended");
-        let spent = started.elapsed();
-        assert!(spent < FRAME, "replacing and clearing two loading objects took {spent:?}, over a {FRAME:?} frame");
+        assert!(second.load(Ordering::SeqCst), "the cleared object left in the frame that cleared it");
+        assert!(first_exchange.strong_count() > 0 && second_exchange.strong_count() > 0, "both loads are still held, so neither leaving waited for its thread");
+        *GATE.0.lock().unwrap() = true;
+        GATE.1.notify_all();
         let deadline = Instant::now() + Duration::from_secs(10);
-        while exchange.strong_count() > 0 {
-            assert!(Instant::now() < deadline, "the loading thread never ended");
+        while first_exchange.strong_count() + second_exchange.strong_count() > 0 {
+            assert!(Instant::now() < deadline, "a loading thread never ended");
             std::thread::sleep(TICK);
         }
     }

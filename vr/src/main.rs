@@ -322,7 +322,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
         let mut fresh = None;
         if let Some(mut shown) = voice.take_display() {
             let in_place = shown.addresses_object();
-            let about_object = shown.point.is_some() || shown.data.is_some();
+            let about_object = shown.point.is_some() || shown.data.is_some() || shown.hold.is_some();
             if let Some(name) = shown.point.take() {
                 pointing.start(name, started);
             }
@@ -334,6 +334,9 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
             }
             if let Some(data) = shown.data.take() {
                 object.feed(data.into_bytes());
+            }
+            if let Some(hold) = shown.hold.take() {
+                object.hold(hold);
             }
             if card {
                 let picture = panel::draw(&shown);

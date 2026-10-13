@@ -84,6 +84,7 @@ A hub reply's display item may carry an object. Live speaks follow-ups in order,
 - With the tip closer to the centre than half the radius, the object's parts (its top-level nodes, or a lone root's children) spread away from its centre, fully apart at a fifth of the radius, and close again as the tip withdraws.
 - While the tip is inside, `time` stands still, and sliding the tip up or down by the sphere's diameter moves it through one whole `duration`.
 - A reply may name a node of the shown object: while the puppet speaks that reply, it points its right arm at the centre of that node and its descendants, wherever the program, the spread and the turn have put it. A reply may also carry live data, which the overlay delivers to the shown object's `data`; neither replaces the object.
+- A reply may hold the shown object's timeline: `time` stands at the seconds it names, wrapped at `duration`, until a reply lets it run on from there or the object leaves; the tip still scrubs it. A hold and live data in one reply reach the program on the same `tick`, so a program that reads its data against `time` pauses where the data puts it.
 - The object is removed when neither touched nor fed live data for three minutes, replaced, when the session ends, or when, after its first 45 frames, its own rendering averages over 4 ms a frame or takes over 40 ms in one; removing it closes its overlay, frees its GPU memory and stops its thread, which ends without the drawing thread waiting on it, even mid-load.
 
 ## Measuring an object

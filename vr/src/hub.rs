@@ -77,6 +77,7 @@ struct Shown {
     object: Option<serde::de::IgnoredAny>,
     point: Option<String>,
     data: Option<String>,
+    hold: Option<Value>,
     html: Option<serde::de::IgnoredAny>,
 }
 
@@ -92,8 +93,24 @@ pub struct Display {
     /// The name of a node in the shown object for the puppet to point at while it speaks.
     pub point: Option<String>,
     pub data: Option<String>,
+    pub hold: Option<Hold>,
     /// An HTML document, which only the page can run.
     pub html: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Hold {
+    At(f32),
+    Run,
+}
+
+impl Hold {
+    fn read(value: &Value) -> Option<Hold> {
+        match value {
+            Value::Bool(false) => Some(Hold::Run),
+            _ => value.as_f64().map(|seconds| seconds as f32).filter(|seconds| seconds.is_finite() && *seconds >= 0.0).map(Hold::At),
+        }
+    }
 }
 
 impl Display {
@@ -263,7 +280,7 @@ impl Hub {
                 Display { html: true, ..Display::default() }
             } else {
                 let trailer = |carried: bool| (carried && !image.is_empty()).then(|| image.to_vec());
-                Display { markdown: shown.markdown, link: shown.link, image: trailer(shown.image.is_some()), object: trailer(shown.object.is_some() && shown.image.is_none()), point: shown.point, data: shown.data, html: false }
+                Display { markdown: shown.markdown, link: shown.link, image: trailer(shown.image.is_some()), object: trailer(shown.object.is_some() && shown.image.is_none()), point: shown.point, data: shown.data, hold: shown.hold.as_ref().and_then(Hold::read), html: false }
             });
         }
         let unspoken = (!reply.commentary.is_empty() && self.sleeping).then_some(ASLEEP);
@@ -553,6 +570,14 @@ mod tests {
         let pointed = f.hub.take_display().unwrap();
         assert_eq!(pointed.point.as_deref(), Some("top"));
         assert!(pointed.addresses_object(), "a display that only points leaves the panel and the object");
+        for (stamp, hold, read) in [("o3", json!(0), Some(Hold::At(0.0))), ("o4", json!(12.5), Some(Hold::At(12.5))), ("o5", json!(false), Some(Hold::Run)), ("o6", json!(-1), None), ("o7", json!(true), None)] {
+            f.reply(json!({ "id": "cube", "stamp": stamp, "commentary": ["Like so."], "instructions": [], "display": { "data": "2026-10-12", "hold": hold } }));
+            f.wait(TURN_QUIET, true);
+            f.speak("Like so.");
+            let held = f.hub.take_display().unwrap();
+            assert_eq!(held.hold, read, "hold {hold}");
+            assert!(held.addresses_object(), "a display that holds the timeline leaves the panel and the object");
+        }
     }
 
     #[test]

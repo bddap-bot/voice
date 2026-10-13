@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use glam::{Mat4, Quat, Vec3 as V3};
 
 use crate::device;
+use crate::hub::Hold;
 use crate::openvr::Overlay;
 use crate::placement::{facing, length, sub, Pose, Vec3};
 use crate::program::{self, Transform};
@@ -260,6 +261,8 @@ pub struct Handling {
     pub slide: f32,
     /// Seconds the timeline has run untouched.
     pub clock: f32,
+    /// Whether the hub holds the timeline still, so only the tip moves it.
+    held: bool,
     /// Where the tip is inside the object, relative to its centre.
     pub touching: Option<Vec3>,
     deadline: Instant,
@@ -270,7 +273,7 @@ pub struct Handling {
 
 impl Handling {
     pub fn new(now: Instant) -> Handling {
-        Handling { yaw: 0.0, spread: 0.0, slide: 0.0, clock: 0.0, touching: None, deadline: now + LIFETIME, last: None, stepped: now }
+        Handling { yaw: 0.0, spread: 0.0, slide: 0.0, clock: 0.0, held: false, touching: None, deadline: now + LIFETIME, last: None, stepped: now }
     }
 
     pub fn renew(&mut self, now: Instant) {
@@ -291,7 +294,9 @@ impl Handling {
         let target = ((OPENING - depth) / (OPENING - OPEN)).clamp(0.0, 1.0);
         self.spread += (target - self.spread) * (delta * EASE).min(1.0);
         let Some((tip, room)) = inside else {
-            self.clock += delta;
+            if !self.held {
+                self.clock += delta;
+            }
             return None;
         };
         self.deadline = now + LIFETIME;
@@ -351,6 +356,8 @@ pub struct Object<S: Surface> {
     renderer: Renderer,
     runner: Runner,
     handling: Handling,
+    /// Live data waiting for the next frame, so it reaches the program with the time that frame sets, a hold's included.
+    data: Option<Vec<u8>>,
     budget: Budget,
     /// Seconds the render thread spends on it per frame, a running mean.
     cost: f32,
@@ -365,7 +372,7 @@ impl<S: Surface> Object<S> {
     }
 
     fn loading(surface: S, gpu: Rc<Gpu>, bytes: Vec<u8>, load: Load, budget: Budget, now: Instant) -> Result<Object<S>, String> {
-        Ok(Object { drawn: None, renderer: Renderer::new(gpu, [eye_texels(QUAD); 2], 1.0)?, runner: Runner::start(bytes, load)?, surface, handling: Handling::new(now), budget, cost: 0.0, worst: 0.0, frames: 0 })
+        Ok(Object { drawn: None, renderer: Renderer::new(gpu, [eye_texels(QUAD); 2], 1.0)?, runner: Runner::start(bytes, load)?, surface, handling: Handling::new(now), data: None, budget, cost: 0.0, worst: 0.0, frames: 0 })
     }
 
     pub fn hide(&mut self) {
@@ -373,9 +380,17 @@ impl<S: Surface> Object<S> {
     }
 
     /// Live data for the program; only the newest waiting update is kept.
-    pub fn feed(&self, data: Vec<u8>) {
-        self.runner.exchange.lock().unwrap().data = Some(data);
-        self.runner.thread.unpark();
+    pub fn feed(&mut self, data: Vec<u8>) {
+        self.data = Some(data);
+    }
+
+    pub fn hold(&mut self, hold: Hold) {
+        let handling = &mut self.handling;
+        handling.held = hold != Hold::Run;
+        if let Hold::At(seconds) = hold {
+            handling.clock = seconds;
+            handling.slide = 0.0;
+        }
     }
 
     /// Where the node named `name` is now, in the standing universe.
@@ -417,6 +432,10 @@ impl<S: Surface> Object<S> {
             let handling = &self.handling;
             exchange.time = if drawn.duration > 0.0 { (handling.clock + handling.slide / (2.0 * reach) * drawn.duration).rem_euclid(drawn.duration) } else { handling.clock };
             exchange.tip = handling.touching.map(|offset| turned.inverse().transform_point3(offset.into()).into());
+            if let Some(data) = self.data.take() {
+                exchange.data = Some(data);
+                self.runner.thread.unpark();
+            }
         }
         let quad = facing(view.center, view.head.t);
         let local = quad.inverse();
@@ -508,10 +527,17 @@ impl<S: Surface> Slot<S> {
         self.object.as_ref()?.locate(name)
     }
 
-    pub fn feed(&self, data: Vec<u8>) {
-        match &self.object {
+    pub fn feed(&mut self, data: Vec<u8>) {
+        match &mut self.object {
             Some(object) => object.feed(data),
             None => eprintln!("live data with no object shown"),
+        }
+    }
+
+    pub fn hold(&mut self, hold: Hold) {
+        match &mut self.object {
+            Some(object) => object.hold(hold),
+            None => eprintln!("a hold with no object shown"),
         }
     }
 
@@ -759,6 +785,52 @@ pub mod tests {
         }
         let closed = parts(&object);
         assert!((closed[1] - closed[0] - 0.12).abs() < 1e-3, "withdrawn, they close: {closed:?}");
+    }
+
+    #[test]
+    fn a_hold_stills_the_timeline_at_its_time_the_tip_still_scrubs_it_and_run_lets_it_go_on() {
+        let gpu = Rc::new(Gpu::new(None).unwrap());
+        let born = Instant::now();
+        let mut slot = Slot::default();
+        slot.show(|| Object::spawn(Counted::new(), gpu, scene(0.2, Some((crate::program::tests::FOLLOW, 4.0))), LOOSE, born));
+        drawn(slot.object.as_mut().unwrap(), born);
+        let frame = Duration::from_millis(11);
+        let mut now = born;
+        for _ in 0..30 {
+            slot.step(now, &view(None));
+            now += frame;
+        }
+        slot.hold(Hold::At(1.5));
+        let clock = |slot: &Slot<Counted>| slot.object.as_ref().unwrap().handling.clock;
+        for _ in 0..90 {
+            slot.step(now, &view(None));
+            now += frame;
+        }
+        assert_eq!(clock(&slot), 1.5, "a second untouched leaves a held timeline where the hub put it");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            assert!(Instant::now() < deadline, "the program never saw the held time");
+            slot.step(now, &view(None));
+            if slot.object.as_ref().unwrap().drawn.as_ref().is_some_and(|drawn| (drawn.worlds[0].w_axis.x - 1.5).abs() < 1e-5) {
+                break;
+            }
+            std::thread::sleep(TICK);
+        }
+        let center = view(None).center;
+        let radius = slot.object.as_ref().unwrap().drawn.as_ref().unwrap().radius;
+        for step in 0..=10 {
+            slot.step(now, &view(Some([center[0] + 0.3 * radius, center[1] + step as f32 * radius / 20.0, center[2]])));
+            now += frame;
+        }
+        slot.step(now, &view(None));
+        now += frame;
+        assert!(slot.object.as_ref().unwrap().handling.slide > 0.0, "the tip still scrubs a held timeline");
+        slot.hold(Hold::Run);
+        for _ in 0..10 {
+            slot.step(now, &view(None));
+            now += frame;
+        }
+        assert!((clock(&slot) - 1.5 - 10.0 * frame.as_secs_f32()).abs() < 1e-4, "run lets it go on from where it was held: {}", clock(&slot));
     }
 
     #[test]

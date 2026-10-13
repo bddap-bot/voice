@@ -424,15 +424,18 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
             eprintln!("idle {idle}");
         }
         let mut pose = puppet.model.pose(&puppet.animator.humanoid(&puppet.standing, puppet.model.rest_hips()));
-        let worlds = puppet.model.worlds(&pose);
+        let mut worlds = puppet.model.worlds(&pose);
         let body = stand.mat4() * glam::Mat4::from_scale(glam::Vec3::splat(size)) * puppet.fit.placement(&puppet.model, &worlds, 0.0);
         let to_model = body.inverse();
-        puppet.gaze.look(&puppet.model, &mut pose, &worlds, to_model.transform_point3(head.t.into()), delta);
-        puppet.model.express(&mut pose, "blink", puppet.animator.blink());
         let mouth = voice.mouth();
         if let Some((target, weight)) = pointing.step(started, delta, mouth, |name| object.locate(name)) {
-            puppet.model.point_at(&mut pose, to_model.transform_point3(target.into()), weight);
+            if let Some(reach) = puppet.model.point_at(&mut pose, to_model.transform_point3(target.into()), weight, pointing.hand()) {
+                pointing.made(reach);
+            }
+            worlds = puppet.model.worlds(&pose);
         }
+        puppet.gaze.look(&puppet.model, &mut pose, &worlds, to_model.transform_point3(head.t.into()), delta);
+        puppet.model.express(&mut pose, "blink", puppet.animator.blink());
         puppet.model.express(&mut pose, "aa", mouth);
         puppet.springs.step(&puppet.model, &mut pose, body, delta);
         let posed = puppet.model.worlds(&pose);

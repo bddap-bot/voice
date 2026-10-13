@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::placement::Vec3;
+use crate::vrm::{Hand, Reach};
 
 /// How long the puppet keeps pointing after it stops speaking.
 const QUIET: Duration = Duration::from_millis(1500);
@@ -19,16 +20,31 @@ pub struct Pointing {
     spoke: bool,
     weight: f32,
     target: Option<Vec3>,
+    hand: Option<Hand>,
+    told: bool,
 }
 
 impl Pointing {
     pub fn start(&mut self, name: String, now: Instant) {
         eprintln!("pointing at {name:?}");
-        *self = Pointing { name: Some(name), since: Some(now), weight: self.weight, ..Pointing::default() };
+        *self = Pointing { name: Some(name), since: Some(now), weight: self.weight, hand: self.hand, ..Pointing::default() };
     }
 
     pub fn stop(&mut self) {
         *self = Pointing::default();
+    }
+
+    /// The hand the last point used, which keeps it until the other shoulder is clearly nearer.
+    pub fn hand(&self) -> Option<Hand> {
+        self.hand
+    }
+
+    pub fn made(&mut self, reach: Reach) {
+        if !self.told || self.hand != Some(reach.hand) {
+            eprintln!("pointing with the {:?} hand, spine turned {:.0}°, arm short of the target by {:.0}°", reach.hand, reach.torso.to_degrees(), reach.short.to_degrees());
+            self.told = true;
+        }
+        self.hand = Some(reach.hand);
     }
 
     /// The target and how fully to point at it this frame; `locate` finds a part of the shown object by name, and finds nothing while the object loads.

@@ -125,6 +125,48 @@ struct LookAt {
     up: RangeMap,
 }
 
+/// How far a pointing arm swings from straight ahead toward its own side and across the body, and below and above level, in the chest's frame;
+/// inside a shoulder's range with room to spare, so a point never strains it.
+const ARM_OUT: f32 = 110.0 * std::f32::consts::PI / 180.0;
+const ARM_ACROSS: f32 = -25.0 * std::f32::consts::PI / 180.0;
+const ARM_DOWN: f32 = -60.0 * std::f32::consts::PI / 180.0;
+const ARM_UP: f32 = 75.0 * std::f32::consts::PI / 180.0;
+/// The spine's comfortable twist, shared between its bones, for a target past the arm's range.
+const TORSO: f32 = 50.0 * std::f32::consts::PI / 180.0;
+/// How much nearer the other shoulder must be before the point changes hands, so a target crossing the middle does not flick the arms.
+const HAND_HELD: f32 = 0.05;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hand {
+    Left,
+    Right,
+}
+
+impl Hand {
+    fn side(self) -> &'static str {
+        match self {
+            Hand::Left => "left",
+            Hand::Right => "right",
+        }
+    }
+
+    /// The sign of the figure's +X (its left) on this hand's side.
+    fn outward(self) -> f32 {
+        match self {
+            Hand::Left => 1.0,
+            Hand::Right => -1.0,
+        }
+    }
+}
+
+/// How a point was made: the hand, the spine's twist toward the hand's side and the angle by which the arm stops short of the target, radians.
+#[derive(Clone, Copy, Debug)]
+pub struct Reach {
+    pub hand: Hand,
+    pub torso: f32,
+    pub short: f32,
+}
+
 pub struct Model {
     pub version: Version,
     nodes: Vec<Node>,
@@ -855,17 +897,41 @@ impl Model {
         self.nodes.iter().position(|node| node.name.as_deref() == Some(name))
     }
 
-    /// Straightens the right elbow and turns the right upper arm until the hand lies on the line from the shoulder to `target`, both by `weight`.
-    pub fn point_at(&self, pose: &mut Pose, target: Vec3, weight: f32) {
-        let (Some(&upper), Some(&lower), Some(&hand)) = (self.humanoid.get("rightUpperArm"), self.humanoid.get("rightLowerArm"), self.humanoid.get("rightHand")) else { return };
+    /// Points the arm nearer `target` at it, both by `weight`: straightens the elbow, turns the spine toward a target the arm cannot reach within the shoulder's range, and swings the upper arm as far toward the target as that range allows.
+    pub fn point_at(&self, pose: &mut Pose, target: Vec3, weight: f32, held: Option<Hand>) -> Option<Reach> {
+        let spine: Vec<usize> = ["spine", "chest", "upperChest"].iter().filter_map(|bone| self.humanoid.get(*bone).copied()).collect();
+        let worlds = self.worlds(pose);
+        let at = |worlds: &[Mat4], node: usize| worlds[node].w_axis.truncate();
+        let arm = |hand: Hand| {
+            let bone = |part: &str| self.humanoid.get(&format!("{}{part}", hand.side())).copied();
+            Some((hand, [bone("UpperArm")?, bone("LowerArm")?, bone("Hand")?]))
+        };
+        let distance = |(hand, [upper, ..]): &(Hand, [usize; 3])| at(&worlds, *upper).distance(target) - if held == Some(*hand) { HAND_HELD } else { 0.0 };
+        let (hand, [upper, lower, end]) = [Hand::Right, Hand::Left].into_iter().filter_map(arm).min_by(|a, b| distance(a).total_cmp(&distance(b)))?;
+        let outward = hand.outward();
+        let body = |worlds: &[Mat4]| spine.last().map_or(self.facing(), |&node| self.frame(worlds, node));
+        let azimuth = |ahead: Vec3| {
+            let azimuth = (outward * ahead.x).atan2(ahead.z);
+            if azimuth < (ARM_ACROSS + ARM_OUT) / 2.0 - std::f32::consts::PI { azimuth + std::f32::consts::TAU } else { azimuth }
+        };
+        let wanted = azimuth(body(&worlds).inverse() * (target - at(&worlds, upper)));
+        let torso = if spine.is_empty() { 0.0 } else { (wanted - wanted.clamp(ARM_ACROSS, ARM_OUT)).clamp(-TORSO, TORSO) };
+        let part = Quat::from_axis_angle(body(&worlds) * Vec3::Y, outward * torso * weight / spine.len().max(1) as f32);
+        for &node in &spine {
+            let parent = self.nodes[node].parent.map_or(Quat::IDENTITY, |parent| rotation(&worlds[parent]));
+            pose.rotations[node] = (parent.inverse() * part * parent * pose.rotations[node]).normalize();
+        }
         pose.rotations[lower] = pose.rotations[lower].slerp(self.nodes[lower].rotation, weight);
         let worlds = self.worlds(pose);
-        let shoulder = worlds[upper].w_axis.truncate();
-        let (reach, toward) = (worlds[hand].w_axis.truncate() - shoulder, target - shoulder);
-        let (Some(reach), Some(toward)) = (reach.try_normalize(), toward.try_normalize()) else { return };
-        let turn = Quat::IDENTITY.slerp(Quat::from_rotation_arc(reach, toward), weight);
+        let (shoulder, body) = (at(&worlds, upper), body(&worlds));
+        let (reach, ahead) = ((at(&worlds, end) - shoulder).try_normalize()?, (body.inverse() * (target - shoulder)).try_normalize()?);
+        let azimuth = azimuth(ahead).clamp(ARM_ACROSS, ARM_OUT);
+        let elevation = ahead.y.clamp(-1.0, 1.0).asin().clamp(ARM_DOWN, ARM_UP);
+        let aimed = body * Vec3::new(outward * azimuth.sin() * elevation.cos(), elevation.sin(), azimuth.cos() * elevation.cos());
+        let turn = Quat::IDENTITY.slerp(Quat::from_rotation_arc(reach, aimed), weight);
         let parent = self.nodes[upper].parent.map_or(Quat::IDENTITY, |parent| rotation(&worlds[parent]));
         pose.rotations[upper] = (parent.inverse() * turn * parent * pose.rotations[upper]).normalize();
+        Some(Reach { hand, torso, short: aimed.angle_between(body * ahead) })
     }
 
     pub fn rest(&self) -> Pose {
@@ -929,7 +995,12 @@ impl Model {
     /// Where the eyes look from, and the head's frame (+Z ahead, +Y up, +X to the figure's left), in model space.
     pub fn face(&self, worlds: &[Mat4]) -> Option<(Vec3, Quat)> {
         let head = *self.humanoid.get("head")?;
-        Some((worlds[head].transform_point3(self.look_at.offset), rotation(&worlds[head]) * self.rest_turns[head].inverse() * self.facing()))
+        Some((worlds[head].transform_point3(self.look_at.offset), self.frame(worlds, head)))
+    }
+
+    /// A bone's frame: +Z ahead, +Y up, +X to the figure's left, in model space.
+    fn frame(&self, worlds: &[Mat4], node: usize) -> Quat {
+        rotation(&worlds[node]) * self.rest_turns[node].inverse() * self.facing()
     }
 
     /// The gaze angles, radians, at which the eyes stop following: sideways, up and down.
@@ -1346,15 +1417,70 @@ pub mod tests {
         let mut pose = model.rest();
         pose.rotations[2] = Quat::from_rotation_z(1.0);
         let target = Vec3::new(-0.2, 1.4, 1.0);
-        model.point_at(&mut pose, target, 1.0);
+        model.point_at(&mut pose, target, 1.0, None);
         let worlds = model.worlds(&pose);
         let [shoulder, elbow, hand] = [1, 2, 3].map(|node| worlds[node].w_axis.truncate());
         assert!((hand - shoulder).normalize().abs_diff_eq((target - shoulder).normalize(), 1e-4), "the hand {hand} is on the line to {target}");
         assert!(((hand - shoulder).length() - 0.5).abs() < 1e-4 && (elbow - shoulder).normalize().abs_diff_eq((hand - shoulder).normalize(), 1e-4), "the elbow is straight");
         let mut half = model.rest();
-        model.point_at(&mut half, target, 0.5);
+        model.point_at(&mut half, target, 0.5, None);
         let reach = model.worlds(&half)[3].w_axis.truncate() - shoulder;
         assert!((reach.angle_between(Vec3::NEG_X) - std::f32::consts::FRAC_PI_4).abs() < 1e-3, "half weight turns half way: {reach}");
+    }
+
+    #[test]
+    fn every_point_uses_the_nearer_hand_and_keeps_the_arm_and_spine_inside_human_joint_limits() {
+        let degrees = |angle: f32| angle.to_radians();
+        let model = Model::parse(include_bytes!("../golden/figure.vrm")).unwrap();
+        let standing = model.pose(&model.standing());
+        let worlds = model.worlds(&standing);
+        let at = |worlds: &[Mat4], bone: &str| worlds[model.humanoid[bone]].w_axis.truncate();
+        let height = at(&worlds, "head").y - at(&worlds, "leftFoot").y;
+        let chest = at(&worlds, "chest");
+        let yaw_of = |worlds: &[Mat4]| {
+            let ahead = model.frame(worlds, model.humanoid["hips"]).inverse() * model.frame(worlds, model.humanoid["chest"]) * Vec3::Z;
+            ahead.x.atan2(ahead.z)
+        };
+        let (mut hands, mut twisted, mut short) = ([0; 2], 0, 0);
+        for step in 0..24 {
+            for rise in -5..=5 {
+                let (yaw, pitch) = (degrees(15.0 * step as f32), degrees(15.0 * rise as f32));
+                let toward = model.frame(&worlds, model.humanoid["chest"]) * Vec3::new(yaw.sin() * pitch.cos(), pitch.sin(), yaw.cos() * pitch.cos());
+                let target = chest + toward * 0.5 * height;
+                let mut pose = standing.clone();
+                let reach = model.point_at(&mut pose, target, 1.0, None).unwrap();
+                let pointed = model.worlds(&pose);
+                let side = reach.hand.side();
+                let other = if reach.hand == Hand::Left { "right" } else { "left" };
+                let case = format!("yaw {:.0}° pitch {:.0}°", yaw.to_degrees(), pitch.to_degrees());
+                assert!(at(&worlds, &format!("{side}UpperArm")).distance(target) <= at(&worlds, &format!("{other}UpperArm")).distance(target) + 1e-5, "{case}: the {side} hand is the nearer one");
+                for part in ["UpperArm", "LowerArm", "Hand"] {
+                    let node = model.humanoid[&format!("{other}{part}")];
+                    assert!(pose.rotations[node].abs_diff_eq(standing.rotations[node], 1e-6), "{case}: the {other} arm stays down");
+                }
+                let body = model.frame(&pointed, model.humanoid["chest"]);
+                let twist = (yaw_of(&pointed) - yaw_of(&worlds)).abs();
+                assert!(twist <= degrees(60.0), "{case}: the spine twists {:.0}°, past a person's", twist.to_degrees());
+                let [shoulder, elbow, wrist] = ["UpperArm", "LowerArm", "Hand"].map(|part| at(&pointed, &format!("{side}{part}")));
+                let upper = (body.inverse() * (elbow - shoulder)).normalize();
+                let outward = reach.hand.outward() * upper.x;
+                let swing = outward.atan2(upper.z);
+                assert!((degrees(-45.0)..=degrees(135.0)).contains(&swing), "{case}: the upper arm swings {:.0}° from ahead toward its side, outside the shoulder's range", swing.to_degrees());
+                assert!(upper.y.asin() <= degrees(90.0) && upper.y.asin() >= degrees(-80.0), "{case}: the upper arm points {:.0}° from level", upper.y.asin().to_degrees());
+                let bend = (elbow - shoulder).angle_between(wrist - elbow);
+                assert!(bend <= degrees(5.0), "{case}: the elbow is straight, bent {:.0}°", bend.to_degrees());
+                let ahead = body.inverse() * (target - shoulder);
+                if ahead.z > 0.3 * ahead.length() && ahead.normalize().y.abs() <= degrees(50.0).sin() {
+                    assert!(reach.short < degrees(1.0) && (wrist - shoulder).angle_between(target - shoulder) < degrees(2.0), "{case}: a target ahead is pointed at exactly");
+                }
+                assert!(reach.short <= degrees(50.0), "{case}: the point comes within 50° of the target, {:.0}°", reach.short.to_degrees());
+                hands[(reach.hand == Hand::Left) as usize] += 1;
+                twisted += (reach.torso.abs() > 1e-3) as usize;
+                short += (reach.short > degrees(1.0)) as usize;
+            }
+        }
+        assert!(hands[0] > 100 && hands[1] > 100, "both hands point: {hands:?}");
+        assert!(twisted > 20 && short > 0, "targets behind turn the spine ({twisted}) and some stay out of the arm's reach ({short})");
     }
 
     #[test]

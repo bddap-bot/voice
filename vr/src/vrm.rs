@@ -1018,8 +1018,23 @@ impl Model {
                 indices.extend(primitive.indices.iter().map(|&vertex| vertex + base));
             }
         }
-        let queue = |draw: &Draw| self.materials[draw.material].queue;
-        draws.sort_by_key(queue);
+        // Blended draws keep node order; the rest are order-independent, so each material's index ranges are laid end to end and draw in one call.
+        let key = |at: usize, draw: &Draw| {
+            let material = &self.materials[draw.material];
+            (material.queue, if material.alpha == Alpha::Blend { (usize::MAX, at) } else { (draw.material, 0) })
+        };
+        let mut order: Vec<(usize, Draw)> = draws.into_iter().enumerate().collect();
+        order.sort_by_key(|(at, draw)| key(*at, draw));
+        let mut grouped = Vec::with_capacity(indices.len());
+        let mut draws: Vec<Draw> = order
+            .into_iter()
+            .map(|(_, draw)| {
+                let first = grouped.len() as u32;
+                grouped.extend_from_slice(&indices[draw.first as usize..(draw.first + draw.count) as usize]);
+                Draw { first, ..draw }
+            })
+            .collect();
+        let indices = grouped;
         draws.dedup_by(|next, run| {
             let joins = next.material == run.material && run.first + run.count == next.first;
             if joins {

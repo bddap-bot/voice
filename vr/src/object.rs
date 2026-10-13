@@ -653,7 +653,7 @@ pub mod tests {
         let view = builder.view(&png);
         builder.set("images", serde_json::json!([{ "bufferView": view, "mimeType": "image/png" }]));
         builder.set("textures", serde_json::json!([{ "source": 0 }]));
-        builder.set("materials", serde_json::json!([{ "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } } }]));
+        builder.set("materials", serde_json::json!([{ "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } } }, { "pbrMetallicRoughness": { "baseColorFactor": [0.2, 0.4, 0.8, 1.0] } }]));
         builder.set("nodes", nodes);
         if let Some((text, duration)) = program {
             let view = builder.view(&crate::program::tests::wasm(text));
@@ -661,7 +661,8 @@ pub mod tests {
             extension.as_object_mut().unwrap().extend(declared.as_object().unwrap().clone());
             builder.set("extensions", serde_json::json!({ crate::vrm::PROGRAM: extension }));
         }
-        builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position, "NORMAL": normal, "TEXCOORD_0": uv }, "indices": index, "material": 0 }] }]));
+        let mesh = |material: usize| serde_json::json!({ "primitives": [{ "attributes": { "POSITION": position, "NORMAL": normal, "TEXCOORD_0": uv }, "indices": index, "material": material }] });
+        builder.set("meshes", serde_json::json!([mesh(0), mesh(1)]));
         builder.glb()
     }
 
@@ -890,15 +891,14 @@ pub mod tests {
     }
 
     #[test]
-    fn many_nodes_of_one_material_draw_in_one_call() {
+    fn many_nodes_of_interleaved_materials_draw_in_one_call_per_material() {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let now = Instant::now();
-        let nodes: Vec<serde_json::Value> = (0..500).map(|at| serde_json::json!({ "mesh": 0, "translation": [at as f32 * 0.001, 0.0, 0.0] })).collect();
+        let nodes: Vec<serde_json::Value> = (0..500).map(|at| serde_json::json!({ "mesh": at % 2, "translation": [at as f32 * 0.001, 0.0, 0.0] })).collect();
         let mut object = Object::spawn(Counted::new(), gpu, built(0.001, serde_json::Value::Array(nodes), None), LOOSE, now).unwrap();
         drawn(&mut object, now);
-        let drawn = object.drawn.as_ref().unwrap();
-        assert_eq!(drawn.skinned.draws.len(), 1);
-        assert_eq!(drawn.skinned.draws[0].count, 500 * 36);
+        let draws = &object.drawn.as_ref().unwrap().skinned.draws;
+        assert_eq!(draws.iter().map(|draw| (draw.material, draw.count)).collect::<Vec<_>>(), [(0, 250 * 36), (1, 250 * 36)]);
     }
 
     #[test]
@@ -990,7 +990,7 @@ pub mod tests {
             let view = builder.view(&png);
             builder.set("images", serde_json::json!([{ "bufferView": view, "mimeType": "image/png" }]));
             builder.set("textures", serde_json::json!([{ "source": 0 }]));
-            builder.set("materials", serde_json::json!([{ "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } } }]));
+            builder.set("materials", serde_json::json!([{ "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } } }, { "pbrMetallicRoughness": { "baseColorFactor": [0.2, 0.4, 0.8, 1.0] } }]));
             builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": 0 }, "material": 0 }] }]));
         });
         assert!(huge.contains("image 0"), "a 30000-texel header is refused from the header: {huge}");

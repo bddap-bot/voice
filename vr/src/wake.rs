@@ -248,7 +248,7 @@ fn listen(head: &Head, stop: &AtomicBool, heard: &Sender<Result<Heard, String>>)
             busy += started.elapsed();
             chunks += 1;
             if since.elapsed() >= Duration::from_secs(60) {
-                eprintln!("wake spotter: {:.1} ms of work per 80 ms chunk", busy.as_secs_f64() * 1e3 / chunks as f64);
+                tracing::info!("wake spotter: {:.1} ms of work per 80 ms chunk", busy.as_secs_f64() * 1e3 / chunks as f64);
                 (chunks, busy, since) = (0, Duration::ZERO, Instant::now());
             }
             if let Some(event) = event {

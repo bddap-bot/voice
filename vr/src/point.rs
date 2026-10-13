@@ -26,7 +26,7 @@ pub struct Pointing {
 
 impl Pointing {
     pub fn start(&mut self, name: String, now: Instant) {
-        eprintln!("pointing at {name:?}");
+        tracing::info!("pointing at {name:?}");
         *self = Pointing { name: Some(name), since: Some(now), weight: self.weight, hand: self.hand, ..Pointing::default() };
     }
 
@@ -41,7 +41,7 @@ impl Pointing {
 
     pub fn made(&mut self, reach: Reach) {
         if !self.told || self.hand != Some(reach.hand) {
-            eprintln!("pointing with the {:?} hand, spine turned {:.0}°, arm short of the target by {:.0}°", reach.hand, reach.torso.to_degrees(), reach.short.to_degrees());
+            tracing::info!("pointing with the {:?} hand, spine turned {:.0}°, arm short of the target by {:.0}°", reach.hand, reach.torso.to_degrees(), reach.short.to_degrees());
             self.told = true;
         }
         self.hand = Some(reach.hand);

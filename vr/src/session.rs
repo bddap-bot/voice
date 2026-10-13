@@ -155,7 +155,7 @@ impl Link {
         });
         drop(audio);
         if let Err(error) = relay.post("cancel", None) {
-            eprintln!("cancel not sent: {error}");
+            tracing::warn!("cancel not sent: {error}");
         }
         result
     }
@@ -218,7 +218,7 @@ impl Link {
                     Output::Timeout(at) => break at,
                     Output::Transmit(transmit) => {
                         if let Err(error) = socket.send_to(&transmit.contents, transmit.destination) {
-                            eprintln!("peer send: {error}");
+                            tracing::warn!("peer send: {error}");
                         }
                     }
                     Output::Event(event) => match event {
@@ -229,7 +229,7 @@ impl Link {
                         RtcEvent::IceConnectionStateChange(IceConnectionState::Disconnected) => return Ok("the connection dropped".into()),
                         RtcEvent::MediaData(data) => match decoder.decode_float(&data.data, &mut decoded, false) {
                             Ok(samples) => self.played.lock().unwrap().push(&decoded[..samples]),
-                            Err(error) => eprintln!("opus decode: {error}"),
+                            Err(error) => tracing::warn!("opus decode: {error}"),
                         },
                         RtcEvent::ChannelData(data) if data.id == channel => {
                             let Ok(event) = serde_json::from_slice::<Value>(&data.data) else { continue };
@@ -259,7 +259,7 @@ impl Link {
                                     let limit = &event["usage_limit"];
                                     if !limit_reported && (!limit["status"].is_null() || !limit["reset_seconds"].is_null()) {
                                         limit_reported = true;
-                                        eprintln!("Live usage limit: {limit}");
+                                        tracing::warn!("Live usage limit: {limit}");
                                         if let Err(error) = relay.post("usage-limit", Some(&json!({ "status": limit["status"], "reset_seconds": limit["reset_seconds"] }))) {
                                             return Ok(format!("the relay closed: {error}"));
                                         }
@@ -315,7 +315,7 @@ impl Link {
                         Some(mut channel) => {
                             channel.write(false, tell.event().to_string().as_bytes()).map_err(|error| format!("event channel: {error}"))?;
                         }
-                        None => eprintln!("not told, the event channel is not open: {tell:?}"),
+                        None => tracing::warn!("not told, the event channel is not open: {tell:?}"),
                     },
                 }
             }

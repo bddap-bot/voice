@@ -10,6 +10,7 @@ mod gaze;
 mod identity;
 mod session;
 mod speaker;
+mod telemetry;
 mod voice;
 mod gesture;
 mod hub;
@@ -90,7 +91,7 @@ impl Meter {
         let elapsed = now - window;
         if elapsed >= Duration::from_secs(5) {
             let rate = self.interval.len() as f64 / elapsed.as_secs_f64();
-            eprintln!("overlay {rate:.1} fps; frame interval {}; animate+draw+submit {}", summary(&mut self.interval), summary(&mut self.work));
+            tracing::info!("overlay {rate:.1} fps; frame interval {}; animate+draw+submit {}", summary(&mut self.interval), summary(&mut self.work));
             *self = Meter { window: Some(now), ..Meter::default() };
         }
     }
@@ -115,7 +116,7 @@ fn load(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer) -> Result<P
     let mut clips = HashMap::new();
     for entry in relay.clips()?.iter().filter(|entry| played(&entry.action)) {
         if entry.format != "fbx" {
-            eprintln!("{}: {} clips are not played natively", entry.name, entry.format);
+            tracing::info!("{}: {} clips are not played natively", entry.name, entry.format);
             continue;
         }
         match relay.motion(entry).and_then(|bytes| Clip::parse(&bytes, model.version, model.rest_hips())) {
@@ -125,15 +126,15 @@ fn load(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer) -> Result<P
                 }
                 clips.insert(entry.action.clone(), clip);
             }
-            Err(error) => eprintln!("{}: {error}", entry.name),
+            Err(error) => tracing::warn!("{}: {error}", entry.name),
         }
     }
     let idles = clips.keys().filter(|name| IDLES.contains(&name.as_str())).count();
-    eprintln!("appearance {} with {idles} standing idle clips, gestures {:?}, {} spring joints at gravity {}", avatar.id, clips.keys().filter(|name| !IDLES.contains(&name.as_str())).collect::<Vec<_>>(), model.spring_joints(), vrm::spring::GRAVITY);
+    tracing::info!("appearance {} with {idles} standing idle clips, gestures {:?}, {} spring joints at gravity {}", avatar.id, clips.keys().filter(|name| !IDLES.contains(&name.as_str())).collect::<Vec<_>>(), model.spring_joints(), vrm::spring::GRAVITY);
     let skinned = model.skinned()?;
     let fit = Fit::new(&model, &skinned, HEIGHT);
     let height = (HEIGHT / fit.scale).clamp(FULL_HEIGHT[0], FULL_HEIGHT[1]);
-    eprintln!("appearance {} stands {height:.2} m full size", avatar.id);
+    tracing::info!("appearance {} stands {height:.2} m full size", avatar.id);
     let drawn = renderer.appearance(&model, &skinned)?;
     Ok(Puppet { model, skinned, fit, full: height / HEIGHT, standing, animator: Animator::new(clips, Random::seeded()), gaze: Gaze::default(), springs: Springs::default(), drawn })
 }
@@ -151,7 +152,7 @@ fn act(animator: &mut Animator, action: &action::Action) {
         action::Kind::Mood => "not drawn",
         action::Kind::None => "ignored",
     };
-    eprintln!("action {:?} {} {:.3} from {:?}: {outcome}", action.kind, action.name, action.score, action.sentence);
+    tracing::info!("action {:?} {} {:.3} from {:?}: {outcome}", action.kind, action.name, action.score, action.sentence);
 }
 
 fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), String> {
@@ -159,7 +160,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
     let mut recognizer = Recognizer::new(Templates::parse(&std::fs::read(&gesture_file).map_err(|error| format!("{}: {error}", gesture_file.display()))?)?);
     let gpu = Rc::new(vulkan::Gpu::new(Some(runtime))?);
     let runtime = gpu.vr.as_ref().expect("the overlay's device was made for SteamVR");
-    eprintln!("display {:.0} px/rad, windows sized for {:.0} px/rad at {} m: puppet {} texels per eye, object {}", runtime.display_density(), render::DISPLAY_DENSITY, render::NEAREST, eye_texels(QUAD), eye_texels(object::QUAD));
+    tracing::info!("display {:.0} px/rad, windows sized for {:.0} px/rad at {} m: puppet {} texels per eye, object {}", runtime.display_density(), render::DISPLAY_DENSITY, render::NEAREST, eye_texels(QUAD), eye_texels(object::QUAD));
     let mut renderer = Renderer::new(gpu.clone(), [eye_texels(QUAD); 2], HEIGHT / render::PAGE_HEIGHT)?;
     let cache = state.join("assets");
     let mut relay = Relay::connect(token, &cache)?;
@@ -194,16 +195,16 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
     let wake_head = match std::fs::read(&wake_file).map_err(|error| format!("{}: {error}", wake_file.display())).and_then(|bytes| wake::Head::parse(&bytes, wake::phrase())) {
         Ok(head) => Some(std::sync::Arc::new(head)),
         Err(error) => {
-            eprintln!("no wake word, the gesture alone wakes: {error}");
+            tracing::warn!("no wake word, the gesture alone wakes: {error}");
             None
         }
     };
     let mut spotter: Option<wake::Spotter> = None;
     let mut spotter_retry = epoch;
-    eprintln!("dormant");
+    tracing::info!("dormant");
     loop {
         if let Some(Signal::Quit) = runtime.poll() {
-            eprintln!("SteamVR asked the overlay to quit");
+            tracing::info!("SteamVR asked the overlay to quit");
             return Ok(());
         }
         for (index, image) in previews.iter().flat_map(|previews: &std::sync::mpsc::Receiver<_>| previews.try_iter()) {
@@ -225,7 +226,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
                     (false, _) => "near miss",
                 };
                 if verdict.matched || verdict.near {
-                    eprintln!("gesture {kind}: distance {:.3} peak {:.2} m/s over {:.2} s", verdict.distance, verdict.peak, verdict.duration);
+                    tracing::info!("gesture {kind}: distance {:.3} peak {:.2} m/s over {:.2} s", verdict.distance, verdict.peak, verdict.duration);
                 }
                 summoned |= verdict.matched && !voice.awake();
             }
@@ -233,7 +234,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         match &wake_head {
             Some(model) if !voice.awake() && !voice.muted() => {
                 if spotter.is_none() && started >= spotter_retry {
-                    eprintln!("listening for {:?}", wake::phrase());
+                    tracing::info!("listening for {:?}", wake::phrase());
                     spotter = Some(wake::Spotter::start(model.clone()));
                 }
             }
@@ -242,12 +243,12 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         while let Some(heard) = spotter.as_ref().and_then(wake::Spotter::heard) {
             match heard {
                 Ok(wake::Heard::Wake(score)) => {
-                    eprintln!("wake word heard: score {score:.3}, waking");
+                    tracing::info!("wake word heard: score {score:.3}, waking");
                     summoned = true;
                 }
-                Ok(wake::Heard::Miss(peak)) => eprintln!("wake word near miss: peak {peak:.3}"),
+                Ok(wake::Heard::Miss(peak)) => tracing::info!("wake word near miss: peak {peak:.3}"),
                 Err(error) => {
-                    eprintln!("wake spotter: {error}");
+                    tracing::warn!("wake spotter: {error}");
                     spotter = None;
                     spotter_retry = started + SPOTTER_RETRY;
                 }
@@ -283,16 +284,17 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             std::thread::sleep(DORMANT_POLL);
             continue;
         };
+        let _frame = tracing::info_span!("frame").entered();
         let right_device = runtime.hand_index(Hand::Right);
         if let Some(device) = right_device.filter(|&device| pressing.map_or(true, |(known, _)| known != device) && started >= calibration.0) {
             calibration.0 = started + Duration::from_secs(1);
             match runtime.tip(device) {
                 Ok(tip) => {
-                    eprintln!("pressing point {tip:?} on device {device}");
+                    tracing::info!("pressing point {tip:?} on device {device}");
                     pressing = Some((device, tip));
                 }
                 Err(error) if error != calibration.1 => {
-                    eprintln!("pressing point: {error}; the default until it reports one");
+                    tracing::info!("pressing point: {error}; the default until it reports one");
                     calibration.1 = error;
                 }
                 Err(_) => {}
@@ -304,12 +306,12 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         let figure = facing(stand.apply([0.0, -FLOOR * size, 0.0]), head.t);
         board.tick(started);
         if reveal.hold(started, hand(Hand::Right).map(|right| placement::scale(local_tip(&stand, &right, tip), 1.0 / size))) {
-            eprintln!("appearance library revealed");
+            tracing::info!("appearance library revealed");
             board.reveal(started);
             if previews.is_none() {
                 match Relay::connect(token, &cache) {
                     Ok(relay) => previews = Some(preview::spawn(relay, catalog.avatars.clone())),
-                    Err(error) => eprintln!("previews: {error}"),
+                    Err(error) => tracing::warn!("previews: {error}"),
                 }
             }
         }
@@ -355,7 +357,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         object.step(started, &object::View { stand, size, head, eyes: eye_offsets, tip: right.map(|(right, _)| right.apply(tip)) });
         let touch = board.touch(right.map(|(right, _)| local_tip(&board_pose, &right, tip)));
         if let Some([x, y]) = touch.crossing {
-            eprintln!("board crossed at ({x:.3}, {y:.3}) m: {}", touch.press.map_or("none".to_owned(), |press| format!("{press:?}")));
+            tracing::info!("board crossed at ({x:.3}, {y:.3}) m: {}", touch.press.map_or("none".to_owned(), |press| format!("{press:?}")));
         }
         match (touch.marker, right) {
             (Some(at), Some((right, right_device))) => {
@@ -386,7 +388,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             Some(Press::SetDown) => anchor.toggle(started),
             Some(Press::Appearance(index)) if index != board.active => {
                 let avatar = &catalog.avatars[index];
-                eprintln!("picked appearance {}", avatar.id);
+                tracing::info!("picked appearance {}", avatar.id);
                 board.pending = Some(index);
                 board.mark();
                 if let Some(image) = board.take_image() {
@@ -398,7 +400,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
                         puppet = loaded;
                         board.active = index;
                     }
-                    Err(error) => eprintln!("appearance {} not shown: {error}", avatar.id),
+                    Err(error) => tracing::warn!("appearance {} not shown: {error}", avatar.id),
                 }
                 board.pending = None;
                 board.mark();
@@ -423,7 +425,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         }
         let delta = interval.as_secs_f32().min(0.05);
         if let Some(idle) = puppet.animator.update(delta) {
-            eprintln!("idle {idle}");
+            tracing::info!("idle {idle}");
         }
         let mut pose = puppet.model.pose(&puppet.animator.humanoid(&puppet.standing, puppet.model.rest_hips()));
         let mut worlds = puppet.model.worlds(&pose);
@@ -542,8 +544,10 @@ fn run() -> Result<(), String> {
 }
 
 fn main() {
+    let telemetry = telemetry::init(directory("XDG_STATE_HOME", ".local/state").join("crashes"));
     if let Err(error) = run() {
-        eprintln!("voice-vr: {error}");
+        tracing::error!("voice-vr: {error}");
+        drop(telemetry);
         std::process::exit(1);
     }
 }

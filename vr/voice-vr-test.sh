@@ -13,17 +13,26 @@ host() {
   chmod +x "$work/bin/voice-vr-host"
   rm -f "$work/runs"
 }
-run() { PATH="$work/stub:$PATH" "$work/bin/voice-vr" 2>/dev/null && rc=0 || rc=$?; runs=$(cat "$work/runs"); }
+export XDG_CONFIG_HOME="$work/config" XDG_STATE_HOME="$work/state"
+crashes() { find "$XDG_STATE_HOME/voice-vr/crashes" -type f 2>/dev/null | wc -l; }
+run() { rm -rf "$XDG_STATE_HOME"; PATH="$work/stub:$PATH" "$work/bin/voice-vr" 2>/dev/null && rc=0 || rc=$?; runs=$(cat "$work/runs"); }
 fail() { echo "voice-vr supervisor: $*"; exit 1; }
 
 host 'exit 0'; run
 [ "$rc" = 0 ] && [ "$runs" = 1 ] || fail "a quit from SteamVR: rc $rc after $runs runs"
 
 host 'kill -TERM $$'; run
-[ "$rc" = 143 ] && [ "$runs" = 1 ] || fail "a deliberate stop: rc $rc after $runs runs"
+[ "$rc" = 143 ] && [ "$runs" = 1 ] && [ "$(crashes)" = 0 ] || fail "a deliberate stop: rc $rc after $runs runs, $(crashes) crash reports"
 
 host '[ "$n" -ge 2 ] && exit 0; [ "$n" = 0 ] && exit 101; kill -ABRT $$'; run
 [ "$rc" = 0 ] && [ "$runs" = 3 ] || fail "a panic, then an abort, then a quit: rc $rc after $runs runs"
+grep -q 'signal 6' "$XDG_STATE_HOME"/voice-vr/crashes/* && [ "$(crashes)" = 1 ] || fail "the abort left $(crashes) crash reports"
+
+mkdir -p "$XDG_CONFIG_HOME/voice-vr"
+printf '%s\n' "VOICE_VR_PROBE='from the environment file'" > "$XDG_CONFIG_HOME/voice-vr/environment"
+host '[ "$VOICE_VR_PROBE" = "from the environment file" ]'; run
+[ "$rc" = 0 ] || fail "the environment file did not reach the host: rc $rc"
+rm "$XDG_CONFIG_HOME/voice-vr/environment"
 
 host 'exit 101'; run
 [ "$rc" = 101 ] && [ "$runs" = 5 ] || fail "a crash loop: rc $rc after $runs runs"
@@ -40,4 +49,4 @@ kill -TERM "$supervisor_pid"
 wait "$supervisor_pid" && rc=0 || rc=$?
 [ "$rc" = 143 ] || fail "stopping the supervisor: rc $rc"
 ! kill -0 "$(cat "$work/bin/voice-vr-host.pid")" 2>/dev/null || fail "the host outlived its supervisor"
-echo "voice-vr supervisor: 6 checks passed"
+echo "voice-vr supervisor: 8 checks passed"

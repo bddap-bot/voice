@@ -27,6 +27,14 @@ sha2 = "0.10"
 regex = "1"
 unicode-normalization = "0.1"
 wasmi = { version = "2", default-features = false, features = ["std", "validate", "auto-dispatch"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "std", "ansi"] }
+opentelemetry = { version = "0.33", default-features = false, features = ["trace", "logs"] }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "logs"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "logs", "http-proto", "reqwest-blocking-client"] }
+opentelemetry-appender-tracing = "0.33"
+tracing-opentelemetry = "0.34"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 [dev-dependencies]
 wat = "1"

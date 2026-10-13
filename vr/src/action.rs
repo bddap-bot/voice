@@ -330,17 +330,17 @@ fn serve(load: impl FnOnce() -> Result<Classifier, String>, requests: Receiver<(
             let started = Instant::now();
             match load() {
                 Ok(loaded) => {
-                    eprintln!("action classifier loaded in {:.1} s", started.elapsed().as_secs_f32());
+                    tracing::info!("action classifier loaded in {:.1} s", started.elapsed().as_secs_f32());
                     classifier = Some(loaded);
                 }
-                Err(error) => eprintln!("speech-driven actions are off: {error}"),
+                Err(error) => tracing::warn!("speech-driven actions are off: {error}"),
             }
         }
         let Some(classifier) = &classifier else { continue };
         let action = match classifier.classify(&sentence) {
             Ok((kind, name, score)) => Action { kind, name: name.to_owned(), score, sentence },
             Err(error) => {
-                eprintln!("{error}");
+                tracing::warn!("{error}");
                 continue;
             }
         };

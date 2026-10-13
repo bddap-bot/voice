@@ -515,7 +515,7 @@ impl<S: Surface> Default for Slot<S> {
 impl<S: Surface> Slot<S> {
     pub fn clear(&mut self, why: &str) {
         if let Some(object) = self.object.take() {
-            eprintln!("object gone: {why}; {}", object.cost());
+            tracing::info!("object gone: {why}; {}", object.cost());
         }
     }
 
@@ -524,10 +524,10 @@ impl<S: Surface> Slot<S> {
         self.clear("replaced");
         match spawn() {
             Ok(object) => {
-                eprintln!("object spawned");
+                tracing::info!("object spawned");
                 self.object = Some(object);
             }
-            Err(error) => eprintln!("object not shown: {error}"),
+            Err(error) => tracing::warn!("object not shown: {error}"),
         }
     }
 
@@ -544,14 +544,14 @@ impl<S: Surface> Slot<S> {
     pub fn feed(&mut self, data: Vec<u8>) {
         match &mut self.object {
             Some(object) => object.feed(data),
-            None => eprintln!("live data with no object shown"),
+            None => tracing::info!("live data with no object shown"),
         }
     }
 
     pub fn hold(&mut self, hold: Hold) {
         match &mut self.object {
             Some(object) => object.hold(hold),
-            None => eprintln!("a hold with no object shown"),
+            None => tracing::info!("a hold with no object shown"),
         }
     }
 

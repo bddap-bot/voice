@@ -162,11 +162,11 @@ impl Audio {
 impl Drop for Audio {
     fn drop(&mut self) {
         if let Err(error) = self.capture(false) {
-            eprintln!("{error}");
+            tracing::warn!("{error}");
         }
         if let Some(stream) = self.playback.take() {
             if let Err(error) = futures::executor::block_on(stream.delete()) {
-                eprintln!("playback close: {error}");
+                tracing::warn!("playback close: {error}");
             }
         }
     }

@@ -25,6 +25,7 @@ struct Awake {
     activity: Instant,
     mouth: f32,
     hub: Hub,
+    _span: tracing::Span,
 }
 
 /// The conversation side of the overlay: awake exactly while a session is open or opening.
@@ -78,7 +79,7 @@ impl Voice {
     pub fn toggle_voice_id(&mut self) {
         let Some(stored) = &mut self.stored else { return };
         stored.off = !stored.off;
-        eprintln!("{}", if stored.off { "voice ID off: conversations hear everyone" } else { "voice ID on: other voices are filtered out" });
+        tracing::info!("{}", if stored.off { "voice ID off: conversations hear everyone" } else { "voice ID on: other voices are filtered out" });
         Stored::write(self.stored.as_ref(), &self.voiceprint);
         self.refilter();
     }
@@ -91,19 +92,19 @@ impl Voice {
         } else if self.stored.is_some() {
             self.stored = None;
             Stored::write(None, &self.voiceprint);
-            eprintln!("voice forgotten: conversations hear everyone");
+            tracing::info!("voice forgotten: conversations hear everyone");
         } else if self.muted {
-            eprintln!("unmute the microphone to learn your voice");
+            tracing::info!("unmute the microphone to learn your voice");
         } else {
             self.learning = Some(0.0);
-            eprintln!("learning your voice: talk normally for about ten seconds");
+            tracing::info!("learning your voice: talk normally for about ten seconds");
         }
         self.refilter();
     }
 
     fn stop_learning(&mut self, reason: &str) {
         if self.learning.take().is_some() {
-            eprintln!("{reason}");
+            tracing::info!("{reason}");
             self.refilter();
         }
     }
@@ -143,10 +144,10 @@ impl Voice {
     }
 
     pub fn summon(&mut self) {
-        eprintln!("summoned, opening the session");
+        tracing::info!("summoned, opening the session");
         self.actions.reset();
         let session = Session::open(&self.token, &self.cache, self.trace.wake(Instant::now()), self.muted, self.hearing.clone());
-        self.awake = Some(Awake { session, opened: false, said: String::new(), activity: Instant::now(), mouth: 0.0, hub: Hub::default() });
+        self.awake = Some(Awake { session, opened: false, said: String::new(), activity: Instant::now(), mouth: 0.0, hub: Hub::default(), _span: tracing::info_span!("session") });
     }
 
     /// Ends the session and releases the microphone; an opened session hands the hub what it never heard and becomes memory for the next.
@@ -165,20 +166,20 @@ impl Voice {
                         })
                     });
                     if let Err(error) = sent {
-                        eprintln!("the session's last words did not reach the hub: {error}");
+                        tracing::warn!("the session's last words did not reach the hub: {error}");
                     }
                 });
             }
             self.trace.slept(Instant::now());
         }
         self.stop_learning("voice learning stopped");
-        eprintln!("{reason}, dormant");
+        tracing::info!("{reason}, dormant");
     }
 
     /// The microphone stops or starts and nothing else changes; the choice holds across sessions.
     pub fn toggle_mute(&mut self) -> bool {
         self.muted = !self.muted;
-        eprintln!("microphone {}", if self.muted { "muted" } else { "unmuted" });
+        tracing::info!("microphone {}", if self.muted { "muted" } else { "unmuted" });
         if self.muted {
             self.stop_learning("voice learning stopped");
         }
@@ -194,8 +195,8 @@ impl Voice {
         self.trace = Trace::default();
         let (token, cache) = (self.token.clone(), self.cache.clone());
         std::thread::spawn(move || match Relay::connect(&token, &cache).and_then(|mut relay| relay.forget()) {
-            Ok(()) => eprintln!("the server forgot the conversation"),
-            Err(error) => eprintln!("reset incomplete: {error}"),
+            Ok(()) => tracing::info!("the server forgot the conversation"),
+            Err(error) => tracing::warn!("reset incomplete: {error}"),
         });
     }
 
@@ -208,18 +209,18 @@ impl Voice {
         for event in awake.session.events() {
             match event {
                 session::Event::Open => {
-                    eprintln!("session open");
+                    tracing::info!("session open");
                     awake.opened = true;
                     awake.activity = Instant::now();
                 }
                 session::Event::Heard(delta) => {
-                    eprintln!("heard {delta:?}");
+                    tracing::info!("heard {delta:?}");
                     self.trace.heard(&delta, Instant::now());
                     awake.hub.heard(&delta, &self.trace, Instant::now());
                     awake.activity = Instant::now();
                 }
                 session::Event::Spoke(delta) => {
-                    eprintln!("spoke {delta:?}");
+                    tracing::info!("spoke {delta:?}");
                     self.actions.spoke(&delta);
                     self.trace.spoke(&delta);
                     awake.hub.spoke();
@@ -230,7 +231,7 @@ impl Voice {
                         awake.said.drain(..cut);
                     }
                     if !awake.hub.sleeping() && includes_phrase(&awake.said, sign_off) {
-                        eprintln!("sign-off heard");
+                        tracing::info!("sign-off heard");
                         awake.hub.sleep();
                         awake.session.listen_for_quiet();
                     }

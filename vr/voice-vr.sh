@@ -3,6 +3,14 @@
 here=$(dirname "$(readlink -f "$0")")
 export VOICE_VR_SPEAKER_MODEL="${VOICE_VR_SPEAKER_MODEL:-$here/../share/speaker.onnx}"
 export VOICE_VR_ACTION_MODEL="${VOICE_VR_ACTION_MODEL:-$here/../share/action}"
+environment=${XDG_CONFIG_HOME:-$HOME/.config}/voice-vr/environment
+if [ -r "$environment" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$environment"
+  set +a
+fi
+crashes=${XDG_STATE_HOME:-$HOME/.local/state}/voice-vr/crashes
 quick=0
 child=
 trap 'if [ -n "$child" ]; then kill "$child" 2>/dev/null; wait "$child"; fi; exit 143' TERM INT HUP
@@ -12,6 +20,10 @@ while :; do
   child=$!
   wait "$child"
   status=$?
+  if [ "$status" -gt 128 ] && [ "$status" != 130 ] && [ "$status" != 143 ]; then
+    mkdir -p "$crashes"
+    echo "the host died of signal $((status - 128)) $(($(date +%s) - started)) s after starting" > "$crashes/$(date +%s)000-$child.txt"
+  fi
   child=
   case $status in
     0 | 130 | 137 | 143) exit "$status" ;;

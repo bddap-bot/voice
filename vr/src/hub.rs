@@ -208,7 +208,7 @@ impl Hub {
         let delegation = trace.delegated(now);
         trace.calls.asked(id, &delegation.text);
         self.waiting.insert(id.to_owned());
-        eprintln!("delegating {id}: {:?}", delegation.text);
+        tracing::info!("delegating {id}: {:?}", delegation.text);
         if delegation.text.is_empty() {
             return self.failed(id, "no transcript before the delegation", trace);
         }
@@ -220,7 +220,7 @@ impl Hub {
             return;
         }
         trace.calls.failed(id);
-        eprintln!("hub request {id} failed: {message}");
+        tracing::warn!("hub request {id} failed: {message}");
         let owned = self.owned.contains(id).then_some(id);
         self.out.push(speak(owned, FAILED));
     }
@@ -271,9 +271,9 @@ impl Hub {
         };
         let mut reply: Reply = match serde_json::from_slice(line) {
             Ok(reply) => reply,
-            Err(error) => return eprintln!("hub reply unreadable: {error}"),
+            Err(error) => return tracing::warn!("hub reply unreadable: {error}"),
         };
-        eprintln!("hub reply {} ({}): {:?}{}", reply.id, reply.stamp, reply.commentary, if reply.instructions.is_empty() { "" } else { " with instructions" });
+        tracing::info!("hub reply {} ({}): {:?}{}", reply.id, reply.stamp, reply.commentary, if reply.instructions.is_empty() { "" } else { " with instructions" });
         trace.calls.replied(&reply.id, &reply.commentary);
         if let Some(shown) = reply.display.take() {
             reply.shown = Some(if shown.html.is_some() {
@@ -369,7 +369,7 @@ impl Hub {
         for content in &instructions {
             self.out.push(Command::Tell(Tell::Session(Channel::Developer, content.clone())));
         }
-        eprintln!("standing instructions applied");
+        tracing::info!("standing instructions applied");
         self.standing = instructions;
         self.standing_at = self.audio_seconds;
     }
@@ -383,7 +383,7 @@ impl Hub {
 
     fn interrupt(&mut self, reason: &str) {
         for reply in self.replies.drain(..) {
-            eprintln!("hub reply {} ({}) dropped: {reason}", reply.id, reply.stamp);
+            tracing::warn!("hub reply {} ({}) dropped: {reason}", reply.id, reply.stamp);
         }
         self.turn = None;
         self.apply_standing();

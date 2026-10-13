@@ -579,14 +579,14 @@ pub fn model() -> Result<&'static Model, String> {
     let path = std::env::var_os("VOICE_VR_SPEAKER_MODEL").map(PathBuf::from).ok_or("VOICE_VR_SPEAKER_MODEL is not set")?;
     let started = Instant::now();
     let model = Model::load(&path)?;
-    eprintln!("speaker model loaded in {:.1} s", started.elapsed().as_secs_f32());
+    tracing::info!("speaker model loaded in {:.1} s", started.elapsed().as_secs_f32());
     Ok(MODEL.get_or_init(|| model))
 }
 
 pub fn prepare() {
     std::thread::spawn(|| {
         if let Err(error) = model() {
-            eprintln!("{error}");
+            tracing::warn!("{error}");
         }
     });
 }
@@ -742,9 +742,9 @@ impl Ear {
             match &event {
                 Report::Open(at) => running.granted.open(at * DECIMATION as i64),
                 Report::Close(at) => running.granted.close(at * DECIMATION as i64),
-                Report::Score { .. } => eprintln!("speaker {event:?}"),
+                Report::Score { .. } => tracing::info!("speaker {event:?}"),
                 Report::Error(error) if !running.failed => {
-                    eprintln!("speaker filter off, hearing everyone: {error}");
+                    tracing::warn!("speaker filter off, hearing everyone: {error}");
                     running.failed = true;
                 }
                 _ => {}
@@ -794,7 +794,7 @@ impl Stored {
             None => std::fs::remove_file(path).or_else(|error| if error.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(error) }),
         };
         if let Err(error) = result {
-            eprintln!("voiceprint not saved: {error}");
+            tracing::warn!("voiceprint not saved: {error}");
         }
     }
 }

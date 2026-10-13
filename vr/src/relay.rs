@@ -261,7 +261,7 @@ impl Relay {
                     static WRITES: AtomicU64 = AtomicU64::new(0);
                     let temporary = cached.with_extension(format!("{extension}.{}-{}.tmp", std::process::id(), WRITES.fetch_add(1, Ordering::Relaxed)));
                     if let Err(error) = std::fs::write(&temporary, &bytes).and_then(|()| std::fs::rename(&temporary, &cached)) {
-                        eprintln!("{} not cached: {error}", cached.display());
+                        tracing::warn!("{} not cached: {error}", cached.display());
                     }
                     return Ok(bytes);
                 }

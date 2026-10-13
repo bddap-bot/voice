@@ -197,7 +197,7 @@ pub fn draw(display: &Display) -> Canvas {
     let picture = image.and_then(|encoded| match fitted(encoded, [width - 2 * PADDING, inside - text]) {
         Ok(fitted) => Some(fitted),
         Err(error) => {
-            eprintln!("display image not shown: {error}");
+            tracing::warn!("display image not shown: {error}");
             None
         }
     });

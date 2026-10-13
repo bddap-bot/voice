@@ -145,7 +145,7 @@ fn frames(gpu: Rc<Gpu>, bytes: &[u8], options: &Options, budget: Budget) -> Resu
     let mean = measured.iter().sum::<f64>() / measured.len() as f64;
     let worst = measured.iter().copied().fold(0.0, f64::max);
     let first = times.iter().take(45).map(Duration::as_secs_f64).fold(0.0, f64::max) * 1e3;
-    eprintln!("object gone: measured; {}", object.cost());
+    tracing::info!("object gone: measured; {}", object.cost());
     println!("render thread: {} frames past the first 45, mean {mean:.2} ms, max {worst:.2} ms (budget {} ms mean, {} ms any frame); first 45 max {first:.2} ms", measured.len(), BUDGET.mean.as_millis(), BUDGET.frame.as_millis());
     Ok(())
 }

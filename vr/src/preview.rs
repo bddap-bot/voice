@@ -22,7 +22,7 @@ pub fn spawn(relay: Relay, avatars: Vec<Avatar>) -> mpsc::Receiver<(usize, Vec<u
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
         if let Err(error) = render_all(relay, &avatars, &sender) {
-            eprintln!("previews: {error}");
+            tracing::warn!("previews: {error}");
         }
     });
     receiver
@@ -38,10 +38,10 @@ fn render_all(mut relay: Relay, avatars: &[Avatar], sender: &mpsc::Sender<(usize
                     return Ok(());
                 }
             }
-            Err(error) => eprintln!("preview {}: {error}", avatar.id),
+            Err(error) => tracing::warn!("preview {}: {error}", avatar.id),
         }
     }
-    eprintln!("{} previews rendered in {:.1} s", avatars.len(), started.elapsed().as_secs_f64());
+    tracing::info!("{} previews rendered in {:.1} s", avatars.len(), started.elapsed().as_secs_f64());
     Ok(())
 }
 

@@ -167,6 +167,7 @@ impl Runtime {
 impl Drop for Runtime {
     fn drop(&mut self) {
         unsafe { sys::VR_ShutdownInternal() };
+        eprintln!("SteamVR session closed");
     }
 }
 

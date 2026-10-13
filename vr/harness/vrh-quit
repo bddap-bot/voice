@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Usage: vrh-quit HOST CREDENTIALS [LOG]   inside vrh: start HOST dormant, shut SteamVR down as its Quit does, exit with HOST's status.
+# CREDENTIALS holds config/voice-vr (the token) and state/voice-vr (gesture.json and the assets cache).
+set -uo pipefail
+host=$1; credentials=$2; log=${3:-$VRH_STATE/logs/vrh-quit.log}
+mkdir -p "$HOME/.config" "$HOME/.local/state"
+cp -r "$credentials/config/voice-vr" "$HOME/.config/"
+cp -r "$credentials/state/voice-vr" "$HOME/.local/state/"
+"$host" >"$log" 2>&1 &
+pid=$!
+for _ in $(seq 600); do
+  grep -q '^dormant' "$log" && break
+  kill -0 "$pid" 2>/dev/null || break
+  sleep 0.5
+done
+if ! grep -q '^dormant' "$log"; then
+  echo "vrh-quit: the host never went dormant; see $log" >&2
+  kill "$pid" 2>/dev/null; wait "$pid"
+  exit 2
+fi
+sleep "${VRH_QUIT_SETTLE:-3}"
+steam-run "$VRH/steam-runtime/run.sh" "$VRH/SteamVR/bin/vrenv.sh" "$VRH/SteamVR/bin/linux64/vrstartup" -shutdown >>"$VRH_STATE/logs/vrstartup.out" 2>&1 &
+( sleep 60; kill -KILL "$pid" 2>/dev/null ) &
+watchdog=$!
+wait "$pid"; status=$?
+kill "$watchdog" 2>/dev/null
+echo "vrh-quit: the host exited $status after SteamVR quit"
+exit "$status"

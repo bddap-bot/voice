@@ -19,6 +19,7 @@ pkgs.runCommand "vrh" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
   substitute ${./vrh} $out/libexec/vrh/vrh --subst-var-by simulatedController ${simulatedController} --subst-var-by share $out/share/vrh
   install -m755 ${./vrh-inner} $out/libexec/vrh/vrh-inner
   install -m755 ${./vrh-capture} $out/libexec/vrh/vrh-capture
+  install -m755 ${./vrh-quit} $out/libexec/vrh/vrh-quit
   chmod 755 $out/libexec/vrh/vrh
   patchShebangs $out/libexec/vrh
   makeWrapper $out/libexec/vrh/vrh $out/bin/vrh \

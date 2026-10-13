@@ -19,6 +19,8 @@ pub struct Gpu {
     pub family: u32,
     pub pool: vk::CommandPool,
     allocations: std::cell::Cell<usize>,
+    /// SteamVR's client creates Vulkan objects of its own on this device and destroys them when its session closes, so the session lives and dies inside the device.
+    pub vr: Option<Runtime>,
 }
 
 pub fn vk_error(context: &str) -> impl Fn(vk::Result) -> String + '_ {
@@ -26,7 +28,8 @@ pub fn vk_error(context: &str) -> impl Fn(vk::Result) -> String + '_ {
 }
 
 impl Gpu {
-    pub fn new(runtime: Option<&Runtime>) -> Result<Gpu, String> {
+    pub fn new(vr: Option<Runtime>) -> Result<Gpu, String> {
+        let runtime = vr.as_ref();
         let entry = unsafe { ash::Entry::load() }.map_err(|error| format!("Vulkan loader: {error}"))?;
         let instance_extensions = runtime.map(Runtime::instance_extensions).unwrap_or_default();
         let instance_names: Vec<_> = instance_extensions.iter().map(|name| name.as_ptr()).collect();
@@ -46,7 +49,7 @@ impl Gpu {
         let device = unsafe { instance.create_device(physical, &vk::DeviceCreateInfo::default().queue_create_infos(&queues).enabled_extension_names(&device_names), None) }.map_err(vk_error("vkCreateDevice"))?;
         let queue = unsafe { device.get_device_queue(family, 0) };
         let pool = unsafe { device.create_command_pool(&vk::CommandPoolCreateInfo::default().queue_family_index(family).flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER), None) }.map_err(vk_error("vkCreateCommandPool"))?;
-        Ok(Gpu { _entry: entry, instance, physical, device, queue, family, pool, allocations: Default::default() })
+        Ok(Gpu { _entry: entry, instance, physical, device, queue, family, pool, allocations: Default::default(), vr })
     }
 
     pub fn memory_type(&self, bits: u32, flags: vk::MemoryPropertyFlags) -> Result<u32, String> {
@@ -143,6 +146,7 @@ impl Drop for Gpu {
     fn drop(&mut self) {
         unsafe {
             let _ = self.device.device_wait_idle();
+            drop(self.vr.take());
             self.device.destroy_command_pool(self.pool, None);
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);

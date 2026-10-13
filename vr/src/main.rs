@@ -154,10 +154,11 @@ fn act(animator: &mut Animator, action: &action::Action) {
     eprintln!("action {:?} {} {:.3} from {:?}: {outcome}", action.kind, action.name, action.score, action.sentence);
 }
 
-fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(), String> {
+fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), String> {
     let gesture_file = state.join("gesture.json");
     let mut recognizer = Recognizer::new(Templates::parse(&std::fs::read(&gesture_file).map_err(|error| format!("{}: {error}", gesture_file.display()))?)?);
     let gpu = Rc::new(vulkan::Gpu::new(Some(runtime))?);
+    let runtime = gpu.vr.as_ref().expect("the overlay's device was made for SteamVR");
     eprintln!("display {:.0} px/rad, windows sized for {:.0} px/rad at {} m: puppet {} texels per eye, object {}", runtime.display_density(), render::DISPLAY_DENSITY, render::NEAREST, eye_texels(QUAD), eye_texels(object::QUAD));
     let mut renderer = Renderer::new(gpu.clone(), [eye_texels(QUAD); 2], HEIGHT / render::PAGE_HEIGHT)?;
     let cache = state.join("assets");
@@ -202,6 +203,7 @@ fn host(runtime: &Runtime, token: &Token, state: &std::path::Path) -> Result<(),
     eprintln!("dormant");
     loop {
         if let Some(Signal::Quit) = runtime.poll() {
+            eprintln!("SteamVR asked the overlay to quit");
             return Ok(());
         }
         for (index, image) in previews.iter().flat_map(|previews: &std::sync::mpsc::Receiver<_>| previews.try_iter()) {
@@ -506,8 +508,9 @@ fn card(args: &[String]) -> Result<(), String> {
     let seconds: u64 = seconds.parse().map_err(|_| usage)?;
     let markdown = std::fs::read_to_string(file).map_err(|error| format!("{file}: {error}"))?;
     let picture = panel::draw(&hub::Display { markdown: Some(markdown), ..hub::Display::default() });
-    let runtime = Runtime::init()?;
-    let mut image = vulkan::Flat::new(Rc::new(vulkan::Gpu::new(Some(&runtime))?));
+    let gpu = Rc::new(vulkan::Gpu::new(Some(Runtime::init()?))?);
+    let runtime = gpu.vr.as_ref().expect("the card's device was made for SteamVR");
+    let mut image = vulkan::Flat::new(gpu.clone());
     let mut overlay = runtime.create_overlay("voice.card", "Card", panel::WIDTH, false)?;
     overlay.place_on(openvr_sys::k_unTrackedDeviceIndex_Hmd as u32, &Pose { r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], t: [0.0, 0.0, -0.35] });
     overlay.texture(&mut image.upload(&picture)?)?;
@@ -535,7 +538,7 @@ fn run() -> Result<(), String> {
     let token_file = config.join("token");
     let token = std::fs::read_to_string(&token_file).map_err(|error| format!("{}: {error}", token_file.display()))?.trim().to_owned();
     let runtime = Runtime::init()?;
-    host(&runtime, &Token::decode(&token)?, &state)
+    host(runtime, &Token::decode(&token)?, &state)
 }
 
 fn main() {

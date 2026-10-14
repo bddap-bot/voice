@@ -3,6 +3,7 @@
 here=$(dirname "$(readlink -f "$0")")
 export VOICE_VR_SPEAKER_MODEL="${VOICE_VR_SPEAKER_MODEL:-$here/../share/speaker.onnx}"
 export VOICE_VR_ACTION_MODEL="${VOICE_VR_ACTION_MODEL:-$here/../share/action}"
+export VOICE_VR_TURN_MODEL="${VOICE_VR_TURN_MODEL:-$here/../share/turn.onnx}"
 environment=${XDG_CONFIG_HOME:-$HOME/.config}/voice-vr/environment
 if [ -r "$environment" ]; then
   set -a

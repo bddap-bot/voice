@@ -17,6 +17,7 @@ use crate::identity::identity;
 use crate::hub::{self, Command, Tell};
 use crate::relay::{message, split, Relay, Token};
 use crate::speaker::{Ear, Hearing};
+use crate::turn::Tail;
 
 const FRAME: usize = RATE as usize / 50;
 const TICK: Duration = Duration::from_millis(20);
@@ -46,6 +47,7 @@ pub struct Session {
     events: mpsc::Receiver<Event>,
     commands: mpsc::Sender<Command>,
     played: Arc<Mutex<PlaybackBuffer>>,
+    heard: Arc<Mutex<Tail>>,
 }
 
 impl Session {
@@ -55,7 +57,8 @@ impl Session {
         let (event_sender, events) = mpsc::channel();
         let (commands, command_receiver) = mpsc::channel();
         let played = Arc::new(Mutex::new(PlaybackBuffer::default()));
-        let link = Link { token: token.clone(), cache: cache.to_owned(), stop: stop.clone(), muted: muted.clone(), events: event_sender.clone(), commands: command_receiver, played: played.clone(), hearing };
+        let heard = Arc::new(Mutex::new(Tail::default()));
+        let link = Link { token: token.clone(), cache: cache.to_owned(), stop: stop.clone(), muted: muted.clone(), events: event_sender.clone(), commands: command_receiver, played: played.clone(), heard: heard.clone(), hearing };
         std::thread::spawn(move || {
             let reason = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| link.run(wake))) {
                 Ok(Ok(reason) | Err(reason)) => reason,
@@ -63,7 +66,7 @@ impl Session {
             };
             let _ = event_sender.send(Event::Closed(reason));
         });
-        Session { stop, muted, events, commands, played }
+        Session { stop, muted, events, commands, played, heard }
     }
 
     pub fn send(&self, command: Command) {
@@ -90,6 +93,11 @@ impl Session {
     pub fn quiet(&self, duration: Duration) -> bool {
         self.played.lock().unwrap().quiet((duration.as_secs_f64() * RATE as f64) as usize)
     }
+
+    /// The newest microphone audio as Live heard it, for the turn judge.
+    pub fn heard(&self) -> Vec<f32> {
+        self.heard.lock().unwrap().snapshot()
+    }
 }
 
 impl Drop for Session {
@@ -106,6 +114,7 @@ struct Link {
     events: mpsc::Sender<Event>,
     commands: mpsc::Receiver<Command>,
     played: Arc<Mutex<PlaybackBuffer>>,
+    heard: Arc<Mutex<Tail>>,
     hearing: Arc<Mutex<Hearing>>,
 }
 
@@ -336,6 +345,7 @@ impl Link {
                 if *capturing {
                     ear.hear(&mut frame);
                 }
+                self.heard.lock().unwrap().push(&frame);
                 let length = encoder.encode_float(&frame, &mut packet).map_err(|error| format!("opus encode: {error}"))?;
                 rtp_time += FRAME as u64;
                 if connected {

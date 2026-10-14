@@ -2,6 +2,8 @@
 let
   pinned = builtins.match ".*url: '([^']+)',[[:space:]]*sha256: '([0-9a-f]+)'.*" (builtins.readFile ../docs/speaker.js);
   speakerModel = pkgs.fetchurl { url = builtins.elemAt pinned 0; sha256 = builtins.elemAt pinned 1; };
+  # Smart Turn v3.2 (BSD-2-Clause): whether speech so far ends a turn, from the audio alone. The float export: tract's int8 path disagrees with onnxruntime on the quantized one.
+  turnModel = pkgs.fetchurl { url = "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/f766f81d3cfdf7737ac64aad813d91bbfd56bf93/smart-turn-v3.2-gpu.onnx"; sha256 = "ab8dc64b88713f90b571c15b714bd1330e6c883cad8763dacf65c9376dc539be"; };
   # The page's action embedding model at a fixed revision; vr/golden/actions.json holds the page's decisions on it.
   actionModel = let
     id = builtins.elemAt (builtins.match ".*export const EMBEDDING_MODEL = '([^']+)';.*" (builtins.readFile ../docs/puppet-drivers.js)) 0;
@@ -63,7 +65,7 @@ let
     preCheck = ''
       export LD_LIBRARY_PATH=${pkgs.vulkan-loader}/lib
       export VK_ICD_FILENAMES=${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.${pkgs.stdenv.hostPlatform.parsed.cpu.name}.json
-      export VOICE_VR_SPEAKER_MODEL=${speakerModel} VOICE_VR_SPEECH=${speech} VOICE_VR_ACTION_MODEL=${actionModel}
+      export VOICE_VR_SPEAKER_MODEL=${speakerModel} VOICE_VR_SPEECH=${speech} VOICE_VR_ACTION_MODEL=${actionModel} VOICE_VR_TURN_MODEL=${turnModel}
     '';
   });
   native = host pkgs;
@@ -75,6 +77,7 @@ let
     mkdir -p $out/bin $out/share
     install -m755 ${aarch64}/bin/voice-vr $out/bin/voice-vr-host
     install -m644 ${speakerModel} $out/share/speaker.onnx
+    install -m644 ${turnModel} $out/share/turn.onnx
     install -Dm644 -t $out/share/action ${actionModel}/model_quantized.onnx ${actionModel}/tokenizer.json
     patchelf --set-interpreter /lib/ld-linux-aarch64.so.1 --remove-rpath $out/bin/voice-vr-host
     nuke-refs $out/bin/voice-vr-host
@@ -102,7 +105,8 @@ pkgs.runCommand "voice-vr-${native.version}" { nativeBuildInputs = [ pkgs.makeWr
   makeWrapper ${native}/bin/voice-vr $out/bin/voice-vr \
     --prefix LD_LIBRARY_PATH : ${runtimeLibraries} \
     --set-default VOICE_VR_SPEAKER_MODEL ${speakerModel} \
-    --set-default VOICE_VR_ACTION_MODEL ${actionModel}
+    --set-default VOICE_VR_ACTION_MODEL ${actionModel} \
+    --set-default VOICE_VR_TURN_MODEL ${turnModel}
   mkdir -p $out/share/voice-vr
   substitute ${./voice-vr.vrmanifest} $out/share/voice-vr/voice-vr.vrmanifest --subst-var out
 ''

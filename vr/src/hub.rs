@@ -1,4 +1,5 @@
 use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -8,6 +9,10 @@ use crate::conversation::Trace;
 
 /// The page's wait for an ignored turn before the page itself sends it to the hub.
 const UNANSWERED: Duration = Duration::from_secs(3);
+/// The quiet after the last word that releases a hand-off whose speech sounded unfinished: the longest mid-thought pause measured in the user's own sessions was 5.6 s.
+pub const HOLD: Duration = Duration::from_secs(6);
+/// The quiet after renewed speech before a held hand-off is judged again.
+const JUDGE_QUIET: Duration = Duration::from_secs(1);
 /// The page's wait for the model to start speaking a hub reply before the next one goes out.
 const TURN_START: Duration = Duration::from_secs(20);
 /// The page's quiet after a spoken hub reply before the next reply or standing instructions.
@@ -165,6 +170,17 @@ pub struct Hub {
     /// A presented reply's display, shown once the model starts speaking it.
     cued: Option<Display>,
     display: Option<Display>,
+    held: Option<Held>,
+    heard_at: Option<Instant>,
+    ask: Option<u64>,
+}
+
+/// A hand-off waiting for the speech to finish its thought.
+struct Held {
+    id: String,
+    judging: Option<u64>,
+    judge_at: Option<Instant>,
+    until: Instant,
 }
 
 fn has_word(text: &str) -> bool {
@@ -203,10 +219,59 @@ impl Hub {
 
     pub fn delegated(&mut self, id: &str, trace: &mut Trace, now: Instant) {
         self.owned.insert(id.to_owned());
-        self.hand_off(id, trace, now);
+        if trace.ends_request() {
+            self.hand_off(id, trace, now);
+        } else {
+            self.due(id.to_owned(), now);
+        }
+    }
+
+    /// A hand-off is due: it waits for the speech so far to be judged, and a later one joins a hand-off already held, under Live's newest id.
+    fn due(&mut self, id: String, now: Instant) {
+        self.unanswered = None;
+        match &mut self.held {
+            Some(held) => {
+                if self.owned.contains(&id) {
+                    held.id = id;
+                }
+            }
+            None => {
+                self.held = Some(Held { id, judging: None, judge_at: Some(now), until: self.heard_at.unwrap_or(now) + HOLD });
+                self.judge(now);
+            }
+        }
+    }
+
+    fn judge(&mut self, now: Instant) {
+        static ASKS: AtomicU64 = AtomicU64::new(0);
+        let Some(held) = &mut self.held else { return };
+        if held.judging.is_none() && held.judge_at.is_some_and(|at| now >= at) {
+            let number = ASKS.fetch_add(1, Ordering::Relaxed);
+            held.judging = Some(number);
+            held.judge_at = None;
+            self.ask = Some(number);
+        }
+    }
+
+    /// The number of a judgement to make now of the speech Live heard, once.
+    pub fn take_ask(&mut self) -> Option<u64> {
+        self.ask.take()
+    }
+
+    /// A judgement of the held hand-off's speech: a finished thought goes now, an unfinished one waits for more speech or `HOLD` of quiet.
+    pub fn judged(&mut self, number: u64, complete: bool, trace: &mut Trace, now: Instant) {
+        let Some(held) = self.held.as_mut().filter(|held| held.judging == Some(number)) else { return };
+        held.judging = None;
+        if complete {
+            let id = held.id.clone();
+            self.hand_off(&id, trace, now);
+        } else {
+            tracing::info!("holding {}: the thought sounds unfinished", held.id);
+        }
     }
 
     fn hand_off(&mut self, id: &str, trace: &mut Trace, now: Instant) {
+        self.held = None;
         self.unanswered = None;
         self.request_end = None;
         let delegation = trace.delegated(now);
@@ -235,6 +300,12 @@ impl Hub {
         }
         if has_word(delta) {
             self.unanswered = (!self.waiting.is_empty() && !self.sleeping).then_some(now + UNANSWERED);
+            self.heard_at = Some(now);
+            if let Some(held) = &mut self.held {
+                held.judging = None;
+                held.judge_at = Some(now + JUDGE_QUIET);
+                held.until = now + HOLD;
+            }
         }
         self.request_end = (trace.ends_request() && !self.sleeping).then_some(now + UNANSWERED);
     }
@@ -257,6 +328,7 @@ impl Hub {
     /// The sign-off was heard: replies from here on are not spoken and standing instructions wait for good.
     pub fn sleep(&mut self) {
         self.sleeping = true;
+        self.held = None;
     }
 
     /// The session is over: words heard since the last delegation go to the hub as one `ended` frame, which no voice answers.
@@ -412,8 +484,18 @@ impl Hub {
                 self.play(trace, now);
             }
         }
-        if self.unanswered.is_some_and(|at| now >= at) || self.request_end.is_some_and(|at| now >= at) {
-            self.hand_off(&format!("turn_{}", stamp()), trace, now);
+        if self.request_end.is_some_and(|at| now >= at) {
+            let id = self.held.take().map_or_else(|| format!("turn_{}", stamp()), |held| held.id);
+            self.hand_off(&id, trace, now);
+        }
+        if self.unanswered.is_some_and(|at| now >= at) {
+            self.due(format!("turn_{}", stamp()), now);
+        }
+        self.judge(now);
+        if let Some(held) = self.held.as_ref().filter(|held| now >= held.until) {
+            let id = held.id.clone();
+            tracing::info!("handing off {id}: {} s of quiet after an unfinished thought", HOLD.as_secs());
+            self.hand_off(&id, trace, now);
         }
     }
 }
@@ -429,15 +511,29 @@ mod tests {
         now: Instant,
         out: Vec<Command>,
         listens: usize,
+        /// The judge's answer to every ask, or `None` to leave asks in `asks` for the test to answer.
+        verdict: Option<bool>,
+        asks: Vec<u64>,
     }
 
     impl Fixture {
         fn new() -> Fixture {
-            Fixture { hub: Hub::default(), trace: Trace::default(), now: Instant::now(), out: Vec::new(), listens: 0 }
+            Fixture { hub: Hub::default(), trace: Trace::default(), now: Instant::now(), out: Vec::new(), listens: 0, verdict: Some(true), asks: Vec::new() }
         }
         fn collect(&mut self) {
+            if let Some(number) = self.hub.take_ask() {
+                match self.verdict {
+                    Some(complete) => self.hub.judged(number, complete, &mut self.trace, self.now),
+                    None => self.asks.push(number),
+                }
+            }
             self.out.extend(self.hub.drain());
             self.listens += usize::from(self.hub.take_listen());
+        }
+        fn judged(&mut self, complete: bool) {
+            let number = self.asks.pop().expect("an ask to answer");
+            self.hub.judged(number, complete, &mut self.trace, self.now);
+            self.collect();
         }
         fn hear(&mut self, delta: &str) {
             self.trace.heard(delta, self.now);
@@ -815,6 +911,85 @@ mod tests {
         let frames = f.frames("delegate");
         assert!(frames[3]["id"].as_str().unwrap().starts_with("turn_"));
         assert_eq!(frames.iter().map(|frame| frame["text"].as_str().unwrap()).collect::<Vec<_>>(), ["Is the printer", "Is the printer\nbusy right now?", "And the backup", "And the backup\nfrom last night."]);
+    }
+
+    #[test]
+    fn a_finished_thought_goes_once_judged() {
+        let mut f = Fixture { verdict: None, ..Fixture::new() };
+        f.hear("How big is it?");
+        f.delegate("item_size");
+        assert!(f.frames("delegate").is_empty(), "nothing goes before the judgement");
+        f.judged(true);
+        assert_eq!(f.frames("delegate"), [json!({ "id": "item_size", "text": "How big is it?", "context": [], "duration_ms": 0 })]);
+    }
+
+    #[test]
+    fn an_unfinished_thought_waits_and_goes_whole_under_lives_newest_id() {
+        let mut f = Fixture { verdict: None, ..Fixture::new() };
+        f.hear("Okay. So");
+        f.delegate("item_so");
+        f.judged(false);
+        f.wait(Duration::from_secs(4), false);
+        f.hear(" I have an idea.");
+        f.delegate("item_idea");
+        f.wait(JUDGE_QUIET - Duration::from_millis(1), false);
+        assert!(f.asks.is_empty(), "renewed speech is judged after a quiet");
+        f.wait(Duration::from_millis(1), false);
+        f.judged(true);
+        let frames = f.frames("delegate");
+        assert_eq!(frames.len(), 1);
+        assert_eq!((frames[0]["id"].as_str(), frames[0]["text"].as_str()), (Some("item_idea"), Some("Okay. So I have an idea.")));
+    }
+
+    #[test]
+    fn an_unfinished_thought_goes_after_the_hold_of_quiet() {
+        let mut f = Fixture { verdict: None, ..Fixture::new() };
+        f.hear("Just need to figure out");
+        f.delegate("item_figure");
+        f.judged(false);
+        f.wait(HOLD - Duration::from_millis(1), false);
+        assert!(f.frames("delegate").is_empty());
+        f.wait(Duration::from_millis(1), false);
+        assert_eq!(f.frames("delegate")[0]["text"], "Just need to figure out");
+    }
+
+    #[test]
+    fn a_judgement_of_speech_that_went_on_is_dropped() {
+        let mut f = Fixture { verdict: None, ..Fixture::new() };
+        f.hear("Can you try showing");
+        f.delegate("item_showing");
+        f.hear(" me the doodad?");
+        f.judged(true);
+        assert!(f.frames("delegate").is_empty(), "the verdict was on speech that has since continued");
+        f.wait(JUDGE_QUIET, false);
+        f.judged(true);
+        assert_eq!(f.frames("delegate")[0]["text"], "Can you try showing me the doodad?");
+    }
+
+    #[test]
+    fn a_turn_the_model_ignores_is_held_like_its_own_hand_offs() {
+        let mut f = Fixture::new();
+        f.hear("Grow the trees.");
+        f.delegate("item_trees");
+        f.verdict = None;
+        f.hear(" When I pick it back up");
+        f.wait(Duration::from_secs(3), false);
+        f.judged(false);
+        f.wait(HOLD - Duration::from_secs(3) - Duration::from_millis(1), false);
+        assert_eq!(f.frames("delegate").len(), 1);
+        f.wait(Duration::from_millis(1), false);
+        let frames = f.frames("delegate");
+        assert!(frames[1]["id"].as_str().unwrap().starts_with("turn_"));
+        assert_eq!(frames[1]["text"], "When I pick it back up");
+    }
+
+    #[test]
+    fn the_hand_off_phrase_ends_a_thought_without_a_judgement() {
+        let mut f = Fixture { verdict: None, ..Fixture::new() };
+        f.hear("Is the printer busy? Fly, Corvus.");
+        f.delegate("item_printer");
+        assert!(f.asks.is_empty());
+        assert_eq!(f.frames("delegate")[0]["text"], "Is the printer busy?");
     }
 
     #[test]

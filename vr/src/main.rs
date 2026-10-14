@@ -11,6 +11,7 @@ mod identity;
 mod session;
 mod speaker;
 mod telemetry;
+mod turn;
 mod voice;
 mod gesture;
 mod hub;
@@ -543,6 +544,9 @@ fn run() -> Result<(), String> {
     }
     if args.get(1).is_some_and(|mode| mode == "card") {
         return card(&args[2..]);
+    }
+    if args.get(1).is_some_and(|mode| mode == "turn") {
+        return turn::replay(&args[2..]);
     }
     let config = directory("XDG_CONFIG_HOME", ".config");
     let state = directory("XDG_STATE_HOME", ".local/state");

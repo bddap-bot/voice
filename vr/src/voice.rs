@@ -11,6 +11,7 @@ use crate::identity::{identity, includes_phrase};
 use crate::relay::{Relay, Token};
 use crate::session::{self, Session};
 use crate::speaker::{self, Hearing, Mode, Report, Stored};
+use crate::turn::Judge;
 
 /// The page's wait for quiet after the sign-off.
 const SIGN_OFF_QUIET: Duration = Duration::from_secs(2);
@@ -40,6 +41,7 @@ pub struct Voice {
     learning: Option<f32>,
     hearing: Arc<Mutex<Hearing>>,
     actions: Actions,
+    judge: Judge,
 }
 
 /// What the board shows of Voice ID and Learn my voice.
@@ -53,7 +55,7 @@ pub struct VoiceId {
 impl Voice {
     pub fn new(token: Token, cache: PathBuf, voiceprint: PathBuf) -> Voice {
         let stored = Stored::read(&voiceprint);
-        let mut voice = Voice { token, cache, trace: Trace::default(), muted: false, awake: None, voiceprint, stored, learning: None, hearing: Arc::default(), actions: Actions::start() };
+        let mut voice = Voice { token, cache, trace: Trace::default(), muted: false, awake: None, voiceprint, stored, learning: None, hearing: Arc::default(), actions: Actions::start(), judge: Judge::start() };
         voice.refilter();
         voice
     }
@@ -203,7 +205,11 @@ impl Voice {
     /// Takes the session's news into the trace, and goes dormant on the sign-off, inactivity, or a session ended from the other side.
     pub fn step(&mut self) {
         self.take_reports();
+        let verdicts = self.judge.verdicts();
         let Some(awake) = &mut self.awake else { return };
+        for (number, complete) in verdicts {
+            awake.hub.judged(number, complete, &mut self.trace, Instant::now());
+        }
         let sign_off = &identity().sign_off;
         let mut ended = None;
         for event in awake.session.events() {
@@ -250,6 +256,9 @@ impl Voice {
             awake.session.listen_for_quiet();
         }
         awake.hub.step(&mut self.trace, Instant::now(), awake.session.quiet(hub::TURN_QUIET));
+        if let Some(number) = awake.hub.take_ask() {
+            self.judge.ask(number, awake.session.heard());
+        }
         for command in awake.hub.drain() {
             awake.session.send(command);
         }

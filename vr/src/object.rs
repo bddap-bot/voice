@@ -317,9 +317,12 @@ impl Handling {
     }
 }
 
-/// Where an object's centre sits in the frame of a puppet `size` times hand size: right of the figure as it faces you, about chest high.
-pub fn beside(size: f32) -> Vec3 {
-    [SIZE / 2.0 + 0.1 * size, -crate::FLOOR * size, 0.0]
+/// The space between neighbouring places.
+const GAP: f32 = 0.05;
+
+/// Where the centre of the object at `place` sits in the frame of a puppet `size` times hand size: right of the figure as it faces you, about chest high, place 0 nearest.
+pub fn beside(size: f32, place: usize) -> Vec3 {
+    [SIZE / 2.0 + 0.1 * size + place as f32 * (SIZE + GAP), -crate::FLOOR * size, 0.0]
 }
 
 /// Where the puppet stands and the viewer and the right controller's tip are this frame, in the standing universe.
@@ -333,8 +336,8 @@ pub struct View {
 
 impl View {
     /// Fixed to the puppet's frame alone, so walking around a set-down puppet shows the object's other sides.
-    pub fn center(&self) -> Vec3 {
-        self.stand.apply(beside(self.size))
+    pub fn center(&self, place: usize) -> Vec3 {
+        self.stand.apply(beside(self.size, place))
     }
 }
 
@@ -365,6 +368,8 @@ fn transformed(model: &Model, transforms: &[Transform]) -> Vec<Mat4> {
 pub struct Object<S: Surface> {
     /// First, so the overlay closes before the textures it shows are freed.
     surface: S,
+    /// Which place beside the puppet it stands at.
+    place: usize,
     drawn: Option<Drawn>,
     renderer: Renderer,
     runner: Runner,
@@ -385,7 +390,7 @@ impl<S: Surface> Object<S> {
     }
 
     fn loading(surface: S, gpu: Rc<Gpu>, bytes: Vec<u8>, load: Load, budget: Budget, now: Instant) -> Result<Object<S>, String> {
-        Ok(Object { drawn: None, renderer: Renderer::new(gpu, [eye_texels(QUAD); 2], 1.0)?, runner: Runner::start(bytes, load)?, surface, handling: Handling::new(now), data: None, budget, cost: 0.0, worst: 0.0, frames: 0 })
+        Ok(Object { place: 0, drawn: None, renderer: Renderer::new(gpu, [eye_texels(QUAD); 2], 1.0)?, runner: Runner::start(bytes, load)?, surface, handling: Handling::new(now), data: None, budget, cost: 0.0, worst: 0.0, frames: 0 })
     }
 
     pub fn hide(&mut self) {
@@ -404,6 +409,10 @@ impl<S: Surface> Object<S> {
             handling.clock = seconds;
             handling.slide = 0.0;
         }
+    }
+
+    fn has(&self, name: &str) -> bool {
+        self.drawn.as_ref().is_some_and(|drawn| drawn.model.named(name).is_some())
     }
 
     /// Where the node named `name` is now, in the standing universe.
@@ -432,7 +441,7 @@ impl<S: Surface> Object<S> {
             self.drawn = Some(Drawn { appearance, model: geometry.model, skinned: geometry.skinned, worlds, fit: geometry.fit, radius: geometry.radius, duration: geometry.duration, parts: geometry.parts, anchors: geometry.anchors, placed: Mat4::IDENTITY });
         }
         let reach = self.drawn.as_ref().map_or(0.0, |drawn| drawn.radius).max(MIN_REACH);
-        let center = view.center();
+        let center = view.center(self.place);
         if let Some(reason) = self.handling.touch(now, reach, view.tip.map(|tip| (sub(tip, center), tip))) {
             return Err(reason.into());
         }
@@ -501,69 +510,102 @@ impl<S: Surface> Object<S> {
     }
 }
 
-/// The one object shown at a time: every way an object leaves goes through `clear`.
-pub struct Slot<S: Surface> {
-    object: Option<Object<S>>,
+/// The most objects shown at once. Each object's render waits on its own GPU work on the render thread: on the headset the puppet's frame measured 3.5 ms and a shown object 2.85 ms a frame, so three keep the overlay's update at or above 72 Hz, half the display's 144 Hz, and a fourth would not.
+pub const MOST: usize = 3;
+
+/// The objects shown, each at its own place beside the puppet until it leaves; every way one leaves goes through `remove` or `clear`.
+pub struct Shelf<S: Surface> {
+    /// Oldest first.
+    objects: Vec<Object<S>>,
 }
 
-impl<S: Surface> Default for Slot<S> {
-    fn default() -> Slot<S> {
-        Slot { object: None }
+impl<S: Surface> Default for Shelf<S> {
+    fn default() -> Shelf<S> {
+        Shelf { objects: Vec::new() }
     }
 }
 
-impl<S: Surface> Slot<S> {
+impl<S: Surface> Shelf<S> {
+    fn remove(&mut self, index: usize, why: &str) {
+        let object = self.objects.remove(index);
+        tracing::info!(place = object.place + 1, "object gone: {why}; {}", object.cost());
+    }
+
     pub fn clear(&mut self, why: &str) {
-        if let Some(object) = self.object.take() {
-            tracing::info!("object gone: {why}; {}", object.cost());
+        while !self.objects.is_empty() {
+            self.remove(0, why);
         }
     }
 
-    /// Clears the shown object before spawning, so the new one can take its overlay key.
-    pub fn show(&mut self, spawn: impl FnOnce() -> Result<Object<S>, String>) {
-        self.clear("replaced");
-        match spawn() {
-            Ok(object) => {
-                tracing::info!("object spawned");
-                self.object = Some(object);
+    /// Spawns at the nearest free place, given to `spawn` so its overlay key is that place's; with every place taken the oldest goes first.
+    pub fn show(&mut self, spawn: impl FnOnce(usize) -> Result<Object<S>, String>) {
+        if self.objects.len() >= MOST {
+            self.remove(0, "replaced");
+        }
+        let place = (0..).find(|place| self.objects.iter().all(|object| object.place != *place)).unwrap();
+        match spawn(place) {
+            Ok(mut object) => {
+                tracing::info!(place = place + 1, "object spawned");
+                object.place = place;
+                self.objects.push(object);
             }
             Err(error) => tracing::warn!("object not shown: {error}"),
         }
     }
 
     pub fn hide(&mut self) {
-        if let Some(object) = &mut self.object {
+        for object in &mut self.objects {
             object.hide();
         }
     }
 
-    pub fn locate(&self, name: &str) -> Option<Vec3> {
-        self.object.as_ref()?.locate(name)
+    /// The object a pointed name means and the node's name in it: `<place>:<node>` names the object at that place, counted from the puppet outward from 1; a bare name means the newest object that has it.
+    fn named<'a>(&self, name: &'a str) -> Option<(usize, &'a str)> {
+        let placed = name.split_once(':').and_then(|(place, node)| {
+            let place = place.parse::<usize>().ok()?;
+            Some((self.objects.iter().position(|object| object.place + 1 == place)?, node))
+        });
+        placed.or_else(|| Some((self.objects.iter().rposition(|object| object.has(name))?, name)))
     }
 
-    pub fn feed(&mut self, data: Vec<u8>) {
-        match &mut self.object {
+    pub fn locate(&self, name: &str) -> Option<Vec3> {
+        let (index, node) = self.named(name)?;
+        self.objects[index].locate(node)
+    }
+
+    /// What a reply's live data or hold reaches: the object its pointing names, else the newest.
+    fn addressed(&mut self, point: Option<&str>) -> Option<&mut Object<S>> {
+        let index = point.and_then(|name| self.named(name)).map_or(self.objects.len().checked_sub(1)?, |(index, _)| index);
+        self.objects.get_mut(index)
+    }
+
+    pub fn feed(&mut self, data: Vec<u8>, point: Option<&str>) {
+        match self.addressed(point) {
             Some(object) => object.feed(data),
             None => tracing::info!("live data with no object shown"),
         }
     }
 
-    pub fn hold(&mut self, hold: Hold) {
-        match &mut self.object {
+    pub fn hold(&mut self, hold: Hold, point: Option<&str>) {
+        match self.addressed(point) {
             Some(object) => object.hold(hold),
             None => tracing::info!("a hold with no object shown"),
         }
     }
 
     pub fn step(&mut self, now: Instant, view: &View) {
-        if let Some(Err(why)) = self.object.as_mut().map(|object| object.step(now, view)) {
-            self.clear(&why);
+        let mut index = 0;
+        while index < self.objects.len() {
+            match self.objects[index].step(now, view) {
+                Ok(()) => index += 1,
+                Err(why) => self.remove(index, &why),
+            }
         }
     }
 
     #[cfg(test)]
     fn shown(&self) -> bool {
-        self.object.is_some()
+        !self.objects.is_empty()
     }
 }
 
@@ -683,7 +725,7 @@ pub mod tests {
 
     fn view(tip: Option<Vec3>) -> View {
         let eye = |x| Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [x, 0.0, 0.0]);
-        let stand = Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], sub([0.0, 1.2, -0.5], beside(1.0)));
+        let stand = Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], sub([0.0, 1.2, -0.5], beside(1.0, 0)));
         View { stand, size: 1.0, head: Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.3, 0.0]), eyes: [eye(-0.032), eye(0.032)], tip }
     }
 
@@ -732,12 +774,12 @@ pub mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let now = Instant::now();
         for (bytes, expected) in [(b"not a model".to_vec(), "glTF"), (Builder::new(serde_json::json!({})).glb(), "no mesh")] {
-            let mut slot = Slot::default();
-            slot.show(|| Object::spawn(Counted::new(), gpu.clone(), bytes, LOOSE, now));
+            let mut shelf = Shelf::default();
+            shelf.show(|_| Object::spawn(Counted::new(), gpu.clone(), bytes, LOOSE, now));
             let deadline = Instant::now() + Duration::from_secs(10);
             let error = loop {
                 assert!(Instant::now() < deadline);
-                if let Err(error) = slot.object.as_mut().unwrap().step(now, &view(None)) {
+                if let Err(error) = shelf.objects.last_mut().unwrap().step(now, &view(None)) {
                     break error;
                 }
             };
@@ -753,7 +795,7 @@ pub mod tests {
         drawn(&mut object, born);
         object.step(born + Duration::from_secs(5), &view(None)).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
-        let center = view(None).center();
+        let center = view(None).center(0);
         let mut moved = Vec::new();
         while moved.len() < 2 {
             assert!(Instant::now() < deadline, "the program never published");
@@ -774,7 +816,7 @@ pub mod tests {
         let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None, true), LOOSE, born).unwrap();
         drawn(&mut object, born);
         let radius = object.drawn.as_ref().unwrap().radius;
-        let center = view(None).center();
+        let center = view(None).center(0);
         let at = |dy: f32| view(Some([center[0] + 0.3 * radius, center[1] + dy, center[2]]));
         let frame = Duration::from_millis(11);
         let mut now = born;
@@ -808,46 +850,46 @@ pub mod tests {
     fn a_hold_stills_the_timeline_at_its_time_the_tip_still_scrubs_it_and_run_lets_it_go_on() {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
-        let mut slot = Slot::default();
-        slot.show(|| Object::spawn(Counted::new(), gpu, scene(0.2, Some((crate::program::tests::FOLLOW, 4.0))), LOOSE, born));
-        drawn(slot.object.as_mut().unwrap(), born);
+        let mut shelf = Shelf::default();
+        shelf.show(|_| Object::spawn(Counted::new(), gpu, scene(0.2, Some((crate::program::tests::FOLLOW, 4.0))), LOOSE, born));
+        drawn(shelf.objects.last_mut().unwrap(), born);
         let frame = Duration::from_millis(11);
         let mut now = born;
         for _ in 0..30 {
-            slot.step(now, &view(None));
+            shelf.step(now, &view(None));
             now += frame;
         }
-        slot.hold(Hold::At(1.5));
-        let clock = |slot: &Slot<Counted>| slot.object.as_ref().unwrap().handling.clock;
+        shelf.hold(Hold::At(1.5), None);
+        let clock = |shelf: &Shelf<Counted>| shelf.objects.last().unwrap().handling.clock;
         for _ in 0..90 {
-            slot.step(now, &view(None));
+            shelf.step(now, &view(None));
             now += frame;
         }
-        assert_eq!(clock(&slot), 1.5, "a second untouched leaves a held timeline where the hub put it");
+        assert_eq!(clock(&shelf), 1.5, "a second untouched leaves a held timeline where the hub put it");
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             assert!(Instant::now() < deadline, "the program never saw the held time");
-            slot.step(now, &view(None));
-            if slot.object.as_ref().unwrap().drawn.as_ref().is_some_and(|drawn| (drawn.worlds[0].w_axis.x - 1.5).abs() < 1e-5) {
+            shelf.step(now, &view(None));
+            if shelf.objects.last().unwrap().drawn.as_ref().is_some_and(|drawn| (drawn.worlds[0].w_axis.x - 1.5).abs() < 1e-5) {
                 break;
             }
             std::thread::sleep(TICK);
         }
-        let center = view(None).center();
-        let radius = slot.object.as_ref().unwrap().drawn.as_ref().unwrap().radius;
+        let center = view(None).center(0);
+        let radius = shelf.objects.last().unwrap().drawn.as_ref().unwrap().radius;
         for step in 0..=10 {
-            slot.step(now, &view(Some([center[0] + 0.3 * radius, center[1] + step as f32 * radius / 20.0, center[2]])));
+            shelf.step(now, &view(Some([center[0] + 0.3 * radius, center[1] + step as f32 * radius / 20.0, center[2]])));
             now += frame;
         }
-        slot.step(now, &view(None));
+        shelf.step(now, &view(None));
         now += frame;
-        assert!(slot.object.as_ref().unwrap().handling.slide > 0.0, "the tip still scrubs a held timeline");
-        slot.hold(Hold::Run);
+        assert!(shelf.objects.last().unwrap().handling.slide > 0.0, "the tip still scrubs a held timeline");
+        shelf.hold(Hold::Run, None);
         for _ in 0..10 {
-            slot.step(now, &view(None));
+            shelf.step(now, &view(None));
             now += frame;
         }
-        assert!((clock(&slot) - 1.5 - 10.0 * frame.as_secs_f32()).abs() < 1e-4, "run lets it go on from where it was held: {}", clock(&slot));
+        assert!((clock(&shelf) - 1.5 - 10.0 * frame.as_secs_f32()).abs() < 1e-4, "run lets it go on from where it was held: {}", clock(&shelf));
     }
 
     #[test]
@@ -859,7 +901,7 @@ pub mod tests {
         drawn(&mut object, born);
         let mut now = born;
         for _ in 0..60 {
-            object.step(now, &view(Some(view(None).center()))).unwrap();
+            object.step(now, &view(Some(view(None).center(0)))).unwrap();
             now += Duration::from_millis(11);
         }
         let drawn = object.drawn.as_ref().unwrap();
@@ -874,7 +916,7 @@ pub mod tests {
         let nodes = serde_json::json!([{ "mesh": 0, "name": "left", "translation": [-0.06, 0.0, 0.0] }, { "mesh": 0, "name": "right", "translation": [0.06, 0.0, 0.0] }]);
         let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None, true), LOOSE, born).unwrap();
         drawn(&mut object, born);
-        let center = V3::from(view(None).center());
+        let center = V3::from(view(None).center(0));
         let right = V3::from(object.locate("right").unwrap());
         assert!(right.abs_diff_eq(center + V3::new(0.06, 0.0, 0.0), 1e-5), "the right cube's centre: {right}");
         assert_eq!(object.locate("missing"), None);
@@ -883,6 +925,45 @@ pub mod tests {
         object.step(born, &view(None)).unwrap();
         let moved = V3::from(object.locate("right").unwrap());
         assert!(moved.abs_diff_eq(center + V3::new(0.0, 0.0, -0.12), 1e-5), "spread to 12 cm and turned a quarter: {moved}");
+    }
+
+    #[test]
+    fn several_objects_stand_at_their_own_places_point_by_place_and_one_flicked_away_leaves_the_rest_in_place() {
+        let gpu = Rc::new(Gpu::new(None).unwrap());
+        let now = Instant::now();
+        let named = |name: &str| built(0.05, serde_json::json!([{ "mesh": 0, "name": name }]), None, false);
+        let mut shelf: Shelf<Counted> = Shelf::default();
+        for name in ["gear", "gear", "wheel"] {
+            shelf.show(|_| Object::spawn(Counted::new(), gpu.clone(), named(name), LOOSE, now));
+            drawn(shelf.objects.last_mut().unwrap(), now);
+        }
+        let at = |place: usize| V3::from(view(None).center(place));
+        for (place, object) in shelf.objects.iter().enumerate() {
+            assert_eq!(object.place, place);
+        }
+        assert!(at(1).distance(at(0)) >= SIZE && at(2).distance(at(1)) >= SIZE, "neighbouring places hold the largest objects apart");
+        assert!(V3::from(shelf.locate("gear").unwrap()).abs_diff_eq(at(1), 1e-5), "a bare name means the newest object that has it");
+        assert!(V3::from(shelf.locate("1:gear").unwrap()).abs_diff_eq(at(0), 1e-5), "a place names the object there");
+        assert!(V3::from(shelf.locate("3:wheel").unwrap()).abs_diff_eq(at(2), 1e-5));
+        assert_eq!(shelf.locate("3:gear"), None);
+        assert_eq!(shelf.locate("4:wheel"), None, "an empty place names no object");
+        shelf.hold(Hold::At(2.0), Some("1:gear"));
+        assert!(shelf.objects[0].handling.held && !shelf.objects[2].handling.held, "a hold reaches the object its pointing names");
+        shelf.hold(Hold::At(2.0), None);
+        assert!(shelf.objects[2].handling.held, "and without pointing, the newest");
+        let tip = |offset: f32| view(Some((at(1) + V3::new(offset, 0.0, 0.0)).into()));
+        shelf.step(now, &tip(0.0));
+        shelf.step(now + Duration::from_millis(11), &tip(0.03));
+        assert_eq!(shelf.objects.iter().map(|object| object.place).collect::<Vec<_>>(), [0, 2], "a flick throws away only the object it hits");
+        assert!(V3::from(shelf.locate("wheel").unwrap()).abs_diff_eq(at(2), 1e-5), "the rest stay where they were");
+        shelf.show(|place| {
+            assert_eq!(place, 1, "a new object takes the nearest free place");
+            Object::spawn(Counted::new(), gpu.clone(), named("wheel"), LOOSE, now)
+        });
+        drawn(shelf.objects.last_mut().unwrap(), now);
+        assert!(V3::from(shelf.locate("wheel").unwrap()).abs_diff_eq(at(1), 1e-5));
+        shelf.clear("cleared by the hub");
+        assert!(!shelf.shown());
     }
 
     #[test]
@@ -899,7 +980,7 @@ pub mod tests {
         for (set_down, size) in [(Anchor::Stuck(held), 1.0), (Anchor::Grounded(floor), 5.0)] {
             let mut anchor = set_down;
             let pose = anchor.stand(born, &hand(0.0, [0.0; 3]), [0.0; 3]);
-            let place = pose.apply(beside(size));
+            let place = pose.apply(beside(size, 0));
             let mut placed = Vec::new();
             for step in 0..8 {
                 let around = step as f32 * std::f32::consts::TAU / 8.0;
@@ -921,14 +1002,14 @@ pub mod tests {
     fn live_data_fed_to_a_shown_object_moves_it_from_the_program_thread() {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
-        let mut slot = Slot::default();
-        slot.show(|| Object::spawn(Counted::new(), gpu, scene(0.2, Some((crate::program::tests::GAUGE, 0.0))), LOOSE, born));
-        slot.feed(b"\x05".to_vec());
+        let mut shelf = Shelf::default();
+        shelf.show(|_| Object::spawn(Counted::new(), gpu, scene(0.2, Some((crate::program::tests::GAUGE, 0.0))), LOOSE, born));
+        shelf.feed(b"\x05".to_vec(), None);
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             assert!(Instant::now() < deadline, "the data never reached the drawing");
-            slot.step(born, &view(None));
-            if slot.object.as_ref().unwrap().drawn.as_ref().is_some_and(|drawn| drawn.worlds[0].w_axis.x == 5.0) {
+            shelf.step(born, &view(None));
+            if shelf.objects.last().unwrap().drawn.as_ref().is_some_and(|drawn| drawn.worlds[0].w_axis.x == 5.0) {
                 break;
             }
             std::thread::sleep(TICK);
@@ -1122,20 +1203,22 @@ pub mod tests {
         };
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let now = Instant::now();
-        let mut slot = Slot::default();
-        let mut shown = |slot: &mut Slot<Watched>| {
+        let mut shelf = Shelf::default();
+        let shown = |shelf: &mut Shelf<Watched>| {
             let gone = Arc::new(AtomicBool::new(false));
-            slot.show(|| Object::loading(Watched(gone.clone()), gpu.clone(), cube(0.2), gated, LOOSE, now));
-            (gone, Arc::downgrade(&slot.object.as_ref().unwrap().runner.exchange))
+            shelf.show(|_| Object::loading(Watched(gone.clone()), gpu.clone(), cube(0.2), gated, LOOSE, now));
+            (gone, Arc::downgrade(&shelf.objects.last().unwrap().runner.exchange))
         };
-        let (first, first_exchange) = shown(&mut slot);
-        slot.step(now, &view(None));
-        let (second, second_exchange) = shown(&mut slot);
-        assert!(first.load(Ordering::SeqCst), "the replaced object left in the frame that replaced it");
+        let (first, first_exchange) = shown(&mut shelf);
+        shelf.step(now, &view(None));
+        let beside: Vec<_> = (1..MOST).map(|_| shown(&mut shelf)).collect();
+        assert!(!first.load(Ordering::SeqCst), "a new object joins the shown ones while there is a free place");
+        let (second, second_exchange) = shown(&mut shelf);
+        assert!(first.load(Ordering::SeqCst), "with every place taken, the oldest object left in the frame that replaced it");
         assert!(!second.load(Ordering::SeqCst));
-        slot.step(now, &view(None));
-        slot.clear("session ended");
-        assert!(second.load(Ordering::SeqCst), "the cleared object left in the frame that cleared it");
+        shelf.step(now, &view(None));
+        shelf.clear("session ended");
+        assert!(second.load(Ordering::SeqCst) && beside.iter().all(|(gone, _)| gone.load(Ordering::SeqCst)), "the cleared objects left in the frame that cleared them");
         assert!(first_exchange.strong_count() > 0 && second_exchange.strong_count() > 0, "both loads are still held, so neither leaving waited for its thread");
         *GATE.0.lock().unwrap() = true;
         GATE.1.notify_all();
@@ -1197,15 +1280,15 @@ pub mod tests {
         }
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let bytes = [cube(0.2), scene(0.2, Some((crate::program::tests::FOLLOW, 0.0)))];
-        let mut slot: Slot<Counted> = Slot::default();
+        let mut shelf: Shelf<Counted> = Shelf::default();
         let start = Instant::now();
-        let spawn = |slot: &mut Slot<Counted>, now: Instant| {
-            slot.show(|| Object::spawn(Counted::new(), gpu.clone(), bytes[now.duration_since(start).as_secs() as usize % 5 % 2].clone(), LOOSE, now));
-            drawn(slot.object.as_mut().unwrap(), now);
+        let spawn = |shelf: &mut Shelf<Counted>, now: Instant| {
+            shelf.show(|_| Object::spawn(Counted::new(), gpu.clone(), bytes[now.duration_since(start).as_secs() as usize % 5 % 2].clone(), LOOSE, now));
+            drawn(shelf.objects.last_mut().unwrap(), now);
         };
-        spawn(&mut slot, start);
-        let warming = Arc::downgrade(&slot.object.as_ref().unwrap().runner.exchange);
-        slot.clear("warm-up");
+        spawn(&mut shelf, start);
+        let warming = Arc::downgrade(&shelf.objects.last().unwrap().runner.exchange);
+        shelf.clear("warm-up");
         while warming.strong_count() > 0 {
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -1214,23 +1297,27 @@ pub mod tests {
         let mut peak = 0;
         for round in 0..120 {
             let now = start + Duration::from_secs(round);
-            spawn(&mut slot, now);
+            spawn(&mut shelf, now);
             assert_eq!(SURFACES.load(Ordering::SeqCst), 1, "one overlay while shown");
             assert!(gpu.allocations() > allocations && settled(threads_before + 1) <= threads_before + 1);
             match round % 4 {
                 0 => {
-                    slot.step(now, &view(Some([0.0, 1.2, -0.5])));
-                    slot.step(now + Duration::from_millis(11), &view(Some([0.04, 1.2, -0.5])));
+                    shelf.step(now, &view(Some([0.0, 1.2, -0.5])));
+                    shelf.step(now + Duration::from_millis(11), &view(Some([0.04, 1.2, -0.5])));
                 }
-                1 => slot.step(now + LIFETIME, &view(None)),
-                2 => spawn(&mut slot, now),
-                _ => slot.clear("session ended"),
+                1 => shelf.step(now + LIFETIME, &view(None)),
+                2 => {
+                    for _ in 0..MOST {
+                        spawn(&mut shelf, now);
+                    }
+                }
+                _ => shelf.clear("session ended"),
             }
             if round % 4 == 2 {
-                assert_eq!(SURFACES.load(Ordering::SeqCst), 1, "a replaced object leaves exactly one overlay");
-                slot.clear("asleep");
+                assert_eq!(SURFACES.load(Ordering::SeqCst), MOST, "with every place taken a new object replaces the oldest, one overlay a place");
+                shelf.clear("asleep");
             }
-            assert!(!slot.shown(), "round {round}: the object is gone");
+            assert!(!shelf.shown(), "round {round}: the object is gone");
             peak = peak.max(resident());
         }
         let growth = resident().saturating_sub(resident_before);

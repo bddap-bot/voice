@@ -78,6 +78,8 @@ struct Shown {
     point: Option<String>,
     data: Option<String>,
     hold: Option<Value>,
+    #[serde(default)]
+    clear: bool,
     html: Option<serde::de::IgnoredAny>,
 }
 
@@ -88,12 +90,14 @@ pub struct Display {
     pub link: Option<String>,
     /// The encoded PNG, JPEG, GIF or WebP.
     pub image: Option<Vec<u8>>,
-    /// A binary glTF 2 scene; a reply carries an image or an object, never both, so either is the whole trailer.
+    /// A binary glTF 2 scene, shown beside those already shown; a reply carries an image or an object, never both, so either is the whole trailer.
     pub object: Option<Vec<u8>>,
-    /// The name of a node in the shown object for the puppet to point at while it speaks.
+    /// A node in a shown object for the puppet to point at while it speaks: `<node>`, or `<place>:<node>` to choose among objects that share a name.
     pub point: Option<String>,
     pub data: Option<String>,
     pub hold: Option<Hold>,
+    /// Removes every shown object first.
+    pub clear: bool,
     /// An HTML document, which only the page can run.
     pub html: bool,
 }
@@ -280,7 +284,7 @@ impl Hub {
                 Display { html: true, ..Display::default() }
             } else {
                 let trailer = |carried: bool| (carried && !image.is_empty()).then(|| image.to_vec());
-                Display { markdown: shown.markdown, link: shown.link, image: trailer(shown.image.is_some()), object: trailer(shown.object.is_some() && shown.image.is_none()), point: shown.point, data: shown.data, hold: shown.hold.as_ref().and_then(Hold::read), html: false }
+                Display { markdown: shown.markdown, link: shown.link, image: trailer(shown.image.is_some()), object: trailer(shown.object.is_some() && shown.image.is_none()), point: shown.point, data: shown.data, hold: shown.hold.as_ref().and_then(Hold::read), clear: shown.clear, html: false }
             });
         }
         let unspoken = (!reply.commentary.is_empty() && self.sleeping).then_some(ASLEEP);
@@ -578,6 +582,11 @@ mod tests {
             assert_eq!(held.hold, read, "hold {hold}");
             assert!(held.addresses_object(), "a display that holds the timeline leaves the panel and the object");
         }
+        f.reply(json!({ "id": "cube", "stamp": "o8", "commentary": ["Gone."], "instructions": [], "display": { "clear": true } }));
+        f.wait(TURN_QUIET, true);
+        f.speak("Gone.");
+        let cleared = f.hub.take_display().unwrap();
+        assert!(cleared.clear && cleared.addresses_object() && !cleared.card(), "a clear leaves the panel");
     }
 
     #[test]

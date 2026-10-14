@@ -2999,3 +2999,17 @@ test('leaving the app keeps the delegation log and whether Live was awake throug
   assert.deepEqual(result.reloadedInView, { log: withoutUsage(result.sleptInView.log), pressed: 'false', restores: [false], offers: 0 });
   assert.deepEqual(result.killedInView, { log: '', pressed: 'false', restores: [], offers: 0 });
 });
+
+test('a start over a relay that died unnoticed redials once and opens the conversation', async () => {
+  const result = await runWakePage(`${startInFlight}
+    const stale = lastOffer.id, offers = count('offer');
+    loseRelay(new Error('read frame failed'));
+    await until(() => globalThis.answerAuth);
+    globalThis.holdAnswer = false;
+    answerAuth(true);
+    await opened();
+    await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true');
+    return { errors: errors(), reconnected: sessionEvents('reconnect').length > 0, offers: count('offer') - offers, fresh: lastOffer.id !== stale };
+  `);
+  assert.deepEqual(result, { errors: [], reconnected: true, offers: 1, fresh: true });
+});

@@ -1150,8 +1150,10 @@ function cancelStarting(reason = '') {
   paintOff();
   setStatus(reason, reason ? 'err' : '');
 }
-async function startConversation() {
+async function startConversation(redialed = false) {
   stopLearning();
+  const reusedRelay = connected;
+  let redial = false;
   const attempt = { cancelled: false, offered: false, cancelSent: false, cancelMic: null, cancelIce: null, cancelData: null, stream: null, gate: null, sender: null, notice: '', outputStream: null, recorders: [], pc: null, channel: null, delegations: new Set() };
   attempt.playback = new LivePlayback((error) => {
     if (attempt.cancelled || (starting !== attempt && conversation?.audioOwner !== attempt)) return;
@@ -1230,8 +1232,12 @@ async function startConversation() {
     recordSession('open', '', attempt.offerId);
   } catch (error) {
     if (attempt.cancelled) throw new Error('conversation start cancelled');
-    recordPageError(error, attempt.offerId ?? null);
-    throw error;
+    // A page frozen in the background misses the relay closing (a backend restart); the tap meets the dead connection.
+    redial = !redialed && reusedRelay && !connected;
+    if (!redial) {
+      recordPageError(error, attempt.offerId ?? null);
+      throw error;
+    }
   } finally {
     if (conversation?.pc !== attempt.pc) {
       cancelOffer(attempt);
@@ -1239,6 +1245,7 @@ async function startConversation() {
     }
     if (starting === attempt) starting = null;
   }
+  if (redial) await startConversation(true);
 }
 function release(attempt) {
   attempt.released = true;

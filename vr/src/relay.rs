@@ -1,7 +1,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -13,7 +13,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_FRAME: usize = 32 << 20;
 const MAX_ASSET: usize = 256 << 20;
-const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+const STOP_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Deserialize)]
 pub struct Token {
@@ -67,10 +67,10 @@ struct Start {
 }
 
 pub struct Relay {
-    runtime: tokio::runtime::Runtime,
+    runtime: Arc<tokio::runtime::Runtime>,
     endpoint: iroh::Endpoint,
     connection: iroh::endpoint::Connection,
-    send: iroh::endpoint::SendStream,
+    send: Option<iroh::endpoint::SendStream>,
     recv: Option<iroh::endpoint::RecvStream>,
     cache: PathBuf,
     broken: bool,
@@ -99,21 +99,28 @@ pub fn message(body: &[u8]) -> String {
 
 impl Relay {
     pub fn connect(token: &Token, cache: &Path) -> Result<Relay, String> {
-        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().map_err(|error| format!("relay runtime: {error}"))?;
-        let (endpoint, connection, send, recv) = runtime.block_on(async {
-            let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0).bind().await.map_err(|error| format!("relay endpoint: {error}"))?;
-            let id: iroh::EndpointId = token.endpoint_id.parse().map_err(|_| "the token's endpoint id is invalid")?;
-            let mut address = iroh::EndpointAddr::new(id);
-            if let Some(url) = &token.relay_url {
-                address = address.with_relay_url(url.parse::<iroh::RelayUrl>().map_err(|_| "the token's relay url is invalid")?);
-            }
-            let connection = endpoint.connect(address, ALPN).await.map_err(|error| format!("relay transport failed: {error}"))?;
-            let (send, recv) = connection.open_bi().await.map_err(|error| format!("relay stream: {error}"))?;
-            Ok::<_, String>((endpoint, connection, send, recv))
-        })?;
+        let id: iroh::EndpointId = token.endpoint_id.parse().map_err(|_| "the token's endpoint id is invalid")?;
+        let mut address = iroh::EndpointAddr::new(id);
+        if let Some(url) = &token.relay_url {
+            address = address.with_relay_url(url.parse::<iroh::RelayUrl>().map_err(|_| "the token's relay url is invalid")?);
+        }
         let cache = cache.join(&token.endpoint_id);
         std::fs::create_dir_all(&cache).map_err(|error| format!("{}: {error}", cache.display()))?;
-        let mut relay = Relay { runtime, endpoint, connection, send, recv: Some(recv), cache, broken: false };
+        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().map_err(|error| format!("relay runtime: {error}"))?;
+        let endpoint = runtime.block_on(iroh::Endpoint::builder(iroh::endpoint::presets::N0).bind()).map_err(|error| format!("relay endpoint: {error}"))?;
+        let opened = runtime.block_on(async {
+            let connection = endpoint.connect(address, ALPN).await.map_err(|error| format!("relay transport failed: {error}"))?;
+            let (send, recv) = connection.open_bi().await.map_err(|error| format!("relay stream: {error}"))?;
+            Ok::<_, String>((connection, send, recv))
+        });
+        let (connection, send, recv) = match opened {
+            Ok(opened) => opened,
+            Err(error) => {
+                runtime.block_on(endpoint.close());
+                return Err(error);
+            }
+        };
+        let mut relay = Relay { runtime: Arc::new(runtime), endpoint, connection, send: Some(send), recv: Some(recv), cache, broken: false };
         relay.send(json!({ "auth": token.secret }).to_string().as_bytes())?;
         let reply: Value = serde_json::from_slice(&relay.recv(Instant::now() + REQUEST_TIMEOUT)?).map_err(|_| "authentication reply is not JSON")?;
         if reply["ok"].as_bool() != Some(true) {
@@ -124,7 +131,7 @@ impl Relay {
 
     fn send(&mut self, frame: &[u8]) -> Result<(), String> {
         let length = u32::try_from(frame.len()).map_err(|_| "frame too large")?;
-        let send = &mut self.send;
+        let send = self.send.as_mut().expect("the send stream leaves only when the relay drops");
         self.runtime.block_on(async {
             send.write_all(&length.to_le_bytes()).await?;
             send.write_all(frame).await
@@ -279,14 +286,20 @@ impl Relay {
 
 impl Drop for Relay {
     /// Delivers what was sent, then closes the connection, so the server ends this connection's session now rather than at an idle timeout.
+    /// The endpoint's close waits for the peer to acknowledge, up to iroh's own probe timeout; that wait runs off the dropping thread, which is often the render loop.
     fn drop(&mut self) {
-        let (send, connection, endpoint) = (&mut self.send, &self.connection, &self.endpoint);
-        self.runtime.block_on(async {
-            if send.finish().is_ok() {
-                let _ = tokio::time::timeout(CLOSE_TIMEOUT, send.stopped()).await;
-            }
-            connection.close(iroh::endpoint::VarInt::from_u32(0), b"done");
-            let _ = tokio::time::timeout(CLOSE_TIMEOUT, endpoint.close()).await;
+        let (runtime, connection, endpoint) = (self.runtime.clone(), self.connection.clone(), self.endpoint.clone());
+        let mut send = self.send.take();
+        std::thread::spawn(move || {
+            runtime.block_on(async {
+                if let Some(send) = send.as_mut() {
+                    if send.finish().is_ok() {
+                        let _ = tokio::time::timeout(STOP_TIMEOUT, send.stopped()).await;
+                    }
+                }
+                connection.close(iroh::endpoint::VarInt::from_u32(0), b"done");
+                endpoint.close().await;
+            })
         });
     }
 }

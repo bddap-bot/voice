@@ -13,6 +13,8 @@ const RING: usize = 3;
 const NEAR: f32 = 0.01;
 pub const PAGE_HEIGHT: f32 = 2.7;
 const FAR: f32 = 10.0;
+/// Samples per pixel, resolved into the overlay's texture: one sample breaks outlines thinner than a texel into dots.
+const SAMPLES: vk::SampleCountFlags = vk::SampleCountFlags::TYPE_4;
 /// The Frame's display: 2160 pixels across a 110° field per eye, in pixels per radian.
 pub const DISPLAY_DENSITY: f32 = 2160.0 / (110.0 * std::f32::consts::PI / 180.0);
 /// The closest a window is seen from: the puppet held up on the hand.
@@ -111,6 +113,7 @@ pub struct Renderer {
     pub eye: [u32; 2],
     targets: Vec<Target>,
     depth: Texture,
+    samples: Texture,
     render_pass: vk::RenderPass,
     set_layout: vk::DescriptorSetLayout,
     layout: vk::PipelineLayout,
@@ -147,22 +150,30 @@ impl Renderer {
         let attachments = [
             vk::AttachmentDescription::default()
                 .format(FORMAT)
-                .samples(vk::SampleCountFlags::TYPE_1)
+                .samples(SAMPLES)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
+                .store_op(vk::AttachmentStoreOp::DONT_CARE)
                 .initial_layout(vk::ImageLayout::UNDEFINED)
-                .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
+                .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
             vk::AttachmentDescription::default()
                 .format(DEPTH)
-                .samples(vk::SampleCountFlags::TYPE_1)
+                .samples(SAMPLES)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
                 .store_op(vk::AttachmentStoreOp::DONT_CARE)
                 .initial_layout(vk::ImageLayout::UNDEFINED)
                 .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+            vk::AttachmentDescription::default()
+                .format(FORMAT)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
         ];
         let color_reference = [vk::AttachmentReference::default().attachment(0).layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)];
         let depth_reference = vk::AttachmentReference::default().attachment(1).layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-        let subpasses = [vk::SubpassDescription::default().pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS).color_attachments(&color_reference).depth_stencil_attachment(&depth_reference)];
+        let resolve_reference = [vk::AttachmentReference::default().attachment(2).layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)];
+        let subpasses = [vk::SubpassDescription::default().pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS).color_attachments(&color_reference).resolve_attachments(&resolve_reference).depth_stencil_attachment(&depth_reference)];
         let render_pass = unsafe { device.create_render_pass(&vk::RenderPassCreateInfo::default().attachments(&attachments).subpasses(&subpasses), None) }.map_err(vk_error("vkCreateRenderPass"))?;
 
         let both = vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
@@ -193,6 +204,7 @@ impl Renderer {
         .map_err(vk_error("vkCreateSampler"))?;
         let mut renderer = Renderer {
             depth: Texture { image: vk::Image::null(), memory: vk::DeviceMemory::null(), view: vk::ImageView::null() },
+            samples: Texture { image: vk::Image::null(), memory: vk::DeviceMemory::null(), view: vk::ImageView::null() },
             gpu,
             eye,
             targets: Vec::new(),
@@ -205,7 +217,8 @@ impl Renderer {
             next: 0,
             last: None,
         };
-        renderer.depth = renderer.attachment(DEPTH, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::ImageAspectFlags::DEPTH)?;
+        renderer.depth = renderer.attachment(DEPTH, SAMPLES, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::ImageAspectFlags::DEPTH)?;
+        renderer.samples = renderer.attachment(FORMAT, SAMPLES, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT, vk::ImageAspectFlags::COLOR)?;
         for _ in 0..RING {
             let target = renderer.target()?;
             renderer.targets.push(target);
@@ -309,7 +322,7 @@ impl Renderer {
         let input = vk::PipelineVertexInputStateCreateInfo::default().vertex_binding_descriptions(&vertex_bindings).vertex_attribute_descriptions(&vertex_attributes);
         let assembly = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
         let viewport = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
-        let multisample = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
+        let multisample = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(SAMPLES);
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
         let mut pipelines = HashMap::new();
@@ -358,7 +371,7 @@ impl Renderer {
         Ok(pipelines)
     }
 
-    fn attachment(&self, format: vk::Format, usage: vk::ImageUsageFlags, aspect: vk::ImageAspectFlags) -> Result<Texture, String> {
+    fn attachment(&self, format: vk::Format, samples: vk::SampleCountFlags, usage: vk::ImageUsageFlags, aspect: vk::ImageAspectFlags) -> Result<Texture, String> {
         let (image, memory) = self.gpu.image(
             &vk::ImageCreateInfo::default()
                 .image_type(vk::ImageType::TYPE_2D)
@@ -366,7 +379,7 @@ impl Renderer {
                 .extent(vk::Extent3D { width: self.eye[0] * 2, height: self.eye[1], depth: 1 })
                 .mip_levels(1)
                 .array_layers(1)
-                .samples(vk::SampleCountFlags::TYPE_1)
+                .samples(samples)
                 .tiling(vk::ImageTiling::OPTIMAL)
                 .usage(usage)
                 .initial_layout(vk::ImageLayout::UNDEFINED),
@@ -378,8 +391,8 @@ impl Renderer {
 
     fn target(&self) -> Result<Target, String> {
         let device = &self.gpu.device;
-        let texture = self.attachment(FORMAT, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::SAMPLED, vk::ImageAspectFlags::COLOR)?;
-        let views = [texture.view, self.depth.view];
+        let texture = self.attachment(FORMAT, vk::SampleCountFlags::TYPE_1, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::SAMPLED, vk::ImageAspectFlags::COLOR)?;
+        let views = [self.samples.view, self.depth.view, texture.view];
         let framebuffer = unsafe { device.create_framebuffer(&vk::FramebufferCreateInfo::default().render_pass(self.render_pass).attachments(&views).width(self.eye[0] * 2).height(self.eye[1]).layers(1), None) }.map_err(vk_error("vkCreateFramebuffer"))?;
         let commands = unsafe { device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(self.gpu.pool).command_buffer_count(1)) }.map_err(vk_error("vkAllocateCommandBuffers"))?[0];
         let fence = unsafe { device.create_fence(&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None) }.map_err(vk_error("vkCreateFence"))?;
@@ -509,6 +522,7 @@ impl Drop for Renderer {
                 destroy(&self.gpu, &target.texture);
             }
             destroy(&self.gpu, &self.depth);
+            destroy(&self.gpu, &self.samples);
             for &pipeline in self.pipelines.values() {
                 device.destroy_pipeline(pipeline, None);
             }

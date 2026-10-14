@@ -308,7 +308,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         let (stand, size) = glide.step(started, held, if anchor.grounded() { puppet.full } else { 1.0 });
         let figure = facing(stand.apply([0.0, -FLOOR * size, 0.0]), head.t);
         board.tick(started);
-        if reveal.hold(started, hand(Hand::Right).map(|right| placement::scale(local_tip(&stand, &right, tip), 1.0 / size))) {
+        if reveal.hold(started, hand(Hand::Right).filter(|_| size == 1.0).map(|right| local_tip(&stand, &right, tip))) {
             tracing::info!("appearance library revealed");
             board.reveal(started);
             if previews.is_none() {
@@ -419,6 +419,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             board.mark();
         }
         if board.anchor != anchor {
+            eprintln!("puppet {} at {:.2} m above the floor", match anchor { Anchor::Riding => "riding", Anchor::Settling(_) => "settling", Anchor::Stuck(_) => "set down", Anchor::Grounded(_) => "standing on the floor" }, held.t[1]);
             board.anchor = anchor;
             board.mark();
         }

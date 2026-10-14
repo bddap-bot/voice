@@ -73,6 +73,7 @@ class Recorder extends EventTarget { static isTypeSupported(){return true} start
 class Channel extends EventTarget { constructor(){super();this.readyState='open'} send(){} close(){this.readyState='closed'} }
 class Peer extends EventTarget { constructor(){super();this.connectionState='new';this.iceGatheringState='complete';this.localDescription={sdp:'offer'}} createDataChannel(){this.channel=new Channel();globalThis.__smokeChannel=this.channel;return this.channel}async createOffer(){return {type:'offer',sdp:'offer'}}async setLocalDescription(v){this.localDescription=v}async setRemoteDescription(){queueMicrotask(()=>this.channel.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'session.started',session:{model:'live-model',delegation:{type:'client'}}})})))}addTrack(){}async getStats(){return new Map()}close(){this.connectionState='closed';this.dispatchEvent(new Event('connectionstatechange'))} } globalThis.RTCPeerConnection=Peer;
 globalThis.__voiceStartSpotter=async()=>({close(){}});
+globalThis.__voiceTurn={prepareTurn(){},listenForTurns:async()=>({close(){}}),judgeTurn:(heard)=>heard({probability:1,ms:0})};
 globalThis.__voiceLoadEmbedder=async()=>async(texts)=>texts.map(()=>[1]);
 const cache=new Map();Object.defineProperty(globalThis,'caches',{value:{open:async()=>({match:async(r)=>cache.get(r.url)?.clone(),put:async(r,v)=>cache.set(r.url,v.clone())})}});
 `;

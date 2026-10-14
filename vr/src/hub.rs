@@ -6,13 +6,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::conversation::Trace;
+use crate::turn::{hold, judge_quiet};
 
 /// The page's wait for an ignored turn before the page itself sends it to the hub.
 const UNANSWERED: Duration = Duration::from_secs(3);
-/// The quiet after the last word that releases a hand-off whose speech sounded unfinished: the longest mid-thought pause measured in the user's own sessions was 5.6 s.
-pub const HOLD: Duration = Duration::from_secs(6);
-/// The quiet after renewed speech before a held hand-off is judged again.
-const JUDGE_QUIET: Duration = Duration::from_secs(1);
 /// The page's wait for the model to start speaking a hub reply before the next one goes out.
 const TURN_START: Duration = Duration::from_secs(20);
 /// The page's quiet after a spoken hub reply before the next reply or standing instructions.
@@ -236,7 +233,7 @@ impl Hub {
                 }
             }
             None => {
-                self.held = Some(Held { id, judging: None, judge_at: Some(now), until: self.heard_at.unwrap_or(now) + HOLD });
+                self.held = Some(Held { id, judging: None, judge_at: Some(now), until: self.heard_at.unwrap_or(now) + hold() });
                 self.judge(now);
             }
         }
@@ -258,7 +255,7 @@ impl Hub {
         self.ask.take()
     }
 
-    /// A judgement of the held hand-off's speech: a finished thought goes now, an unfinished one waits for more speech or `HOLD` of quiet.
+    /// A judgement of the held hand-off's speech: a finished thought goes now, an unfinished one waits for more speech or `hold()` of quiet.
     pub fn judged(&mut self, number: u64, complete: bool, trace: &mut Trace, now: Instant) {
         let Some(held) = self.held.as_mut().filter(|held| held.judging == Some(number)) else { return };
         held.judging = None;
@@ -303,8 +300,8 @@ impl Hub {
             self.heard_at = Some(now);
             if let Some(held) = &mut self.held {
                 held.judging = None;
-                held.judge_at = Some(now + JUDGE_QUIET);
-                held.until = now + HOLD;
+                held.judge_at = Some(now + judge_quiet());
+                held.until = now + hold();
             }
         }
         self.request_end = (trace.ends_request() && !self.sleeping).then_some(now + UNANSWERED);
@@ -494,7 +491,7 @@ impl Hub {
         self.judge(now);
         if let Some(held) = self.held.as_ref().filter(|held| now >= held.until) {
             let id = held.id.clone();
-            tracing::info!("handing off {id}: {} s of quiet after an unfinished thought", HOLD.as_secs());
+            tracing::info!("handing off {id}: {} s of quiet after an unfinished thought", hold().as_secs());
             self.hand_off(&id, trace, now);
         }
     }
@@ -932,7 +929,7 @@ mod tests {
         f.wait(Duration::from_secs(4), false);
         f.hear(" I have an idea.");
         f.delegate("item_idea");
-        f.wait(JUDGE_QUIET - Duration::from_millis(1), false);
+        f.wait(judge_quiet() - Duration::from_millis(1), false);
         assert!(f.asks.is_empty(), "renewed speech is judged after a quiet");
         f.wait(Duration::from_millis(1), false);
         f.judged(true);
@@ -947,7 +944,7 @@ mod tests {
         f.hear("Just need to figure out");
         f.delegate("item_figure");
         f.judged(false);
-        f.wait(HOLD - Duration::from_millis(1), false);
+        f.wait(hold() - Duration::from_millis(1), false);
         assert!(f.frames("delegate").is_empty());
         f.wait(Duration::from_millis(1), false);
         assert_eq!(f.frames("delegate")[0]["text"], "Just need to figure out");
@@ -961,7 +958,7 @@ mod tests {
         f.hear(" me the doodad?");
         f.judged(true);
         assert!(f.frames("delegate").is_empty(), "the verdict was on speech that has since continued");
-        f.wait(JUDGE_QUIET, false);
+        f.wait(judge_quiet(), false);
         f.judged(true);
         assert_eq!(f.frames("delegate")[0]["text"], "Can you try showing me the doodad?");
     }
@@ -975,7 +972,7 @@ mod tests {
         f.hear(" When I pick it back up");
         f.wait(Duration::from_secs(3), false);
         f.judged(false);
-        f.wait(HOLD - Duration::from_secs(3) - Duration::from_millis(1), false);
+        f.wait(hold() - Duration::from_secs(3) - Duration::from_millis(1), false);
         assert_eq!(f.frames("delegate").len(), 1);
         f.wait(Duration::from_millis(1), false);
         let frames = f.frames("delegate");

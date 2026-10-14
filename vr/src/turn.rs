@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::f64::consts::PI;
 use std::path::PathBuf;
 use std::sync::{mpsc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tract_onnx::prelude::*;
 
@@ -16,8 +16,25 @@ const HOP: usize = 160;
 const BINS: usize = FFT / 2 + 1;
 const MELS: usize = 80;
 const FRAMES: usize = WINDOW / HOP;
-/// The model's own decision line on its sigmoid output.
-const COMPLETE: f32 = 0.5;
+const SOURCE: &str = include_str!("../../docs/turn.js");
+
+/// `name: …,` inside the page's `export const TURN = { … }`, so the page and the overlay hold a thought alike.
+fn constant(name: &str) -> f64 {
+    let turn = &SOURCE[SOURCE.find("export const TURN = {").expect("turn.js has no TURN")..];
+    let turn = &turn[..turn.find('}').expect("turn.js: TURN is unterminated")];
+    let start = turn.find(&format!(" {name}: ")).unwrap_or_else(|| panic!("turn.js has no {name}")) + name.len() + 3;
+    turn[start..start + turn[start..].find(',').unwrap()].trim().parse().unwrap_or_else(|_| panic!("turn.js: {name} is not a number"))
+}
+
+/// The quiet after the last word that releases a hand-off whose speech sounded unfinished.
+pub fn hold() -> Duration {
+    Duration::from_millis(constant("holdMs") as u64)
+}
+
+/// The quiet after renewed speech before a held hand-off is judged again.
+pub fn judge_quiet() -> Duration {
+    Duration::from_millis(constant("quietMs") as u64)
+}
 
 fn hz_to_mel(hz: f64) -> f64 {
     if hz < 1000.0 { 3.0 * hz / 200.0 } else { 15.0 + (hz / 1000.0).ln() * 27.0 / 6.4f64.ln() }
@@ -198,7 +215,7 @@ impl Judge {
 
     /// Each answered ask: whether its speech ends a thought; a model that cannot judge lets every pause end one.
     pub fn verdicts(&self) -> Vec<(u64, bool)> {
-        self.verdicts.try_iter().map(|(number, verdict)| (number, verdict.map_or(true, |probability| probability >= COMPLETE))).collect()
+        self.verdicts.try_iter().map(|(number, verdict)| (number, verdict.map_or(true, |probability| probability >= constant("complete") as f32))).collect()
     }
 }
 
@@ -213,16 +230,25 @@ mod tests {
         captured.iter().step_by(crate::speaker::DECIMATION).copied().collect()
     }
 
-    /// Smart Turn's reference inference (onnxruntime and transformers' WhisperFeatureExtractor) on the same cuts of the same recordings.
+    /// The page's judgements of the same cuts of the same recordings, from `vr/golden/turn.json`.
     #[test]
-    fn the_overlay_scores_speech_as_the_reference_inference_does() {
+    fn the_overlay_scores_speech_as_the_page_does() {
         let model = Model::load(std::path::Path::new(&std::env::var("VOICE_VR_TURN_MODEL").expect("VOICE_VR_TURN_MODEL names the model"))).unwrap();
-        for (name, seconds, reference) in [("leijun-test-sr-1", 3.2, 0.9903), ("leijun-test-sr-1", 4.0, 0.0298), ("fangjun-test-sr-1", 2.5, 0.9881), ("fangjun-test-sr-1", 3.4, 0.0139)] {
+        let golden: serde_json::Value = serde_json::from_str(include_str!("../golden/turn.json")).unwrap();
+        let judgements = golden["judgements"].as_array().unwrap();
+        assert!(!judgements.is_empty());
+        for judgement in judgements {
+            let (name, seconds, page) = (judgement["name"].as_str().unwrap(), judgement["seconds"].as_f64().unwrap(), judgement["probability"].as_f64().unwrap() as f32);
             let clip = speech(name);
             let probability = model.complete(&clip[..(seconds * RATE as f64) as usize]).unwrap();
-            eprintln!("{name} at {seconds} s: {probability:.4}, reference {reference:.4}");
-            assert!((probability - reference).abs() < 0.03, "{name} at {seconds} s: {probability} against the reference {reference}");
+            eprintln!("{name} at {seconds} s: {probability:.4}, page {page:.4}");
+            assert!((probability - page).abs() < 0.01, "{name} at {seconds} s: {probability} against the page's {page}");
         }
+    }
+
+    #[test]
+    fn the_page_constants_parse() {
+        assert_eq!((hold(), judge_quiet(), constant("complete")), (Duration::from_secs(6), Duration::from_secs(1), 0.5));
     }
 
     #[test]

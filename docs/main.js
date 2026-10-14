@@ -11,6 +11,7 @@ import { PuppetRuntime } from './puppet.js';
 import { IDENTITY, INACTIVITY_MS, SIGN_OFF, WAKE_PHRASE, WOKEN } from './identity.js';
 import { loadHead, startWakeSpotter } from './wake.js';
 import { MODEL, learnVoice, prepareSpeaker, startSpeakerGate } from './speaker.js';
+import { HandOffHold, judgeTurn, listenForTurns, prepareTurn } from './turn.js';
 import { disposeRenderer, renderChart, renderMath, renderMermaid } from './lib/render.js';
 
 import config, { configuredToken } from './config.js';
@@ -66,6 +67,16 @@ let unanswered;
 let requestEnd;
 const startSpotter = globalThis.__voiceStartSpotter ?? startWakeSpotter;
 const speaker = globalThis.__voiceSpeaker ?? { learnVoice, prepareSpeaker, startSpeakerGate };
+const turns = globalThis.__voiceTurn ?? { judgeTurn, listenForTurns, prepareTurn };
+const hold = new HandOffHold({
+  handOff: (id) => handOff(id),
+  judge: (verdict) => turns.judgeTurn(({ probability, ms, error }) => {
+    if (error) recordPageError(new Error(error));
+    verdict(error ? null : probability);
+    if (!error) recordSession('turn-verdict', JSON.stringify({ probability: +probability.toFixed(3), ms }));
+  }),
+  log: (name, detail) => { if (name === 'released') recordSession('turn-hold-released', JSON.stringify(detail)); },
+});
 const VOICEPRINT = `${config.storageKey}.voiceprint`;
 let learning;
 const shareWaiters = new Map();
@@ -785,6 +796,15 @@ async function applyVoiceFilter(attempt) {
     attempt.gate = gate;
   }
   if (!attempt.released) await attempt.sender?.replaceTrack((attempt.gate?.stream ?? attempt.stream).getAudioTracks()[0]);
+  tapTurns(attempt);
+}
+function tapTurns(attempt) {
+  const heard = attempt.released ? null : attempt.gate?.stream ?? attempt.stream;
+  if (attempt.turnStream === heard) return;
+  attempt.turnStream = heard;
+  const previous = attempt.turnTap;
+  attempt.turnTap = heard && turns.listenForTurns(heard).catch((error) => { recordPageError(error, attempt.offerId ?? null); return null; });
+  previous?.then((tap) => tap?.close()).catch(recordPageError);
 }
 function speakerFilterFailed(attempt, error) {
   if (attempt.cancelled || attempt.released || attempt.notice) return;
@@ -946,11 +966,12 @@ function onLiveEvent(message, source) {
     stayAwake();
     trace.heard(delta, Date.now(), event.start_ms);
     clearTimeout(requestEnd);
-    if (trace.endsRequest() && !conversation?.sleeping) requestEnd = setTimeout(() => handOff(`turn_${crypto.randomUUID()}`), UNANSWERED_MS);
+    if (trace.endsRequest() && !conversation?.sleeping) requestEnd = setTimeout(() => handOff(hold.take() ?? `turn_${crypto.randomUUID()}`), UNANSWERED_MS);
     conversation?.transcript?.add('user', delta);
     if (/[\p{L}\p{N}]/u.test(delta)) {
       clearTimeout(unanswered);
-      if (hubWaiting.size && !conversation?.sleeping) unanswered = setTimeout(() => handOff(`turn_${crypto.randomUUID()}`), UNANSWERED_MS);
+      hold.heard();
+      if (hubWaiting.size && !conversation?.sleeping) unanswered = setTimeout(() => { unanswered = undefined; hold.due(`turn_${crypto.randomUUID()}`, false); }, UNANSWERED_MS);
     }
   }
   else if (event.type === 'output_transcript.added') presentTranscript({ delta: event.item?.text ?? '', start_ms: event.start_ms, end_ms: event.end_ms });
@@ -999,9 +1020,14 @@ function tell(owner, channel, content, delegationItemId = null) {
 function delegate(id, owner) {
   if (!owner || typeof id !== 'string') return;
   owner.delegations.add(id);
-  handOff(id);
+  if (trace.endsRequest()) handOff(id);
+  else {
+    clearTimeout(unanswered);
+    hold.due(id, true);
+  }
 }
 function handOff(id) {
+  hold.clear();
   clearTimeout(unanswered);
   clearTimeout(requestEnd);
   const turn = trace.delegated(id);
@@ -1023,6 +1049,7 @@ function fallAsleep() {
   const current = conversation;
   if (!current || current.sleeping) return;
   current.sleeping = true;
+  hold.clear();
   recordSession('sleep', 'sign-off');
   current.audioOwner.playback.quiet().then(() => { if (conversation === current) stopConversation(); });
 }
@@ -1116,6 +1143,7 @@ function interruptHubReplies(reason) {
 function paintOff() {
   syncSpotter();
   hubWaiting.clear();
+  hold.clear();
   clearTimeout(unanswered);
   clearTimeout(requestEnd);
   interruptHubReplies('conversation ended');
@@ -1152,6 +1180,7 @@ function cancelStarting(reason = '') {
 }
 async function startConversation(redialed = false) {
   stopLearning();
+  try { turns.prepareTurn(); } catch (error) { recordPageError(error); }
   const reusedRelay = connected;
   let redial = false;
   const attempt = { cancelled: false, offered: false, cancelSent: false, cancelMic: null, cancelIce: null, cancelData: null, stream: null, gate: null, sender: null, notice: '', outputStream: null, recorders: [], pc: null, channel: null, delegations: new Set() };
@@ -1202,6 +1231,7 @@ async function startConversation(redialed = false) {
     if (attempt.cancelled) return;
     const sent = attempt.gate?.stream ?? attempt.stream;
     for (const track of sent.getTracks()) attempt.sender = attempt.pc.addTrack(track, sent);
+    tapTurns(attempt);
     await attempt.pc.setLocalDescription(await attempt.pc.createOffer());
     await waitIce(attempt.pc, attempt);
     if (attempt.cancelled) return;
@@ -1249,6 +1279,7 @@ async function startConversation(redialed = false) {
 }
 function release(attempt) {
   attempt.released = true;
+  tapTurns(attempt);
   const flushed = stopRecorders(attempt);
   attempt.gate?.close();
   attempt.channel?.close();

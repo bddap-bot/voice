@@ -2,8 +2,9 @@
 let
   pinned = builtins.match ".*url: '([^']+)',[[:space:]]*sha256: '([0-9a-f]+)'.*" (builtins.readFile ../docs/speaker.js);
   speakerModel = pkgs.fetchurl { url = builtins.elemAt pinned 0; sha256 = builtins.elemAt pinned 1; };
-  # Smart Turn v3.2 (BSD-2-Clause): whether speech so far ends a turn, from the audio alone. The float export: tract's int8 path disagrees with onnxruntime on the quantized one.
-  turnModel = pkgs.fetchurl { url = "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/f766f81d3cfdf7737ac64aad813d91bbfd56bf93/smart-turn-v3.2-gpu.onnx"; sha256 = "ab8dc64b88713f90b571c15b714bd1330e6c883cad8763dacf65c9376dc539be"; };
+  # Smart Turn v3.2 (BSD-2-Clause), pinned by the page. The float export: tract's int8 path disagrees with onnxruntime on the quantized one.
+  turnPinned = builtins.match ".*url: '([^']+)',[[:space:]]*sha256: '([0-9a-f]+)'.*" (builtins.readFile ../docs/turn.js);
+  turnModel = pkgs.fetchurl { url = builtins.elemAt turnPinned 0; sha256 = builtins.elemAt turnPinned 1; };
   # The page's action embedding model at a fixed revision; vr/golden/actions.json holds the page's decisions on it.
   actionModel = let
     id = builtins.elemAt (builtins.match ".*export const EMBEDDING_MODEL = '([^']+)';.*" (builtins.readFile ../docs/puppet-drivers.js)) 0;
@@ -54,7 +55,7 @@ let
     pname = "voice-vr";
     src = pkgs.lib.fileset.toSource {
       root = ./..;
-      fileset = pkgs.lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./build.rs ./src ./shaders ./golden ../docs/poses/standing.json ../docs/identity.js ../docs/live.js ../docs/speaker.js ../docs/wake/melspectrogram.onnx ../docs/wake/embedding_model.onnx ../scripts/wake-demo.json ../test/fixtures/delegated-reply-capture.json ];
+      fileset = pkgs.lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./build.rs ./src ./shaders ./golden ../docs/poses/standing.json ../docs/identity.js ../docs/live.js ../docs/speaker.js ../docs/turn.js ../docs/wake/melspectrogram.onnx ../docs/wake/embedding_model.onnx ../scripts/wake-demo.json ../test/fixtures/delegated-reply-capture.json ];
     };
     preBuild = ''
       # Cargo reads a dependency newer than its dependent as rebuilt; the store's one mtime keeps copy order out of that test.

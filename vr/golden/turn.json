@@ -1,0 +1,25 @@
+{
+ "about": "docs/turn.js with onnxruntime-web on public speech clips: written by scripts/vr-turn-golden.mjs, compared by the overlay host build",
+ "judgements": [
+  {
+   "name": "leijun-test-sr-1",
+   "seconds": 3.2,
+   "probability": 0.9902
+  },
+  {
+   "name": "leijun-test-sr-1",
+   "seconds": 4,
+   "probability": 0.0328
+  },
+  {
+   "name": "fangjun-test-sr-1",
+   "seconds": 2.5,
+   "probability": 0.9879
+  },
+  {
+   "name": "fangjun-test-sr-1",
+   "seconds": 3.4,
+   "probability": 0.0135
+  }
+ ]
+}

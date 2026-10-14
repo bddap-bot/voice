@@ -297,6 +297,13 @@ globalThis.__voiceSpeaker = {
   startSpeakerGate: async (stream, voiceprint, heard) => fakeSpeaker(stream, voiceprint, heard),
   learnVoice: async (stream, heard) => { const gate = fakeSpeaker(stream, null, heard); return { close: () => gate.close() }; },
 };
+globalThis.turnJudgements = [];
+globalThis.turnTaps = [];
+globalThis.__voiceTurn = {
+  prepareTurn() {},
+  listenForTurns: async (stream) => { const tap = { stream, closed: 0, close() { this.closed++; } }; turnTaps.push(tap); return tap; },
+  judgeTurn: (heard) => (globalThis.heldTurns ? turnJudgements.push(heard) : heard({ probability: 1, ms: 0 })),
+};
 globalThis.spotterStarts = [];
 globalThis.__voiceStartSpotter = async (stream, heard, model) => {
   spotterStarts.push({ muted: document.querySelector('#mic-mute').getAttribute('aria-pressed'), awake: document.querySelector('#puppet').getAttribute('aria-pressed') });
@@ -1547,6 +1554,53 @@ window.addEventListener('test-ready', async () => {
     ['item_backup', 'And the backup'],
     ['page', 'And the backup\nfrom last night.'],
   ]);
+});
+
+test('a hand-off waits for the speech Live heard to sound finished, joining later speech under the newest delegation, or six seconds of quiet', async () => {
+  const { result, stderr } = await runPage(`
+globalThis.heldTurns = true;
+window.addEventListener('test-ready', async () => {
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const frames = () => (globalThis.delegateFrames ?? []).map(({ id, text }) => ({ id, text }));
+  const counts = [];
+  hear('Okay. So');
+  delegateTurn('item_so');
+  counts.push([frames().length, turnJudgements.length]);
+  turnJudgements.shift()({ probability: 0.2, ms: 40 });
+  await wait(4000);
+  hear(' I have an idea.');
+  delegateTurn('item_idea');
+  await wait(900);
+  counts.push([frames().length, turnJudgements.length]);
+  await wait(100);
+  counts.push([frames().length, turnJudgements.length]);
+  turnJudgements.shift()({ probability: 0.8, ms: 40 });
+  await wait(10);
+  counts.push([frames().length, turnJudgements.length]);
+  hear('Just need to figure out');
+  delegateTurn('item_figure');
+  turnJudgements.shift()({ probability: 0.1, ms: 40 });
+  await wait(5880);
+  counts.push([frames().length, turnJudgements.length]);
+  await wait(120);
+  counts.push([frames().length, turnJudgements.length]);
+  hear('Is the printer busy? Fly, Corvus.');
+  delegateTurn('item_printer');
+  await wait(10);
+  counts.push([frames().length, turnJudgements.length]);
+  await wait(200);
+  const tap = turnTaps[0];
+  document.body.dataset.result = JSON.stringify({ counts, frames: frames(), tapped: tap?.stream.getAudioTracks()[0] === testMicrophoneOutput && tap.closed === 0 });
+});
+`, { virtualTime: true });
+  assert.ok(result, stderr);
+  assert.deepEqual(result.counts, [[0, 1], [0, 0], [0, 1], [1, 0], [1, 0], [2, 0], [3, 0]]);
+  assert.deepEqual(result.frames, [
+    { id: 'item_idea', text: 'Okay. So I have an idea.' },
+    { id: 'item_figure', text: 'Just need to figure out' },
+    { id: 'item_printer', text: 'Okay. So I have an idea.\nJust need to figure out\nIs the printer busy?' },
+  ]);
+  assert.equal(result.tapped, true);
 });
 
 test('while a delegation is pending, a turn the model ignores for three seconds goes to the hub, and its reply or failure carries a null delegation id', async () => {

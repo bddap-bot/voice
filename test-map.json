@@ -223,6 +223,7 @@
         "scripts/wake-reply-smoke.mjs",
         "scripts/idle-cost.mjs",
         "scripts/delegated-reply-smoke.mjs",
+        "scripts/filler-language-smoke.mjs",
         "scripts/live-rig.mjs",
         "scripts/wake.mjs",
         "scripts/wake-demo.json",

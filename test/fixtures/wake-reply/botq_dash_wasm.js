@@ -22,9 +22,9 @@ export async function recv() {
   }
   return queue.length ? queue.shift() : new Promise((resolve) => { waiting = resolve; });
 }
-globalThis.__deliverHubReply = (reply, stamp) => {
+globalThis.__deliverHubReply = (reply, stamp, instructions = []) => {
   const request = globalThis.__lastHubRequest;
-  const value = enc.encode('hub\n' + JSON.stringify({ id: request?.id ?? stamp, commentary: [reply], instructions: [], timing_ms: 0, stamp }));
+  const value = enc.encode('hub\n' + JSON.stringify({ id: request?.id ?? stamp, commentary: [reply], instructions, timing_ms: 0, stamp }));
   keep('in', value, ['hub'], 16384);
   deliver(value);
 };

@@ -986,8 +986,12 @@ function onLiveEvent(message, source) {
     if (conversation?.standing && !conversation.pendingStanding && usageSeconds - conversation.standingAt >= STANDING_REFRESH_S) standBy(conversation.standing);
   }
 }
+// The relay only forwards a close the page did not ask for; a page that has gone away reports none.
 function liveClosed(payload) {
-  if (isOfferFor(conversation, payload)) stopConversation('Session ended — tap to continue');
+  if (isOfferFor(conversation, payload)) {
+    recordPageError(new Error(`Live session closed: ${payload.reason}`));
+    stopConversation('Session ended — tap to continue');
+  }
   else if (isOfferFor(starting, payload)) cancelStarting();
 }
 function presentTranscript(event) {

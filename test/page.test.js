@@ -1854,15 +1854,26 @@ window.addEventListener('test-ready', async () => {
   assert.deepEqual(result, { offered: 'Session ended — tap to continue', active: 'true' }, stderr);
 });
 
+test('a provider close of the open call is reported as a page error', async () => {
+  const { result, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  closeLive('transport_closed');
+  await until(() => fleetLines.length);
+  document.body.dataset.result = JSON.stringify(fleetLines);
+});
+`);
+  assert.deepEqual(result, ['fleet-error: voice/page — Error: Live session closed: transport_closed'], stderr);
+});
+
 test('a closed frame for an earlier call leaves the open conversation running', async () => {
   const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {
   closeLive('call ended', 'an-earlier-offer');
   await new Promise((resolve) => setTimeout(resolve, 200));
-  document.body.dataset.result = JSON.stringify({ active: document.querySelector('#puppet').getAttribute('aria-pressed') });
+  document.body.dataset.result = JSON.stringify({ active: document.querySelector('#puppet').getAttribute('aria-pressed'), fleetLines });
 });
 `);
-  assert.deepEqual(result, { active: 'true' }, stderr);
+  assert.deepEqual(result, { active: 'true', fleetLines: [] }, stderr);
 });
 
 test('a usage limit reaches the relay once per conversation and the session line reports audio seconds', async () => {

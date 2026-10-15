@@ -302,7 +302,11 @@ impl Link {
                         ("hub", body) => {
                             let _ = self.events.send(Event::Hub(body.to_vec()));
                         }
-                        ("closed", _) => return Ok("Session ended".into()),
+                        ("closed", body) => {
+                            let reason = serde_json::from_slice::<Value>(body).ok().and_then(|value| value["reason"].as_str().map(str::to_owned)).unwrap_or_default();
+                            tracing::error!("Live session closed: {reason}");
+                            return Ok("Session ended".into());
+                        }
                         ("hub-error", body) => {
                             let value: Value = serde_json::from_slice(body).unwrap_or_default();
                             if let Some(id) = value["id"].as_str() {

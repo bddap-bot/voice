@@ -129,6 +129,13 @@ impl Display {
     pub fn card(&self) -> bool {
         self.markdown.is_some() || self.link.is_some() || self.image.is_some() || self.html
     }
+
+    pub fn items(&self) -> Vec<&'static str> {
+        [(self.clear, "clear"), (self.markdown.is_some(), "markdown"), (self.link.is_some(), "link"), (self.image.is_some(), "image"), (self.html, "html"), (self.object.is_some(), "object"), (self.data.is_some(), "data"), (self.hold.is_some(), "hold"), (self.point.is_some(), "point")]
+            .into_iter()
+            .filter_map(|(carried, name)| carried.then_some(name))
+            .collect()
+    }
 }
 
 enum Turn {
@@ -665,6 +672,7 @@ mod tests {
         f.wait(TURN_QUIET, true);
         f.speak("This face.");
         let pointed = f.hub.take_display().unwrap();
+        assert_eq!(pointed.items(), ["point"]);
         assert_eq!(pointed.point.as_deref(), Some("top"));
         assert!(pointed.addresses_object(), "a display that only points leaves the panel and the object");
         for (stamp, hold, read) in [("o3", json!(0), Some(Hold::At(0.0))), ("o4", json!(12.5), Some(Hold::At(12.5))), ("o5", json!(false), Some(Hold::Run)), ("o6", json!(-1), None), ("o7", json!(true), None)] {
@@ -672,6 +680,7 @@ mod tests {
             f.wait(TURN_QUIET, true);
             f.speak("Like so.");
             let held = f.hub.take_display().unwrap();
+            assert_eq!(held.items(), if read.is_some() { vec!["data", "hold"] } else { vec!["data"] });
             assert_eq!(held.hold, read, "hold {hold}");
             assert!(held.addresses_object(), "a display that holds the timeline leaves the panel and the object");
         }
@@ -679,6 +688,7 @@ mod tests {
         f.wait(TURN_QUIET, true);
         f.speak("Gone.");
         let cleared = f.hub.take_display().unwrap();
+        assert_eq!(cleared.items(), ["clear"]);
         assert!(cleared.clear && cleared.addresses_object() && !cleared.card(), "a clear leaves the panel");
     }
 

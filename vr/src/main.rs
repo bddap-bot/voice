@@ -324,6 +324,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         let board_pose = left.then(&mount);
         board_overlay.place_on(device, &mount);
         if let Some(mut shown) = voice.take_display() {
+            tracing::info!("display shown: {}", shown.items().join(" "));
             let in_place = shown.addresses_object();
             if shown.clear {
                 objects.clear("cleared by the hub");

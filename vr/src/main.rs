@@ -309,8 +309,9 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         let (stand, size) = glide.step(started, held, if anchor.grounded() { puppet.full } else { 1.0 });
         let figure = facing(stand.apply([0.0, -FLOOR * size, 0.0]), head.t);
         board.tick(started);
-        if reveal.hold(started, hand(Hand::Right).filter(|_| size == 1.0).map(|right| local_tip(&stand, &right, tip))) {
-            tracing::info!("appearance library revealed");
+        let in_puppet = hand(Hand::Right).filter(|_| size == 1.0).map(|right| local_tip(&stand, &right, tip));
+        if reveal.hold(started, in_puppet) {
+            tracing::info!("appearance library revealed by a tip held at {:.3?} m in the puppet's standing frame", in_puppet.unwrap_or_default());
             board.reveal(started);
             if previews.is_none() {
                 match Relay::connect(token, &cache) {

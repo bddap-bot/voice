@@ -1854,15 +1854,27 @@ window.addEventListener('test-ready', async () => {
   assert.deepEqual(result, { offered: 'Session ended — tap to continue', active: 'true' }, stderr);
 });
 
-test('a provider close of the open call is reported as a page error', async () => {
+for (const [close, reason] of [["closeLive('transport_closed')", 'transport_closed'], ["testChannel.dispatchEvent(new Event('close'))", 'data channel closed']]) test('a dropped call is reported as a page error: ' + reason, async () => {
   const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {
-  closeLive('transport_closed');
+  ${close};
   await until(() => fleetLines.length);
   document.body.dataset.result = JSON.stringify(fleetLines);
 });
 `);
-  assert.deepEqual(result, ['fleet-error: voice/page — Error: Live session closed: transport_closed'], stderr);
+  assert.deepEqual(result, ['fleet-error: voice/page — Error: Live session closed: ' + reason], stderr);
+});
+
+test('ending the call from the page reports no error', async () => {
+  const { result, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  document.querySelector('#puppet').click();
+  await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false');
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  document.body.dataset.result = JSON.stringify(fleetLines);
+});
+`);
+  assert.deepEqual(result, [], stderr);
 });
 
 test('a closed frame for an earlier call leaves the open conversation running', async () => {

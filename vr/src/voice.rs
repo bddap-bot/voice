@@ -247,6 +247,9 @@ impl Voice {
                 session::Event::HubError { id, message } => awake.hub.failed(&id, &message, &mut self.trace),
                 session::Event::AudioSeconds(seconds) => awake.hub.usage(seconds),
                 session::Event::Closed(reason) => {
+                    if awake.opened {
+                        tracing::error!("Live session closed: {reason}");
+                    }
                     ended = Some(format!("session closed: {reason}"));
                     break;
                 }

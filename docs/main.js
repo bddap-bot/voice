@@ -986,12 +986,13 @@ function onLiveEvent(message, source) {
     if (conversation?.standing && !conversation.pendingStanding && usageSeconds - conversation.standingAt >= STANDING_REFRESH_S) standBy(conversation.standing);
   }
 }
-// The relay only forwards a close the page did not ask for; a page that has gone away reports none.
+// Only a page still running reports a dropped call, so one that navigated away raises nothing.
+function callDropped(reason) {
+  recordPageError(new Error(`Live session closed: ${reason}`));
+  stopConversation('Session ended — tap to continue');
+}
 function liveClosed(payload) {
-  if (isOfferFor(conversation, payload)) {
-    recordPageError(new Error(`Live session closed: ${payload.reason}`));
-    stopConversation('Session ended — tap to continue');
-  }
+  if (isOfferFor(conversation, payload)) callDropped(payload.reason);
   else if (isOfferFor(starting, payload)) cancelStarting();
 }
 function presentTranscript(event) {
@@ -1216,7 +1217,7 @@ async function startConversation(redialed = false) {
     stageTrace = new StageTrace((span) => traces.add(span));
     const started = waitData(attempt.channel, (event) => event.type === 'session.started', 30000, attempt);
     started.catch(() => {});
-    attempt.channel.addEventListener('close', () => { if (attempt.channel === conversation?.channel) stopConversation('Session ended — tap to continue'); });
+    attempt.channel.addEventListener('close', () => { if (attempt.channel === conversation?.channel) callDropped('data channel closed'); });
     attempt.channel.addEventListener('message', (event) => onLiveEvent(event, attempt.channel));
     attempt.pc.ontrack = async (event) => {
       try {

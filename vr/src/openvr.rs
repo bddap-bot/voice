@@ -92,6 +92,19 @@ impl Runtime {
         [sys::EVREye_Eye_Left, sys::EVREye_Eye_Right].map(|eye| Pose::from_m34(&call!(self.system, GetEyeToHeadTransform, eye).m))
     }
 
+    /// The tangent of the widest either eye sees off the head's forward axis, across or up and down.
+    pub fn view(&self) -> f32 {
+        let offsets = self.eye_offsets();
+        [sys::EVREye_Eye_Left, sys::EVREye_Eye_Right].into_iter().zip(offsets).fold(0.0, |widest, (eye, offset)| {
+            let (mut left, mut right, mut top, mut bottom) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+            call!(self.system, GetProjectionRaw, eye, &mut left, &mut right, &mut top, &mut bottom);
+            [[left, top], [left, bottom], [right, top], [right, bottom]].into_iter().fold(widest, |widest, [x, y]| {
+                let [x, y, z] = offset.rotate([x, y, -1.0]);
+                widest.max((x / z).abs()).max((y / z).abs())
+            })
+        })
+    }
+
     /// The left eye's recommended render width over its horizontal field, in pixels per radian.
     pub fn display_density(&self) -> f32 {
         let (mut width, mut height) = (0, 0);

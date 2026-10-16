@@ -226,6 +226,8 @@ pub struct Skinned {
     pub indices: Vec<u32>,
     pub draws: Vec<Draw>,
     joints: Vec<(usize, Mat4)>,
+    /// Each node that moves vertices and the farthest of them from its origin, in its own frame.
+    reach: Vec<(usize, f32)>,
     morphs: Vec<Morph>,
     applied: Vec<f32>,
     touched: Vec<u32>,
@@ -1137,7 +1139,15 @@ impl Model {
             }
         }
         let base = touched.iter().map(|&vertex| (Vec3::from(vertices[vertex as usize].position), Vec3::from(vertices[vertex as usize].normal))).collect();
-        let mut skinned = Skinned { vertices, indices, draws, joints, applied: vec![0.0; morphs.len()], stamps: vec![0; touched.len()], morphs, touched, base, offsets, entries, stamp: 0 };
+        let mut farthest = vec![0.0f32; self.nodes.len()];
+        for vertex in &vertices {
+            for (&slot, _) in vertex.joints.iter().zip(vertex.weights).filter(|(_, weight)| *weight > 0.0) {
+                let (node, inverse) = joints[slot as usize];
+                farthest[node] = farthest[node].max(inverse.transform_point3(vertex.position.into()).length());
+            }
+        }
+        let reach = farthest.into_iter().enumerate().filter(|&(_, radius)| radius > 0.0).collect();
+        let mut skinned = Skinned { vertices, indices, draws, joints, reach, applied: vec![0.0; morphs.len()], stamps: vec![0; touched.len()], morphs, touched, base, offsets, entries, stamp: 0 };
         skinned.morph(&self.rest().weights);
         Ok(skinned)
     }
@@ -1146,6 +1156,17 @@ impl Model {
 impl Skinned {
     pub fn palette(&self, worlds: &[Mat4], placement: Mat4) -> Vec<Mat4> {
         self.joints.iter().map(|&(node, inverse)| placement * worlds[node] * inverse).collect()
+    }
+
+    /// Balls around the posed nodes that hold every vertex: a vertex lies in the ball of each node that moves it, so a blend of them lies in their hull.
+    pub fn reach(&self, worlds: &[Mat4], placement: Mat4) -> Vec<(Vec3, f32)> {
+        self.reach
+            .iter()
+            .map(|&(node, radius)| {
+                let world = placement * worlds[node];
+                (world.w_axis.truncate(), radius * world.x_axis.truncate().length().max(world.y_axis.truncate().length()).max(world.z_axis.truncate().length()))
+            })
+            .collect()
     }
 
     pub fn positions(&self, palette: &[Mat4]) -> Vec<Vec3> {

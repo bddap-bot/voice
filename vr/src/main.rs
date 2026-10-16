@@ -54,15 +54,12 @@ const MARGIN: f32 = 0.03;
 const FLOOR: f32 = -QUAD / 2.0 + MARGIN;
 /// The tallest and shortest a model may stand set down full size, against a model whose units are not metres.
 const FULL_HEIGHT: [f32; 2] = [0.5, 2.5];
-/// How far a grown puppet's surface reaches past its joints, over its height: the crown of the head past the head joint.
-const PAD: f32 = 0.1;
 const DORMANT_POLL: Duration = Duration::from_micros(11_111);
 const SPOTTER_RETRY: Duration = Duration::from_secs(10);
 
-/// A grown puppet's window: wide enough for both eyes to see every joint of `worlds` with `PAD` of its height around each.
-fn grown_window(worlds: &[glam::Mat4], body: glam::Mat4, size: f32, head: Vec3, eyes: &[Vec3]) -> (Pose, f32) {
-    let joints: Vec<Vec3> = worlds.iter().map(|world| body.transform_point3(world.w_axis.truncate()).into()).collect();
-    window(&joints, PAD * HEIGHT * size, head, eyes)
+fn grown_window(skinned: &Skinned, worlds: &[glam::Mat4], body: glam::Mat4, head: &Pose, eyes: &[Vec3], view: f32) -> (Pose, f32) {
+    let balls: Vec<(Vec3, f32)> = skinned.reach(worlds, body).into_iter().map(|(center, radius)| (center.into(), radius)).collect();
+    window(&balls, head, eyes, view)
 }
 
 fn directory(variable: &str, fallback: &str) -> PathBuf {
@@ -184,6 +181,8 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
     let mut objects: object::Shelf<openvr::Overlay> = object::Shelf::default();
     let mut pointing = point::Pointing::default();
     let eye_offsets = runtime.eye_offsets();
+    let view = runtime.view();
+    tracing::info!("the eyes see {:.0}° off the head's axis at the widest", view.atan().to_degrees());
     let mut meter = Meter::default();
     let epoch = Instant::now();
     let mut last = epoch;
@@ -454,7 +453,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         puppet.springs.step(&puppet.model, &mut pose, body, delta);
         let posed = puppet.model.worlds(&pose);
         let eye_points = eye_offsets.map(|eye: Pose| head.then(&eye).t);
-        let (quad, half) = if size > 1.0 { grown_window(&posed, body, size, head.t, &eye_points) } else { (figure, QUAD / 2.0) };
+        let (quad, half) = if size > 1.0 { grown_window(&puppet.skinned, &posed, body, &head, &eye_points, view) } else { (figure, QUAD / 2.0) };
         let local = quad.inverse();
         let changed = puppet.skinned.morph(&pose.weights);
         let palette = puppet.skinned.palette(&posed, local.mat4() * body);
@@ -570,5 +569,126 @@ fn main() {
         tracing::error!("voice-vr: {error}");
         drop(telemetry);
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::placement::sub;
+    use crate::vulkan::Gpu;
+
+    /// The Frame's half field of view per eye, as its tangent.
+    const FIELD: f32 = 1.43;
+    const SEEN: u32 = 384;
+
+    struct Shot {
+        direct: Vec<u8>,
+        through: Vec<u8>,
+    }
+
+    fn pitched(at: Vec3, pitch: f32) -> Pose {
+        let (s, c) = pitch.sin_cos();
+        Pose::from_axes([1.0, 0.0, 0.0], [0.0, c, s], [0.0, -s, c], at)
+    }
+
+    fn left_eye(pixels: &[u8], eye: u32) -> Vec<u8> {
+        pixels.chunks_exact((eye * 8) as usize).flat_map(|row| &row[..(eye * 4) as usize]).copied().collect()
+    }
+
+    /// The left eye's view of a figure `tall` metres high standing at the origin facing +z: drawn straight into the eye's field, and through the grown window as the headset composites it.
+    fn shoot(gpu: &Rc<Gpu>, tall: f32, head: Pose) -> Shot {
+        let model = Model::parse(include_bytes!("../golden/figure.vrm")).unwrap();
+        let mut skinned = model.skinned().unwrap();
+        let fit = Fit::new(&model, &skinned, HEIGHT);
+        let pose = model.pose(&model.standing());
+        let changed = skinned.morph(&pose.weights);
+        let worlds = model.worlds(&pose);
+        let size = tall / HEIGHT;
+        let body = glam::Mat4::from_scale(glam::Vec3::splat(size)) * fit.placement(&model, &worlds, 0.0);
+        let eye = head.apply([-0.032, 0.0, 0.0]);
+        let field = Pose { t: head.apply([0.0, 0.0, -1.0]), ..head };
+        let draw = |window: &Pose, half: f32, texels: u32| {
+            let mut renderer = Renderer::new(gpu.clone(), [texels; 2], HEIGHT / render::PAGE_HEIGHT).unwrap();
+            renderer.outline_scale = HEIGHT * size / render::PAGE_HEIGHT;
+            let mut drawn = renderer.appearance(&model, &skinned).unwrap();
+            let local = window.inverse();
+            drawn.update(&skinned.palette(&worlds, local.mat4() * body), &skinned.vertices, &changed);
+            renderer.render(&drawn, [eye_projection(local.apply(eye).into(), half, half), None]).unwrap();
+            left_eye(&renderer.read().unwrap(), texels)
+        };
+        let direct = draw(&field, FIELD, SEEN);
+        let (window, half) = grown_window(&skinned, &worlds, body, &head, &[eye, head.apply([0.032, 0.0, 0.0])], FIELD);
+        let texels = eye_texels(QUAD);
+        let quad = draw(&window, half, texels);
+        let to_window = window.inverse();
+        let origin = to_window.apply(eye);
+        let mut through = vec![0; direct.len()];
+        for (index, pixel) in through.chunks_exact_mut(4).enumerate() {
+            let (x, y) = ((index as u32 % SEEN) as f32, (index as u32 / SEEN) as f32);
+            let target = field.apply([FIELD * (2.0 * (x + 0.5) / SEEN as f32 - 1.0), FIELD * (1.0 - 2.0 * (y + 0.5) / SEEN as f32), 0.0]);
+            let direction = sub(to_window.apply(target), origin);
+            let distance = -origin[2] / direction[2];
+            let [u, v] = [0, 1].map(|axis| origin[axis] + distance * direction[axis]);
+            let (u, v) = (u / (2.0 * half) + 0.5, 0.5 - v / (2.0 * half));
+            if distance > 0.0 && (0.0..1.0).contains(&u) && (0.0..1.0).contains(&v) {
+                let at = (((v * texels as f32) as usize * texels as usize) + (u * texels as f32) as usize) * 4;
+                pixel.copy_from_slice(&quad[at..at + 4]);
+            }
+        }
+        Shot { direct, through }
+    }
+
+    fn covered(pixels: &[u8]) -> Vec<bool> {
+        pixels.chunks_exact(4).map(|pixel| pixel[3] > 128).collect()
+    }
+
+    /// Covered texels of the eye's own view that the window loses, over all it covers.
+    fn lost(shot: &Shot) -> f32 {
+        let (direct, through) = (covered(&shot.direct), covered(&shot.through));
+        let total = direct.iter().filter(|&&c| c).count();
+        direct.iter().zip(&through).filter(|(&d, &t)| d && !t).count() as f32 / total.max(1) as f32
+    }
+
+    /// The top and bottom rows the figure covers.
+    fn rows(pixels: &[u8]) -> (usize, usize) {
+        let covered = covered(pixels);
+        let row = |index: usize| index / SEEN as usize;
+        (row(covered.iter().position(|&c| c).unwrap()), row(covered.iter().rposition(|&c| c).unwrap()))
+    }
+
+    fn save(shot: &Shot, name: &str) {
+        let Some(directory) = std::env::var_os("VOICE_VR_CAPTURES") else { return };
+        let mut image = image::RgbImage::new(SEEN * 2 + 8, SEEN);
+        for (side, pixels) in [&shot.direct, &shot.through].into_iter().enumerate() {
+            for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+                let (x, y) = (index as u32 % SEEN, index as u32 / SEEN);
+                let a = pixel[3] as f32 / 255.0;
+                let back = 40.0 + 30.0 * y as f32 / SEEN as f32;
+                let mix = |channel: u8| (channel as f32 + back * (1.0 - a)).min(255.0) as u8;
+                image.put_pixel(side as u32 * (SEEN + 8) + x, y, image::Rgb([mix(pixel[0]), mix(pixel[1]), mix(pixel[2])]));
+            }
+        }
+        image.save(std::path::Path::new(&directory).join(format!("{name}.png"))).unwrap();
+    }
+
+    #[test]
+    fn a_grown_puppet_seen_close_shows_whole_in_the_eyes_field() {
+        let gpu = Rc::new(Gpu::new(None).unwrap());
+        for (name, tall, head) in [
+            ("tallest-close-looking-up", FULL_HEIGHT[1], pitched([0.0, 1.6, 0.45], 0.6)),
+            ("tallest-close-looking-ahead", FULL_HEIGHT[1], pitched([0.0, 1.6, 0.45], 0.0)),
+            ("tallest-close-looking-down", FULL_HEIGHT[1], pitched([0.0, 1.6, 0.45], -0.9)),
+            ("human-close-looking-down", 1.7, pitched([0.0, 1.6, 0.4], -0.8)),
+            ("human-close-looking-up", 1.7, pitched([0.0, 1.5, 0.35], 0.3)),
+            ("human-far", 1.7, pitched([0.0, 1.6, 2.0], -0.2)),
+        ] {
+            let shot = shoot(&gpu, tall, head);
+            save(&shot, name);
+            let (lost, [top, bottom]) = (lost(&shot), [0, 1].map(|end| [rows(&shot.direct), rows(&shot.through)].map(|rows| if end == 0 { rows.0 } else { rows.1 })));
+            eprintln!("{name}: {:.1}% of the figure lost, top row {top:?}, bottom row {bottom:?}", lost * 100.0);
+            assert!(lost < 0.04, "{name}: {:.1}% of the figure the eye sees is cut off", lost * 100.0);
+            assert!(top[0].abs_diff(top[1]) <= 2 && bottom[0].abs_diff(bottom[1]) <= 2, "{name}: head and feet show where the eye sees them: top rows {top:?}, bottom rows {bottom:?}");
+        }
     }
 }

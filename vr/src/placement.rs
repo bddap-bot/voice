@@ -210,28 +210,46 @@ pub fn facing(at: Vec3, viewer: Vec3) -> Pose {
     Pose::from_axes(x, cross(z, x), z, at)
 }
 
-/// A window's widest useful half width over its distance from the viewer: past this it lies outside the headset's view.
-const VIEW: f32 = 1.5;
+/// Nearer than this a window square to the view stands off from the head, so the eyes stay in front of it.
+const CLOSEST: f32 = 0.1;
 
-/// A window through the middle of `points` facing `head`, and the half width that shows every ball of `pad` around them to each of `eyes`, but no wider than the view from `head`.
-pub fn window(points: &[Vec3], pad: f32, head: Vec3, eyes: &[Vec3]) -> (Pose, f32) {
-    let (low, high) = points.iter().fold(([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]), |(low, high), point| (std::array::from_fn(|axis| low[axis].min(point[axis])), std::array::from_fn(|axis| high[axis].max(point[axis]))));
-    let middle = scale(add(low, high), 0.5);
-    let window = facing(middle, head);
-    let local = window.inverse();
-    let widest = VIEW * length(sub(head, middle));
-    let half = eyes.iter().map(|&eye| local.apply(eye)).flat_map(|eye| {
-        points.iter().map(move |&point| {
-            let point = local.apply(point);
-            let depth = eye[2] - point[2];
-            if depth <= pad {
-                return f32::INFINITY;
+/// A window square to the head's view through the middle of `balls`, and its half width: the least that shows every ball to each of `eyes`, cut to what each eye can see, `view` being the tangent of the widest the headset shows off its axis.
+/// A ball reaching back past an eye fills that eye's view: the surface between it and the balls ahead can reach any edge.
+pub fn window(balls: &[(Vec3, f32)], head: &Pose, eyes: &[Vec3], view: f32) -> (Pose, f32) {
+    let (low, high) = balls.iter().fold(([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]), |(low, high), (point, _)| (std::array::from_fn(|axis| low[axis].min(point[axis])), std::array::from_fn(|axis| high[axis].max(point[axis]))));
+    let depth = dot(sub(scale(add(low, high), 0.5), head.t), scale(head.axis(2), -1.0)).max(CLOSEST);
+    let plane = Pose { r: head.r, t: head.apply([0.0, 0.0, -depth]) };
+    let local = plane.inverse();
+    let (mut low, mut high) = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);
+    for eye in eyes.iter().map(|&eye| local.apply(eye)) {
+        let (mut near, mut far) = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);
+        for &(center, radius) in balls {
+            let center = local.apply(center);
+            let ahead = eye[2] - center[2];
+            if ahead - radius <= CLOSEST / 10.0 {
+                (near, far) = ([f32::NEG_INFINITY; 2], [f32::INFINITY; 2]);
+                break;
             }
-            let t = eye[2] / depth;
-            (eye[0] + (point[0] - eye[0]) * t).abs().max((eye[1] + (point[1] - eye[1]) * t).abs()) + pad * eye[2] / (depth - pad)
-        })
-    });
-    (window, half.fold(0.0, f32::max).min(widest))
+            let (t, spread) = (eye[2] / ahead, radius * eye[2] / (ahead - radius));
+            for axis in 0..2 {
+                let at = eye[axis] + (center[axis] - eye[axis]) * t;
+                near[axis] = near[axis].min(at - spread);
+                far[axis] = far[axis].max(at + spread);
+            }
+        }
+        let seen: [[f32; 2]; 2] = std::array::from_fn(|axis| [near[axis].max(eye[axis] - view * eye[2]), far[axis].min(eye[axis] + view * eye[2])]);
+        if seen.iter().all(|[from, to]| from <= to) {
+            for axis in 0..2 {
+                low[axis] = low[axis].min(seen[axis][0]);
+                high[axis] = high[axis].max(seen[axis][1]);
+            }
+        }
+    }
+    if low[0] > high[0] {
+        (low, high) = ([-view * depth; 2], [view * depth; 2]);
+    }
+    let half = (0..2).map(|axis| (high[axis] - low[axis]) / 2.0).fold(0.0, f32::max);
+    (Pose { t: plane.apply([(low[0] + high[0]) / 2.0, (low[1] + high[1]) / 2.0, 0.0]), ..plane }, half)
 }
 
 /// Where the right controller's touch point is in the board's frame.
@@ -401,34 +419,49 @@ mod tests {
         assert!(close(gap, [SIDE_GAP, 0.0, 0.0]), "a gap to the right, near edges level: {gap:?}");
     }
 
+    fn looking(at: Vec3, toward: Vec3) -> Pose {
+        let z = normalize(sub(at, toward));
+        let x = normalize(cross([0.0, 1.0, 0.0], z));
+        Pose::from_axes(x, cross(z, x), z, at)
+    }
+
     #[test]
-    fn a_window_holds_every_point_of_a_box_seen_by_either_eye_until_it_would_outgrow_the_view() {
-        let (low, high) = ([-0.8, 0.0, -0.3], [0.8, 1.7, 0.2]);
-        let corners: Vec<Vec3> = (0..8).map(|k| [if k & 1 == 0 { low[0] } else { high[0] }, if k & 2 == 0 { low[1] } else { high[1] }, if k & 4 == 0 { low[2] } else { high[2] }]).collect();
-        let middle = scale(add(low, high), 0.5);
-        for head in [[0.0, 1.6, 2.0], [0.0, 1.6, 1.0], [1.2, 1.6, 0.4], [0.3, 0.8, 1.1]] {
-            let eyes = [add(head, [-0.032, 0.0, 0.0]), add(head, [0.032, 0.0, 0.0])];
-            let (window, half) = window(&corners, 0.0, head, &eyes);
-            assert!(close(window.t, middle) && close(window.axis(2), normalize(sub(head, middle))), "through the middle, facing the head");
-            assert!(half < VIEW * length(sub(head, middle)), "seen from {head:?} the box fits");
+    fn a_window_holds_every_point_of_a_box_either_eye_can_see() {
+        let (low, high) = ([-0.8, 0.0, -0.3], [0.8, 2.5, 0.2]);
+        let corners: Vec<(Vec3, f32)> = (0..8).map(|k| ([if k & 1 == 0 { low[0] } else { high[0] }, if k & 2 == 0 { low[1] } else { high[1] }, if k & 4 == 0 { low[2] } else { high[2] }], 0.0)).collect();
+        let view = 1.4;
+        for head in [looking([0.0, 1.6, 2.0], [0.0, 1.2, 0.0]), looking([0.0, 1.6, 0.5], [0.0, 2.6, 0.0]), looking([0.0, 1.6, 0.5], [0.0, 0.0, 0.0]), looking([1.2, 1.6, 0.4], [0.0, 1.0, 0.0]), looking([0.3, 0.8, 1.1], [1.5, 0.8, 0.0])] {
+            let eyes = [head.apply([-0.032, 0.0, 0.0]), head.apply([0.032, 0.0, 0.0])];
+            let (window, half) = window(&corners, &head, &eyes, view);
+            assert!(close(window.axis(2), head.axis(2)) && close(window.axis(0), head.axis(0)), "square to the head's view");
             let local = window.inverse();
-            for eye in eyes.map(|eye| local.apply(eye)) {
-                for step in 0..500 {
+            let mut inside = 0;
+            for eye in eyes {
+                let (from_head, from_window) = (head.inverse(), local.apply(eye));
+                for step in 0..2000 {
                     let mix = |axis: usize, k: f32| low[axis] + (high[axis] - low[axis]) * (k * (step as f32 + 1.0)).fract();
-                    let point = local.apply([mix(0, 0.618), mix(1, 0.414), mix(2, 0.732)]);
-                    let t = eye[2] / (eye[2] - point[2]);
-                    let [x, y] = [eye[0] + (point[0] - eye[0]) * t, eye[1] + (point[1] - eye[1]) * t];
-                    assert!(x.abs() <= half + 1e-4 && y.abs() <= half + 1e-4, "seen from {head:?}, a point of the box lands inside: ({x}, {y}) against {half}");
+                    let point = [mix(0, 0.618), mix(1, 0.414), mix(2, 0.732)];
+                    let seen = sub(from_head.apply(point), from_head.apply(eye));
+                    if seen[2] >= 0.0 || seen[0].abs() > -view * seen[2] || seen[1].abs() > -view * seen[2] {
+                        continue;
+                    }
+                    inside += 1;
+                    let point = local.apply(point);
+                    let t = from_window[2] / (from_window[2] - point[2]);
+                    let [x, y] = [0, 1].map(|axis| from_window[axis] + (point[axis] - from_window[axis]) * t);
+                    assert!(x.abs() <= half + 1e-4 && y.abs() <= half + 1e-4, "a point the eye sees lands inside: ({x}, {y}) against {half}");
                 }
             }
+            assert!(inside > 0);
+            let depth = -local.apply(head.t)[2];
+            assert!(half <= (view * depth + 0.032) * 1.0001 || depth < CLOSEST * 1.0001, "no wider than the view: {half} at {depth}");
         }
-        let close_by = [0.0, 1.6, 0.3];
-        let (_, half) = window(&corners, 0.0, close_by, &[close_by]);
-        assert_eq!(half, VIEW * length(sub(close_by, middle)), "a head inside the box's reach gets the whole view and no more");
-        let head = [0.0, 1.0, 3.0];
-        let (_, bare) = window(&[[0.0, 1.0, 0.0]], 0.0, head, &[head]);
-        let (_, padded) = window(&[[0.0, 1.0, 0.0]], 0.2, head, &[head]);
+        let head = looking([0.0, 1.0, 3.0], [0.0, 1.0, 0.0]);
+        let (_, bare) = window(&[([0.0, 1.0, 0.0], 0.0)], &head, &[head.t], view);
+        let (_, padded) = window(&[([0.0, 1.0, 0.0], 0.2)], &head, &[head.t], view);
         assert!(bare.abs() < 1e-6 && padded > 0.2 && padded < 0.22, "a ball's outline grows a little nearer: {padded}");
+        let (window, around) = window(&[([0.0, 1.0, 2.9], 0.2)], &head, &[head.t], view);
+        assert!((around - view * CLOSEST).abs() < 1e-5 && close(window.t, head.apply([0.0, 0.0, -CLOSEST])), "a ball around the eye fills the view: {around}");
     }
 
     #[test]

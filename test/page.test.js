@@ -1787,14 +1787,12 @@ window.addEventListener('test-ready', () => {
   });
 });
 `);
-  assert.deepEqual(result, { text: 'Spent $9 on the pizza and $3 more, see https://example.test/receipt?id=1). Ended.', links: [['https://example.test/receipt?id=1', 'noopener noreferrer', '']], math: 0 }, stderr);
+  assert.deepEqual(result, { text: 'Spent $9 on the pizza and $3 more, see https://example.test/receipt?id=1). Ended.', links: [['https://example.test/receipt?id=1', 'noopener noreferrer', '_blank']], math: 0 }, stderr);
   assert.ok(await libBytes(requests) < 8192, requests.join(' '));
 });
 
-for (const standalone of [false, true]) test(`panel links preserve the page only in standalone mode: ${standalone}`, async () => {
+test('panel links open in a new tab and leave the Live session running', async () => {
   const { result, stderr, requests } = await runPage(`
-const originalMatchMedia = window.matchMedia.bind(window);
-window.matchMedia = (query) => query === '(display-mode: standalone)' ? { matches: ${standalone} } : originalMatchMedia(query);
 window.addEventListener('test-ready', () => {
   const url = location.origin + '/panel-link-destination';
   replyFromHub('unknown', 'display', [], 1, { display: { markdown: '[label](' + url + '#markdown) ' + url + '#bare', link: url + '#payload' } });
@@ -1802,22 +1800,41 @@ window.addEventListener('test-ready', () => {
     const channel = testChannel;
     const links = [...document.querySelectorAll('.display-item a')];
     const attributes = links.map(link => [link.textContent === 'label' ? 'label' : new URL(link.href).hash, new URL(link.href).hash, link.getAttribute('target'), link.rel]);
-    let opened = 0;
-    for (const link of links) {
-      if (${standalone} && link.target !== '_blank') continue;
-      if (!${standalone}) link.href = '#' + new URL(link.href).hash.slice(1);
-      else opened++;
-      link.click();
-    }
-    await fetch('/panel-links-loaded?count=' + opened);
-    document.body.dataset.result = JSON.stringify({ attributes, hash: location.hash, active: document.querySelector('#puppet').getAttribute('aria-pressed'), sameSession: channel === testChannel && channel.readyState === 'open' });
+    for (const link of links) link.click();
+    await fetch('/panel-links-loaded?count=' + links.length);
+    document.body.dataset.result = JSON.stringify({ attributes, href: location.href, active: document.querySelector('#puppet').getAttribute('aria-pressed'), sameSession: channel === testChannel && channel.readyState === 'open', cancels: sentVerbs.filter((verb) => verb === 'cancel').length });
   });
 });`);
-  assert.deepEqual(result, {
-    attributes: [['label', '#markdown'], ['#bare', '#bare'], ['#payload', '#payload']].map(([label, hash]) => [label, hash, standalone ? '_blank' : null, 'noopener noreferrer']),
-    hash: standalone ? '' : '#payload', active: 'true', sameSession: true,
+  assert.deepEqual({ ...result, href: new URL(result.href).pathname + new URL(result.href).hash }, {
+    attributes: [['label', '#markdown'], ['#bare', '#bare'], ['#payload', '#payload']].map(([label, hash]) => [label, hash, '_blank', 'noopener noreferrer']),
+    href: '/', active: 'true', sameSession: true, cancels: 0,
   }, stderr);
-  assert.equal(requests.filter(path => path === '/panel-link-destination').length, standalone ? 3 : 0, 'each standalone link loads outside the original page');
+  assert.equal(requests.filter(path => path === '/panel-link-destination').length, 3, 'each link loads outside the Live page');
+});
+
+test('a link clicked inside an html display navigates only its frame and leaves the Live session running', async () => {
+  const { result, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  const channel = testChannel;
+  const html = '<!doctype html><a id="go" href="' + location.origin + '/panel-link-destination">go</a><script>setTimeout(() => document.getElementById("go").click(), 50)<\\/script>';
+  replyFromHub('unknown', 'html', [], 1, { display: { html } });
+  await fetch('/panel-links-loaded?count=1');
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  document.body.dataset.result = JSON.stringify({ path: location.pathname, active: document.querySelector('#puppet').getAttribute('aria-pressed'), sameSession: channel === testChannel && channel.readyState === 'open' });
+});`, { size: '1440,900' });
+  assert.deepEqual(result, { path: '/', active: 'true', sameSession: true }, stderr);
+});
+
+test('leaving the page mid-call cancels the call and keeps it marked open for a reload', async () => {
+  const { result, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+  document.dispatchEvent(new Event('visibilitychange'));
+  window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: false }));
+  await until(() => sentVerbs.includes('cancel'));
+  document.body.dataset.result = JSON.stringify({ cancels: sentVerbs.filter((verb) => verb === 'cancel').length, awake: JSON.parse(sessionStorage.getItem([...Array(sessionStorage.length).keys()].map((index) => sessionStorage.key(index)).find((key) => JSON.parse(sessionStorage.getItem(key))?.awake !== undefined)))?.awake });
+});`);
+  assert.deepEqual(result, { cancels: 1, awake: true }, stderr);
 });
 
 test('adopted renderer output loses scripts, handlers, remote references and unsafe links in both SVG and HTML', async () => {
@@ -1836,8 +1853,8 @@ window.addEventListener('test-ready', async () => {
   assert.ok(result, stderr);
   assert.equal(result.unparseable, true);
   for (const forbidden of ['script', 'onload', 'onclick', 'onmouseover', 'onerror', 'javascript:', 'evil.test', '<image', '<iframe', 'srcdoc', 'data:']) assert.equal(result.svg.includes(forbidden) || result.html.includes(forbidden), false, forbidden + ': ' + result.svg + result.html);
-  for (const kept of ['<style>.a{fill:red}</style>', 'href="https://ok.test/" rel="noopener noreferrer"', 'href="#local"', '<foreignObject><div>f</div></foreignObject>']) assert.ok(result.svg.includes(kept), kept + ': ' + result.svg);
-  assert.ok(result.html.includes('href="https://ok.test/" rel="noopener noreferrer"') && result.html.includes('<img>'), result.html);
+  for (const kept of ['<style>.a{fill:red}</style>', 'href="https://ok.test/" target="_blank" rel="noopener noreferrer"', 'href="#local"', '<foreignObject><div>f</div></foreignObject>']) assert.ok(result.svg.includes(kept), kept + ': ' + result.svg);
+  assert.ok(result.html.includes('href="https://ok.test/" target="_blank" rel="noopener noreferrer"') && result.html.includes('<img>'), result.html);
 });
 
 for (const [label, close] of [['the relay closed frame', 'closeLive()'], ['a data channel close', "testChannel.dispatchEvent(new Event('close'))"]]) test('provider close offers a fresh session: ' + label, async () => {
@@ -1957,7 +1974,7 @@ window.addEventListener('test-ready', () => {
       { head: [['Name', 'Value']], body: [['First', 'one'], ['Second', 'two']] },
       { head: [['Link', 'Code', 'Empty']], body: [['docs', 'left|right', '']] },
     ],
-    link: [['docs', 'https://example.test/docs', 'noopener noreferrer', '']],
+    link: [['docs', 'https://example.test/docs', 'noopener noreferrer', '_blank']],
     code: ['left|right'],
     paragraphs: ['After', '| ordinary | prose |', '| not a separator | text |'],
   }, stderr);

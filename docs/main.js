@@ -425,8 +425,7 @@ async function listen(mine) {
 }
 function appendUrl(parent, url, label = url) {
   const link = document.createElement('a');
-  link.href = url; link.textContent = label; link.rel = 'noopener noreferrer';
-  if (matchMedia('(display-mode: standalone)').matches) link.target = '_blank';
+  link.href = url; link.textContent = label; link.rel = 'noopener noreferrer'; link.target = '_blank';
   parent.append(link);
 }
 function appendMath(parent, source, display) {
@@ -1469,7 +1468,8 @@ $('forget').addEventListener('click', async () => { listening = false; setMicrop
 navigator.mediaDevices?.addEventListener('devicechange', syncSpotter);
 document.addEventListener('visibilitychange', () => { syncScreenLock(); keepPage(); if (document.hidden) puppetRuntime?.pause(); else if (!$('conversation').classList.contains('hidden')) puppetRuntime?.start(); });
 window.addEventListener('beforeunload', () => puppetRuntime?.dispose());
-window.addEventListener('pagehide', (event) => { if (!event.persisted && conversation) sendUnrelayed(); });
+// Not stopConversation: the hidden-page save already recorded Live as open, so a reload resumes it.
+window.addEventListener('pagehide', (event) => { if (!event.persisted && conversation) { sendFrame('cancel').catch(() => {}); sendUnrelayed(); } });
 const saved = configuredToken(config, localStorage.getItem(KEY));
 if (saved) { setCard(false); start(saved).then(() => {
   if (!restored) return;

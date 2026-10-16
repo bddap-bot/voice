@@ -22,7 +22,7 @@ const ALPN = 'voice-web/1';
 const UNANSWERED_MS = 3000;
 const HUB_TURN_START_MS = 20000;
 const HUB_TURN_QUIET_MS = 1500;
-const STANDING_REFRESH_S = 600;
+const REFRESH_S = 600;
 const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -982,7 +982,7 @@ function onLiveEvent(message, source) {
       recordPageError(new Error(`Live usage limit: ${JSON.stringify(limit)}`));
       sendFrame(`usage-limit\n${JSON.stringify(limit)}`).catch(recordPageError);
     }
-    if (conversation?.standing && !conversation.pendingStanding && usageSeconds - conversation.standingAt >= STANDING_REFRESH_S) standBy(conversation.standing);
+    if (conversation && !conversation.pendingStanding && usageSeconds - conversation.refreshedAt >= REFRESH_S) refresh();
   }
 }
 // Only a page still running reports a dropped call, so one that navigated away raises nothing.
@@ -1130,8 +1130,16 @@ async function playHubReplies() {
   applyStanding();
 }
 function standBy(instructions) {
-  if (!conversation || conversation.sleeping) return;
+  if (!conversation || conversation.sleeping || sameInstructions(instructions, conversation.pendingStanding ?? conversation.standing)) return;
   conversation.pendingStanding = instructions;
+  applyStanding();
+}
+const sameInstructions = (a, b) => a.length === b.length && a.every((text, index) => text === b[index]);
+// The session's opening instructions fade as its audio grows, and with them the sign-off: every REFRESH_S of audio they go in again.
+function refresh() {
+  conversation.refreshedAt = usageSeconds;
+  conversation.pendingIdentity = true;
+  conversation.pendingStanding = conversation.standing;
   applyStanding();
 }
 function applyStanding() {
@@ -1140,7 +1148,8 @@ function applyStanding() {
   const instructions = current.pendingStanding;
   current.pendingStanding = null;
   current.standing = instructions;
-  current.standingAt = usageSeconds;
+  if (current.pendingIdentity) tell(current.audioOwner, 'developer', IDENTITY);
+  current.pendingIdentity = false;
   instructions.forEach((content) => tell(current.audioOwner, 'developer', content));
 }
 function interruptHubReplies(reason) {
@@ -1259,7 +1268,7 @@ async function startConversation(redialed = false) {
     if (attempt.cancelled) return;
     tell(attempt, 'commentary', WOKEN);
     const clock = new SessionClock({ onTick: (seconds) => { $('elapsed').textContent = formatElapsed(seconds); } });
-    conversation = { pc: attempt.pc, channel: attempt.channel, clock, id: attempt.offerId, audioOwner: attempt, said: '', transcript: new TranscriptBatcher(attempt.offerId, persistenceUploads, { onTurn: (side, at) => telemetry.add({ kind: 'transcript', session_id: attempt.offerId, name: side, at }) }) };
+    conversation = { pc: attempt.pc, channel: attempt.channel, clock, id: attempt.offerId, audioOwner: attempt, said: '', standing: [], refreshedAt: 0, transcript: new TranscriptBatcher(attempt.offerId, persistenceUploads, { onTurn: (side, at) => telemetry.add({ kind: 'transcript', session_id: attempt.offerId, name: side, at }) }) };
     startRecorders(attempt, attempt.offerId);
     clock.start();
     puppetRuntime?.pose('listen');

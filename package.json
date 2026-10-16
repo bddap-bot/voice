@@ -17,7 +17,9 @@
     "presmoke:delegated-reply": "npm run build",
     "smoke:delegated-reply": "node scripts/delegated-reply-smoke.mjs",
     "presmoke:filler-language": "npm run build",
-    "smoke:filler-language": "node scripts/filler-language-smoke.mjs"
+    "smoke:filler-language": "node scripts/filler-language-smoke.mjs",
+    "presmoke:dismissals": "npm run build",
+    "smoke:dismissals": "node scripts/dismissal-smoke.mjs"
   },
   "dependencies": {
     "@pixiv/three-vrm": "3.5.5",

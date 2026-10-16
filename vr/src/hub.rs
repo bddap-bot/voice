@@ -16,8 +16,8 @@ const TURN_START: Duration = Duration::from_secs(20);
 pub const TURN_QUIET: Duration = Duration::from_millis(1500);
 const FAILED: &str = "The hub request failed.";
 const ASLEEP: &str = "Live is asleep";
-/// Audio seconds after which the standing instructions go in again, so a long session does not lose them.
-const STANDING_REFRESH_S: f64 = 600.0;
+/// The page's `REFRESH_S`: the session's opening instructions fade as its audio grows, and with them the sign-off, so every this many audio seconds they go in again.
+const REFRESH_S: f64 = 600.0;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Channel {
@@ -168,8 +168,8 @@ pub struct Hub {
     pending_standing: Standing,
     standing: Vec<String>,
     reply_unspoken: bool,
-    audio_seconds: f64,
-    standing_at: f64,
+    refreshed_at: f64,
+    pending_identity: bool,
     sleeping: bool,
     /// A presented reply's display, shown once the model starts speaking it.
     cued: Option<Display>,
@@ -431,7 +431,11 @@ impl Hub {
     }
 
     fn stand_by(&mut self, instructions: Vec<String>) {
-        if self.sleeping {
+        let current = match &self.pending_standing {
+            Standing::Waiting(pending) | Standing::Settling(pending) => pending,
+            Standing::None => &self.standing,
+        };
+        if self.sleeping || *current == instructions {
             return;
         }
         self.pending_standing = match self.pending_standing {
@@ -448,18 +452,22 @@ impl Hub {
         let Standing::Waiting(instructions) = &mut self.pending_standing else { return };
         let instructions = std::mem::take(instructions);
         self.pending_standing = Standing::None;
+        if std::mem::take(&mut self.pending_identity) {
+            self.out.push(Command::Tell(Tell::Session(Channel::Developer, crate::identity::identity().instructions.clone())));
+        }
         for content in &instructions {
             self.out.push(Command::Tell(Tell::Session(Channel::Developer, content.clone())));
         }
         tracing::info!("standing instructions applied");
         self.standing = instructions;
-        self.standing_at = self.audio_seconds;
     }
 
     pub fn usage(&mut self, audio_seconds: f64) {
-        self.audio_seconds = audio_seconds;
-        if audio_seconds - self.standing_at >= STANDING_REFRESH_S && matches!(self.pending_standing, Standing::None) && !self.standing.is_empty() {
-            self.stand_by(self.standing.clone());
+        if audio_seconds - self.refreshed_at >= REFRESH_S && matches!(self.pending_standing, Standing::None) && !self.sleeping {
+            self.refreshed_at = audio_seconds;
+            self.pending_identity = true;
+            self.pending_standing = Standing::Waiting(self.standing.clone());
+            self.apply_standing();
         }
     }
 
@@ -784,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn standing_instructions_follow_the_spoken_reply_beside_them_an_instructions_only_reply_is_silent_and_a_rollover_reappends() {
+    fn standing_instructions_follow_the_spoken_reply_beside_them_an_instructions_only_reply_is_silent_and_every_600_audio_seconds_the_identity_goes_in_again_with_them() {
         let mut f = Fixture::new();
         f.hear("Check the test beacon.");
         f.delegate("styled");
@@ -804,14 +812,41 @@ mod tests {
             f.hub.usage(seconds);
         }
         f.collect();
-        assert_eq!(f.told()[4..], [instructions("Answer in one short sentence.")]);
+        let refreshed = [instructions(&crate::identity::identity().instructions), instructions("Answer in one short sentence.")];
+        assert_eq!(f.told()[4..], refreshed);
         f.hub.usage(1199.0);
         f.collect();
-        assert_eq!(f.told().len(), 5);
+        assert_eq!(f.told().len(), 6);
         f.hub.usage(1200.0);
         f.collect();
-        assert_eq!(f.told()[5..], [instructions("Answer in one short sentence.")]);
+        assert_eq!(f.told()[6..], refreshed);
         assert_eq!(f.frames("hub-ack"), [json!({ "id": "styled", "stamp": "s1" }), json!({ "id": "silent", "stamp": "s2" })]);
+    }
+
+    #[test]
+    fn without_standing_instructions_the_identity_alone_goes_in_again_every_600_audio_seconds_until_the_sign_off() {
+        let mut f = Fixture::new();
+        f.hub.usage(599.0);
+        f.collect();
+        assert!(f.told().is_empty());
+        f.hub.usage(600.0);
+        f.collect();
+        assert_eq!(f.told(), [instructions(&crate::identity::identity().instructions)]);
+        f.hub.sleep();
+        f.hub.usage(1200.0);
+        f.collect();
+        assert_eq!(f.told().len(), 1);
+    }
+
+    #[test]
+    fn a_restated_standing_direction_is_not_appended_again() {
+        let mut f = Fixture::new();
+        for id in ["a", "b"] {
+            f.reply(json!({ "id": id, "stamp": id, "commentary": [], "instructions": ["Hum."] }));
+        }
+        f.reply(json!({ "id": "c", "stamp": "c", "commentary": [], "instructions": ["Whistle."] }));
+        f.collect();
+        assert_eq!(f.told(), [instructions("Hum."), instructions("Whistle.")]);
     }
 
     #[test]

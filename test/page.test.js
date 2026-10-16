@@ -2512,6 +2512,28 @@ test('a muted microphone runs no wake spotter, not even after a session ends, an
   assert.deepEqual(result, { before: 0, muted: { closed: 1, replaced: false }, startedMuted: 0, wakes: ['0.900'] });
 });
 
+test('a provider close before the session opens is reported as a page error', async () => {
+  const result = await runWakePage(`${startInFlight}
+    closeLive('error', lastOffer.id);
+    await until(() => fleetLines.length);
+    return { fleetLines, active: document.querySelector('#puppet').getAttribute('aria-pressed') };
+  `);
+  assert.deepEqual(result, { fleetLines: ['fleet-error: voice/page — Error: Live session closed before it opened: error'], active: 'false' });
+});
+
+test('a relay lost mid-call is reported as a page error once the relay is back', async () => {
+  const result = await runWakePage(`
+    loseRelay(new Error('relay closed'));
+    await until(() => document.querySelector('#status').textContent.includes('connection lost'));
+    document.querySelector('#puppet').click();
+    await until(() => globalThis.answerAuth);
+    answerAuth(true);
+    await until(() => fleetLines.length);
+    return { fleetLines };
+  `);
+  assert.deepEqual(result, { fleetLines: ['fleet-error: voice/page — Error: Live session closed: connection lost'] });
+});
+
 test('a reconnect while the microphone is muted starts no wake spotter until unmute', async () => {
   const result = await runWakePage(`
     await sleepNow();

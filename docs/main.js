@@ -419,7 +419,7 @@ async function listen(mine) {
     puppetChannel.fail(error);
     connected = false;
     audioDiagnostics()?.record('relay', { state: 'disconnected' });
-    if (conversation) stopConversation('connection lost');
+    if (conversation) callDropped('connection lost', 'connection lost');
     else setStatus('connection lost', 'err');
   }
 }
@@ -986,13 +986,16 @@ function onLiveEvent(message, source) {
   }
 }
 // Only a page still running reports a dropped call, so one that navigated away raises nothing.
-function callDropped(reason) {
+function callDropped(reason, status = 'Session ended — tap to continue') {
   recordPageError(new Error(`Live session closed: ${reason}`));
-  stopConversation('Session ended — tap to continue');
+  stopConversation(status);
 }
 function liveClosed(payload) {
   if (isOfferFor(conversation, payload)) callDropped(payload.reason);
-  else if (isOfferFor(starting, payload)) cancelStarting();
+  else if (isOfferFor(starting, payload)) {
+    recordPageError(new Error(`Live session closed before it opened: ${payload.reason}`));
+    cancelStarting();
+  }
 }
 function presentTranscript(event) {
     clearTimeout(unanswered);

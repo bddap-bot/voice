@@ -1980,6 +1980,21 @@ window.addEventListener('test-ready', () => {
   }, stderr);
 });
 
+test('a wide display table wraps its cells within the card instead of scrolling sideways', async () => {
+  const markdown = `| Job | State | Note |\n|---|---|---|\n| ${'reconfigure'.repeat(4)} | running | ${'a long explanation of what happened '.repeat(6)}${'https://example.test/' + 'x'.repeat(80)} |`;
+  const { result, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  replyFromHub('unknown', 'display', [], 1, { display: { markdown: ${JSON.stringify(markdown)} } });
+  until(() => globalThis.hubAcks?.includes('display')).then(() => {
+    const items = document.querySelector('#display-items');
+    const item = items.querySelector('.display-item');
+    const table = item.querySelector('table');
+    document.body.dataset.result = JSON.stringify({ cells: table.querySelectorAll('td').length, fits: table.getBoundingClientRect().right <= item.getBoundingClientRect().right, scrolls: items.scrollWidth > items.clientWidth });
+  });
+});`);
+  assert.deepEqual(result, { cells: 3, fits: true, scrolls: false }, stderr);
+});
+
 const untilAsleep = `
 const signOff = (text = ${JSON.stringify(SIGN_OFF)}) => say(text);
 const count = (verb) => sentVerbs.filter((item) => item === verb).length;

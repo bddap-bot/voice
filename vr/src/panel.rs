@@ -18,6 +18,8 @@ const LINK: [u8; 4] = [142, 171, 255, 255];
 const CODE: [u8; 4] = [214, 200, 150, 255];
 const TRACK: [u8; 4] = [52, 52, 60, 255];
 const THUMB: [u8; 4] = [150, 150, 160, 255];
+/// Characters between a table's columns.
+const GUTTER: usize = 2;
 /// The position bar's width, in the right padding.
 const BAR: u32 = 4;
 
@@ -29,6 +31,8 @@ enum Kind {
     Heading,
     Code,
     Link,
+    /// A table's rule, as wide as its text.
+    Rule,
 }
 
 impl Kind {
@@ -43,7 +47,7 @@ impl Kind {
         }
     }
     fn height(self) -> u32 {
-        8 * self.scale() + LEADING
+        if self == Kind::Rule { 2 * LEADING } else { 8 * self.scale() + LEADING }
     }
 }
 
@@ -115,12 +119,89 @@ fn wrap(text: &str, columns: usize) -> Vec<String> {
     lines
 }
 
+fn is_row(line: &str) -> bool {
+    line.trim_start().starts_with('|')
+}
+
+fn is_separator(line: &str) -> bool {
+    let line = line.trim();
+    line.starts_with('|') && line.contains('-') && line.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+}
+
+/// A row's cells, split at pipes outside code spans.
+fn cells(row: &str) -> Vec<String> {
+    let row = row.trim();
+    let row = row.strip_prefix('|').unwrap_or(row);
+    let row = row.strip_suffix('|').unwrap_or(row);
+    let mut cells = vec![String::new()];
+    let mut code = false;
+    for c in row.chars() {
+        match c {
+            '`' => code = !code,
+            '|' if !code => cells.push(String::new()),
+            _ => {}
+        }
+        if c != '|' || code {
+            cells.last_mut().unwrap().push(c);
+        }
+    }
+    cells.iter().map(|cell| ascii(&inline(cell.trim()))).collect()
+}
+
+/// Each column's width in characters, `available` shared so a narrow column keeps its text and the wide ones split the rest evenly.
+fn widths(natural: &[usize], available: usize) -> Vec<usize> {
+    let mut widths = vec![0; natural.len()];
+    let mut open: Vec<usize> = (0..natural.len()).collect();
+    let mut left = available;
+    while !open.is_empty() {
+        let share = left / open.len();
+        let (fits, wide): (Vec<usize>, Vec<usize>) = open.iter().partition(|&&column| natural[column] <= share);
+        if fits.is_empty() {
+            for (rank, &column) in wide.iter().enumerate() {
+                widths[column] = share + usize::from(rank < left % wide.len());
+            }
+            break;
+        }
+        for &column in &fits {
+            widths[column] = natural[column];
+            left -= natural[column];
+        }
+        open = wide;
+    }
+    widths
+}
+
+/// A table in fixed columns that fit `columns` characters, each cell wrapped within its own; a rule under the head, and between rows once one wraps.
+fn table(rows: &[Vec<String>], columns: usize) -> Vec<Line> {
+    let count = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let natural: Vec<usize> = (0..count).map(|column| rows.iter().filter_map(|row| row.get(column)).map(String::len).max().unwrap_or(0).max(1)).collect();
+    let Some(available) = columns.checked_sub(GUTTER * (count - 1)).filter(|&available| available >= count) else {
+        return rows.iter().flat_map(|row| wrap(&row.join(" | "), columns)).map(|text| Line { kind: Kind::Text, text }).collect();
+    };
+    let widths = widths(&natural, available);
+    let wrapped: Vec<Vec<Vec<String>>> = rows.iter().map(|row| widths.iter().enumerate().map(|(column, &width)| wrap(row.get(column).map_or("", String::as_str), width)).collect()).collect();
+    let ruled = wrapped.iter().any(|row| row.iter().any(|cell| cell.len() > 1));
+    let span = widths.iter().sum::<usize>() + GUTTER * (count - 1);
+    let rule = || Line { kind: Kind::Rule, text: " ".repeat(span) };
+    let mut out = Vec::new();
+    for (index, row) in wrapped.iter().enumerate() {
+        if index == 1 || index > 1 && ruled {
+            out.push(rule());
+        }
+        for line in 0..row.iter().map(Vec::len).max().unwrap_or(0) {
+            let text: Vec<String> = row.iter().zip(&widths).map(|(cell, &width)| format!("{:width$}", cell.get(line).map_or("", String::as_str))).collect();
+            out.push(Line { kind: Kind::Text, text: text.join(&" ".repeat(GUTTER)).trim_end().into() });
+        }
+    }
+    out
+}
+
 fn lines(display: &Display, width: u32) -> Vec<Line> {
     if display.html {
         return vec![Line { kind: Kind::Link, text: ON_THE_PAGE.into() }];
     }
     let mut out: Vec<Line> = Vec::new();
-    let mut push = |kind: Kind, text: &str| {
+    let push = |out: &mut Vec<Line>, kind: Kind, text: &str| {
         let text = ascii(text);
         let wrapped = if kind == Kind::Code {
             let characters: Vec<char> = text.chars().collect();
@@ -131,28 +212,35 @@ fn lines(display: &Display, width: u32) -> Vec<Line> {
         out.extend(wrapped.into_iter().map(|text| Line { kind, text }));
     };
     let mut code = false;
-    for raw in display.markdown.as_deref().unwrap_or_default().lines() {
+    let mut source = display.markdown.as_deref().unwrap_or_default().lines().peekable();
+    while let Some(raw) = source.next() {
         let trimmed = raw.trim();
         if trimmed.starts_with("```") {
             code = !code;
         } else if code {
-            push(Kind::Code, raw.trim_end());
+            push(&mut out, Kind::Code, raw.trim_end());
         } else if trimmed.starts_with('#') {
-            push(Kind::Heading, &inline(trimmed.trim_start_matches('#').trim()));
-        } else if trimmed.starts_with('|') && trimmed.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ')) {
+            push(&mut out, Kind::Heading, &inline(trimmed.trim_start_matches('#').trim()));
+        } else if is_row(raw) && source.peek().is_some_and(|next| is_separator(next)) {
+            source.next();
+            let mut rows = vec![cells(raw)];
+            while let Some(row) = source.next_if(|next| is_row(next)) {
+                rows.push(cells(row));
+            }
+            out.extend(table(&rows, columns(Kind::Text, width)));
         } else if let Some(item) = ["- ", "* ", "+ "].iter().find_map(|bullet| trimmed.strip_prefix(bullet)) {
-            push(Kind::Text, &format!("- {}", inline(item)));
+            push(&mut out, Kind::Text, &format!("- {}", inline(item)));
         } else {
-            push(Kind::Text, &inline(trimmed));
+            push(&mut out, Kind::Text, &inline(trimmed));
         }
     }
     if let Some(link) = &display.link {
-        push(Kind::Link, link);
+        push(&mut out, Kind::Link, link);
     }
     while out.first().is_some_and(|line| line.text.is_empty()) {
         out.remove(0);
     }
-    out.dedup_by(|line, previous| line.text.is_empty() && previous.text.is_empty());
+    out.dedup_by(|line, previous| line.kind == previous.kind && line.text.is_empty() && previous.text.is_empty());
     while out.last().is_some_and(|line| line.text.is_empty()) {
         out.pop();
     }
@@ -273,6 +361,10 @@ impl Card {
         let mut canvas = Canvas::new(width, self.height(), BACKGROUND);
         let mut y = PADDING;
         for line in self.shown_in(self.view) {
+            if line.kind == Kind::Rule {
+                let middle = y + line.kind.height() / 2;
+                canvas.fill([PADDING, middle - 1, PADDING + line.text.len() as u32 * 8 * SCALE, middle + 1], TRACK);
+            }
             canvas.text([PADDING, y], &line.text.chars().collect::<Vec<_>>(), line.kind.scale(), line.kind.ink());
             y += line.kind.height();
         }
@@ -324,12 +416,35 @@ mod tests {
             (Kind::Text, "- one".into()),
             (Kind::Text, "- two".into()),
             (Kind::Text, String::new()),
-            (Kind::Text, "| job | state |".into()),
-            (Kind::Text, "| 1 | done |".into()),
+            (Kind::Text, "job  state".into()),
+            (Kind::Rule, " ".repeat(10)),
+            (Kind::Text, "1    done".into()),
             (Kind::Code, "fn main() {".into()),
             (Kind::Code, "    x".into()),
         ]);
         assert_eq!(texts("2 * 3 and snake_case"), [(Kind::Text, "2 * 3 and snake_case".into())]);
+    }
+
+    #[test]
+    fn a_table_keeps_its_columns_and_a_wide_one_wraps_its_cells_within_the_card() {
+        assert_eq!(texts("| a | `b|c` | [d](https://x.test) |\n| --- | :-: | ---: |\n| 1 | 2 |"), [
+            (Kind::Text, "a  b|c  d".into()),
+            (Kind::Rule, " ".repeat(9)),
+            (Kind::Text, "1  2".into()),
+        ]);
+        let columns = columns(Kind::Text, (WIDTH * PIXELS_PER_METRE) as u32);
+        let wide = format!("| Job | State | Note |\n|---|---|---|\n| 7 | running | {} |\n| 8 | {} | ok |", "a long explanation of what happened ".repeat(3), "x".repeat(60));
+        let lines = texts(&wide);
+        assert!(lines.iter().all(|(_, text)| text.len() <= columns), "{lines:#?}");
+        assert!(lines.iter().all(|(_, text)| !text.contains('|')));
+        let gutter = " ".repeat(GUTTER);
+        let starts: Vec<usize> = lines.iter().filter(|(kind, _)| *kind == Kind::Text).filter_map(|(_, text)| text.find("happened").or(text.find("ok")).map(|_| text.rfind(&gutter).unwrap())).collect();
+        assert!(starts.len() > 1 && starts.windows(2).all(|pair| pair[0] == pair[1]), "the note column starts at one place: {lines:#?}");
+        assert_eq!(lines.iter().filter(|(kind, _)| *kind == Kind::Rule).count(), 2, "under the head and between wrapped rows");
+        let picture = draw(&Display { markdown: Some(wide), ..Display::default() });
+        let rule = PADDING + Kind::Text.height() + Kind::Rule.height() / 2;
+        assert_eq!(at(&picture, PADDING + 1, rule), TRACK);
+        assert!(texts(&format!("{}\n{}", "|a".repeat(40), "|-".repeat(40))).iter().all(|(_, text)| text.len() <= columns), "too many columns fall back to wrapped rows");
     }
 
     #[test]

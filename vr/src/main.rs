@@ -392,7 +392,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             }
             Some(Press::VoiceId) => voice.toggle_voice_id(),
             Some(Press::Learn) => voice.toggle_learning(),
-            Some(Press::Calls) => board.toggle_log(),
+            Some(Press::Log) => board.toggle_log(),
             Some(Press::SetDown) => anchor.toggle(started),
             Some(Press::Appearance(index)) if index != board.active => {
                 let avatar = &catalog.avatars[index];
@@ -415,8 +415,9 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             }
             _ => {}
         }
-        if board.calls != *voice.calls() {
-            board.calls = voice.calls().clone();
+        let log = voice.log(board::LOG_LINES);
+        if board.log != log {
+            board.log = log;
             board.mark();
         }
         if board.anchor != anchor {

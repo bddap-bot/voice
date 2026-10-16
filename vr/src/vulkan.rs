@@ -253,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn the_board_texture_follows_the_board_as_hub_calls_open_and_close() {
+    fn the_board_texture_follows_the_board_as_the_log_closes_and_opens() {
         let mut flat = Flat::new(Rc::new(Gpu::new(None).unwrap()));
         let mut board = crate::board::Board::new(6, 0);
         let mut sizes = Vec::new();
@@ -267,6 +267,6 @@ mod tests {
             assert_eq!(flat.read().unwrap(), image.pixels);
             sizes.push(image.height);
         }
-        assert!(sizes[1] > sizes[0] && sizes[2] == sizes[0], "opening the log grows the board: {sizes:?}");
+        assert!(sizes[1] < sizes[0] && sizes[2] == sizes[0], "closing the log shrinks the board: {sizes:?}");
     }
 }

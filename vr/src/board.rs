@@ -2,7 +2,8 @@ use std::time::{Duration, Instant};
 
 use font8x8::legacy::BASIC_LEGACY;
 
-use crate::calls::{Calls, State};
+use crate::calls::State;
+use crate::conversation::Entry;
 use crate::placement::{Anchor, Vec3};
 use crate::voice::VoiceId;
 
@@ -12,7 +13,7 @@ pub const LIBRARY_SHOWN: Duration = Duration::from_secs(60);
 const PIXELS_PER_METRE: f32 = 2000.0;
 const ROW: f32 = 0.022;
 const GAP: f32 = 0.004;
-/// Dismiss, the microphone and reset, Voice ID, Learn my voice, and the hub calls with setting the avatar down.
+/// Dismiss, the microphone and reset, Voice ID, Learn my voice, and the log with setting the avatar down.
 const ROWS: usize = 5;
 const COLUMNS: usize = 6;
 const CELL: f32 = (WIDTH - (COLUMNS + 1) as f32 * GAP) / COLUMNS as f32;
@@ -21,8 +22,10 @@ const BORDER: u32 = 4;
 pub const PREVIEW: u32 = (CELL * PIXELS_PER_METRE) as u32 - 2 * BORDER;
 const GLYPH_SCALE: u32 = 2;
 const PADDING: u32 = 8;
-/// The hub calls' text is drawn at the font's own size.
+/// The log's text is drawn at the font's own size.
 const LINE: u32 = 10;
+/// The log's height in lines; it shows the newest that fit.
+pub const LOG_LINES: usize = 12;
 const STRIPE: u32 = 4;
 const REQUEST_LINES: usize = 2;
 const REPLY_LINES: usize = 3;
@@ -43,6 +46,8 @@ const MUTED: [u8; 4] = [140, 47, 57, 255];
 const INK: [u8; 4] = [240, 240, 240, 255];
 const HOVER: [u8; 4] = [255, 214, 90, 255];
 const REPLY_INK: [u8; 4] = [170, 200, 240, 255];
+const HEARD: [u8; 4] = [64, 168, 96, 255];
+const SPOKE_INK: [u8; 4] = [190, 190, 200, 255];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Press {
@@ -51,7 +56,7 @@ pub enum Press {
     Reset,
     VoiceId,
     Learn,
-    Calls,
+    Log,
     SetDown,
     Appearance(usize),
 }
@@ -115,8 +120,8 @@ pub struct Board {
     previews: Vec<Option<Vec<u8>>>,
     /// When the appearance library was last revealed, while it shows.
     library: Option<Instant>,
-    log: bool,
-    pub calls: Calls,
+    shows_log: bool,
+    pub log: Vec<Entry>,
     pub active: usize,
     pub pending: Option<usize>,
     pub muted: bool,
@@ -129,7 +134,7 @@ pub struct Board {
 
 impl Board {
     pub fn new(appearances: usize, active: usize) -> Board {
-        Board { previews: vec![None; appearances], library: None, log: false, calls: Calls::default(), active, pending: None, muted: false, voice: VoiceId::default(), anchor: Anchor::Riding, contact: Contact::default(), hover: None, dirty: true }
+        Board { previews: vec![None; appearances], library: None, shows_log: true, log: Vec::new(), active, pending: None, muted: false, voice: VoiceId::default(), anchor: Anchor::Riding, contact: Contact::default(), hover: None, dirty: true }
     }
 
     /// As summoned: a hand already at the board must withdraw before it presses, and the appearance library is hidden.
@@ -137,7 +142,6 @@ impl Board {
         self.contact.reset();
         self.hover = None;
         self.library = None;
-        self.log = false;
         self.dirty = true;
     }
 
@@ -159,34 +163,44 @@ impl Board {
         self.library.is_some()
     }
 
-    /// Shows or hides the recent hub calls below the buttons.
+    /// Shows or hides the log below the buttons.
     pub fn toggle_log(&mut self) {
-        self.log = !self.log;
+        self.shows_log = !self.shows_log;
         self.dirty = true;
     }
 
-    /// Each line of the shown hub calls with its ink and the call's state, newest call first.
-    fn log_lines(&self) -> Vec<(String, [u8; 4], State)> {
-        if !self.log {
+    /// The newest lines of the log that fit, oldest first, each with its ink and stripe: what was heard, what was spoken, and each hub call marked by its state.
+    fn log_lines(&self) -> Vec<(String, [u8; 4], [u8; 4])> {
+        if !self.shows_log {
             return Vec::new();
         }
         let fits = ((WIDTH * PIXELS_PER_METRE) as u32 - 2 * PADDING - 2 * STRIPE) as usize / 8;
         let mut lines = Vec::new();
-        for (index, call) in self.calls.iter().enumerate() {
-            if index > 0 {
-                lines.push((String::new(), INK, call.state));
+        for entry in &self.log {
+            match entry {
+                Entry::Heard(text) => lines.extend(wrap(text, fits, usize::MAX).into_iter().map(|line| (line, INK, HEARD))),
+                Entry::Spoke(text) => lines.extend(wrap(text, fits, usize::MAX).into_iter().map(|line| (line, SPOKE_INK, BUTTON))),
+                Entry::Call(call) => {
+                    let mark = match call.state {
+                        State::Waiting => PENDING,
+                        State::Replied => ACTIVE,
+                        State::Failed => DISMISS,
+                    };
+                    let request = wrap(&call.request, fits, REQUEST_LINES);
+                    let request = if request.is_empty() && call.replies.is_empty() { vec![String::new()] } else { request };
+                    lines.extend(request.into_iter().map(|line| (line, INK, mark)));
+                    lines.extend(wrap(&call.replies.join(" "), fits, REPLY_LINES).into_iter().map(|line| (line, REPLY_INK, mark)));
+                }
             }
-            lines.extend(wrap(&call.request, fits, REQUEST_LINES).into_iter().map(|line| (line, INK, call.state)));
-            lines.extend(wrap(&call.replies.join(" "), fits, REPLY_LINES).into_iter().map(|line| (line, REPLY_INK, call.state)));
         }
-        lines
+        lines.split_off(lines.len().saturating_sub(LOG_LINES))
     }
 
     fn log_height(&self) -> f32 {
-        if !self.log {
+        if !self.shows_log {
             return 0.0;
         }
-        (self.log_lines().len() as u32 * LINE + 2 * PADDING) as f32 / PIXELS_PER_METRE + GAP
+        (LOG_LINES as u32 * LINE + 2 * PADDING) as f32 / PIXELS_PER_METRE + GAP
     }
 
     /// The appearance's preview, `PREVIEW` pixels square, premultiplied RGBA, top row first.
@@ -224,7 +238,7 @@ impl Board {
             Button { press: Press::Mute, rect: self.row(1, left, left + half) },
             Button { press: Press::Reset, rect: self.row(1, right - half, right) },
             Button { press: Press::Learn, rect: self.row(3, left, right) },
-            Button { press: Press::Calls, rect: self.row(4, left, left + half) },
+            Button { press: Press::Log, rect: self.row(4, left, left + half) },
             Button { press: Press::SetDown, rect: self.row(4, right - half, right) },
         ];
         if self.voice.stored {
@@ -279,7 +293,7 @@ impl Board {
                     None if self.voice.stored => (BUTTON, "Forget my voice".to_owned()),
                     None => (BUTTON, "Learn my voice".to_owned()),
                 },
-                Press::Calls => (if self.log { ACTIVE } else { BUTTON }, "Hub calls".to_owned()),
+                Press::Log => (if self.shows_log { ACTIVE } else { BUTTON }, "Log".to_owned()),
                 Press::SetDown => match self.anchor {
                     Anchor::Riding => (BUTTON, "Set down".to_owned()),
                     Anchor::Settling(_) => (PENDING, "Set down".to_owned()),
@@ -308,16 +322,8 @@ impl Board {
         }
         let [left, _, _, bottom] = self.area(self.row(ROWS - 1, -WIDTH / 2.0 + GAP, WIDTH / 2.0 - GAP));
         let first = bottom + (GAP * PIXELS_PER_METRE) as u32 + PADDING;
-        for (index, (line, ink, state)) in self.log_lines().into_iter().enumerate() {
-            if line.is_empty() {
-                continue;
-            }
+        for (index, (line, ink, mark)) in self.log_lines().into_iter().enumerate() {
             let y = first + index as u32 * LINE;
-            let mark = match state {
-                State::Waiting => PENDING,
-                State::Replied => ACTIVE,
-                State::Failed => DISMISS,
-            };
             image.fill([left, y, left + STRIPE, y + LINE], mark);
             image.text([left + 2 * STRIPE, y + (LINE - 8) / 2], &line.chars().collect::<Vec<_>>(), 1, ink);
         }
@@ -856,11 +862,11 @@ mod tests {
     }
 
     #[test]
-    fn set_down_shares_the_hub_calls_row_presses_once_and_shows_its_state() {
+    fn set_down_shares_the_log_row_presses_once_and_shows_its_state() {
         let mut board = Board::new(3, 0);
-        let ([_, calls_bottom, calls_right, calls_top], [set_left, set_bottom, _, set_top]) = (rect_of(&board, Press::Calls), rect_of(&board, Press::SetDown));
-        assert!(calls_right < set_left);
-        assert_eq!((calls_bottom, calls_top), (set_bottom, set_top));
+        let ([_, log_bottom, log_right, log_top], [set_left, set_bottom, _, set_top]) = (rect_of(&board, Press::Log), rect_of(&board, Press::SetDown));
+        assert!(log_right < set_left);
+        assert_eq!((log_bottom, log_top), (set_bottom, set_top));
         assert_eq!(poke_on(&mut board, Press::SetDown, 0.0), [Press::SetDown]);
         board.touch(None);
         let mut shown = |anchor| {
@@ -876,53 +882,65 @@ mod tests {
         assert_ne!(riding.1, stuck.1, "Set down, then Pick up");
     }
 
-    fn calls(requests: &[(&str, &[&str], bool)]) -> Calls {
-        let mut calls = Calls::default();
-        for (index, (request, replies, failed)) in requests.iter().enumerate().rev() {
-            let id = index.to_string();
-            calls.asked(&id, request);
-            calls.replied(&id, &replies.iter().map(|reply| reply.to_string()).collect::<Vec<_>>());
-            if *failed {
-                calls.failed(&id);
-            }
-        }
-        calls
+    fn call(request: &str, replies: &[&str], state: State) -> Entry {
+        Entry::Call(crate::calls::Call { id: request.into(), at: 0, request: request.into(), state, replies: replies.iter().map(|reply| reply.to_string()).collect() })
     }
 
     #[test]
-    fn hub_calls_show_below_the_buttons_and_above_the_library_marked_by_state_and_hide_again() {
+    fn the_log_shows_below_the_buttons_and_above_the_library_newest_lines_last_marked_by_kind_and_state() {
         let mut board = Board::new(6, 0);
         board.reveal(Instant::now());
-        board.calls = calls(&[("What is queued right now on every lane of the build queue, and which are stalled?", &[], false), ("Is the printer busy?", &["It is idle.", "The bed is clear."], false), ("Lost one", &[], true)]);
-        let closed = board.height();
-        let cell = rect_of(&board, Press::Appearance(0));
-        assert_eq!(poke_on(&mut board, Press::Calls, 0.0), [Press::Calls]);
-        board.touch(None);
-        board.toggle_log();
+        board.log = vec![
+            Entry::Heard("What is queued right now on every lane of the build queue, and which are stalled?".into()),
+            call("What is queued right now on every lane of the build queue, and which are stalled?", &[], State::Waiting),
+            Entry::Spoke("Checking.".into()),
+            call("Is the printer busy?", &["It is idle.", "The bed is clear."], State::Replied),
+            call("Lost one", &[], State::Failed),
+            Entry::Heard("And the deck".into()),
+        ];
         let lines = board.log_lines();
         assert_eq!(lines.iter().map(|(line, _, _)| line.as_str()).collect::<Vec<_>>(), [
             "What is queued right now on every lane of the",
             "build queue, and which are stalled?",
-            "",
+            "What is queued right now on every lane of the",
+            "build queue, and which are stalled?",
+            "Checking.",
             "Is the printer busy?",
             "It is idle. The bed is clear.",
-            "",
             "Lost one",
+            "And the deck",
         ]);
-        assert!(board.height() > closed && rect_of(&board, Press::Appearance(0))[3] < cell[3], "the board grows and the library moves down");
+        let marks: Vec<_> = lines.iter().map(|&(_, ink, mark)| (ink, mark)).collect();
+        assert_eq!(marks, [(INK, HEARD), (INK, HEARD), (INK, PENDING), (INK, PENDING), (SPOKE_INK, BUTTON), (INK, ACTIVE), (REPLY_INK, ACTIVE), (INK, DISMISS), (INK, HEARD)]);
         let image = board.take_image().unwrap().pixels;
-        let [left, _, _, bottom] = board.area(rect_of(&board, Press::Calls));
-        assert_eq!(corner_of(&board, &image, Press::Calls), ACTIVE);
+        let [left, _, _, bottom] = board.area(rect_of(&board, Press::Log));
+        assert_eq!(corner_of(&board, &image, Press::Log), ACTIVE);
         let first = bottom + (GAP * PIXELS_PER_METRE) as u32 + PADDING;
         let stripe = |line: u32| <[u8; 4]>::try_from(&image[(((first + line * LINE + LINE / 2) * board.pixels()[0] + left + 1) * 4) as usize..][..4]).unwrap();
-        assert_eq!([stripe(0), stripe(1), stripe(2), stripe(3), stripe(4), stripe(6)], [PENDING, PENDING, BACKGROUND_PREMULTIPLIED, ACTIVE, ACTIVE, DISMISS]);
+        assert_eq!([stripe(0), stripe(2), stripe(4), stripe(6), stripe(7), stripe(8), stripe(9)], [HEARD, PENDING, BUTTON, ACTIVE, DISMISS, HEARD, BACKGROUND_PREMULTIPLIED]);
         let width = board.pixels()[0];
         let row_inked = |line: u32, ink: [u8; 4]| (first + line * LINE..first + (line + 1) * LINE).any(|y| (left..width).any(|x| image[((y * width + x) * 4) as usize..][..4] == ink));
-        assert!(row_inked(0, INK) && row_inked(4, REPLY_INK) && !row_inked(2, INK));
+        assert!(row_inked(0, INK) && row_inked(4, SPOKE_INK) && row_inked(6, REPLY_INK) && !row_inked(9, INK));
         let [_, cell_top, _, _] = board.area(rect_of(&board, Press::Appearance(0)));
-        assert!(first + lines.len() as u32 * LINE <= cell_top, "the log ends above the library");
+        assert!(first + LOG_LINES as u32 * LINE <= cell_top, "the log ends above the library");
+
+        let shown = board.height();
+        board.log.push(Entry::Heard("one two three four five six seven eight nine ten ".repeat(20)));
+        let lines = board.log_lines();
+        assert_eq!(lines.len(), LOG_LINES);
+        assert!(lines.iter().all(|&(_, _, mark)| mark == HEARD) && lines.last().unwrap().0.ends_with("ten"), "a long utterance shows its newest words");
+        assert_eq!(board.height(), shown, "the log keeps its height as it fills");
+
+        let cell = rect_of(&board, Press::Appearance(0));
+        assert_eq!(poke_on(&mut board, Press::Log, 0.0), [Press::Log]);
+        board.touch(None);
+        board.toggle_log();
+        assert!(board.log_lines().is_empty() && board.height() < shown && rect_of(&board, Press::Appearance(0))[3] > cell[3], "hidden, the board shrinks and the library moves up");
         board.reset();
-        assert!(board.log_lines().is_empty());
+        assert!(board.log_lines().is_empty(), "a summon keeps it hidden");
+        board.toggle_log();
+        board.reset();
+        assert_eq!(board.log_lines().len(), LOG_LINES, "and shown");
     }
 
     #[test]

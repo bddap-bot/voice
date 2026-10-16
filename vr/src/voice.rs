@@ -4,8 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::action::{Action, Actions};
 use crate::audio;
-use crate::calls::Calls;
-use crate::conversation::Trace;
+use crate::conversation::{self, Trace};
 use crate::hub::{self, Hub};
 use crate::identity::{identity, includes_phrase};
 use crate::relay::{Relay, Token};
@@ -128,8 +127,9 @@ impl Voice {
         }
     }
 
-    pub fn calls(&self) -> &Calls {
-        &self.trace.calls
+    /// The newest `most` entries of the conversation and its hub calls, for the board.
+    pub fn log(&self, most: usize) -> Vec<conversation::Entry> {
+        self.trace.log(most)
     }
 
     pub fn awake(&self) -> bool {

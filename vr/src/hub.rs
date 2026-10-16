@@ -279,7 +279,8 @@ impl Hub {
         self.unanswered = None;
         self.request_end = None;
         let delegation = trace.delegated(now);
-        trace.calls.asked(id, &delegation.text);
+        let at = trace.len();
+        trace.calls.asked(id, &delegation.text, at);
         self.waiting.insert(id.to_owned());
         tracing::info!("delegating {id}: {:?}", delegation.text);
         if delegation.text.is_empty() {
@@ -354,7 +355,8 @@ impl Hub {
             Err(error) => return tracing::warn!("hub reply unreadable: {error}"),
         };
         tracing::info!("hub reply {} ({}): {:?}{}", reply.id, reply.stamp, reply.commentary, if reply.instructions.is_empty() { "" } else { " with instructions" });
-        trace.calls.replied(&reply.id, &reply.commentary);
+        let at = trace.len();
+        trace.calls.replied(&reply.id, &reply.commentary, at);
         if let Some(shown) = reply.display.take() {
             reply.shown = Some(if shown.html.is_some() {
                 Display { html: true, ..Display::default() }

@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use crate::calls::Calls;
+use crate::calls::{Call, Calls};
 use crate::identity::{identity, without_trailing_phrase};
 
 const MEMORY: &str = "Context: Archived transcripts of completed conversations, oldest first, for memory only. Each ended when you went to sleep. These utterances already happened; do not repeat or continue them.\n";
@@ -42,6 +42,14 @@ pub struct Delegation {
     pub text: String,
     pub context: Vec<Turn>,
     pub duration_ms: u64,
+}
+
+/// One item of the conversation as the page's delegation log lists it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Entry {
+    Heard(String),
+    Spoke(String),
+    Call(Call),
 }
 
 /// The conversation carried between sessions, as the page's `ConversationTrace` keeps it; a delegation leaves only a boundary.
@@ -86,6 +94,31 @@ impl Trace {
             Some(turn) if turn.speaker == speaker && !fresh => turn.text.push_str(delta),
             _ => self.turns.push(Turn { speaker, text: delta.to_owned() }),
         }
+    }
+
+    pub fn len(&self) -> usize {
+        self.turns.len()
+    }
+
+    /// The newest `most` entries in order, each kept hub call among the turns where it was asked.
+    pub fn log(&self, most: usize) -> Vec<Entry> {
+        let from = self.turns.len().saturating_sub(most);
+        let mut calls: Vec<&Call> = self.calls.iter().filter(|call| call.at >= from).collect();
+        calls.reverse();
+        let mut calls = calls.into_iter().peekable();
+        let mut entries = Vec::new();
+        for index in from..=self.turns.len() {
+            while let Some(call) = calls.next_if(|call| call.at <= index) {
+                entries.push(Entry::Call(call.clone()));
+            }
+            if let Some(turn) = self.turns.get(index) {
+                entries.push(match turn.speaker {
+                    Speaker::User => Entry::Heard(turn.text.clone()),
+                    Speaker::Live => Entry::Spoke(turn.text.clone()),
+                });
+            }
+        }
+        entries.split_off(entries.len().saturating_sub(most))
     }
 
     pub fn heard(&mut self, delta: &str, now: Instant) {
@@ -382,6 +415,29 @@ mod tests {
         let context = trace.delegated(start).context;
         assert!(serde_json::to_string(&context).unwrap().len() <= MAX_CONTEXT);
         assert_eq!(context.len(), 5);
+    }
+
+    #[test]
+    fn the_log_lists_turns_in_order_with_each_call_where_it_was_asked_and_keeps_the_newest() {
+        let start = Instant::now();
+        let mut trace = Trace::default();
+        trace.heard("Is the ", start);
+        trace.heard("printer busy?", start);
+        let request = trace.delegated(start).text;
+        let at = trace.len();
+        trace.calls.asked("a", &request, at);
+        trace.spoke("Checking.");
+        let at = trace.len();
+        trace.calls.replied("a", &["It is idle.".to_owned()], at);
+        trace.hub_replied();
+        trace.spoke("It is idle.");
+        trace.heard("Thanks", start);
+        let call = |state, replies: &[&str]| Entry::Call(Call { id: "a".into(), at: 1, request: "Is the printer busy?".into(), state, replies: replies.iter().map(|reply| reply.to_string()).collect() });
+        assert_eq!(trace.log(10), [Entry::Heard("Is the printer busy?".into()), call(crate::calls::State::Replied, &["It is idle."]), Entry::Spoke("Checking.".into()), Entry::Spoke("It is idle.".into()), Entry::Heard("Thanks".into())]);
+        assert_eq!(trace.log(2), [Entry::Spoke("It is idle.".into()), Entry::Heard("Thanks".into())]);
+        let at = trace.len();
+        trace.calls.asked("b", "", at);
+        assert!(matches!(trace.log(1)[..], [Entry::Call(ref call)] if call.request.is_empty() && call.state == crate::calls::State::Waiting));
     }
 
     #[test]

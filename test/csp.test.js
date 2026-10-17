@@ -84,10 +84,15 @@ test('the vendored inference runtime loads and runs in a window under the page p
 const violations = [];
 document.addEventListener('securitypolicyviolation', (event) => violations.push(event.violatedDirective + ' ' + event.blockedURI));
 let result;
+const stage = (name) => { document.body.dataset.stage = name; };
 try {
+  stage('import');
   const ort = await import('./lib/ort.js');
+  stage('session');
   const mel = await ort.InferenceSession.create('./wake/melspectrogram.onnx');
+  stage('run');
   const { output } = await mel.run({ input: new ort.Tensor('float32', new Float32Array(${CHUNK + 480}), [1, ${CHUNK + 480}]) });
+  stage('transformers');
   const { env } = await import('./lib/transformers.js');
   result = { mel: output.data.length > 0, wasm: env.backends.onnx.wasm.wasmPaths.wasm, violations };
 } catch (error) {
@@ -114,7 +119,8 @@ document.body.dataset.result = JSON.stringify(result);
       const value = await evaluate('document.body?.dataset.result ?? null');
       result = value && JSON.parse(value);
     }
-    assert.match(result?.wasm ?? '', new RegExp(`^${origin}/lib/ort-wasm-simd-threaded\\.jsep-[A-Z0-9]{8}\\.wasm$`), JSON.stringify(result) + chrome.stderr);
+    const stuck = result ? '' : `stuck at ${await evaluate('document.body?.dataset.stage ?? null')} after fetching ${requests.join(' ')}\n`;
+    assert.match(result?.wasm ?? '', new RegExp(`^${origin}/lib/ort-wasm-simd-threaded\\.jsep-[A-Z0-9]{8}\\.wasm$`), stuck + JSON.stringify(result) + chrome.stderr);
     assert.deepEqual(result, { mel: true, wasm: result.wasm, violations: [] });
     assert.ok(requests.includes(new URL(result.wasm).pathname), requests.join(' '));
   } finally {

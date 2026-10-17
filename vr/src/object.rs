@@ -31,6 +31,8 @@ pub struct Budget {
 }
 
 pub const BUDGET: Budget = Budget { mean: Duration::from_millis(4), frame: Duration::from_millis(40) };
+/// No frame is ever over it: for pictures from a device slower than the headset, and for tests of anything but the budget, which pass at any speed.
+pub const UNBUDGETED: Budget = Budget { mean: Duration::MAX, frame: Duration::MAX };
 /// Frames before either limit applies: uploads and first draws run long on any device.
 const WINDOW: f32 = 45.0;
 /// Tip speed relative to the object that throws it away.
@@ -172,10 +174,16 @@ struct Exchange {
     fed: bool,
 }
 
-type Load = fn(&[u8], &AtomicBool) -> Result<Geometry, String>;
+#[derive(Clone, Copy)]
+struct Work {
+    load: fn(&[u8], &AtomicBool) -> Result<Geometry, String>,
+    tick: fn(&mut program::Program, f32, Option<Vec3>) -> Result<Option<Vec<Transform>>, String>,
+}
 
-fn run(bytes: Vec<u8>, load: Load, exchange: &Mutex<Exchange>, stop: &AtomicBool) {
-    let mut geometry = match load(&bytes, stop) {
+const WORK: Work = Work { load, tick: program::Program::tick };
+
+fn run(bytes: Vec<u8>, work: Work, exchange: &Mutex<Exchange>, stop: &AtomicBool) {
+    let mut geometry = match (work.load)(&bytes, stop) {
         Ok(geometry) => geometry,
         Err(error) => return exchange.lock().unwrap().failed = Some(error),
     };
@@ -189,27 +197,20 @@ fn run(bytes: Vec<u8>, load: Load, exchange: &Mutex<Exchange>, stop: &AtomicBool
         Ok(program) => program,
         Err(error) => return exchange.lock().unwrap().failed = Some(error),
     };
-    let mut device = declared.device_feed.then(|| (device::Device::new(), Instant::now()));
+    let mut device = declared.device_feed.then(|| device::Device::new(std::path::Path::new("/"), Instant::now()));
     while !stop.load(Ordering::SeqCst) {
         let (time, tip, data) = {
             let mut exchange = exchange.lock().unwrap();
             (exchange.time, exchange.tip, exchange.data.take())
         };
-        let data = data.or_else(|| {
-            let (device, sampled) = device.as_mut()?;
-            if sampled.elapsed() < device::PERIOD {
-                return None;
-            }
-            *sampled = Instant::now();
-            Some(device.sample())
-        });
+        let data = data.or_else(|| device.as_mut()?.sample(Instant::now()));
         if let Some(data) = data {
             if let Err(error) = program.feed(&data) {
                 return exchange.lock().unwrap().failed = Some(error);
             }
             exchange.lock().unwrap().fed = true;
         }
-        match program.tick(time, tip) {
+        match (work.tick)(&mut program, time, tip) {
             Ok(Some(transforms)) => exchange.lock().unwrap().transforms = Some(transforms),
             Ok(None) => {}
             Err(error) => return exchange.lock().unwrap().failed = Some(error),
@@ -227,14 +228,14 @@ struct Runner {
 }
 
 impl Runner {
-    fn start(bytes: Vec<u8>, load: Load) -> Result<Runner, String> {
+    fn start(bytes: Vec<u8>, work: Work) -> Result<Runner, String> {
         let exchange = Arc::new(Mutex::new(Exchange::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let (shared, stopped) = (exchange.clone(), stop.clone());
         let thread = std::thread::Builder::new()
             .name("voice-object".into())
             .spawn(move || {
-                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(bytes, load, &shared, &stopped))).is_err() {
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(bytes, work, &shared, &stopped))).is_err() {
                     shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).failed = Some("the object's thread panicked".into());
                     shared.clear_poison();
                 }
@@ -386,11 +387,11 @@ pub struct Object<S: Surface> {
 
 impl<S: Surface> Object<S> {
     pub fn spawn(surface: S, gpu: Rc<Gpu>, bytes: Vec<u8>, budget: Budget, now: Instant) -> Result<Object<S>, String> {
-        Object::loading(surface, gpu, bytes, load, budget, now)
+        Object::loading(surface, gpu, bytes, WORK, budget, now)
     }
 
-    fn loading(surface: S, gpu: Rc<Gpu>, bytes: Vec<u8>, load: Load, budget: Budget, now: Instant) -> Result<Object<S>, String> {
-        Ok(Object { place: 0, drawn: None, renderer: Renderer::new(gpu, [eye_texels(QUAD); 2], 1.0)?, runner: Runner::start(bytes, load)?, surface, handling: Handling::new(now), data: None, budget, cost: 0.0, worst: 0.0, frames: 0 })
+    fn loading(surface: S, gpu: Rc<Gpu>, bytes: Vec<u8>, work: Work, budget: Budget, now: Instant) -> Result<Object<S>, String> {
+        Ok(Object { place: 0, drawn: None, renderer: Renderer::new(gpu, [eye_texels(QUAD); 2], 1.0)?, runner: Runner::start(bytes, work)?, surface, handling: Handling::new(now), data: None, budget, cost: 0.0, worst: 0.0, frames: 0 })
     }
 
     pub fn hide(&mut self) {
@@ -629,7 +630,8 @@ pub mod tests {
 
     static SURFACES: AtomicUsize = AtomicUsize::new(0);
 
-    const LOOSE: Budget = Budget { mean: Duration::from_secs(1), frame: Duration::from_secs(5) };
+    /// Long past any healthy wait on any machine: only a deadlock or a lost signal reaches it.
+    const HANG: Duration = Duration::from_secs(60);
 
     struct Counted;
 
@@ -731,7 +733,7 @@ pub mod tests {
 
     /// Steps until the program has published and the object is drawn once.
     fn drawn(object: &mut Object<Counted>, now: Instant) {
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + HANG;
         while object.drawn.is_none() {
             assert!(Instant::now() < deadline, "the program never published");
             object.step(now, &view(None)).unwrap();
@@ -744,7 +746,7 @@ pub mod tests {
     fn a_plain_gltf_object_is_drawn_in_both_eyes_shaded_and_fit_to_its_size() {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let now = Instant::now();
-        let mut object = Object::spawn(Counted::new(), gpu, cube(3.0), LOOSE, now).unwrap();
+        let mut object = Object::spawn(Counted::new(), gpu, cube(3.0), UNBUDGETED, now).unwrap();
         drawn(&mut object, now);
         let fit = object.drawn.as_ref().unwrap().radius;
         assert!(fit >= SIZE / 2.0 && fit <= SIZE * 3f32.sqrt() / 2.0, "a turned 3 m cube shows with its largest side at {SIZE} m: radius {fit}");
@@ -762,7 +764,7 @@ pub mod tests {
             }
             assert!(covered.len() >= 4, "eye {half}: textured, lit and shaded faces give several colours, got {covered:?}");
         }
-        let small = Object::spawn(Counted::new(), Rc::new(Gpu::new(None).unwrap()), cube(0.05), LOOSE, now);
+        let small = Object::spawn(Counted::new(), Rc::new(Gpu::new(None).unwrap()), cube(0.05), UNBUDGETED, now);
         let mut small = small.unwrap();
         drawn(&mut small, now);
         let radius = small.drawn.as_ref().unwrap().radius;
@@ -775,8 +777,8 @@ pub mod tests {
         let now = Instant::now();
         for (bytes, expected) in [(b"not a model".to_vec(), "glTF"), (Builder::new(serde_json::json!({})).glb(), "no mesh")] {
             let mut shelf = Shelf::default();
-            shelf.show(|_| Object::spawn(Counted::new(), gpu.clone(), bytes, LOOSE, now));
-            let deadline = Instant::now() + Duration::from_secs(10);
+            shelf.show(|_| Object::spawn(Counted::new(), gpu.clone(), bytes, UNBUDGETED, now));
+            let deadline = Instant::now() + HANG;
             let error = loop {
                 assert!(Instant::now() < deadline);
                 if let Err(error) = shelf.objects.last_mut().unwrap().step(now, &view(None)) {
@@ -791,10 +793,10 @@ pub mod tests {
     fn a_program_moves_the_object_from_its_own_thread_by_time_and_touch() {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
-        let mut object = Object::spawn(Counted::new(), gpu, scene(0.2, Some((crate::program::tests::FOLLOW, 4.0))), LOOSE, born).unwrap();
+        let mut object = Object::spawn(Counted::new(), gpu, scene(0.2, Some((crate::program::tests::FOLLOW, 4.0))), UNBUDGETED, born).unwrap();
         drawn(&mut object, born);
         object.step(born + Duration::from_secs(5), &view(None)).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + HANG;
         let center = view(None).center(0);
         let mut moved = Vec::new();
         while moved.len() < 2 {
@@ -813,7 +815,7 @@ pub mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
         let nodes = serde_json::json!([{ "mesh": 0, "translation": [-0.06, 0.0, 0.0] }, { "mesh": 0, "translation": [0.06, 0.0, 0.0] }]);
-        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None, true), LOOSE, born).unwrap();
+        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None, true), UNBUDGETED, born).unwrap();
         drawn(&mut object, born);
         let radius = object.drawn.as_ref().unwrap().radius;
         let center = view(None).center(0);
@@ -851,7 +853,7 @@ pub mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
         let mut shelf = Shelf::default();
-        shelf.show(|_| Object::spawn(Counted::new(), gpu, scene(0.2, Some((crate::program::tests::FOLLOW, 4.0))), LOOSE, born));
+        shelf.show(|_| Object::spawn(Counted::new(), gpu, scene(0.2, Some((crate::program::tests::FOLLOW, 4.0))), UNBUDGETED, born));
         drawn(shelf.objects.last_mut().unwrap(), born);
         let frame = Duration::from_millis(11);
         let mut now = born;
@@ -866,7 +868,7 @@ pub mod tests {
             now += frame;
         }
         assert_eq!(clock(&shelf), 1.5, "a second untouched leaves a held timeline where the hub put it");
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + HANG;
         loop {
             assert!(Instant::now() < deadline, "the program never saw the held time");
             shelf.step(now, &view(None));
@@ -897,7 +899,7 @@ pub mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
         let nodes = serde_json::json!([{ "mesh": 0, "translation": [-0.06, 0.0, 0.0] }, { "mesh": 0, "translation": [0.06, 0.0, 0.0] }]);
-        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None, false), LOOSE, born).unwrap();
+        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None, false), UNBUDGETED, born).unwrap();
         drawn(&mut object, born);
         let mut now = born;
         for _ in 0..60 {
@@ -914,7 +916,7 @@ pub mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
         let nodes = serde_json::json!([{ "mesh": 0, "name": "left", "translation": [-0.06, 0.0, 0.0] }, { "mesh": 0, "name": "right", "translation": [0.06, 0.0, 0.0] }]);
-        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None, true), LOOSE, born).unwrap();
+        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None, true), UNBUDGETED, born).unwrap();
         drawn(&mut object, born);
         let center = V3::from(view(None).center(0));
         let right = V3::from(object.locate("right").unwrap());
@@ -934,7 +936,7 @@ pub mod tests {
         let named = |name: &str| built(0.05, serde_json::json!([{ "mesh": 0, "name": name }]), None, false);
         let mut shelf: Shelf<Counted> = Shelf::default();
         for name in ["gear", "gear", "wheel"] {
-            shelf.show(|_| Object::spawn(Counted::new(), gpu.clone(), named(name), LOOSE, now));
+            shelf.show(|_| Object::spawn(Counted::new(), gpu.clone(), named(name), UNBUDGETED, now));
             drawn(shelf.objects.last_mut().unwrap(), now);
         }
         let at = |place: usize| V3::from(view(None).center(place));
@@ -958,7 +960,7 @@ pub mod tests {
         assert!(V3::from(shelf.locate("wheel").unwrap()).abs_diff_eq(at(2), 1e-5), "the rest stay where they were");
         shelf.show(|place| {
             assert_eq!(place, 1, "a new object takes the nearest free place");
-            Object::spawn(Counted::new(), gpu.clone(), named("wheel"), LOOSE, now)
+            Object::spawn(Counted::new(), gpu.clone(), named("wheel"), UNBUDGETED, now)
         });
         drawn(shelf.objects.last_mut().unwrap(), now);
         assert!(V3::from(shelf.locate("wheel").unwrap()).abs_diff_eq(at(1), 1e-5));
@@ -972,7 +974,7 @@ pub mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
         let nodes = serde_json::json!([{ "mesh": 0, "name": "left", "translation": [-0.06, 0.0, 0.0] }, { "mesh": 0, "name": "right", "translation": [0.06, 0.0, 0.0] }]);
-        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None, true), LOOSE, born).unwrap();
+        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None, true), UNBUDGETED, born).unwrap();
         drawn(&mut object, born);
         let hand = |angle: f32, at: Vec3| Pose::from_axes([angle.cos(), 0.0, -angle.sin()], [0.0, 1.0, 0.0], [angle.sin(), 0.0, angle.cos()], at);
         let held = on_controller(&hand(0.7, [0.3, 1.0, -0.6]));
@@ -1003,9 +1005,9 @@ pub mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
         let mut shelf = Shelf::default();
-        shelf.show(|_| Object::spawn(Counted::new(), gpu, scene(0.2, Some((crate::program::tests::GAUGE, 0.0))), LOOSE, born));
+        shelf.show(|_| Object::spawn(Counted::new(), gpu, scene(0.2, Some((crate::program::tests::GAUGE, 0.0))), UNBUDGETED, born));
         shelf.feed(b"\x05".to_vec(), None);
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + HANG;
         loop {
             assert!(Instant::now() < deadline, "the data never reached the drawing");
             shelf.step(born, &view(None));
@@ -1021,10 +1023,10 @@ pub mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
         let bytes = built_with(0.2, serde_json::json!([{ "mesh": 0 }]), Some((crate::program::tests::GAUGE, 0.0)), false, serde_json::json!({ "feed": "device" }));
-        let mut object = Object::spawn(Counted::new(), gpu, bytes, LOOSE, born).unwrap();
+        let mut object = Object::spawn(Counted::new(), gpu, bytes, UNBUDGETED, born).unwrap();
         let cores = std::fs::read_to_string("/proc/stat").unwrap().lines().filter(|line| line.starts_with("cpu") && line.as_bytes()[3].is_ascii_digit()).count();
         let late = born + LIFETIME - Duration::from_secs(1);
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + HANG;
         loop {
             assert!(Instant::now() < deadline, "the device's readings never reached the drawing");
             object.step(late, &view(None)).unwrap();
@@ -1041,7 +1043,7 @@ pub mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let now = Instant::now();
         let nodes: Vec<serde_json::Value> = (0..500).map(|at| serde_json::json!({ "mesh": at % 2, "translation": [at as f32 * 0.001, 0.0, 0.0] })).collect();
-        let mut object = Object::spawn(Counted::new(), gpu, built(0.001, serde_json::Value::Array(nodes), None, false), LOOSE, now).unwrap();
+        let mut object = Object::spawn(Counted::new(), gpu, built(0.001, serde_json::Value::Array(nodes), None, false), UNBUDGETED, now).unwrap();
         drawn(&mut object, now);
         let draws = &object.drawn.as_ref().unwrap().skinned.draws;
         assert_eq!(draws.iter().map(|draw| (draw.material, draw.count)).collect::<Vec<_>>(), [(0, 250 * 36), (1, 250 * 36)]);
@@ -1063,7 +1065,7 @@ pub mod tests {
     fn an_object_over_its_budget_is_stopped_after_its_first_frames() {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let now = Instant::now();
-        let tight = Budget { mean: Duration::from_nanos(1), frame: Duration::from_secs(5) };
+        let tight = Budget { mean: Duration::from_nanos(1), frame: Duration::MAX };
         let mut object = Object::spawn(Counted::new(), gpu, cube(0.1), tight, now).unwrap();
         drawn(&mut object, now);
         let error = (0..2 * WINDOW as usize).find_map(|_| object.step(now, &view(None)).err()).expect("stopped within its window");
@@ -1071,28 +1073,65 @@ pub mod tests {
         assert_eq!(object.frames as f32, 2.0 * WINDOW, "measured only after its first {WINDOW} frames, then over a window of them");
     }
 
+    struct Held {
+        inside: usize,
+        open: bool,
+        frames: usize,
+    }
+
+    static HELD: (Mutex<Held>, std::sync::Condvar) = (Mutex::new(Held { inside: 0, open: false, frames: 0 }), std::sync::Condvar::new());
+
     #[test]
     fn a_program_that_never_returns_is_stopped_without_stalling_the_render_thread() {
+        let held = |program: &mut program::Program, time, tip| {
+            let (state, changed) = &HELD;
+            let mut held = state.lock().unwrap();
+            held.inside += 1;
+            changed.notify_all();
+            loop {
+                let frames = held.frames;
+                let waited;
+                (held, waited) = changed.wait_timeout_while(held, HANG, |held| !held.open && held.frames == frames).unwrap();
+                if held.open || waited.timed_out() {
+                    break;
+                }
+            }
+            held.inside -= 1;
+            drop(held);
+            program.tick(time, tip)
+        };
         let spin = r#"(module (memory (export "memory") 1) (func (export "tick") (param f32 f32 f32 f32 i32) (result i32) (loop $l (br $l)) (i32.const 0)))"#;
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let now = Instant::now();
-        let mut object = Object::spawn(Counted::new(), gpu, scene(0.2, Some((spin, 0.0))), LOOSE, now).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(20);
-        let mut slowest = Duration::ZERO;
+        let mut object = Object::loading(Counted::new(), gpu, scene(0.2, Some((spin, 0.0))), Work { tick: held, ..WORK }, UNBUDGETED, now).unwrap();
+        let (state, changed) = &HELD;
+        let step = |object: &mut Object<Counted>| {
+            let stepped = object.step(now, &view(None));
+            state.lock().unwrap().frames += 1;
+            changed.notify_all();
+            stepped
+        };
+        let deadline = Instant::now() + HANG;
+        while object.drawn.is_none() || state.lock().unwrap().inside == 0 {
+            assert!(Instant::now() < deadline, "the program never published and ticked");
+            step(&mut object).unwrap();
+        }
+        let frames = object.frames;
+        for _ in 0..2 * WINDOW as u32 {
+            step(&mut object).unwrap();
+        }
+        assert_eq!(object.frames, frames + 2 * WINDOW as u32, "every step drew a frame");
+        assert_eq!(state.lock().unwrap().inside, 1, "the program's thread stayed inside one tick while the render thread drew every one of those frames");
+        state.lock().unwrap().open = true;
+        changed.notify_all();
+        let deadline = Instant::now() + HANG;
         let error = loop {
             assert!(Instant::now() < deadline, "the program was never stopped");
-            let uploaded = object.drawn.is_some();
-            let started = Instant::now();
-            let stepped = object.step(now, &view(None));
-            if uploaded {
-                slowest = slowest.max(started.elapsed());
-            }
-            if let Err(error) = stepped {
+            if let Err(error) = step(&mut object) {
                 break error;
             }
         };
         assert!(error.contains("budget"), "{error}");
-        assert!(slowest < Duration::from_millis(200), "a frame took {slowest:?} while the program spun");
     }
 
     #[test]
@@ -1196,9 +1235,9 @@ pub mod tests {
 
     #[test]
     fn an_object_replaced_mid_load_leaves_within_a_frame_and_its_thread_ends_after() {
-        let gated: Load = |bytes, stop| {
+        let gated = |bytes: &[u8], stop: &AtomicBool| {
             let (open, opened) = &GATE;
-            let _ = opened.wait_timeout_while(open.lock().unwrap(), Duration::from_secs(10), |open| !*open).unwrap();
+            let _ = opened.wait_timeout_while(open.lock().unwrap(), HANG, |open| !*open).unwrap();
             load(bytes, stop)
         };
         let gpu = Rc::new(Gpu::new(None).unwrap());
@@ -1206,7 +1245,7 @@ pub mod tests {
         let mut shelf = Shelf::default();
         let shown = |shelf: &mut Shelf<Watched>| {
             let gone = Arc::new(AtomicBool::new(false));
-            shelf.show(|_| Object::loading(Watched(gone.clone()), gpu.clone(), cube(0.2), gated, LOOSE, now));
+            shelf.show(|_| Object::loading(Watched(gone.clone()), gpu.clone(), cube(0.2), Work { load: gated, ..WORK }, UNBUDGETED, now));
             (gone, Arc::downgrade(&shelf.objects.last().unwrap().runner.exchange))
         };
         let (first, first_exchange) = shown(&mut shelf);
@@ -1222,7 +1261,7 @@ pub mod tests {
         assert!(first_exchange.strong_count() > 0 && second_exchange.strong_count() > 0, "both loads are still held, so neither leaving waited for its thread");
         *GATE.0.lock().unwrap() = true;
         GATE.1.notify_all();
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + HANG;
         while first_exchange.strong_count() + second_exchange.strong_count() > 0 {
             assert!(Instant::now() < deadline, "a loading thread never ended");
             std::thread::sleep(TICK);
@@ -1231,11 +1270,11 @@ pub mod tests {
 
     #[test]
     fn a_panic_while_loading_fails_the_object_at_once() {
-        let broken: Load = |_, _| panic!("a broken file");
+        let broken = |_: &[u8], _: &AtomicBool| panic!("a broken file");
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let now = Instant::now();
-        let mut object = Object::loading(Counted::new(), gpu, cube(0.2), broken, LOOSE, now).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut object = Object::loading(Counted::new(), gpu, cube(0.2), Work { load: broken, ..WORK }, UNBUDGETED, now).unwrap();
+        let deadline = Instant::now() + HANG;
         let error = loop {
             assert!(Instant::now() < deadline, "the panic never reached the render thread");
             if let Err(error) = object.step(now, &view(None)) {
@@ -1250,9 +1289,9 @@ pub mod tests {
         std::fs::read_dir("/proc/self/task").unwrap().count()
     }
 
-    /// Program threads end on their own after their object leaves; waits up to a few seconds for the count to fall to `limit`.
+    /// Program threads end on their own after their object leaves; waits for the count to fall to `limit`.
     fn settled(limit: usize) -> usize {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + HANG;
         while threads() > limit && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -1283,7 +1322,7 @@ pub mod tests {
         let mut shelf: Shelf<Counted> = Shelf::default();
         let start = Instant::now();
         let spawn = |shelf: &mut Shelf<Counted>, now: Instant| {
-            shelf.show(|_| Object::spawn(Counted::new(), gpu.clone(), bytes[now.duration_since(start).as_secs() as usize % 5 % 2].clone(), LOOSE, now));
+            shelf.show(|_| Object::spawn(Counted::new(), gpu.clone(), bytes[now.duration_since(start).as_secs() as usize % 5 % 2].clone(), UNBUDGETED, now));
             drawn(shelf.objects.last_mut().unwrap(), now);
         };
         spawn(&mut shelf, start);

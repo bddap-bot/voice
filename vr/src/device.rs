@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub const PERIOD: Duration = Duration::from_secs(1);
+const PERIOD: Duration = Duration::from_secs(1);
 /// Busiest processes reported.
 const PROCESSES: usize = 8;
 const NAME: usize = 16;
@@ -27,6 +27,7 @@ struct Client {
 
 /// The device's own resource readings, the live data an object asks for with `"feed": "device"` (OBJECTS.md).
 pub struct Device {
+    root: PathBuf,
     cores: Vec<Core>,
     processes: HashMap<u32, u64>,
     clients: Vec<Client>,
@@ -47,8 +48,8 @@ fn number(path: &Path) -> Option<f32> {
 }
 
 /// Busy and total ticks of every `cpuN` line, in order.
-fn core_times() -> Vec<(u64, u64)> {
-    let Some(stat) = read(Path::new("/proc/stat")) else { return Vec::new() };
+fn core_times(root: &Path) -> Vec<(u64, u64)> {
+    let Some(stat) = read(&root.join("proc/stat")) else { return Vec::new() };
     stat.lines()
         .filter(|line| line.starts_with("cpu") && line.as_bytes().get(3).is_some_and(u8::is_ascii_digit))
         .map(|line| {
@@ -61,8 +62,8 @@ fn core_times() -> Vec<(u64, u64)> {
 }
 
 /// Name, CPU ticks and resident pages from `/proc/<pid>/stat`; the name may hold spaces and parentheses, so it runs to the last `)`.
-fn process(pid: u32) -> Option<(String, u64, u64)> {
-    let stat = read(&PathBuf::from(format!("/proc/{pid}/stat")))?;
+fn process(root: &Path, pid: u32) -> Option<(String, u64, u64)> {
+    let stat = read(&root.join(format!("proc/{pid}/stat")))?;
     let (head, tail) = stat.rsplit_once(')')?;
     let name = head.split_once('(')?.1.to_owned();
     let fields: Vec<&str> = tail.split_whitespace().collect();
@@ -95,8 +96,8 @@ fn drm(fdinfo: &Path) -> Option<(u64, u64, u64)> {
     Some((id?, busy, memory))
 }
 
-fn pids() -> Vec<u32> {
-    fs::read_dir("/proc").map(|entries| entries.filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok()).collect()).unwrap_or_default()
+fn pids(root: &Path) -> Vec<u32> {
+    fs::read_dir(root.join("proc")).map(|entries| entries.filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok()).collect()).unwrap_or_default()
 }
 
 fn hottest(zones: &[PathBuf]) -> f32 {
@@ -104,17 +105,17 @@ fn hottest(zones: &[PathBuf]) -> f32 {
 }
 
 impl Device {
-    pub fn new() -> Device {
-        let cores = core_times()
+    pub fn new(root: &Path, now: Instant) -> Device {
+        let cores = core_times(root)
             .into_iter()
             .enumerate()
             .map(|(at, times)| {
-                let directory = PathBuf::from(format!("/sys/devices/system/cpu/cpu{at}/cpufreq"));
+                let directory = root.join(format!("sys/devices/system/cpu/cpu{at}/cpufreq"));
                 Core { most: number(&directory.join("cpuinfo_max_freq")).unwrap_or(0.0) * 1000.0, clock: directory.join("scaling_cur_freq"), times }
             })
             .collect();
         let (mut cpu_zones, mut gpu_zones) = (Vec::new(), Vec::new());
-        for zone in fs::read_dir("/sys/class/thermal").into_iter().flatten().flatten() {
+        for zone in fs::read_dir(root.join("sys/class/thermal")).into_iter().flatten().flatten() {
             let kind = read(&zone.path().join("type")).unwrap_or_default();
             if kind.starts_with("cpu") {
                 cpu_zones.push(zone.path().join("temp"));
@@ -122,13 +123,13 @@ impl Device {
                 gpu_zones.push(zone.path().join("temp"));
             }
         }
-        let gpu_clock = fs::read_dir("/sys/class/devfreq").into_iter().flatten().flatten().map(|entry| entry.path()).find(|path| path.to_string_lossy().contains("gpu")).map(|path| {
+        let gpu_clock = fs::read_dir(root.join("sys/class/devfreq")).into_iter().flatten().flatten().filter(|entry| entry.file_name().to_string_lossy().contains("gpu")).map(|entry| entry.path()).next().map(|path| {
             let most = number(&path.join("max_freq")).unwrap_or(0.0);
             (path.join("cur_freq"), most)
         });
-        let page = read(Path::new("/proc/self/smaps")).and_then(|smaps| smaps.lines().find_map(|line| line.strip_prefix("KernelPageSize:")?.split_whitespace().next()?.parse::<f32>().ok())).unwrap_or(4.0) * 1024.0;
-        let mut device = Device { cores, processes: HashMap::new(), clients: Vec::new(), scanned: None, sampled: Instant::now(), cpu_zones, gpu_zones, gpu_clock, page };
-        device.sample();
+        let page = read(&root.join("proc/self/smaps")).and_then(|smaps| smaps.lines().find_map(|line| line.strip_prefix("KernelPageSize:")?.split_whitespace().next()?.parse::<f32>().ok())).unwrap_or(4.0) * 1024.0;
+        let mut device = Device { root: root.to_owned(), cores, processes: HashMap::new(), clients: Vec::new(), scanned: None, sampled: now, cpu_zones, gpu_zones, gpu_clock, page };
+        device.measure(now);
         device
     }
 
@@ -136,13 +137,13 @@ impl Device {
     fn scan(&mut self) {
         let mut seen = HashSet::new();
         let previous: HashMap<PathBuf, u64> = self.clients.drain(..).map(|client| (client.fdinfo, client.busy)).collect();
-        for pid in pids() {
-            let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else { continue };
+        for pid in pids(&self.root) {
+            let Ok(fds) = fs::read_dir(self.root.join(format!("proc/{pid}/fd"))) else { continue };
             for fd in fds.flatten() {
                 if !fs::read_link(fd.path()).is_ok_and(|target| target.starts_with("/dev/dri")) {
                     continue;
                 }
-                let fdinfo = PathBuf::from(format!("/proc/{pid}/fdinfo/{}", fd.file_name().to_string_lossy()));
+                let fdinfo = self.root.join(format!("proc/{pid}/fdinfo/{}", fd.file_name().to_string_lossy()));
                 let Some((id, busy, _)) = drm(&fdinfo) else { continue };
                 if seen.insert(id) {
                     let busy = previous.get(&fdinfo).copied().unwrap_or(busy);
@@ -152,9 +153,12 @@ impl Device {
         }
     }
 
-    /// The readings since the last sample, laid out as OBJECTS.md says.
-    pub fn sample(&mut self) -> Vec<u8> {
-        let now = Instant::now();
+    /// The readings since the last sample, laid out as OBJECTS.md says, once a `PERIOD` has passed since it.
+    pub fn sample(&mut self, now: Instant) -> Option<Vec<u8>> {
+        (now.duration_since(self.sampled) >= PERIOD).then(|| self.measure(now))
+    }
+
+    fn measure(&mut self, now: Instant) -> Vec<u8> {
         let elapsed = now.duration_since(self.sampled).as_secs_f32().max(1e-3);
         self.sampled = now;
         if self.scanned.is_none_or(|scanned| now.duration_since(scanned) >= RESCAN) {
@@ -162,7 +166,7 @@ impl Device {
             self.scanned = Some(now);
         }
 
-        let meminfo = read(Path::new("/proc/meminfo")).unwrap_or_default();
+        let meminfo = read(&self.root.join("proc/meminfo")).unwrap_or_default();
         let kib = |key: &str| meminfo.lines().find_map(|line| line.strip_prefix(key)?.strip_prefix(':')?.split_whitespace().next()?.parse::<f32>().ok()).unwrap_or(0.0) * 1024.0;
 
         let mut gpu_by_pid: HashMap<u32, u64> = HashMap::new();
@@ -180,8 +184,8 @@ impl Device {
 
         let mut processes: Vec<(String, f32, f32, f32)> = Vec::new();
         let mut ticks = HashMap::with_capacity(self.processes.len());
-        for pid in pids() {
-            let Some((name, spent, pages)) = process(pid) else { continue };
+        for pid in pids(&self.root) {
+            let Some((name, spent, pages)) = process(&self.root, pid) else { continue };
             ticks.insert(pid, spent);
             let Some(&before) = self.processes.get(&pid) else { continue };
             processes.push((name, spent.saturating_sub(before) as f32 / TICKS / elapsed, pages as f32 * self.page, fraction(gpu_by_pid.get(&pid).copied().unwrap_or(0))));
@@ -190,7 +194,7 @@ impl Device {
         processes.sort_by(|a, b| (b.1 + b.3).total_cmp(&(a.1 + a.3)));
         processes.truncate(PROCESSES);
 
-        let times = core_times();
+        let times = core_times(&self.root);
         let header = [self.cores.len() as u32, processes.len() as u32];
         let (gpu_clock, gpu_most) = self.gpu_clock.as_ref().map_or((0.0, 0.0), |(clock, most)| (number(clock).unwrap_or(0.0), *most));
         let mut out = Vec::with_capacity(512);
@@ -229,27 +233,60 @@ mod tests {
         f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
     }
 
-    #[test]
-    fn a_sample_reads_this_machine_s_cores_memory_and_busiest_processes() {
-        let mut device = Device::new();
-        let deadline = Instant::now() + Duration::from_millis(300);
-        let mut spin = 0u64;
-        while Instant::now() < deadline {
-            spin = std::hint::black_box(spin.wrapping_add(1));
+    fn put(root: &Path, path: &str, text: &str) {
+        let path = root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+
+    fn stat(name: &str, ticks: u64, pages: u64) -> String {
+        let mut fields = vec![0; 22];
+        (fields[11], fields[21]) = (ticks, pages);
+        format!("1 ({name}) S {}", fields[1..].iter().map(u64::to_string).collect::<Vec<_>>().join(" "))
+    }
+
+    /// Two cores, a busy process, a GPU client and one born between the samples, at `seconds` into the fixture's life.
+    fn machine(root: &Path, seconds: u64) {
+        put(root, "proc/stat", &format!("cpu  0 0 0 0 0 0 0 0\ncpu0 {} 0 100 {} 0 0 0 0\ncpu1 100 0 100 {} 0 0 0 0\nintr 0\n", 100 + 50 * seconds, 700 + 50 * seconds, 700 + 150 * seconds));
+        put(root, "proc/meminfo", "MemTotal:       16000000 kB\nMemFree:  1000 kB\nMemAvailable:    4000000 kB\n");
+        put(root, "proc/10/stat", &stat("a (busy) proc", 1000 + 150 * seconds, 300));
+        put(root, "proc/20/stat", &stat("gpu-client", 20 * seconds, 100));
+        put(root, "proc/20/fdinfo/3", &format!("pos:\t0\ndrm-client-id:\t7\ndrm-engine-gfx:\t{} ns\ndrm-engine-capacity-gfx:\t9\ndrm-total-vram:\t2 MiB\n", 500_000_000 * seconds));
+        if seconds > 0 {
+            put(root, "proc/30/stat", &stat("newborn", 10_000, 1));
         }
-        let bytes = device.sample();
-        let (cores, processes) = (word(&bytes, 0) as usize, word(&bytes, 4) as usize);
-        assert!(cores >= 1);
-        assert!((1..=PROCESSES).contains(&processes), "{processes} processes");
-        assert_eq!(bytes.len(), 8 + 8 * 4 + cores * 12 + processes * (12 + NAME));
-        let (total, available) = (float(&bytes, 8), float(&bytes, 12));
-        assert!(total > 1e8 && available > 0.0 && available <= total, "memory {available} of {total}");
-        let busiest: f32 = (0..cores).map(|core| float(&bytes, 40 + core * 12)).fold(0.0, f32::max);
-        assert!(busiest > 0.2, "one core spun for the whole sample: {busiest}");
-        let at = 40 + cores * 12;
-        let names: Vec<String> = (0..processes).map(|process| String::from_utf8_lossy(&bytes[at + process * 28 + 12..at + process * 28 + 28]).trim_end_matches('\0').to_owned()).collect();
-        let own = std::fs::read_to_string("/proc/self/comm").unwrap().trim().to_owned();
-        assert!(names.iter().any(|name| own.starts_with(name.as_str())), "this spinning process is among the busiest: {names:?}");
-        assert!(float(&bytes, at) > 0.2, "and leads them: {}", float(&bytes, at));
+    }
+
+    #[test]
+    fn a_sample_reads_cores_memory_gpu_and_busiest_processes_since_the_last() {
+        let root = std::env::temp_dir().join(format!("voice-vr-device-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        machine(&root, 0);
+        fs::create_dir_all(root.join("proc/20/fd")).unwrap();
+        std::os::unix::fs::symlink("/dev/dri/renderD128", root.join("proc/20/fd/3")).unwrap();
+        put(&root, "sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq", "3000000\n");
+        put(&root, "sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", "1500000\n");
+        put(&root, "sys/class/thermal/thermal_zone0/type", "cpu-thermal\n");
+        put(&root, "sys/class/thermal/thermal_zone0/temp", "45000\n");
+        put(&root, "sys/class/thermal/thermal_zone1/type", "gpu-thermal\n");
+        put(&root, "sys/class/thermal/thermal_zone1/temp", "50000\n");
+        put(&root, "sys/class/devfreq/fb000000.gpu/cur_freq", "400000000\n");
+        put(&root, "sys/class/devfreq/fb000000.gpu/max_freq", "800000000\n");
+        let born = Instant::now();
+        let mut device = Device::new(&root, born);
+        machine(&root, 1);
+        assert!(device.sample(born + PERIOD / 2).is_none(), "nothing until a period has passed");
+        let bytes = device.sample(born + PERIOD).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!((word(&bytes, 0), word(&bytes, 4)), (2, 2), "two cores; the process born since the last sample has nothing to compare yet");
+        assert_eq!(bytes.len(), 8 + 8 * 4 + 2 * 12 + 2 * (12 + NAME));
+        let floats = |at: usize, count: usize| (0..count).map(|index| float(&bytes, at + 4 * index)).collect::<Vec<_>>();
+        assert_eq!(floats(8, 8), [16000000.0 * 1024.0, 4000000.0 * 1024.0, 0.5, 2.0 * 1024.0 * 1024.0, 400000000.0, 800000000.0, 45.0, 50.0]);
+        assert_eq!(floats(40, 6), [0.5, 1.5e9, 3e9, 0.0, 0.0, 0.0], "per core: busy fraction, clock and top clock; the second core has no cpufreq");
+        let at = 40 + 2 * 12;
+        let name = |process: usize| String::from_utf8_lossy(&bytes[at + process * 28 + 12..at + process * 28 + 28]).trim_end_matches('\0').to_owned();
+        assert_eq!((name(0), floats(at, 3)), ("a (busy) proc".to_owned(), vec![1.5, 300.0 * 4096.0, 0.0]));
+        assert_eq!((name(1), floats(at + 28, 3)), ("gpu-client".to_owned(), vec![0.2, 100.0 * 4096.0, 0.5]));
     }
 }

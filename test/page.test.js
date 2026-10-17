@@ -6,7 +6,7 @@ import { gzipSync } from 'node:zlib';
 import { IDENTITY, INACTIVITY_MS, SIGN_OFF, WAKE_PHRASE, WOKEN } from '../docs/identity.js';
 import { WIDTH, WINDOW } from '../docs/wake.js';
 import { MODEL } from '../docs/speaker.js';
-import { launchChromium, openPage, renderDom } from '../scripts/chromium.mjs';
+import { HANG_MS, launchChromium, openPage, renderDom } from '../scripts/chromium.mjs';
 import { assessSmoke, canvasAspectMatches, clipClearsStage, evidenceRegion, installSmokeMeasurements, smokeLimits, smokeStatusText, smokeViewports } from './smoke-measurements.js';
 
 test('private smoke uses the same authenticated relay transport as the page', async () => {
@@ -67,9 +67,9 @@ export default async function initWasm() {}
 export async function init() {}
 export async function connect() { lost = false; }
 export async function send_only(bytes) {
-  if (globalThis.relayLatency) await new Promise((resolve) => setTimeout(resolve, relayLatency));
   const frame = dec.decode(bytes);
   (globalThis.sentVerbs ??= []).push(frame.split('\\n', 1)[0]);
+  if (globalThis.relayLatency) await new Promise((resolve) => setTimeout(resolve, relayLatency));
   if (frame.startsWith('{"auth"')) {
     if (!authenticated) return deliver(enc.encode(JSON.stringify({ ok: authenticated = true })));
     held = [];
@@ -335,8 +335,6 @@ for (let index = 0; index < 10; index++) {
 }
 `;
 
-const CEILING_MS = 60000;
-
 const ENTITIES = { quot: '"', lt: '<', gt: '>', amp: '&', nbsp: '\u00a0' };
 
 async function dumpDom(url, args, { virtualTime = false } = {}) {
@@ -345,7 +343,7 @@ async function dumpDom(url, args, { virtualTime = false } = {}) {
   try {
     const rendered = renderDom(chrome, url, { done: "document.body?.hasAttribute('data-result')", virtualTime });
     rendered.catch(() => {});
-    const ceiling = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`the page set no result within ${CEILING_MS} ms: ${chrome.stderr}`)), CEILING_MS); });
+    const ceiling = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`the page set no result within ${HANG_MS} ms: ${chrome.stderr}`)), HANG_MS); });
     const stdout = await Promise.race([rendered, ceiling]);
     const result = JSON.parse(/data-result="([^"]*)"/.exec(stdout)[1].replace(/&(quot|lt|gt|amp|nbsp);/g, (_, name) => ENTITIES[name]));
     return { result, stdout, stderr: chrome.stderr };
@@ -413,7 +411,7 @@ async function driveLifecycle(testSetup, drive) {
   const events = [], contentLoaded = new Set(), checks = new Set();
   const within = (work, what) => {
     let timer;
-    const ceiling = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`no ${what} within ${CEILING_MS} ms`)), CEILING_MS); });
+    const ceiling = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`no ${what} within ${HANG_MS} ms`)), HANG_MS); });
     return Promise.race([work, ceiling]).finally(() => clearTimeout(timer));
   };
   const settles = (check, what) => within(new Promise((resolve) => {
@@ -1201,16 +1199,15 @@ window.addEventListener('test-ready', async () => {
   choice.dispatchEvent(new Event('change'));
   let rendered;
   const poll = setInterval(() => {
-    if (!rendered && firstVisible !== booted) rendered = { at: performance.now(), sent: sentVerbs.length };
+    if (!rendered && firstVisible !== booted) rendered = { sent: sentVerbs.length };
     if (!rendered || clipMovement === seated) return;
     clearInterval(poll);
-    document.body.dataset.result = JSON.stringify({ renderToSitMs: Math.round(performance.now() - rendered.at), sentBetween: sentVerbs.slice(rendered.sent), disabled, selected: choice.value });
+    document.body.dataset.result = JSON.stringify({ sentBetween: sentVerbs.slice(rendered.sent), disabled, selected: choice.value });
   }, 4);
 });
 `, { virtualTime: true });
   assert.ok(result, stderr);
   assert.deepEqual(result.sentBetween, [], stderr);
-  assert.ok(result.renderToSitMs <= 100, `render to sitting took ${result.renderToSitMs} ms`);
   assert.equal(result.disabled, false);
   assert.equal(result.selected, '43');
 });

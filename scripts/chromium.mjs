@@ -113,6 +113,9 @@ function devtools(input, output, stderr) {
   };
 }
 
+// Long past any healthy page on a machine however loaded: only a page that will never finish reaches it.
+export const HANG_MS = 10 * 60 * 1000;
+
 export const SWIFTSHADER = ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'];
 
 export const livePageArgs = ({ width, height }) => ['--headless=new', '--no-sandbox', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--hide-scrollbars', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required', `--window-size=${width},${height}`];

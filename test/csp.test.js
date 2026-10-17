@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { launchChromium, openPage } from '../scripts/chromium.mjs';
+import { HANG_MS, launchChromium, openPage } from '../scripts/chromium.mjs';
 import { CHUNK } from '../docs/wake.js';
 
 const docs = fileURLToPath(new URL('../docs/', import.meta.url));
@@ -110,7 +110,7 @@ document.body.dataset.result = JSON.stringify(result);
   try {
     const { evaluate } = await openPage(chrome.devtools.call, `${origin}/`);
     let result = null;
-    for (const deadline = Date.now() + 60000; !result && Date.now() < deadline; await new Promise((resolve) => setTimeout(resolve, 200))) {
+    for (const deadline = Date.now() + HANG_MS; !result && Date.now() < deadline; await new Promise((resolve) => setTimeout(resolve, 200))) {
       const value = await evaluate('document.body?.dataset.result ?? null');
       result = value && JSON.parse(value);
     }

@@ -2,11 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { launchChromium } from '../scripts/chromium.mjs';
-
-// A case takes seconds even on an oversubscribed host; the probe waits on the audio thread rendering, which a
-// stalled browser never does, so only a wall-clock limit ends that run.
-const LIMIT_MS = 180000;
+import { HANG_MS, launchChromium } from '../scripts/chromium.mjs';
 
 // Exercise actual decoded audio. Inject the platform audio interruption and,
 // in mobile app mode, overlay lifecycle events: desktop Chromium cannot open an
@@ -41,7 +37,7 @@ for (const mobile of [false, true]) test(`audio returns after ${mobile ? 'standa
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     const origin = `http://127.0.0.1:${server.address().port}`;
     chrome = await launchChromium({ args: ['--headless=new', '--no-sandbox', '--autoplay-policy=no-user-gesture-required', mobile ? `--app=${origin}` : origin] });
-    deadline = setTimeout(() => { expired = true; chrome.close(); }, LIMIT_MS);
+    deadline = setTimeout(() => { expired = true; chrome.close(); }, HANG_MS);
     const pages = (await chrome.devtools.call('Target.getTargets')).targetInfos.filter(target => target.type === 'page');
     assert.equal(pages.length, 1, JSON.stringify(pages));
     const [{ targetId }] = pages;
@@ -163,7 +159,7 @@ for (const mobile of [false, true]) test(`audio returns after ${mobile ? 'standa
     assert.equal(await evaluate('playback.context.state'), 'closed');
     assert.deepEqual(await evaluate('failures'), []);
   } catch (error) {
-    if (expired) throw new Error(`audio return did not finish within ${LIMIT_MS / 1000} s; Chromium was closed`, { cause: error });
+    if (expired) throw new Error(`audio return did not finish within ${HANG_MS / 1000} s; Chromium was closed`, { cause: error });
     throw error;
   } finally {
     clearTimeout(deadline);

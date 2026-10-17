@@ -13,12 +13,13 @@ S
 cat > "$stubs/pasta" <<S
 #!/bin/sh
 printf '%s\n' "\$*" > "$stubs/pasta-args"
-exec sleep "\${PASTA_SECONDS:-0}"
+[ -p "$stubs/forever" ] && exec cat "$stubs/forever"
+exit 0
 S
 chmod +x "$stubs/ps" "$stubs/pasta"
 mkdir "$stubs/vrh"
-run() { (cd "$stubs" && PATH="$stubs:$PATH" VRH="$stubs/vrh" "$vrh" -- true) && rc=0 || rc=$?; }
-reset() { rm -f "$stubs/pasta-args" "$stubs/ps-calls" "$stubs/ps-fails" "$stubs/foreign-after"; printf '%s\n' "1 systemd" "$me vrserver" > "$stubs/ps-out"; }
+run() { (cd "$stubs" && PATH="$stubs:$PATH" VRH="$stubs/vrh" timeout 120 "$vrh" -- true) && rc=0 || rc=$?; }
+reset() { rm -f "$stubs/pasta-args" "$stubs/ps-calls" "$stubs/ps-fails" "$stubs/foreign-after" "$stubs/forever"; printf '%s\n' "1 systemd" "$me vrserver" > "$stubs/ps-out"; }
 
 reset; run
 [ "$rc" = 0 ] || { echo "own vrserver: rc $rc"; exit 1; }
@@ -30,6 +31,6 @@ reset; echo "$other vrserver" >> "$stubs/ps-out"; run
 reset; touch "$stubs/ps-fails"; run
 [ "$rc" = 75 ] && [ ! -e "$stubs/pasta-args" ] || { echo "unlistable processes: rc $rc"; exit 1; }
 
-reset; echo 2 > "$stubs/foreign-after"; start=$(date +%s); PASTA_SECONDS=60 run
-[ "$rc" = 75 ] && [ $(($(date +%s) - start)) -lt 30 ] || { echo "vrserver started mid-run: rc $rc after $(($(date +%s) - start)) s"; exit 1; }
+reset; echo 2 > "$stubs/foreign-after"; mkfifo "$stubs/forever"; run
+[ "$rc" = 75 ] || { echo "vrserver started mid-run: rc $rc"; exit 1; }
 echo "vrh: 4 launcher checks passed"

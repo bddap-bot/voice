@@ -1,7 +1,7 @@
 import { readFile, readdir } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
-import { SWIFTSHADER, launchChromium, livePageArgs, openPage } from './chromium.mjs';
+import { HANG_MS, SWIFTSHADER, launchChromium, livePageArgs, openPage } from './chromium.mjs';
 
 const root = path.resolve(new URL('..', import.meta.url).pathname);
 const flag = (name, fallback) => { const at = process.argv.indexOf(name); return at >= 0 ? process.argv[at + 1] : fallback; };
@@ -15,7 +15,7 @@ const harness = `<!doctype html><meta charset="utf-8"><style>body{margin:0;backg
 <script>globalThis.__idle = { frames: 0, events: [], ready: false }; addEventListener('error', (event) => __idle.events.push({ error: String(event.message) })); addEventListener('unhandledrejection', (event) => __idle.events.push({ error: String(event.reason?.stack ?? event.reason) }));</script>
 <script type="module">
 import { PuppetRuntime } from './puppet.js';
-import { startWakeSpotter } from './wake.js';
+import { RATE, listenForWake, startWakeSpotter } from './wake.js';
 const options = new URLSearchParams(location.search);
 if (options.has('puppet')) {
   const runtime = new PuppetRuntime(document.querySelector('#puppet'));
@@ -28,23 +28,32 @@ if (options.has('puppet')) {
   await runtime.loadClips(['sit', 'sit-idle'].map((action) => ({ action, format: 'motion', data: { ...motion, name: action } })));
 }
 if (options.has('spotter')) {
-  let stream;
+  const model = await fetch('/wake-demo.json').then((r) => r.json());
+  const heard = (resolve) => (event) => { __idle.events.push(event); if (event.ready) resolve(); };
   if (options.has('phrase')) {
     const { audio } = await fetch('/golden/wake.json').then((r) => r.json());
     const samples = Float32Array.from(new Int16Array(Uint8Array.from(atob(audio), (c) => c.charCodeAt(0)).buffer), (sample) => sample / 32767);
-    const context = new AudioContext({ sampleRate: 16000 });
-    const buffer = context.createBuffer(1, samples.length + 16000, 16000);
+    const offline = options.has('offline');
+    const context = offline ? new OfflineAudioContext(1, samples.length + RATE, RATE) : new AudioContext({ sampleRate: RATE });
+    const buffer = context.createBuffer(1, samples.length + RATE, RATE);
     buffer.copyToChannel(samples, 0);
     const source = context.createBufferSource();
     source.buffer = buffer;
-    source.loop = true;
-    const destination = context.createMediaStreamDestination();
-    source.connect(destination);
-    source.start();
-    stream = destination.stream;
-  } else stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  const model = await fetch('/wake-demo.json').then((r) => r.json());
-  await new Promise((resolve) => startWakeSpotter(stream, (event) => { __idle.events.push(event); if (event.ready) resolve(); }, model));
+    if (offline) {
+      await new Promise((resolve) => listenForWake(context, source, heard(resolve), model));
+      source.start();
+      context.startRendering();
+    } else {
+      source.loop = true;
+      const destination = context.createMediaStreamDestination();
+      source.connect(destination);
+      await new Promise((resolve) => startWakeSpotter(destination.stream, heard(resolve), model));
+      source.start();
+    }
+  } else {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    await new Promise((resolve) => startWakeSpotter(stream, heard(resolve), model));
+  }
 }
 __idle.ready = true;
 </script>`;
@@ -105,7 +114,7 @@ async function threadTicks(processes) {
 }
 
 async function until(evaluate, expression, failure) {
-  const deadline = Date.now() + 30000;
+  const deadline = Date.now() + HANG_MS;
   while (Date.now() < deadline) {
     const [value, error] = await evaluate(`[${expression}, globalThis.__idle?.events.find((event) => event.error)?.error]`).catch(() => []);
     if (error) throw new Error(error);
@@ -154,17 +163,20 @@ async function measure(server, variant) {
   } finally { await chrome.close(); }
 }
 
-async function phrase(server) {
+async function phrase(server, offline) {
   const chrome = await launchChromium({ args: BROWSER });
   try {
     const { evaluate, call } = await openPage(chrome.devtools.call);
-    await call('Page.navigate', { url: `${server.url}?puppet&spotter&phrase` });
-    return await until(evaluate, 'globalThis.__idle?.events.find((event) => event.wake)', 'the wake phrase did not fire');
+    await call('Page.navigate', { url: `${server.url}?${offline ? 'spotter&phrase&offline' : 'puppet&spotter&phrase'}` });
+    await until(evaluate, 'globalThis.__idle?.ready', 'the harness never became ready');
+    const started = performance.now();
+    const wake = await until(evaluate, 'globalThis.__idle?.events.find((event) => event.wake)', 'the wake phrase did not fire');
+    return { ...wake, seconds: Number(((performance.now() - started) / 1000).toFixed(1)) };
   } finally { await chrome.close(); }
 }
 
 const server = await serve();
 try {
-  if (process.argv.includes('--phrase')) console.log(JSON.stringify({ phrase: await phrase(server) }));
+  if (process.argv.includes('--phrase')) console.log(JSON.stringify({ phrase: await phrase(server, process.argv.includes('--offline')) }));
   else for (const variant of variants) console.log(JSON.stringify(await measure(server, variant)));
 } finally { server.close(); }

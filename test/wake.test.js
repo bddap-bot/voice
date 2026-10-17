@@ -149,7 +149,7 @@ test('a model with missing or mismatched weights is refused', () => {
   for (const broken of [{ ...valid, w1: encoded(inputs) }, { ...valid, w2: encoded(3) }, { ...valid, threshold: 1 }, { ...valid, b2: undefined }, { ...valid, mean: encoded(10) }, { ...valid, scale: undefined }, { ...valid, b1: 'not base64!' }]) assert.throws(() => loadHead(broken), /invalid wake model/);
 });
 
-test('the wake phrase fires through the page spotter while the asleep puppet draws', async () => {
-  const { stdout } = await promisify(execFile)(process.execPath, [fileURLToPath(new URL('../scripts/idle-cost.mjs', import.meta.url)), '--phrase'], { timeout: 90000 });
+test('the wake phrase fires through the page spotter\'s worklet, worker and model', async () => {
+  const { stdout } = await promisify(execFile)(process.execPath, [fileURLToPath(new URL('../scripts/idle-cost.mjs', import.meta.url)), '--phrase', '--offline']);
   assert.ok(JSON.parse(stdout).phrase.wake >= 0.999, stdout);
 });

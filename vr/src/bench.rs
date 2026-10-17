@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use glam::Vec3 as V3;
 
-use crate::object::{Budget, Object, Offscreen, View, BUDGET, QUAD};
+use crate::object::{Budget, Object, Offscreen, View, BUDGET, QUAD, UNBUDGETED};
 use crate::placement::{facing, Pose, Vec3};
 use crate::program::Program;
 use crate::render::{eye_projection, eye_texels, Renderer, DISPLAY_DENSITY, PAGE_HEIGHT};
@@ -58,7 +58,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
     let bytes = std::fs::read(&options.file).map_err(|error| format!("{}: {error}", options.file.display()))?;
     program(&bytes, options.data.as_deref())?;
-    let budget = if options.unbudgeted { Budget { mean: Duration::from_secs(1), frame: Duration::from_secs(10) } } else { BUDGET };
+    let budget = if options.unbudgeted { UNBUDGETED } else { BUDGET };
     frames(Rc::new(Gpu::new(None)?), &bytes, &options, budget)
 }
 
@@ -101,7 +101,7 @@ fn frames(gpu: Rc<Gpu>, bytes: &[u8], options: &Options, budget: Budget) -> Resu
     if let Some(data) = &options.data {
         object.feed(data.as_bytes().to_vec());
     }
-    let deadline = started + Duration::from_secs(30);
+    let deadline = started + Duration::from_secs(60);
     let mut now = started;
     while object.radius().is_none() {
         if Instant::now() > deadline {
@@ -220,8 +220,7 @@ mod tests {
     fn an_object_runs_through_touch_and_is_pictured_right_of_the_puppet() {
         let directory = std::env::temp_dir().join(format!("voice-vr-bench-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
-        let loose = Budget { mean: Duration::from_secs(1), frame: Duration::from_secs(10) };
-        frames(Rc::new(Gpu::new(None).unwrap()), &crate::object::tests::cube(0.2), &options(Path::new("cube.glb"), Some(&directory)), loose).unwrap();
+        frames(Rc::new(Gpu::new(None).unwrap()), &crate::object::tests::cube(0.2), &options(Path::new("cube.glb"), Some(&directory)), UNBUDGETED).unwrap();
         let picture = image::open(directory.join("beside.png")).unwrap().to_rgb8();
         let column = |x: f32| ((x - WINDOW[0]) * PIXELS_PER_METRE) as u32;
         let [x, y, _] = crate::placement::add(crate::object::beside(1.0, 0), [0.0, crate::FLOOR, 0.0]);

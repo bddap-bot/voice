@@ -98,7 +98,7 @@ let
     grep -q linuxarm64 $out/bin/voice-vr-host
 
     install -m755 ${./voice-vr.sh} $out/bin/voice-vr
-    sh ${./voice-vr-test.sh} $out/bin/voice-vr
+    timeout 120 sh ${./voice-vr-test.sh} $out/bin/voice-vr
     substitute ${./voice-vr.vrmanifest} $out/voice-vr.vrmanifest --replace-fail '"binary_path_linux": "@out@/bin/voice-vr"' '"binary_path_linux_arm": "bin/voice-vr"'
   '';
 in

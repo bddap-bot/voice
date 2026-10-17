@@ -2,12 +2,14 @@
 # shellcheck disable=SC2016
 set -eu
 supervisor=$1
-work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+work=$(mktemp -d)
+trap 'if [ -n "${supervisor_pid:-}" ]; then kill "$supervisor_pid" 2>/dev/null || :; wait "$supervisor_pid" 2>/dev/null || :; fi; if [ -e "$work/bin/voice-vr-host.pid" ]; then kill "$(cat "$work/bin/voice-vr-host.pid")" 2>/dev/null || :; fi; rm -rf "$work"' EXIT
 mkdir "$work/bin" "$work/stub"
 cp "$supervisor" "$work/bin/voice-vr"
 chmod +x "$work/bin/voice-vr"
 printf '#!/bin/sh\nexit 0\n' > "$work/stub/pgrep"
-chmod +x "$work/stub/pgrep"
+printf '#!/bin/sh\necho 0\n' > "$work/stub/date"
+chmod +x "$work/stub/pgrep" "$work/stub/date"
 host() {
   { echo '#!/bin/sh'; echo "n=\$(cat '$work/runs' 2>/dev/null || echo 0); echo \$((n + 1)) > '$work/runs'"; echo "$1"; } > "$work/bin/voice-vr-host"
   chmod +x "$work/bin/voice-vr-host"
@@ -42,11 +44,14 @@ host 'exit 101'; run
 [ "$rc" = 101 ] && [ "$runs" = 1 ] || fail "a crash with vrserver gone: rc $rc after $runs runs"
 
 printf '#!/bin/sh\nexit 0\n' > "$work/stub/pgrep"
-host 'echo $$ > "$0.pid"; exec sleep 30'
+mkfifo "$work/bin/voice-vr-host.fifo"
+host 'echo $$ > "$0.pid.new"; mv "$0.pid.new" "$0.pid"; read token < "$0.fifo"'
 PATH="$work/stub:$PATH" "$work/bin/voice-vr" 2>/dev/null & supervisor_pid=$!
-while [ ! -e "$work/runs" ]; do sleep 0.1; done
+while [ ! -e "$work/bin/voice-vr-host.pid" ]; do sleep 0.1; done
 kill -TERM "$supervisor_pid"
 wait "$supervisor_pid" && rc=0 || rc=$?
+supervisor_pid=
 [ "$rc" = 143 ] || fail "stopping the supervisor: rc $rc"
 ! kill -0 "$(cat "$work/bin/voice-vr-host.pid")" 2>/dev/null || fail "the host outlived its supervisor"
+rm "$work/bin/voice-vr-host.pid"
 echo "voice-vr supervisor: 8 checks passed"

@@ -45,16 +45,17 @@ for (const mobile of [false, true]) test(`audio returns after ${mobile ? 'standa
     const call = (method, params) => chrome.devtools.call(method, params, sessionId);
     await call('Page.enable');
     await call('Page.setLifecycleEventsEnabled', { enabled: true });
-    const loads = new Set();
+    const loads = new Set(), lifecycle = [];
     let loaded = () => {};
     const stop = chrome.devtools.listen(({ method, params }) => {
+      if (method === 'Page.lifecycleEvent') lifecycle.push([params.name, params.loaderId]);
       if (method === 'Page.lifecycleEvent' && params.name === 'load') { loads.add(params.loaderId); loaded(); }
     });
     const { loaderId, errorText } = await call('Page.navigate', { url: `${origin}/` });
     assert.ok(!errorText, errorText);
     await Promise.race([
       new Promise(resolve => { loaded = () => loads.has(loaderId) && resolve(); loaded(); }),
-      chrome.devtools.closed.then(() => { throw new Error('Chromium closed before the page loaded'); }),
+      chrome.devtools.closed.then(() => { throw new Error(`Chromium closed before the page loaded: navigation ${loaderId}, loads seen ${JSON.stringify([...loads])}, lifecycle ${JSON.stringify(lifecycle)}`); }),
     ]);
     stop();
     const evaluate = async expression => {

@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { launchChromium, openPage } from '../scripts/chromium.mjs';
+import { HANG_MS, launchChromium, openPage } from '../scripts/chromium.mjs';
 
 test('a reload after a deploy runs every shell module from the new deploy even while the old ones are still fresh in the HTTP cache', async () => {
   const worker = await readFile(new URL('../docs/sw.js', import.meta.url));
@@ -28,9 +28,8 @@ test('a reload after a deploy runs every shell module from the new deploy even w
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     const { call: page, evaluate } = await openPage(chrome.devtools.call);
     const settle = async (check) => {
-      for (let tries = 0; tries < 200; tries++) {
+      for (const deadline = Date.now() + HANG_MS; Date.now() < deadline; await delay(50)) {
         if (await evaluate(check).catch(() => false)) return evaluate('document.title');
-        await delay(50);
       }
       throw new Error(`page never satisfied ${check}`);
     };

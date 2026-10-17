@@ -137,6 +137,7 @@ async function runViewport(viewport, executable, server) {
   const { promise: exited, resolve: exit } = Promise.withResolvers();
   chrome.exited.then(exit);
   let stopped = false;
+  let waitingFor = 'browser setup';
   const run = async () => {
     const cdp=await connectCdp(chrome, exit);
     if (development) await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `
@@ -186,11 +187,13 @@ async function runViewport(viewport, executable, server) {
     ` });
     await cdp.call('Page.enable');await cdp.call('Runtime.enable');await cdp.call('ServiceWorker.enable');await cdp.call('Target.setAutoAttach',{autoAttach:true,waitForDebuggerOnStart:false,flatten:true});await cdp.call('Page.addScriptToEvaluateOnNewDocument',{source:`localStorage.setItem('voice.token', ${JSON.stringify(server.token)})`});await cdp.call('Emulation.setDeviceMetricsOverride',{width:viewport.width,height:viewport.height,deviceScaleFactor:viewport.scale,mobile:viewport.mobile});await cdp.call('Page.navigate',{url:server.url});
     if (!development) {
+      waitingFor = 'service worker control';
       await cdp.evaluate(`new Promise((resolve) => {
         const controlled = () => { if (navigator.serviceWorker.controller) resolve(); };
         navigator.serviceWorker.addEventListener('controllerchange', controlled);
         controlled();
       })`);
+      waitingFor = 'controlled reload';
       await cdp.prepareWorker();
       await cdp.evaluate('globalThis.__smokeBeforeReload = true');
       await cdp.call('Page.reload');
@@ -200,8 +203,10 @@ async function runViewport(viewport, executable, server) {
       }
       await cdp.releaseWorker();
     }
+    waitingFor = 'page readiness';
     let ready=false;
     while(!ready){try{const page=JSON.parse(await cdp.evaluate("JSON.stringify({ready:document.querySelector('#puppet')?.getAttribute('aria-disabled')==='false',status:document.querySelector('#status')?.textContent,error:document.querySelector('#status')?.classList.contains('err')})"));ready=page.ready;if(ready)break;if(page.error)throw new Error(`page connection failed: ${page.status}`)}catch(error){if(stopped||error.message?.startsWith('page connection failed:'))throw error}await new Promise((resolve)=>setTimeout(resolve,250));}
+    waitingFor = 'avatar selection';
     await cdp.evaluate(`new Promise((resolve) => {
       let selected = false;
       const check = () => {
@@ -216,6 +221,7 @@ async function runViewport(viewport, executable, server) {
     const stageGeometry = async () => JSON.parse(await cdp.evaluate("JSON.stringify((() => { const box = document.querySelector('#puppet').getBoundingClientRect(); return { canvas: { left: box.left + scrollX, right: box.right + scrollX, top: box.top + scrollY, bottom: box.bottom + scrollY }, viewport: { x: scrollX, y: scrollY, width: innerWidth, height: innerHeight } }; })())"));
     const region = evidenceRegion({ neutralSilhouette, ...(await stageGeometry()) });
     if (live) {
+      waitingFor = 'wake spotter readiness';
       await cdp.evaluate(`new Promise((resolve, reject) => { const check = () => { const failure = __smokeHeard.find((message) => message.error); if (failure) return reject(new Error(failure?.error ?? 'wake spotter did not load')); if (__smokeHeard.some((message) => message.ready)) return resolve(); setTimeout(check, 250); }; check(); })`);
       for (const index of speech.ordinary.keys()) await cdp.evaluate(`__smokeSay(__smokeSpeech.ordinary[${index}]).then(() => new Promise((resolve) => setTimeout(resolve, 1000)))`);
       await cdp.evaluate('new Promise((resolve) => setTimeout(resolve, 3000))');
@@ -227,6 +233,7 @@ async function runViewport(viewport, executable, server) {
     const liveRecord = () => cdp.evaluate('__smokeLiveChannels.map(({ channel, events, spoken, delegations, replies }) => ({ events, spoken, delegations, replies, state: channel.readyState }))');
     const quietLive = () => cdp.evaluate(`new Promise((resolve) => { const deadline = Date.now() + 30000; const check = () => { if (Date.now() - __smokeLiveChannels.at(-1).spokeAt > 2000 || Date.now() > deadline) return resolve(); setTimeout(check, 100); }; check(); })`);
     for(let second=0;second<duration;second++){
+      waitingFor = `sample ${second}`;
       if(second===1){await cdp.evaluate(`${transitions[0]}`);if(mode==='public')await cdp.evaluate(`(async()=>{while(!globalThis.__smokeChannel){if(document.querySelector('#status').classList.contains('err'))throw new Error('fixture session did not open: '+document.querySelector('#status').textContent);await new Promise(done=>setTimeout(done,10))}const emit=(event)=>__smokeChannel.dispatchEvent(new MessageEvent('message',{data:JSON.stringify(event)}));emit({type:'output_transcript.added',item:{id:'fixture_out',type:'output_transcript',text:'I will inspect the fixture.'},start_ms:0,end_ms:20});emit({type:'input_transcript.added',item:{id:'fixture_in',type:'input_transcript',text:'Check the fixture stream.'}});emit({type:'delegation.created',item:{id:'fixture',type:'delegation',content:[{type:'input_text',text:'Check the fixture stream.'}],handoff_id:'fixture_handoff',target:'client'}});while(!__smokeChannel.sent.some(event=>event.channel==='speakable'))await new Promise(resolve=>setTimeout(resolve,10))})()`)}
       if (development && second === 2) {
         await cdp.evaluate(`new Promise((resolve, reject) => { const check = () => { if (document.querySelector('#puppet').getAttribute('aria-pressed') === 'true') return resolve(); if (document.querySelector('#status').classList.contains('err')) return reject(new Error(document.querySelector('#status').textContent + ' heard ' + JSON.stringify(globalThis.__smokeHeard ?? []))); setTimeout(check, 100); }; check(); })`);
@@ -245,6 +252,7 @@ async function runViewport(viewport, executable, server) {
       await new Promise((resolve)=>setTimeout(resolve,1000));
     }
     if (development) {
+      waitingFor = 'session closure';
       if (!liveSessionOpened) throw new Error('development smoke did not open a Live session');
       await cdp.evaluate(`new Promise((resolve) => { const check = () => { if (document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' && document.querySelector('#puppet').getAttribute('aria-disabled') === 'false') return resolve(); setTimeout(check, 100); }; check(); })`);
       const channels = await liveRecord();
@@ -258,11 +266,12 @@ async function runViewport(viewport, executable, server) {
     state.errors.push(...cdp.consoleErrors);
     const report={viewport:viewport.name,...assessSmoke(state),state};
     await writeFile(path.join(output,`${viewport.name}.json`),JSON.stringify(report,null,2));
+    waitingFor = 'evidence encoding';
     await execute('ffmpeg',['-y','-framerate','2','-i',path.join(output,`${viewport.name}-%03d.png`),'-vf','scale=iw/2:ih/2:flags=lanczos','-t','8',path.join(output,`${viewport.name}.gif`)],{timeout:120000,maxBuffer:1024*1024*10});
     return report;
   };
   let timer;
-  const hung = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`smoke viewport ${viewport.name} never completed`)), HANG_MS); });
+  const hung = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`smoke viewport ${viewport.name} never completed: ${waitingFor}; ${chrome.stderr}`)), HANG_MS); });
   try {
     return await Promise.race([exited.then((error) => { throw error; }), hung, run()]);
   } finally {

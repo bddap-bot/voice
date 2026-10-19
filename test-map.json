@@ -68,6 +68,13 @@
     },
     {
       "paths": [
+        "android/README.md"
+      ],
+      "tests": [],
+      "why": "prose"
+    },
+    {
+      "paths": [
         "android/**"
       ],
       "tests": [

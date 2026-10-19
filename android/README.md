@@ -1,10 +1,8 @@
 # Live Voice on Android
 
-[Install Live Voice](https://github.com/bddap-bot/voice/releases/download/android-v7/live-voice.apk) (Android 9 or newer). The app loads the same [Live page](https://bddap-bot.github.io/voice/) as the browser. Conversation logic, authentication, wake detection, speaker filtering and replies remain in that page; the app keeps that page running and hearing while it is hidden.
+Install it from https://bddap-bot.github.io/voice/android.html. The app loads the same [Live page](https://bddap-bot.github.io/voice/) as the browser. Conversation logic, authentication, wake detection, speaker filtering and replies remain in that page; the app keeps that page running and hearing while it is hidden.
 
-Tap the APK link → Download → Open → Settings → Allow from this source → Back → Install → Open. Version 7 installs over versions 2 through 6 and preserves the connection token. Version 1 used a different signing key and must be uninstalled first. Open the app, allow microphone access while using the app, and allow notifications. Re-enroll with **Learn my voice** if you want voice filtering; the saved browser voiceprint does not transfer. Browser storage does not transfer to the app. You can turn off “Allow from this source” after installation.
-
-Swiping Live Voice away from Recents ends background capture. Before a page session starts, the notification’s mute action does nothing. An OS-killed process does not silently restart capture.
+Before a page session starts, the notification’s mute action does nothing. An OS-killed process does not silently restart capture.
 
 ## Diagnosis: Android silences the microphone, the page cannot see it
 

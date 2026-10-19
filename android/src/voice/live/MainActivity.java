@@ -17,6 +17,7 @@ public final class MainActivity extends Activity {
     private VoiceService service;
     private boolean bound;
     private FrameLayout content;
+    private Runnable picked;
     private final ServiceConnection connection = new ServiceConnection() {
         public void onServiceConnected(ComponentName name, IBinder binder) {
             service = ((VoiceService.LocalBinder) binder).service();
@@ -26,6 +27,8 @@ public final class MainActivity extends Activity {
             content.removeAllViews();
             ((MutableContextWrapper) service.web.getContext()).setBaseContext(MainActivity.this);
             content.addView(service.web, new FrameLayout.LayoutParams(-1, -1));
+            if (picked != null) picked.run();
+            picked = null;
         }
         public void onServiceDisconnected(ComponentName name) { service = null; finish(); }
     };
@@ -50,6 +53,14 @@ public final class MainActivity extends Activity {
         Intent intent = new Intent(this, VoiceService.class);
         startForegroundService(intent);
         bound = bindService(intent, connection, BIND_AUTO_CREATE);
+    }
+    protected void onActivityResult(int code, int result, Intent data) {
+        if (code != VoiceService.PICK) return;
+        picked = () -> service.picked(result, data);
+        if (service != null) {
+            picked.run();
+            picked = null;
+        }
     }
     protected void onDestroy() {
         if (service != null && service.web != null && service.web.getParent() == content) {

@@ -1,12 +1,14 @@
 package voice.live;
 
 import android.Manifest;
+import android.app.Activity;
 import android.app.ActivityManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.MutableContextWrapper;
 import android.content.pm.PackageManager;
@@ -20,6 +22,7 @@ import android.view.ViewGroup;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.RenderProcessGoneDetail;
+import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebView;
@@ -27,8 +30,11 @@ import android.webkit.WebViewClient;
 
 public final class VoiceService extends Service {
     static final String PAGE = "https://bddap-bot.github.io/voice/";
+    static final int PICK = 2;
     WebView web;
     private PowerManager.WakeLock wake;
+    private ValueCallback<Uri[]> pending;
+    private Uri photo;
     public final class LocalBinder extends Binder {
         VoiceService service() { return VoiceService.this; }
     }
@@ -75,6 +81,7 @@ public final class VoiceService extends Service {
         wake = getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LiveVoice:conversation");
         wake.acquire();
         WebView.setWebContentsDebuggingEnabled((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0);
+        PhotoProvider.clear(this);
         web = new WebView(new MutableContextWrapper(this));
         web.addJavascriptInterface(new MuteMirror(), "VoiceMute");
         web.getSettings().setJavaScriptEnabled(true);
@@ -118,9 +125,29 @@ public final class VoiceService extends Service {
                 }
                 request.deny();
             }
+            public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
+                android.content.Context base = ((MutableContextWrapper) view.getContext()).getBaseContext();
+                if (!(base instanceof Activity) || !allowed(Uri.parse(view.getUrl() == null ? "" : view.getUrl()))) return false;
+                photo = PhotoProvider.next();
+                try {
+                    ((Activity) base).startActivityForResult(PhotoProvider.picker(VoiceService.this, params.getAcceptTypes(), photo), PICK);
+                } catch (ActivityNotFoundException e) {
+                    return false;
+                }
+                pending = callback;
+                return true;
+            }
         });
         web.loadUrl(PAGE);
         return START_NOT_STICKY;
+    }
+    void picked(int result, Intent data) {
+        if (pending == null) return;
+        Uri uri = result != Activity.RESULT_OK ? null
+            : data != null && data.getData() != null ? data.getData()
+            : PhotoProvider.taken(this, photo) ? photo : null;
+        pending.onReceiveValue(uri == null ? null : new Uri[]{uri});
+        pending = null;
     }
     public void onTaskRemoved(Intent rootIntent) { close(); }
     private void close() {

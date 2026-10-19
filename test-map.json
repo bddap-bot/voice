@@ -75,6 +75,7 @@
         "node --check android/test/background.mjs",
         "node --check android/test/appearance.mjs",
         "node --check android/test/microphone.mjs",
+        "node --check android/test/attach.mjs",
         "bash android/build.sh --test"
       ],
       "why": "Compile, package, align and verify the signed Android host with SDK 35 from android/shell.nix and a throwaway signing key."

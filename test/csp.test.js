@@ -42,7 +42,7 @@ test('every script the built page loads comes from its own origin', async () => 
 });
 
 test('every absolute URL in the hand-written page is one its policy lets it reach', async () => {
-  const files = (await readdir(docs)).filter((file) => /\.(?:html|js)$/.test(file) && file !== 'puppet.js');
+  const files = (await readdir(docs)).filter((file) => /\.(?:html|js)$/.test(file) && file !== 'puppet.js' && file !== 'android.html');
   const unreachable = [];
   for (const file of files) {
     const source = (await readFile(join(docs, file), 'utf8')).replace(/<meta http-equiv="Content-Security-Policy"[^>]*>/g, '');

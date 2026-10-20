@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -161,6 +161,10 @@ pub struct Hub {
     waiting: HashSet<String>,
     /// Delegations Live itself created this session; a reply to one carries its id.
     owned: HashSet<String>,
+    /// The newest hand-off sent to the hub.
+    sent: Option<String>,
+    /// A sent hand-off's reply goes under the id of the Live delegation that arrived with no new speech after it went.
+    joined: HashMap<String, String>,
     replies: VecDeque<Reply>,
     turn: Option<Turn>,
     unanswered: Option<Instant>,
@@ -279,6 +283,13 @@ impl Hub {
         self.unanswered = None;
         self.request_end = None;
         let delegation = trace.delegated(now);
+        if let Some(sent) = self.sent.clone().filter(|sent| delegation.text.is_empty() && self.waiting.contains(sent)) {
+            tracing::info!("{id} joins {sent}: no speech since it went");
+            if self.owned.contains(id) {
+                self.joined.insert(sent, id.to_owned());
+            }
+            return;
+        }
         let at = trace.len();
         trace.calls.asked(id, &delegation.text, at);
         self.waiting.insert(id.to_owned());
@@ -286,6 +297,7 @@ impl Hub {
         if delegation.text.is_empty() {
             return self.failed(id, "no transcript before the delegation", trace);
         }
+        self.sent = Some(id.to_owned());
         self.out.push(Command::Frame("delegate", json!({ "id": id, "text": delegation.text, "context": delegation.context, "duration_ms": delegation.duration_ms })));
     }
 
@@ -295,8 +307,13 @@ impl Hub {
         }
         trace.calls.failed(id);
         tracing::warn!("hub request {id} failed: {message}");
-        let owned = self.owned.contains(id).then_some(id);
-        self.out.push(speak(owned, FAILED));
+        let voice = self.voice(id).map(str::to_owned);
+        self.out.push(speak(voice.as_deref(), FAILED));
+    }
+
+    /// The Live delegation a request's reply is told under, if any.
+    fn voice<'a>(&'a self, id: &'a str) -> Option<&'a str> {
+        self.joined.get(id).map(String::as_str).or(self.owned.contains(id).then_some(id))
     }
 
     pub fn heard(&mut self, delta: &str, trace: &Trace, now: Instant) {
@@ -407,10 +424,10 @@ impl Hub {
         if !spoken {
             return false;
         }
-        let owned = self.owned.contains(&reply.id).then_some(reply.id.as_str());
+        let voice = self.voice(&reply.id).map(str::to_owned);
         self.reply_unspoken = true;
         for content in &reply.commentary {
-            self.out.push(speak(owned, content));
+            self.out.push(speak(voice.as_deref(), content));
         }
         true
     }
@@ -1067,6 +1084,23 @@ mod tests {
         assert_eq!(f.frames("delegate").len(), 3, "punctuation alone forwards nothing");
         f.reply(reply(&printer, "printer", &["The printer is idle."]));
         assert_eq!(f.told(), [speakable(Value::Null, "The printer is idle.")]);
+    }
+
+    #[test]
+    fn lives_late_delegation_of_speech_already_handed_off_joins_that_hand_off_instead_of_failing() {
+        let mut f = Fixture::new();
+        f.hear("Grow the trees.");
+        f.delegate("item_trees");
+        f.hear(" Also, is the printer busy?");
+        f.wait(Duration::from_millis(3100), false);
+        let frames = f.frames("delegate");
+        assert_eq!(frames.len(), 2);
+        let printer = frames[1]["id"].as_str().unwrap().to_owned();
+        f.delegate("item_printer");
+        assert_eq!(f.frames("delegate").len(), 2);
+        assert!(f.told().is_empty(), "nothing failed");
+        f.reply(reply(&printer, "printer", &["The printer is idle."]));
+        assert_eq!(f.told(), [speakable(json!("item_printer"), "The printer is idle.")]);
     }
 
     /// The page's recorded delegated-reply sessions, replayed: each delegation reaches the hub as the words heard before it, and each first reply reaches Live as it arrives, mid-utterance, under the delegation's id.

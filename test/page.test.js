@@ -1652,6 +1652,32 @@ window.addEventListener('test-ready', async () => {
   ]);
 });
 
+test("Live's late delegation of speech the page already handed off joins that hand-off instead of failing", async () => {
+  const { result, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const frames = () => (globalThis.delegateFrames ?? []).map(({ id, text }) => ({ id, text }));
+  hear('Grow the trees.');
+  delegateTurn('item_trees');
+  hear(' Also, is the printer busy?');
+  await wait(3100);
+  const printer = frames().at(-1).id;
+  delegateTurn('item_printer');
+  await wait(100);
+  replyFromHub(printer, 'printer', ['The printer is idle.']);
+  const spoken = () => told(({ channel }) => channel === 'speakable');
+  await until(() => spoken().length);
+  document.body.dataset.result = JSON.stringify({ frames: frames(), told: spoken() });
+});
+`, { virtualTime: true });
+  assert.ok(result, stderr);
+  assert.deepEqual(result.frames.map(({ id, text }) => [id.startsWith('turn_') ? 'page' : id, text]), [
+    ['item_trees', 'Grow the trees.'],
+    ['page', 'Also, is the printer busy?'],
+  ]);
+  assert.deepEqual(result.told, [['delegation.context.append', 'speakable', 'item_printer', 'The printer is idle.']]);
+});
+
 test('a hub reply appends each part as speakable context, scoped to a delegation only when it answers one', async () => {
   const { result: replies, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {

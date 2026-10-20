@@ -91,6 +91,8 @@ function applyTranscriptAction(action, timing) {
 }
 const actionDriver = new TranscriptActionDriver(applyTranscriptAction);
 const hubWaiting = new Set();
+const joined = new Map();
+let lastHandOff;
 const hubReplies = [];
 let cuedDisplay = null;
 let hubTurn = null;
@@ -1037,11 +1039,16 @@ function handOff(id) {
   hold.clear();
   clearTimeout(unanswered);
   clearTimeout(requestEnd);
+  if (!trace.pending().sent && hubWaiting.has(lastHandOff)) {
+    joined.set(lastHandOff, id);
+    return recordSession('delegation-joined', JSON.stringify({ id, joined: lastHandOff }));
+  }
   const turn = trace.delegated(id);
   hubWaiting.add(id);
   puppetRuntime?.waiting(true);
   const traceparent = stageTrace?.delegationCreated(id);
   if (!turn.sent) return hubFailed(id, 'no transcript before the delegation');
+  lastHandOff = id;
   sendFrame(`delegate\n${JSON.stringify({ id, text: turn.sent, context: turn.context, duration_ms: turn.duration_ms, traceparent })}`).catch((error) => hubFailed(id, error.message));
 }
 function hubFailed(id, message) {
@@ -1049,8 +1056,9 @@ function hubFailed(id, message) {
   finishHubWait(id);
   trace.failed(id, message);
   stageTrace?.hubReplied(id, 'failed');
-  const owner = starting?.delegations.has(id) ? starting : conversation?.audioOwner;
-  tell(owner, 'speakable', 'The hub request failed.', owner?.delegations.has(id) ? id : null);
+  const voiced = joined.get(id) ?? id;
+  const owner = starting?.delegations.has(voiced) ? starting : conversation?.audioOwner;
+  tell(owner, 'speakable', 'The hub request failed.', owner?.delegations.has(voiced) ? voiced : null);
 }
 function fallAsleep() {
   const current = conversation;
@@ -1098,7 +1106,8 @@ function presentHubReply({ result, image }) {
   stageTrace?.hubReplied(result.id);
   if (!spoken) return null;
   const owner = current.audioOwner;
-  const delegation = owner.delegations.has(result.id) ? result.id : null;
+  const voiced = joined.get(result.id) ?? result.id;
+  const delegation = owner.delegations.has(voiced) ? voiced : null;
   current.replyUnspoken = true;
   result.commentary.forEach((content) => tell(owner, 'speakable', content, delegation));
   return owner;
@@ -1159,6 +1168,7 @@ function interruptHubReplies(reason) {
 function paintOff() {
   syncSpotter();
   hubWaiting.clear();
+  joined.clear();
   hold.clear();
   clearTimeout(unanswered);
   clearTimeout(requestEnd);

@@ -1055,7 +1055,7 @@ function hubFailed(id, message) {
   if (!hubWaiting.has(id)) return;
   finishHubWait(id);
   trace.failed(id, message);
-  stageTrace?.hubReplied(id, 'failed');
+  stageTrace?.hubReplied(id, String(message).slice(0, 256) || 'failed');
   const voiced = joined.get(id) ?? id;
   const owner = starting?.delegations.has(voiced) ? starting : conversation?.audioOwner;
   tell(owner, 'speakable', 'The hub request failed.', owner?.delegations.has(voiced) ? voiced : null);

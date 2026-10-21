@@ -513,27 +513,57 @@ fn replay(state: &std::path::Path, recording: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// A markdown file drawn as the display card, each view in turn held `seconds` before the headset at the nearest a window is seen from, to check a card on the device without a session.
+/// A hub display, its JSON and the trailer its image or object travels in, before the headset at the nearest a window is seen from: each card view held `seconds`, an object beside it; to check a display on the device without a session.
 fn card(args: &[String]) -> Result<(), String> {
-    let usage = "usage: voice-vr card <file.md> <seconds>";
-    let [file, seconds] = args else { return Err(usage.into()) };
-    let seconds: u64 = seconds.parse().map_err(|_| usage)?;
-    let markdown = std::fs::read_to_string(file).map_err(|error| format!("{file}: {error}"))?;
-    let mut card = panel::Card::new(&hub::Display { markdown: Some(markdown), ..hub::Display::default() });
+    let usage = "usage: voice-vr card <display.json> [<trailer>] <seconds>";
+    let (file, trailer, seconds) = match args {
+        [file, seconds] => (file, None, seconds),
+        [file, trailer, seconds] => (file, Some(trailer), seconds),
+        _ => return Err(usage.into()),
+    };
+    let hold = Duration::from_secs(seconds.parse().map_err(|_| usage)?);
+    let read = |file: &String| std::fs::read(file).map_err(|error| format!("{file}: {error}"));
+    let mut shown = hub::Display::read(&read(file)?, &trailer.map(read).transpose()?.unwrap_or_default())?;
+    tracing::info!("display shown: {}", shown.items().join(" "));
     let gpu = Rc::new(vulkan::Gpu::new(Some(Runtime::init()?))?);
     let runtime = gpu.vr.as_ref().expect("the card's device was made for SteamVR");
     let mut image = vulkan::Flat::new(gpu.clone());
     let mut overlay = runtime.create_overlay("voice.card", "Card", panel::WIDTH, false)?;
     overlay.place_on(openvr_sys::k_unTrackedDeviceIndex_Hmd as u32, &Pose { r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], t: [0.0, 0.0, -0.35] });
-    for view in 1.. {
-        if let Some(picture) = card.take_image() {
-            overlay.texture(&mut image.upload(&picture)?)?;
+    let mut card = shown.card().then(|| panel::Card::new(&shown));
+    let mut objects: object::Shelf<openvr::Overlay> = object::Shelf::default();
+    let started = Instant::now();
+    if let Some(scene) = shown.object.take() {
+        objects.show(|place| object::Object::spawn(runtime.create_overlay(&format!("voice.object.{place}"), "Object", object::QUAD, true)?, gpu.clone(), scene, object::BUDGET, started));
+    }
+    if let Some(data) = shown.data.take() {
+        objects.feed(data.into_bytes(), shown.point.as_deref());
+    }
+    if let Some(held) = shown.hold.take() {
+        objects.hold(held, shown.point.as_deref());
+    }
+    let eyes = runtime.eye_offsets();
+    let mut stand = None;
+    let (mut view, mut turned) = (1, started);
+    loop {
+        runtime.wait_frame();
+        let now = Instant::now();
+        if now - turned >= hold {
+            if !card.as_mut().is_some_and(|card| card.turn(1)) {
+                break;
+            }
+            (view, turned) = (view + 1, now);
         }
-        overlay.show();
-        tracing::info!("view {view} of {}", card.views());
-        std::thread::sleep(Duration::from_secs(seconds));
-        if !card.turn(1) {
-            break;
+        if let Some(card) = &mut card {
+            if let Some(picture) = card.take_image() {
+                overlay.texture(&mut image.upload(&picture)?)?;
+                overlay.show();
+                tracing::info!("view {view} of {}", card.views());
+            }
+        }
+        if let Some(head) = runtime.head(&runtime.poses()) {
+            let stand = *stand.get_or_insert_with(|| facing(head.apply([0.0, -0.2, -0.6]), head.t));
+            objects.step(now, &object::View { stand, size: 1.0, head, eyes, tip: None });
         }
     }
     Ok(())

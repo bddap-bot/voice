@@ -116,7 +116,20 @@ impl Hold {
     }
 }
 
+impl Shown {
+    /// With the bytes that followed the reply's line, which are the image or the object it names.
+    fn with(self, trailer: &[u8]) -> Display {
+        let trailer = |carried: bool| (carried && !trailer.is_empty()).then(|| trailer.to_vec());
+        Display { markdown: self.markdown, link: self.link, image: trailer(self.image.is_some()), object: trailer(self.object.is_some() && self.image.is_none()), point: self.point, data: self.data, hold: self.hold.as_ref().and_then(Hold::read), clear: self.clear }
+    }
+}
+
 impl Display {
+    /// A display as a hub reply carries it: its JSON and the trailer an image or object travels in.
+    pub fn read(json: &[u8], trailer: &[u8]) -> Result<Display, String> {
+        serde_json::from_slice::<Shown>(json).map(|shown| shown.with(trailer)).map_err(|error| format!("display: {error}"))
+    }
+
     /// Whether it only speaks to the shown object, leaving the panel and the object as they are.
     pub fn addresses_object(&self) -> bool {
         self.markdown.is_none() && self.link.is_none() && self.image.is_none() && self.object.is_none()
@@ -372,8 +385,7 @@ impl Hub {
         let at = trace.len();
         trace.calls.replied(&reply.id, &reply.commentary, at);
         if let Some(shown) = reply.display.take() {
-            let trailer = |carried: bool| (carried && !image.is_empty()).then(|| image.to_vec());
-            reply.shown = Some(Display { markdown: shown.markdown, link: shown.link, image: trailer(shown.image.is_some()), object: trailer(shown.object.is_some() && shown.image.is_none()), point: shown.point, data: shown.data, hold: shown.hold.as_ref().and_then(Hold::read), clear: shown.clear });
+            reply.shown = Some(shown.with(image));
         }
         let unspoken = (!reply.commentary.is_empty() && self.sleeping).then_some(ASLEEP);
         let mut ack = json!({ "id": reply.id, "stamp": reply.stamp });

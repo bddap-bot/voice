@@ -31,7 +31,7 @@
   .display.full { left: calc(var(--pad) + var(--grip)); } .ledger.full { right: calc(var(--pad) + var(--grip)); }
   .grip.full { position: fixed; z-index: 21; top: var(--pad); bottom: var(--pad); width: var(--grip); }
   .grip.full[data-pane="display"] { left: var(--pad); } .grip.full[data-pane="ledger"] { right: var(--pad); }
-  body:has(.full) header { visibility: hidden; }
+  body:has(.full) :is(header, .dock) { visibility: hidden; }
   .display h2, .ledger h2 { margin: 0 0 12px; font-size: 14px; text-transform: uppercase; letter-spacing: .08em; color: #a5a5aa; }
   .grip { position: relative; z-index: 5; display: flex; align-items: center; justify-content: center; cursor: col-resize; touch-action: none; user-select: none; outline: none; }
   .grip[data-pane="ledger"] { grid-area: ledger-grip; } .grip[data-pane="display"] { grid-area: display-grip; }
@@ -41,7 +41,7 @@
   #display-items, #log { display: flex; flex-direction: column; gap: 10px; flex: 1; overflow: auto; }
   .display-item { padding: 13px; background: #1b1b1e; border-radius: 8px; overflow-wrap: anywhere; }
   .display-item > :first-child { margin-top: 0; } .display-item > :last-child { margin-bottom: 0; }
-  .display-item img { display: block; width: 100%; height: auto; max-height: 52dvh; object-fit: contain; margin-top: 10px; border-radius: 6px; background: #0b0b0c; }
+  .display-item img { display: block; width: 100%; height: auto; max-height: calc(100cqh - 26px); object-fit: contain; margin-top: 10px; border-radius: 6px; background: #0b0b0c; }
   .display-item a { color: #8eabff; }
   .display-item .mermaid svg { display: block; max-width: 100%; height: auto; margin: 0 auto; }
   .display-item .chart { position: relative; height: 220px; }

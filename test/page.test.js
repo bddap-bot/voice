@@ -3095,3 +3095,38 @@ test('a start over a relay that died unnoticed redials once and opens the conver
   `);
   assert.deepEqual(result, { errors: [], reconnected: true, offers: 1, fresh: true });
 });
+
+for (const [screenWidth, screenHeight] of [[390, 844], [844, 390]]) for (const [shape, width, height] of [['portrait', 600, 1000], ['landscape', 1000, 600]]) test(`a ${shape} hub image is whole in the display panel and a tap fills a ${screenWidth}x${screenHeight} phone with it`, async () => {
+  const result = await driveLifecycle(`window.addEventListener('test-ready', () => { document.body.dataset.ready = 'yes'; });`, async ({ page, evaluate, until }) => {
+    await page('Emulation.setDeviceMetricsOverride', { width: screenWidth, height: screenHeight, deviceScaleFactor: 1, mobile: true });
+    await until(`document.body?.dataset.ready === 'yes'`);
+    await evaluate(`(async () => {
+      const canvas = Object.assign(document.createElement('canvas'), { width: ${width}, height: ${height} });
+      const context = canvas.getContext('2d');
+      context.fillStyle = '#3060e0'; context.fillRect(0, 0, ${width}, ${height});
+      const bytes = new Uint8Array(await (await new Promise((resolve) => canvas.toBlob(resolve))).arrayBuffer());
+      replyFromHub('unknown', 'display', [], 1, { display: { image: { mime: 'image/png' } } }, bytes);
+      return 0;
+    })()`);
+    await until(`document.querySelector('#display img')?.naturalWidth === ${width}`);
+    const fit = () => evaluate(`(() => {
+      const image = document.querySelector('#display img'), box = image.getBoundingClientRect();
+      const area = document.querySelector('#display-items').getBoundingClientRect();
+      const scale = Math.min(box.width / image.naturalWidth, box.height / image.naturalHeight);
+      const [shownWidth, shownHeight] = [image.naturalWidth * scale, image.naturalHeight * scale];
+      const left = box.left + (box.width - shownWidth) / 2, top = box.top + (box.height - shownHeight) / 2;
+      const whole = left >= area.left - 0.5 && top >= area.top - 0.5 && left + shownWidth <= area.right + 0.5 && top + shownHeight <= area.bottom + 0.5;
+      const fills = shownWidth >= area.width - 30 || shownHeight >= area.height - 30;
+      return { whole, fills, dockHidden: getComputedStyle(document.querySelector('#controls')).visibility === 'hidden', screen: area.width * area.height / (innerWidth * innerHeight) };
+    })()`);
+    const panel = await fit();
+    const image = await evaluate(`(() => { const box = document.querySelector('#display img').getBoundingClientRect(); return { x: box.left + box.width / 2, y: box.top + box.height / 2 }; })()`);
+    for (const type of ['mousePressed', 'mouseReleased']) await page('Input.dispatchMouseEvent', { type, ...image, button: 'left', buttons: type === 'mousePressed' ? 1 : 0, clickCount: 1 });
+    await until(`document.querySelector('#display').classList.contains('full')`);
+    await evaluate('new Promise((resolve) => requestAnimationFrame(() => resolve(0)))');
+    return { panel: [panel.whole, panel.fills], full: await fit() };
+  });
+  assert.deepEqual(result.panel, [true, true], JSON.stringify(result));
+  assert.deepEqual([result.full.whole, result.full.fills, result.full.dockHidden], [true, true, true], JSON.stringify(result));
+  assert.ok(result.full.screen > 0.75, JSON.stringify(result));
+});

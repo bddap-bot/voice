@@ -512,6 +512,7 @@ function showDisplay(payload, bytes) {
     const url = URL.createObjectURL(new Blob([bytes], { type: payload.image.mime }));
     const image = document.createElement('img');
     image.src = url; image.alt = typeof payload.markdown === 'string' ? payload.markdown.slice(0, 160) : 'Hub image';
+    image.addEventListener('click', () => { if (fullPane !== 'display') { setFull('display'); syncFullHistory(); } });
     item.append(image);
     item.imageUrl = url;
   }

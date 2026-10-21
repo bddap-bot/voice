@@ -82,7 +82,6 @@ struct Shown {
     hold: Option<Value>,
     #[serde(default)]
     clear: bool,
-    html: Option<serde::de::IgnoredAny>,
 }
 
 /// What a hub reply asks to show, as the page's display card does.
@@ -100,8 +99,6 @@ pub struct Display {
     pub hold: Option<Hold>,
     /// Removes every shown object first.
     pub clear: bool,
-    /// An HTML document, which only the page can run.
-    pub html: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -122,16 +119,16 @@ impl Hold {
 impl Display {
     /// Whether it only speaks to the shown object, leaving the panel and the object as they are.
     pub fn addresses_object(&self) -> bool {
-        self.markdown.is_none() && self.link.is_none() && self.image.is_none() && self.object.is_none() && !self.html
+        self.markdown.is_none() && self.link.is_none() && self.image.is_none() && self.object.is_none()
     }
 
     /// Whether it carries a card for the panel.
     pub fn card(&self) -> bool {
-        self.markdown.is_some() || self.link.is_some() || self.image.is_some() || self.html
+        self.markdown.is_some() || self.link.is_some() || self.image.is_some()
     }
 
     pub fn items(&self) -> Vec<&'static str> {
-        [(self.clear, "clear"), (self.markdown.is_some(), "markdown"), (self.link.is_some(), "link"), (self.image.is_some(), "image"), (self.html, "html"), (self.object.is_some(), "object"), (self.data.is_some(), "data"), (self.hold.is_some(), "hold"), (self.point.is_some(), "point")]
+        [(self.clear, "clear"), (self.markdown.is_some(), "markdown"), (self.link.is_some(), "link"), (self.image.is_some(), "image"), (self.object.is_some(), "object"), (self.data.is_some(), "data"), (self.hold.is_some(), "hold"), (self.point.is_some(), "point")]
             .into_iter()
             .filter_map(|(carried, name)| carried.then_some(name))
             .collect()
@@ -375,12 +372,8 @@ impl Hub {
         let at = trace.len();
         trace.calls.replied(&reply.id, &reply.commentary, at);
         if let Some(shown) = reply.display.take() {
-            reply.shown = Some(if shown.html.is_some() {
-                Display { html: true, ..Display::default() }
-            } else {
-                let trailer = |carried: bool| (carried && !image.is_empty()).then(|| image.to_vec());
-                Display { markdown: shown.markdown, link: shown.link, image: trailer(shown.image.is_some()), object: trailer(shown.object.is_some() && shown.image.is_none()), point: shown.point, data: shown.data, hold: shown.hold.as_ref().and_then(Hold::read), clear: shown.clear, html: false }
-            });
+            let trailer = |carried: bool| (carried && !image.is_empty()).then(|| image.to_vec());
+            reply.shown = Some(Display { markdown: shown.markdown, link: shown.link, image: trailer(shown.image.is_some()), object: trailer(shown.object.is_some() && shown.image.is_none()), point: shown.point, data: shown.data, hold: shown.hold.as_ref().and_then(Hold::read), clear: shown.clear });
         }
         let unspoken = (!reply.commentary.is_empty() && self.sleeping).then_some(ASLEEP);
         let mut ack = json!({ "id": reply.id, "stamp": reply.stamp });
@@ -676,9 +669,6 @@ mod tests {
         f.speak("Four jobs");
         assert_eq!(f.hub.take_display(), Some(Display { link: Some("https://example.com/q".into()), image: Some(vec![0x89, b'P', b'N', b'G', b'\n', 0]), ..Display::default() }));
         f.wait(TURN_QUIET, true);
-        f.reply(json!({ "id": "slow", "stamp": "html_1", "commentary": [], "instructions": [], "display": { "html": "<!doctype html><p>chart</p>", "markdown": "ignored" } }));
-        assert_eq!(f.hub.take_display(), Some(Display { html: true, ..Display::default() }));
-        assert!(Display { html: true, ..Display::default() }.card(), "an html display still gets a card saying where it is shown");
         assert!(Display { markdown: Some("Draft".into()), ..Display::default() }.card());
         assert!(!Display { point: Some("gear".into()), ..Display::default() }.card());
         assert!(f.frames("hub-ack").iter().all(|ack| ack.get("unspoken").is_none()));

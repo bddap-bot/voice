@@ -58,24 +58,7 @@ test('the page policy confines scripts to its origin and names every connection 
   assert.deepEqual(directives.get('base-uri'), ["'none'"]);
   assert.deepEqual(directives.get('connect-src'), CONNECT);
   assert.doesNotMatch(index, /<script(?![^>]*\bsrc=)[^>]*>/, 'an inline script cannot run under this policy');
-  assert.deepEqual(directives.get('frame-src'), ["'self'"]);
-});
-
-test('the html display frame reaches only data, blobs and the allowlisted CDNs', async () => {
-  const frame = await readFile(join(docs, 'frame.html'), 'utf8');
-  const [, content] = /<meta http-equiv="Content-Security-Policy" content="([^"]*)">/.exec(frame);
-  const framed = new Map(content.split(';').map((part) => part.trim().split(/\s+/)).filter(([name]) => name).map(([name, ...sources]) => [name, sources]));
-  const cdns = ['https://cdn.jsdelivr.net', 'https://unpkg.com', 'https://cdnjs.cloudflare.com'];
-  assert.deepEqual(Object.fromEntries(framed), {
-    'default-src': ["'none'"],
-    'script-src': ["'unsafe-inline'", "'unsafe-eval'", ...cdns],
-    'style-src': ["'unsafe-inline'", ...cdns],
-    'font-src': ['data:', ...cdns],
-    'img-src': ['data:', 'blob:', ...cdns],
-    'media-src': ['data:', 'blob:'],
-    'base-uri': ["'none'"],
-    'form-action': ["'none'"],
-  });
+  assert.deepEqual(directives.get('frame-src'), ["'none'"]);
 });
 
 test('the vendored inference runtime loads and runs in a window under the page policy', async () => {

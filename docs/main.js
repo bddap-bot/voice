@@ -502,32 +502,20 @@ function appendMarkdown(parent, markdown) {
     appendInline(block, heading ? heading[2] : line); parent.append(block); index++;
   }
 }
-function appendFrame(parent, html) {
-  const frame = document.createElement('iframe');
-  frame.sandbox = 'allow-scripts';
-  frame.src = 'frame.html';
-  frame.addEventListener('load', () => frame.contentWindow.postMessage(html, '*'), { once: true });
-  parent.classList.add('frame');
-  parent.append(frame);
-}
 function showDisplay(payload, bytes) {
   if (!payload || typeof payload !== 'object') return;
   const item = document.createElement('article');
   item.className = 'display-item';
-  if (typeof payload.html === 'string') appendFrame(item, payload.html);
-  else {
-    if (typeof payload.markdown === 'string') appendMarkdown(item, payload.markdown);
-    if (typeof payload.link === 'string' && /^https?:\/\//i.test(payload.link)) appendUrl(item, payload.link);
-    if (['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(payload.image?.mime) && bytes?.length && bytes.length <= 8 * 1024 * 1024) {
-      const url = URL.createObjectURL(new Blob([bytes], { type: payload.image.mime }));
-      const image = document.createElement('img');
-      image.src = url; image.alt = typeof payload.markdown === 'string' ? payload.markdown.slice(0, 160) : 'Hub image';
-      item.append(image);
-      item.imageUrl = url;
-    }
+  if (typeof payload.markdown === 'string') appendMarkdown(item, payload.markdown);
+  if (typeof payload.link === 'string' && /^https?:\/\//i.test(payload.link)) appendUrl(item, payload.link);
+  if (['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(payload.image?.mime) && bytes?.length && bytes.length <= 8 * 1024 * 1024) {
+    const url = URL.createObjectURL(new Blob([bytes], { type: payload.image.mime }));
+    const image = document.createElement('img');
+    image.src = url; image.alt = typeof payload.markdown === 'string' ? payload.markdown.slice(0, 160) : 'Hub image';
+    item.append(image);
+    item.imageUrl = url;
   }
   if (!item.childNodes.length) return;
-  for (const shown of $('display-items').querySelectorAll('.frame')) shown.remove();
   $('display-items').prepend(item);
   while ($('display-items').childNodes.length > 20) { const removed = $('display-items').lastChild; if (removed.imageUrl) URL.revokeObjectURL(removed.imageUrl); for (const renderer of removed.querySelectorAll('.chart')) disposeRenderer(renderer); removed.remove(); }
 }

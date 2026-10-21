@@ -1305,96 +1305,6 @@ window.addEventListener('test-ready', () => {
   assert.deepEqual(result, { count: 2, first: 'Newest', link: 'https://example.test/result', image: true, gestured: false }, stderr);
 });
 
-test('an html display runs its script in a frame that fills the card without scrollbars, and the next item tears it down', async () => {
-  const html = `<!doctype html><style>html, body { margin: 0; height: 100%; } canvas { display: block; width: 100%; height: 100%; }</style><canvas></canvas><script>
-const canvas = document.querySelector('canvas');
-canvas.width = innerWidth; canvas.height = innerHeight;
-canvas.getContext('2d').fillRect(0, 0, 10, 10);
-parent.postMessage({ ran: canvas.getContext('2d').getImageData(5, 5, 1, 1).data[3] === 255, size: [innerWidth, innerHeight], scrolls: document.documentElement.scrollWidth > innerWidth || document.documentElement.scrollHeight > innerHeight }, '*');
-</script>`;
-  const { result, stderr } = await runPage(`
-const reports = [];
-addEventListener('message', (event) => reports.push(event.data));
-window.addEventListener('test-ready', async () => {
-  replyFromHub('unknown', 'older', [], 1, { display: { markdown: 'Older' } });
-  replyFromHub('unknown', 'html', [], 1, { display: { html: ${JSON.stringify(html)} } });
-  await until(() => reports.length);
-  const frame = document.querySelector('.display-item iframe');
-  const card = document.querySelector('#display-items').getBoundingClientRect();
-  const box = frame.getBoundingClientRect();
-  const shown = { report: reports[0], frame: [Math.round(box.width), Math.round(box.height)], card: [Math.round(card.width), Math.round(card.height)], sandbox: frame.getAttribute('sandbox'), text: frame.parentElement.textContent };
-  const window = frame.contentWindow;
-  replyFromHub('unknown', 'next', [], 1, { display: { markdown: 'Next' } });
-  await until(() => globalThis.hubAcks?.length === 3);
-  document.body.dataset.result = JSON.stringify({ ...shown, after: { frames: document.querySelectorAll('iframe').length, closed: window.closed, items: [...document.querySelectorAll('.display-item')].map((item) => item.textContent) } });
-});
-`, { size: '1440,900' });
-  assert.deepEqual(result.report, { ran: true, size: result.frame, scrolls: false }, stderr);
-  assert.deepEqual(result.frame, result.card);
-  assert.ok(result.card[0] > 100 && result.card[1] > 100, JSON.stringify(result.card));
-  assert.equal(result.sandbox, 'allow-scripts');
-  assert.equal(result.text, '');
-  assert.deepEqual(result.after, { frames: 0, closed: true, items: ['Next', 'Older'] });
-});
-
-test('an html display cannot reach the page, its storage, cookies or a foreign origin, by fetch, image, navigation or popup', async () => {
-  const { result, stderr, requests } = await runPage(`
-const reports = [];
-addEventListener('message', (event) => reports.push(event.data));
-localStorage.setItem('voice.secret-probe', 'kept');
-window.addEventListener('test-ready', async () => {
-  const foreign = location.href.replace('127.0.0.1', 'localhost');
-  const html = \`<!doctype html><script>
-const outcome = {};
-const attempt = (name, work) => { try { work(); outcome[name] = 'reached'; } catch (error) { outcome[name] = error.name; } };
-attempt('parent', () => parent.document.title);
-attempt('top', () => top.localStorage.length);
-attempt('storage', () => localStorage.length);
-attempt('session', () => sessionStorage.length);
-attempt('cookie', () => document.cookie);
-attempt('indexedDB', () => indexedDB.open('probe'));
-outcome.popup = window.open(\${JSON.stringify(foreign + 'escape-popup')}) ? 'opened' : 'refused';
-fetch(\${JSON.stringify(foreign + 'escape-fetch')}).then(() => 'reached', () => 'refused').then((fetched) => {
-  outcome.fetch = fetched;
-  const image = new Image();
-  image.onload = () => report('reached');
-  image.onerror = () => report('refused');
-  image.src = \${JSON.stringify(foreign + 'escape-image')};
-});
-function report(image) {
-  outcome.image = image;
-  parent.postMessage(outcome, '*');
-  location.href = \${JSON.stringify(foreign + 'escape-navigation')};
-}
-<\\/script>\`;
-  replyFromHub('unknown', 'html', [], 1, { display: { html } });
-  await until(() => reports.length);
-  await new Promise((resolve) => setTimeout(resolve, 1000));
-  document.body.dataset.result = JSON.stringify({ report: reports[0], storage: localStorage.getItem('voice.secret-probe') });
-});
-`, { size: '1440,900' });
-  assert.deepEqual(result.report, { parent: 'SecurityError', top: 'SecurityError', storage: 'SecurityError', session: 'SecurityError', cookie: 'SecurityError', indexedDB: 'SecurityError', popup: 'refused', fetch: 'refused', image: 'refused' }, stderr);
-  assert.deepEqual(requests.filter((path) => path.startsWith('/escape')), []);
-  assert.ok(requests.includes('/frame.html'), requests.join(' '));
-  assert.equal(result.storage, 'kept');
-});
-
-test('the html frame writes nothing when embedded without a sandbox', async () => {
-  const { result, stderr } = await runPage(`
-window.addEventListener('test-ready', async () => {
-  const frame = document.createElement('iframe');
-  frame.src = 'frame.html';
-  document.body.append(frame);
-  await new Promise((resolve) => frame.addEventListener('load', resolve, { once: true }));
-  frame.contentWindow.postMessage('<!doctype html><p id="written">written</p>', '*');
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  document.body.dataset.result = JSON.stringify({ origin: frame.contentWindow.origin, written: Boolean(frame.contentDocument.querySelector('#written')) });
-});
-`);
-  assert.deepEqual(result, { origin: result?.origin, written: false }, stderr);
-  assert.notEqual(result.origin, 'null');
-});
-
 for (const size of ['720,1280', '1440,900']) test(`the delegation log keeps its newest entry in view at ${size}`, async () => {
   const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {
@@ -1833,19 +1743,6 @@ window.addEventListener('test-ready', () => {
     href: '/', active: 'true', sameSession: true, cancels: 0,
   }, stderr);
   assert.equal(requests.filter(path => path === '/panel-link-destination').length, 3, 'each link loads outside the Live page');
-});
-
-test('a link clicked inside an html display navigates only its frame and leaves the Live session running', async () => {
-  const { result, stderr } = await runPage(`
-window.addEventListener('test-ready', async () => {
-  const channel = testChannel;
-  const html = '<!doctype html><a id="go" href="' + location.origin + '/panel-link-destination">go</a><script>setTimeout(() => document.getElementById("go").click(), 50)<\\/script>';
-  replyFromHub('unknown', 'html', [], 1, { display: { html } });
-  await fetch('/panel-links-loaded?count=1');
-  await new Promise((resolve) => setTimeout(resolve, 300));
-  document.body.dataset.result = JSON.stringify({ path: location.pathname, active: document.querySelector('#puppet').getAttribute('aria-pressed'), sameSession: channel === testChannel && channel.readyState === 'open' });
-});`, { size: '1440,900' });
-  assert.deepEqual(result, { path: '/', active: 'true', sameSession: true }, stderr);
 });
 
 test('leaving the page mid-call cancels the call and keeps it marked open for a reload', async () => {

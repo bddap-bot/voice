@@ -587,7 +587,13 @@ fn card(args: &[String]) -> Result<(), String> {
             }
         }
         if let Some(head) = runtime.head(&runtime.poses()) {
-            let stand = *stand.get_or_insert_with(|| facing(head.apply([0.0, -0.2, -0.6]), head.t));
+            let stand = *stand.get_or_insert_with(|| {
+                let ahead = head.apply([0.0, 0.0, -0.6]);
+                let mut stand = facing(ahead, head.t);
+                let center = stand.apply(object::beside(1.0, 0));
+                stand.t = [0, 1, 2].map(|axis| stand.t[axis] + ahead[axis] - center[axis]);
+                stand
+            });
             objects.step(now, &object::View { stand, size: 1.0, head, eyes, tip: None });
         }
     }

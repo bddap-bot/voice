@@ -50,6 +50,8 @@ pub enum Entry {
     Heard(String),
     Spoke(String),
     Call(Call),
+    /// The overlay's own word on the connection, not part of the conversation.
+    Note(String),
 }
 
 /// The conversation carried between sessions, as the page's `ConversationTrace` keeps it; a delegation leaves only a boundary.

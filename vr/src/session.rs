@@ -25,11 +25,16 @@ const ANSWER_TIMEOUT: Duration = Duration::from_secs(40);
 /// The page's wait for `session.started`.
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(10);
+/// How long a summon keeps dialing an unreachable relay: a headset just out of sleep reassociates its Wi-Fi within about a minute.
+pub const CONNECT_PATIENCE: Duration = Duration::from_secs(90);
+const REDIAL: Duration = Duration::from_secs(2);
 /// Most of the microphone queued for sending; anything older is dropped so speech goes out live.
 const BACKLOG: usize = 3 * FRAME;
 
 #[derive(Debug, PartialEq)]
 pub enum Event {
+    /// The relay is unreachable and is being dialed again.
+    Waiting(String),
     Open,
     Heard(String),
     Spoke(String),
@@ -136,7 +141,18 @@ fn stopped(stop: &AtomicBool) -> bool {
 impl Link {
     /// Runs the session until it ends; the result is why.
     fn run(self, wake: Wake) -> Result<String, String> {
-        let mut relay = Relay::connect(&self.token, &self.cache)?;
+        let give_up = Instant::now() + CONNECT_PATIENCE;
+        let mut relay = Relay::connect_while(&self.token, &self.cache, |error| {
+            if Instant::now() >= give_up {
+                return false;
+            }
+            let _ = self.events.send(Event::Waiting(error.to_owned()));
+            let redial = Instant::now() + REDIAL;
+            while Instant::now() < redial && !stopped(&self.stop) {
+                std::thread::sleep(POLL);
+            }
+            !stopped(&self.stop)
+        })?;
         if stopped(&self.stop) {
             return Ok("dismissed".into());
         }

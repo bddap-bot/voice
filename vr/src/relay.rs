@@ -97,8 +97,30 @@ pub fn message(body: &[u8]) -> String {
     serde_json::from_slice::<Value>(body).ok().and_then(|value| value["message"].as_str().map(str::to_owned)).unwrap_or_else(|| String::from_utf8_lossy(body).into_owned())
 }
 
+fn dial(address: &iroh::EndpointAddr, cache: &Path) -> Result<Relay, String> {
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().map_err(|error| format!("relay runtime: {error}"))?;
+    let endpoint = runtime.block_on(iroh::Endpoint::builder(iroh::endpoint::presets::N0).bind()).map_err(|error| format!("relay endpoint: {error}"))?;
+    let opened = runtime.block_on(async {
+        let connection = endpoint.connect(address.clone(), ALPN).await.map_err(|error| format!("relay transport failed: {error}"))?;
+        let (send, recv) = connection.open_bi().await.map_err(|error| format!("relay stream: {error}"))?;
+        Ok::<_, String>((connection, send, recv))
+    });
+    match opened {
+        Ok((connection, send, recv)) => Ok(Relay { runtime: Arc::new(runtime), endpoint, connection, send: Some(send), recv: Some(recv), cache: cache.to_owned(), broken: false }),
+        Err(error) => {
+            runtime.block_on(endpoint.close());
+            Err(error)
+        }
+    }
+}
+
 impl Relay {
     pub fn connect(token: &Token, cache: &Path) -> Result<Relay, String> {
+        Relay::connect_while(token, cache, |_| false)
+    }
+
+    /// Dials until the transport opens, asking `again` with each failure whether to dial once more; each dial binds a fresh endpoint, so a network that came up since is used.
+    pub fn connect_while(token: &Token, cache: &Path, mut again: impl FnMut(&str) -> bool) -> Result<Relay, String> {
         let id: iroh::EndpointId = token.endpoint_id.parse().map_err(|_| "the token's endpoint id is invalid")?;
         let mut address = iroh::EndpointAddr::new(id);
         if let Some(url) = &token.relay_url {
@@ -106,21 +128,13 @@ impl Relay {
         }
         let cache = cache.join(&token.endpoint_id);
         std::fs::create_dir_all(&cache).map_err(|error| format!("{}: {error}", cache.display()))?;
-        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().map_err(|error| format!("relay runtime: {error}"))?;
-        let endpoint = runtime.block_on(iroh::Endpoint::builder(iroh::endpoint::presets::N0).bind()).map_err(|error| format!("relay endpoint: {error}"))?;
-        let opened = runtime.block_on(async {
-            let connection = endpoint.connect(address, ALPN).await.map_err(|error| format!("relay transport failed: {error}"))?;
-            let (send, recv) = connection.open_bi().await.map_err(|error| format!("relay stream: {error}"))?;
-            Ok::<_, String>((connection, send, recv))
-        });
-        let (connection, send, recv) = match opened {
-            Ok(opened) => opened,
-            Err(error) => {
-                runtime.block_on(endpoint.close());
-                return Err(error);
+        let mut relay = loop {
+            match dial(&address, &cache) {
+                Ok(dialed) => break dialed,
+                Err(error) if again(&error) => tracing::warn!("{error}, dialing again"),
+                Err(error) => return Err(error),
             }
         };
-        let mut relay = Relay { runtime: Arc::new(runtime), endpoint, connection, send: Some(send), recv: Some(recv), cache, broken: false };
         relay.send(json!({ "auth": token.secret }).to_string().as_bytes())?;
         let reply: Value = serde_json::from_slice(&relay.recv(Instant::now() + REQUEST_TIMEOUT)?).map_err(|_| "authentication reply is not JSON")?;
         if reply["ok"].as_bool() != Some(true) {

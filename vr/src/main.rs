@@ -514,6 +514,31 @@ fn replay(state: &std::path::Path, recording: &str) -> Result<(), String> {
 }
 
 /// A hub display, its JSON and the trailer its image or object travels in, before the headset at the nearest a window is seen from: each card view held `seconds`, an object beside it; to check a display on the device without a session.
+/// Summons a session as the wake word does, without SteamVR, and holds it open for the given seconds: the conversation path alone, for checking it on a device.
+fn session(token: &Token, state: &std::path::Path, args: &[String]) -> Result<(), String> {
+    let usage = "usage: voice-vr session <seconds>";
+    let [seconds] = args else { return Err(usage.into()) };
+    let hold = Duration::from_secs(seconds.parse().map_err(|_| usage)?);
+    let mut voice = Voice::new(token.clone(), state.join("assets"), state.join("voiceprint.json"));
+    let summoned = Instant::now();
+    voice.summon();
+    let mut shown = Vec::new();
+    while voice.awake() {
+        voice.step();
+        let log = voice.log(board::LOG_LINES);
+        if log != shown {
+            tracing::info!("board log: {log:?}");
+            shown = log;
+        }
+        if voice.opened() && summoned.elapsed() >= hold {
+            voice.dismiss("held long enough");
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Err(format!("dormant {:.1} s after the summon without the session opening", summoned.elapsed().as_secs_f64()))
+}
+
 fn card(args: &[String]) -> Result<(), String> {
     let usage = "usage: voice-vr card <display.json> [<trailer>] <seconds>";
     let (file, trailer, seconds) = match args {
@@ -590,6 +615,9 @@ fn run() -> Result<(), String> {
     }
     let token_file = config.join("token");
     let token = std::fs::read_to_string(&token_file).map_err(|error| format!("{}: {error}", token_file.display()))?.trim().to_owned();
+    if args.get(1).is_some_and(|mode| mode == "session") {
+        return session(&Token::decode(&token)?, &state, &args[2..]);
+    }
     let runtime = Runtime::init()?;
     host(runtime, &Token::decode(&token)?, &state)
 }

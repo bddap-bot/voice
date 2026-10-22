@@ -180,6 +180,7 @@ impl Board {
             match entry {
                 Entry::Heard(text) => lines.extend(wrap(text, fits, usize::MAX).into_iter().map(|line| (line, INK, HEARD))),
                 Entry::Spoke(text) => lines.extend(wrap(text, fits, usize::MAX).into_iter().map(|line| (line, SPOKE_INK, BUTTON))),
+                Entry::Note(text) => lines.extend(wrap(text, fits, usize::MAX).into_iter().map(|line| (line, INK, DISMISS))),
                 Entry::Call(call) => {
                     let mark = match call.state {
                         State::Waiting => PENDING,

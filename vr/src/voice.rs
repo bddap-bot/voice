@@ -16,6 +16,8 @@ use crate::turn::Judge;
 const SIGN_OFF_QUIET: Duration = Duration::from_secs(2);
 /// The page's per-frame easing of the mouth toward its target.
 const MOUTH_EASING: f32 = 0.65;
+/// How long a session that never opened stays up to show why before going dormant.
+const FAILED_HOLD: Duration = Duration::from_secs(10);
 
 /// The open session and what the page tracks alongside it.
 struct Awake {
@@ -25,6 +27,9 @@ struct Awake {
     activity: Instant,
     mouth: f32,
     hub: Hub,
+    /// Why the session is not talking yet, or why it never opened, for the board's log.
+    notice: Option<String>,
+    failed: Option<Instant>,
     _span: tracing::Span,
 }
 
@@ -129,11 +134,20 @@ impl Voice {
 
     /// The newest `most` entries of the conversation and its hub calls, for the board.
     pub fn log(&self, most: usize) -> Vec<conversation::Entry> {
-        self.trace.log(most)
+        let mut log = self.trace.log(most);
+        if let Some(notice) = self.awake.as_ref().and_then(|awake| awake.notice.clone()) {
+            log.push(conversation::Entry::Note(notice));
+            log.drain(..log.len().saturating_sub(most));
+        }
+        log
     }
 
     pub fn awake(&self) -> bool {
         self.awake.is_some()
+    }
+
+    pub fn opened(&self) -> bool {
+        self.awake.as_ref().is_some_and(|awake| awake.opened)
     }
 
     pub fn muted(&self) -> bool {
@@ -149,7 +163,7 @@ impl Voice {
         tracing::info!("summoned, opening the session");
         self.actions.reset();
         let session = Session::open(&self.token, &self.cache, self.trace.wake(Instant::now()), self.muted, self.hearing.clone());
-        self.awake = Some(Awake { session, opened: false, said: String::new(), activity: Instant::now(), mouth: 0.0, hub: Hub::default(), _span: tracing::info_span!("session") });
+        self.awake = Some(Awake { session, opened: false, said: String::new(), activity: Instant::now(), mouth: 0.0, hub: Hub::default(), notice: None, failed: None, _span: tracing::info_span!("session") });
     }
 
     /// Ends the session and releases the microphone; an opened session hands the hub what it never heard and becomes memory for the next.
@@ -207,6 +221,12 @@ impl Voice {
         self.take_reports();
         let verdicts = self.judge.verdicts();
         let Some(awake) = &mut self.awake else { return };
+        if let Some(failed) = awake.failed {
+            if failed.elapsed() >= FAILED_HOLD {
+                self.dismiss("session never opened");
+            }
+            return;
+        }
         for (number, complete) in verdicts {
             awake.hub.judged(number, complete, &mut self.trace, Instant::now());
         }
@@ -214,8 +234,10 @@ impl Voice {
         let mut ended = None;
         for event in awake.session.events() {
             match event {
+                session::Event::Waiting(error) => awake.notice = Some(format!("No connection yet, still trying: {error}")),
                 session::Event::Open => {
                     tracing::info!("session open");
+                    awake.notice = None;
                     awake.opened = true;
                     awake.activity = Instant::now();
                 }
@@ -246,6 +268,12 @@ impl Voice {
                 session::Event::Hub(body) => awake.hub.reply(&body, &mut self.trace, Instant::now()),
                 session::Event::HubError { id, message } => awake.hub.failed(&id, &message, &mut self.trace),
                 session::Event::AudioSeconds(seconds) => awake.hub.usage(seconds),
+                session::Event::Closed(reason) if !awake.opened => {
+                    tracing::error!("Live session never opened: {reason}");
+                    awake.notice = Some(format!("Could not connect: {reason}"));
+                    awake.failed = Some(Instant::now());
+                    return;
+                }
                 session::Event::Closed(reason) => {
                     tracing::error!("Live session closed: {reason}");
                     ended = Some(format!("session closed: {reason}"));
@@ -359,6 +387,22 @@ mod tests {
         voice.toggle_learning();
         report(&mut voice, Report::Error("the model is missing".into()));
         assert_eq!((voice.voice_id().learning, mode(&voice)), (None, Mode::Open));
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_session_that_never_opens_shows_why_before_going_dormant() {
+        let (mut voice, path) = voice("never-opens");
+        voice.summon();
+        while voice.awake().then(|| voice.awake.as_ref().unwrap().failed).flatten().is_none() {
+            voice.step();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(voice.awake() && !voice.opened(), "a failed open stays up to show why");
+        assert!(matches!(voice.log(5).last(), Some(conversation::Entry::Note(note)) if note.starts_with("Could not connect: ")), "{:?}", voice.log(5));
+        voice.awake.as_mut().unwrap().failed = Some(Instant::now() - FAILED_HOLD);
+        voice.step();
+        assert!(!voice.awake() && voice.log(5).is_empty(), "then goes dormant and the note leaves with it");
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }

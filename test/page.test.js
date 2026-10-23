@@ -2469,6 +2469,23 @@ test('a relay lost mid-call is reported as a page error once the relay is back',
   assert.deepEqual(result, { fleetLines: ['fleet-error: voice/page — Error: Live session closed: connection lost'] });
 });
 
+test('a relay lost while the page was hidden ends the call without a page error', async () => {
+  const result = await runWakePage(`
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    loseRelay(new Error('relay closed'));
+    await until(() => document.querySelector('#status').textContent.includes('connection lost'));
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    document.querySelector('#puppet').click();
+    await until(() => globalThis.answerAuth);
+    answerAuth(true);
+    await until(() => sessionEvents('close-while-hidden').length || fleetLines.length);
+    return { fleetLines, hidden: sessionEvents('close-while-hidden').length };
+  `);
+  assert.deepEqual(result, { fleetLines: [], hidden: 1 });
+});
+
 test('a reconnect while the microphone is muted starts no wake spotter until unmute', async () => {
   const result = await runWakePage(`
     await sleepNow();

@@ -41,6 +41,8 @@ let answerWaiter;
 let conversation;
 let usageSeconds = 0;
 let connected = false;
+let relayHeardAt = 0;
+let hiddenAt = -1;
 let everConnected = false;
 let starting;
 let screenLock;
@@ -364,6 +366,7 @@ async function listen(mine) {
     for (;;) {
       const raw = await recv();
       if (mine !== generation) return;
+      relayHeardAt = performance.now();
       if (await puppetChannel.receive(raw)) continue;
       const value = dec.decode(raw);
       const at = value.indexOf('\n');
@@ -421,8 +424,13 @@ async function listen(mine) {
     puppetChannel.fail(error);
     connected = false;
     audioDiagnostics()?.record('relay', { state: 'disconnected' });
-    if (conversation) callDropped('connection lost', 'connection lost');
-    else setStatus('connection lost', 'err');
+    if (!conversation) setStatus('connection lost', 'err');
+    // A hidden page is frozen by the OS (Android WebView), which kills the relay; that drop is the user leaving, not a fault.
+    else if (hiddenAt > relayHeardAt) {
+      recordSession('close-while-hidden', `connection lost ${Math.round((performance.now() - hiddenAt) / 1000)}s after hiding`);
+      stopConversation('connection lost');
+    }
+    else callDropped('connection lost', 'connection lost');
   }
 }
 function appendUrl(parent, url, label = url) {
@@ -1477,7 +1485,7 @@ prepareVoice();
 $('reenter').addEventListener('click', async () => { listening = false; setMicrophoneMuted(microphoneMuted); stopConversation(); await recorderFlush; setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); savedState(false); $('token').focus(); });
 $('forget').addEventListener('click', async () => { listening = false; setMicrophoneMuted(microphoneMuted); stopConversation(); await recorderFlush; stopLearning(); localStorage.removeItem(KEY); localStorage.removeItem(VOICEPRINT); syncVoiceprint(); setStatus('finishing private uploads…'); await persistenceUploads.idle(); await telemetry.idle(); await sendFrame('bye').catch(() => {}); generation++; connected = false; resetPuppetConnection(new Error('connection replaced'), true); await puppetChannel.clearCache().catch(() => {}); savedState(false); setStatus('token forgotten'); });
 navigator.mediaDevices?.addEventListener('devicechange', syncSpotter);
-document.addEventListener('visibilitychange', () => { syncScreenLock(); keepPage(); if (document.hidden) puppetRuntime?.pause(); else if (!$('conversation').classList.contains('hidden')) puppetRuntime?.start(); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') hiddenAt = performance.now(); syncScreenLock(); keepPage(); if (document.hidden) puppetRuntime?.pause(); else if (!$('conversation').classList.contains('hidden')) puppetRuntime?.start(); });
 window.addEventListener('beforeunload', () => puppetRuntime?.dispose());
 // Not stopConversation: the hidden-page save already recorded Live as open, so a reload resumes it.
 window.addEventListener('pagehide', (event) => { if (!event.persisted && conversation) { sendFrame('cancel').catch(() => {}); sendUnrelayed(); } });

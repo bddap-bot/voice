@@ -269,6 +269,7 @@ function setMicrophoneMuted(muted) {
   $('mic-mute').disabled = !listening;
   $('mic-mute').textContent = microphoneMuted ? 'Unmute mic' : 'Mute mic';
   $('mic-mute').setAttribute('aria-pressed', String(microphoneMuted));
+  globalThis.VoiceMute?.changed(microphoneMuted);
   syncSpotter();
 }
 function resetPuppetConnection(error = new Error('connection replaced'), clearAppearance = false) {
@@ -1511,6 +1512,7 @@ document.addEventListener('keydown', (event) => {
   else if (fullPane) leaveFull();
 });
 $('mic-mute').addEventListener('click', () => setMicrophoneMuted(!microphoneMuted));
+globalThis.VoiceMute?.changed(microphoneMuted);
 $('voice-print').addEventListener('click', toggleVoiceprint);
 $('voice-filter').addEventListener('click', toggleVoiceFilter);
 syncVoiceprint();

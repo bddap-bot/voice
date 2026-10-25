@@ -104,13 +104,6 @@ public final class VoiceService extends Service {
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap icon) {
                 if (!navigable(Uri.parse(url))) { view.stopLoading(); close(); }
             }
-            public void onPageFinished(WebView view, String url) {
-                if (allowed(Uri.parse(url))) view.evaluateJavascript(
-                    "(() => { const button = document.getElementById('mic-mute'); if (!button) return;"
-                    + "const update = () => VoiceMute.changed(button.getAttribute('aria-pressed') === 'true');"
-                    + "new MutationObserver(update).observe(button, { attributes: true, attributeFilter: ['aria-pressed'] });"
-                    + "update(); })()", null);
-            }
             public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
                 close();
                 return true;

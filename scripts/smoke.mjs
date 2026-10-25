@@ -11,6 +11,7 @@ import { serveDevelopment } from './dev.mjs';
 import { NAME, SIGN_OFF, WAKE_PHRASE } from '../docs/identity.js';
 import { includesPhrase } from '../docs/live.js';
 import { RATE } from '../docs/wake.js';
+import config from '../docs/config.js';
 
 const development = process.argv.includes('--dev');
 const mode = (development || process.argv.includes('--private')) ? 'private' : 'public';
@@ -93,7 +94,7 @@ async function makeServer() {
     token = stdout.trim();
     main = main.replace('puppetRuntime = new PuppetRuntime($(\'puppet\'));', "puppetRuntime = new PuppetRuntime($('puppet')); globalThis.__smokeRuntime = puppetRuntime;");
   }
-  if (deployed) return { url: 'https://bddap-bot.github.io/voice/', token, close() {} };
+  if (deployed) return { url: `${config.origin}/`, token, close() {} };
   mocks += `localStorage.setItem('voice.token', ${JSON.stringify(token)});`;
   index = index.replace('</head>', '<script src="/smoke-mocks.js"></script></head>');
   const server = http.createServer(async (request, response) => {

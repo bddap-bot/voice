@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import config from '../../docs/config.js';
 
 const adb = `${process.env.ANDROID_HOME}/platform-tools/adb`;
 const serial = process.env.ANDROID_SERIAL || 'emulator-5646';
@@ -51,11 +52,11 @@ try {
     if (pid) {
       run('forward', 'tcp:15646', `localabstract:webview_devtools_remote_${pid}`);
       try { pages = await (await fetch('http://127.0.0.1:15646/json')).json(); } catch {}
-      if (pages?.some(page => page.url.startsWith('https://bddap-bot.github.io/voice/'))) break;
+      if (pages?.some(page => page.url.startsWith(`${config.origin}/`))) break;
     }
     await pause(1000);
   }
-  const page = pages?.find(page => page.url.startsWith('https://bddap-bot.github.io/voice/'));
+  const page = pages?.find(page => page.url.startsWith(`${config.origin}/`));
   assert.ok(page, 'Live WebView was loaded');
   let next = 0;
   let onEvent = () => {};
@@ -89,14 +90,14 @@ try {
   };
   for (let attempt = 0; attempt < 60; attempt++) {
     let ready = false;
-    try { ready = await evaluate("location.origin === 'https://bddap-bot.github.io' && document.readyState === 'complete'"); } catch {}
+    try { ready = await evaluate(`location.origin === ${JSON.stringify(config.origin)} && document.readyState === 'complete'`); } catch {}
     if (ready) break;
     if (attempt === 59) throw Error('Live page did not finish loading');
     await pause(1000);
   }
   console.log('Loaded', await evaluate('location.href'));
   await evaluate(`(async () => {
-    const { LivePlayback } = await import('https://bddap-bot.github.io/voice/live-playback.js');
+    const { LivePlayback } = await import('${config.origin}/live-playback.js');
     const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
     const a = new RTCPeerConnection(), b = new RTCPeerConnection();
     const speaker = new Audio();

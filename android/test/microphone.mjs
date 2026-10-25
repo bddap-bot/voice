@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
+import config from '../../docs/config.js';
 
 const adb = `${process.env.ANDROID_HOME}/platform-tools/adb`;
 const serial = process.env.ANDROID_SERIAL || 'emulator-5646';
@@ -44,7 +45,7 @@ try {
     })().catch(error => { fixtureError = error; });
   });
   await c.call('Fetch.enable', { patterns: [
-    { urlPattern: 'https://bddap-bot.github.io/voice/', resourceType: 'Document', requestStage: 'Response' },
+    { urlPattern: `${config.origin}/`, resourceType: 'Document', requestStage: 'Response' },
     ...(local ? [{ urlPattern: '*/microphone.js', requestStage: 'Request' }] : []),
   ] });
   await c.call('Page.reload', { ignoreCache: true });
@@ -97,7 +98,7 @@ try {
 
 async function connect() {
   const pages = await (await fetch('http://127.0.0.1:15832/json')).json();
-  const page = pages.find(page => page.url.startsWith('https://bddap-bot.github.io/voice/'));
+  const page = pages.find(page => page.url.startsWith(`${config.origin}/`));
   assert.ok(page, 'the installed app has loaded the published page');
   const socket = new WebSocket(page.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject; });

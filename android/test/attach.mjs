@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import config from '../../docs/config.js';
 
 const adb = `${process.env.ANDROID_HOME}/platform-tools/adb`;
 const serial = process.env.ANDROID_SERIAL || 'emulator-5646';
@@ -19,7 +20,7 @@ async function connect() {
   run('forward', 'tcp:15648', `localabstract:webview_devtools_remote_${pid}`);
   let page;
   for (let attempt = 0; attempt < 30 && !page; attempt++) {
-    page = (await (await fetch('http://127.0.0.1:15648/json')).json()).find(page => page.url.startsWith('https://bddap-bot.github.io/voice/'));
+    page = (await (await fetch('http://127.0.0.1:15648/json')).json()).find(page => page.url.startsWith(`${config.origin}/`));
     if (!page) await pause(1000);
   }
   assert.ok(page, 'Published page is loaded in the installed app');

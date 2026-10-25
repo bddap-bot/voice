@@ -29,7 +29,8 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
 public final class VoiceService extends Service {
-    static final String PAGE = "https://bddap-bot.github.io/voice/";
+    static final Uri PAGE = Uri.parse("https://voice.dirksen.pw/");
+    static final Uri FORMER_ORIGIN_CLEARER = Uri.parse("https://bddap-bot.github.io/voice-moved/");
     static final int PICK = 2;
     WebView web;
     private PowerManager.WakeLock wake;
@@ -40,9 +41,15 @@ public final class VoiceService extends Service {
     }
     public IBinder onBind(Intent intent) { return new LocalBinder(); }
     static boolean allowed(Uri uri) {
-        return "https".equals(uri.getScheme()) && "bddap-bot.github.io".equals(uri.getHost())
-            && (uri.getPort() == -1 || uri.getPort() == 443)
-            && ("/voice/".equals(uri.getPath()) || "/voice/index.html".equals(uri.getPath()));
+        return sameOrigin(uri) && ("/".equals(uri.getPath()) || "/index.html".equals(uri.getPath()));
+    }
+    static boolean navigable(Uri uri) {
+        return allowed(uri) || ("https".equals(uri.getScheme()) && FORMER_ORIGIN_CLEARER.getHost().equals(uri.getHost())
+            && uri.getPort() == -1 && FORMER_ORIGIN_CLEARER.getPath().equals(uri.getPath()));
+    }
+    static boolean sameOrigin(Uri uri) {
+        return PAGE.getScheme().equals(uri.getScheme()) && PAGE.getHost().equals(uri.getHost())
+            && (uri.getPort() == -1 || uri.getPort() == 443);
     }
     private Notification notification(boolean muted) {
         PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
@@ -92,10 +99,10 @@ public final class VoiceService extends Service {
         web.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false);
         web.setWebViewClient(new WebViewClient() {
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                return !request.isForMainFrame() || !allowed(request.getUrl());
+                return !request.isForMainFrame() || !navigable(request.getUrl());
             }
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap icon) {
-                if (!allowed(Uri.parse(url))) { view.stopLoading(); close(); }
+                if (!navigable(Uri.parse(url))) { view.stopLoading(); close(); }
             }
             public void onPageFinished(WebView view, String url) {
                 if (allowed(Uri.parse(url))) view.evaluateJavascript(
@@ -113,8 +120,7 @@ public final class VoiceService extends Service {
             public void onPermissionRequest(PermissionRequest request) {
                 Uri origin = request.getOrigin();
                 if (web == null || !allowed(Uri.parse(web.getUrl() == null ? "" : web.getUrl()))
-                    || !"https".equals(origin.getScheme()) || !"bddap-bot.github.io".equals(origin.getHost())
-                    || (origin.getPort() != -1 && origin.getPort() != 443)
+                    || !sameOrigin(origin)
                     || checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                     request.deny();
                     return;
@@ -138,7 +144,7 @@ public final class VoiceService extends Service {
                 return true;
             }
         });
-        web.loadUrl(PAGE);
+        web.loadUrl(PAGE.toString());
         return START_NOT_STICKY;
     }
     void picked(int result, Intent data) {

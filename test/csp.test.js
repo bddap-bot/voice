@@ -6,6 +6,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { HANG_MS, launchChromium, openPage } from '../scripts/chromium.mjs';
 import { CHUNK } from '../docs/wake.js';
+import config from '../docs/config.js';
 
 const docs = fileURLToPath(new URL('../docs/', import.meta.url));
 const index = await readFile(join(docs, 'index.html'), 'utf8');
@@ -41,12 +42,13 @@ test('every script the built page loads comes from its own origin', async () => 
   assert.deepEqual(offenders, []);
 });
 
-test('every absolute URL in the hand-written page is one its policy lets it reach', async () => {
+test('every absolute URL in the hand-written page is one its policy lets it reach or a page it navigates to', async () => {
+  const navigations = [config.origin, config.formerOrigin];
   const files = (await readdir(docs)).filter((file) => /\.(?:html|js)$/.test(file) && file !== 'puppet.js' && file !== 'android.html');
   const unreachable = [];
   for (const file of files) {
     const source = (await readFile(join(docs, file), 'utf8')).replace(/<meta http-equiv="Content-Security-Policy"[^>]*>/g, '');
-    for (const [url] of source.matchAll(/\b(?:https?|wss?):\/\/[^\s'"`<>)]+/g)) if (!allowed(url)) unreachable.push(`${file}: ${url}`);
+    for (const [url] of source.matchAll(/\b(?:https?|wss?):\/\/[^\s'"`<>)]+/g)) if (!allowed(url) && !navigations.includes(url)) unreachable.push(`${file}: ${url}`);
   }
   assert.deepEqual(unreachable, []);
 });

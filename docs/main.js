@@ -18,6 +18,8 @@ import config, { configuredToken } from './config.js';
 
 const KEY = config.storageKey;
 const PAGE_KEY = `${KEY}.page`;
+const FORMER_ORIGIN_CLEARED = `${KEY}.formerOriginCleared`;
+const FORMER_ORIGIN_RETURN = '#former-origin-cleared';
 const ALPN = 'voice-web/1';
 const UNANSWERED_MS = 3000;
 const HUB_TURN_START_MS = 20000;
@@ -1489,8 +1491,11 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 window.addEventListener('beforeunload', () => puppetRuntime?.dispose());
 // Not stopConversation: the hidden-page save already recorded Live as open, so a reload resumes it.
 window.addEventListener('pagehide', (event) => { if (!event.persisted && conversation) { sendFrame('cancel').catch(() => {}); sendUnrelayed(); } });
+if (location.hash === FORMER_ORIGIN_RETURN) { localStorage.setItem(FORMER_ORIGIN_CLEARED, '1'); history.replaceState(null, '', location.pathname + location.search); }
+const leavingForFormerOrigin = location.origin === config.origin && !localStorage.getItem(FORMER_ORIGIN_CLEARED);
+if (leavingForFormerOrigin) location.replace(config.formerOrigin);
 const saved = configuredToken(config, localStorage.getItem(KEY));
-if (saved) { setCard(false); start(saved).then(() => {
+if (saved && !leavingForFormerOrigin) { setCard(false); start(saved).then(() => {
   if (!restored) return;
   recordSession('restore', JSON.stringify({ discarded: Boolean(document.wasDiscarded), awake: restored.awake, away_ms: Date.now() - restored.at }), null);
   if (restored.awake && Date.now() - restored.at < INACTIVITY_MS) toggleConversation();

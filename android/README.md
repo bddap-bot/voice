@@ -1,6 +1,6 @@
 # Live Voice on Android
 
-Install it from https://bddap-bot.github.io/voice/android.html. The app loads the same [Live page](https://bddap-bot.github.io/voice/) as the browser. Conversation logic, authentication, wake detection, speaker filtering and replies remain in that page; the app keeps that page running and hearing while it is hidden.
+Install it from https://voice.dirksen.pw/android.html. The app loads the same [Live page](https://voice.dirksen.pw/) as the browser. Conversation logic, authentication, wake detection, speaker filtering and replies remain in that page; the app keeps that page running and hearing while it is hidden.
 
 Before a page session starts, the notification’s mute action does nothing. An OS-killed process does not silently restart capture.
 
@@ -33,6 +33,8 @@ Run `npm test`, `npm run build` and `npm run smoke:ci` for the page. The emulato
 Version 6 supplies the current activity context to the service-owned WebView while attached, and releases that activity on detach. Native appearance dialogs can then open without changing the background capture lifecycle.
 
 Version 7 opens a system picker for the page's file input, which WebView otherwise ignores. The picker offers the gallery and the camera; a camera photo is written to the app's cache, not the phone's gallery.
+
+Version 8 loads the page from its own origin. Its WebView may additionally open the former-origin page that clears the page's old storage, which grants no microphone or file access.
 
 ## Muting releases capture
 

@@ -155,10 +155,11 @@ export async function send_only(bytes) {
     if (globalThis.backendWakeModel === 'unanswered') globalThis.releaseWakeModel = reply;
     else reply();
   }
-  else if (frame.startsWith('offer\\n')) {
+  else if (frame.startsWith('offer\\n') || frame.startsWith('renew\\n')) {
     const offer = JSON.parse(frame.slice(6));
     globalThis.lastOffer = offer;
-    const sendAnswer = () => deliver(enc.encode('answer\\n' + JSON.stringify({ offer_id: offer.id, sdp: 'answer' })));
+    (globalThis.offers ??= []).push({ verb: frame.slice(0, 5), ...offer });
+    const sendAnswer = () => deliver(enc.encode('answer\\n' + JSON.stringify({ offer_id: offer.id, sdp: 'answer', context_turns: globalThis.contextTurns ?? 20 })));
     if (globalThis.holdAnswer) globalThis.releaseAnswer = sendAnswer;
     else sendAnswer();
   }
@@ -261,6 +262,7 @@ class FakeChannel extends EventTarget {
   constructor() { super(); this.readyState = 'open'; }
   send(value) {
     const event = JSON.parse(value);
+    (this.sent ??= []).push(event);
     try { checkClientEvent(event); } catch (error) { document.body.dataset.refusedLiveEvent = value; }
     globalThis.sentLiveEvents.push(event);
   }
@@ -1391,6 +1393,75 @@ window.addEventListener('test-ready', async () => {
     { id: 'item_exact', text: "What's in the build queue right now?", context: [{ speaker: 'user', text: 'Hello there.' }, { speaker: 'live', text: 'Hi.' }] },
   ]);
   assert.ok(frames.every((frame) => Number.isFinite(frame.duration_ms) && /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/.test(frame.traceparent)));
+});
+
+test('a session past twice the window renews at a quiet moment, seeded with the last window, so the turns one call holds stay bounded', async () => {
+  const { result, stderr } = await runPage(`
+globalThis.contextTurns = 4;
+window.addEventListener('test-ready', async () => {
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const channels = [testChannel];
+  const held = [];
+  let since = 0;
+  const turn = (speak) => {
+    if (testChannel !== channels.at(-1)) {
+      held.push(since);
+      channels.push(testChannel);
+      since = 0;
+    }
+    speak();
+    since++;
+  };
+  for (let index = 0; index < 24; index++) {
+    turn(() => hear('question ' + index));
+    await wait(500);
+    turn(() => say('answer ' + index, 0, 10));
+    await wait(6000);
+  }
+  held.push(since);
+  document.body.dataset.result = JSON.stringify({
+    offers: offers.map(({ verb, context, wake }) => ({ verb, context: context?.map(({ text }) => text), wake })),
+    held,
+    open: [...new Set([...channels, testChannel])].map((channel) => channel.readyState),
+    pressed: document.querySelector('#puppet').getAttribute('aria-pressed'),
+  });
+});
+`, { virtualTime: true });
+  assert.ok(result, stderr);
+  const [first, ...renewals] = result.offers;
+  assert.equal(first.verb, 'offer');
+  assert.ok(renewals.length >= 4, JSON.stringify(result.offers));
+  assert.ok(renewals.every(({ verb, context, wake }) => verb === 'renew' && context.length === 4 && /continues the conversation/.test(wake)));
+  assert.deepEqual(renewals[0].context, ['question 2', 'answer 2', 'question 3', 'answer 3']);
+  assert.ok(result.held.every((turns, index) => (index ? 4 : 0) + turns <= 8), JSON.stringify(result.held));
+  assert.deepEqual(result.open, [...result.open.slice(0, -1).map(() => 'closed'), 'open']);
+  assert.equal(result.pressed, 'true');
+});
+
+test('a hub reply that arrives while a session renews is spoken on the renewed call', async () => {
+  const { result, stderr } = await runPage(`
+globalThis.contextTurns = 1;
+window.addEventListener('test-ready', async () => {
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const first = testChannel;
+  globalThis.holdAnswer = true;
+  hear('Is the printer busy?');
+  await wait(500);
+  say('Let me think.', 0, 10);
+  await until(() => offers.length === 2);
+  replyFromHub('item_late', 'late_1', ['The printer is idle.']);
+  await until(() => globalThis.hubAcks?.includes('late_1'));
+  await wait(2000);
+  const before = told(({ channel }) => channel === 'speakable').length;
+  releaseAnswer();
+  await until(() => testChannel.sent?.some(({ channel }) => channel === 'speakable'));
+  document.body.dataset.result = JSON.stringify({ before, renewed: testChannel.sent.map(({ type, content }) => [type, content[0].text]), first: (first.sent ?? []).filter(({ channel }) => channel === 'speakable').length });
+});
+`, { virtualTime: true });
+  assert.ok(result, stderr);
+  assert.equal(result.before, 0);
+  assert.equal(result.first, 0);
+  assert.deepEqual(result.renewed, [['session.context.append', 'The printer is idle.']]);
 });
 
 test('a delegation appends nothing until its hub reply, which reaches Live as speakable context alone, while a display-only push says nothing', async () => {

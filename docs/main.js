@@ -25,6 +25,7 @@ const UNANSWERED_MS = 3000;
 const HUB_TURN_START_MS = 20000;
 const HUB_TURN_QUIET_MS = 1500;
 const REFRESH_S = 600;
+const RENEW_QUIET_MS = 4000;
 const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -67,6 +68,7 @@ let spotter;
 let wakeModelWaiter;
 let listeningModel;
 let inactivity;
+let renewal;
 let unanswered;
 let requestEnd;
 const startSpotter = globalThis.__voiceStartSpotter ?? startWakeSpotter;
@@ -864,6 +866,24 @@ function stayAwake() {
     recordSession('sleep', 'inactivity');
     stopConversation();
   }, INACTIVITY_MS);
+  clearTimeout(renewal);
+  renewal = setTimeout(renew, RENEW_QUIET_MS);
+}
+function renewable(current) {
+  return conversation === current && !starting && !current.sleeping && !current.replyUnspoken && !current.settling && !current.pendingStanding && !hubTurn && !hubReplies.length && !hubWaiting.size && !hold.held;
+}
+async function renew() {
+  const current = conversation;
+  const scheduled = renewal;
+  if (!current || !trace.overWindow() || !renewable(current)) return;
+  await current.audioOwner.playback.quiet(HUB_TURN_QUIET_MS);
+  if (renewal !== scheduled || !renewable(current)) return;
+  recordSession('renew', String(trace.sessionTurns()), current.id);
+  current.renewing = true;
+  try { await startConversation(false, current); }
+  catch (error) {
+    if (conversation === current) callDropped(`renewal failed: ${error.message}`);
+  }
 }
 function openMicrophone(attempt) {
   let rejectCancellation;
@@ -1112,7 +1132,7 @@ function presentHubReply({ result, image }) {
   return owner;
 }
 async function playHubReplies() {
-  if (hubTurn) return;
+  if (hubTurn || conversation?.renewing) return;
   try {
     while (hubReplies.length) {
       let owner;
@@ -1152,7 +1172,7 @@ function refresh() {
 }
 function applyStanding() {
   const current = conversation;
-  if (!current?.pendingStanding || current.sleeping || current.replyUnspoken || current.settling || hubTurn || hubReplies.length) return;
+  if (!current?.pendingStanding || current.sleeping || current.renewing || current.replyUnspoken || current.settling || hubTurn || hubReplies.length) return;
   const instructions = current.pendingStanding;
   current.pendingStanding = null;
   current.standing = instructions;
@@ -1175,6 +1195,7 @@ function paintOff() {
   cuedDisplay = null;
   actionDriver.reset();
   clearTimeout(inactivity);
+  clearTimeout(renewal);
   puppetRuntime?.waiting(false);
   puppetRuntime?.pose('sit');
   puppetRuntime?.asleep(true);
@@ -1203,7 +1224,7 @@ function cancelStarting(reason = '') {
   paintOff();
   setStatus(reason, reason ? 'err' : '');
 }
-async function startConversation(redialed = false) {
+async function startConversation(redialed = false, renewing = null) {
   stopLearning();
   try { turns.prepareTurn(); } catch (error) { recordPageError(error); }
   const reusedRelay = connected;
@@ -1216,8 +1237,10 @@ async function startConversation(redialed = false) {
   }, $('speaker'));
   starting = attempt;
   syncSpotter();
-  puppetRuntime?.asleep(false);
-  puppetRuntime?.pose('stand');
+  if (!renewing) {
+    puppetRuntime?.asleep(false);
+    puppetRuntime?.pose('stand');
+  }
   syncPuppetUi();
   try {
     if (!connected) {
@@ -1234,6 +1257,7 @@ async function startConversation(redialed = false) {
     attempt.pc = new RTCPeerConnection();
     audioDiagnostics()?.peer(attempt.pc);
     attempt.channel = attempt.pc.createDataChannel('oai-events');
+    stageTrace?.sessionEnded();
     stageTrace = new StageTrace((span) => traces.add(span));
     const started = waitData(attempt.channel, (event) => event.type === 'session.started', 30000, attempt);
     started.catch(() => {});
@@ -1263,7 +1287,8 @@ async function startConversation(redialed = false) {
     attempt.offerId = crypto.randomUUID();
     const answerPromise = waitForAnswer(attempt.offerId);
     attempt.offered = true;
-    await sendFrame(`offer\n${JSON.stringify({ id: attempt.offerId, sdp: attempt.pc.localDescription.sdp, instructions: [IDENTITY], ...trace.wake() })}`);
+    const offered = renewing ? trace.continuation() : trace.wake();
+    await sendFrame(`${renewing ? 'renew' : 'offer'}\n${JSON.stringify({ id: attempt.offerId, sdp: attempt.pc.localDescription.sdp, instructions: [IDENTITY], ...offered })}`);
     if (attempt.cancelled) {
       cancelOffer(attempt);
       return;
@@ -1272,12 +1297,27 @@ async function startConversation(redialed = false) {
     answerWaiter = null;
     if (attempt.cancelled) return;
     recordSession('live-config-sdp-answer', JSON.stringify(modelToolFields(answer)), attempt.offerId);
+    if (!Number.isSafeInteger(answer.context_turns) || answer.context_turns < 1) throw new Error('the answer names no context window');
+    trace.window = answer.context_turns;
     await attempt.pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
     await started;
     if (attempt.cancelled) return;
+    trace.opened(offered.context?.length ?? 0);
+    const transcript = new TranscriptBatcher(attempt.offerId, persistenceUploads, { onTurn: (side, at) => telemetry.add({ kind: 'transcript', session_id: attempt.offerId, name: side, at }) });
+    if (renewing) {
+      const previous = renewing.audioOwner;
+      recordSession('close', 'renewed', renewing.id);
+      renewing.transcript.flush();
+      Object.assign(renewing, { pc: attempt.pc, channel: attempt.channel, id: attempt.offerId, audioOwner: attempt, refreshedAt: 0, transcript, renewing: false });
+      recorderFlush = Promise.all([recorderFlush, release(previous)]).then(() => {});
+      startRecorders(attempt, attempt.offerId);
+      recordSession('open', 'renewed', attempt.offerId);
+      playHubReplies().catch(recordPageError);
+      return;
+    }
     tell(attempt, 'commentary', WOKEN);
     const clock = new SessionClock({ onTick: (seconds) => { $('elapsed').textContent = formatElapsed(seconds); } });
-    conversation = { pc: attempt.pc, channel: attempt.channel, clock, id: attempt.offerId, audioOwner: attempt, said: '', standing: [], refreshedAt: 0, transcript: new TranscriptBatcher(attempt.offerId, persistenceUploads, { onTurn: (side, at) => telemetry.add({ kind: 'transcript', session_id: attempt.offerId, name: side, at }) }) };
+    conversation = { pc: attempt.pc, channel: attempt.channel, clock, id: attempt.offerId, audioOwner: attempt, said: '', standing: [], refreshedAt: 0, transcript };
     startRecorders(attempt, attempt.offerId);
     clock.start();
     puppetRuntime?.pose('listen');
@@ -1300,7 +1340,7 @@ async function startConversation(redialed = false) {
     }
     if (starting === attempt) starting = null;
   }
-  if (redial) await startConversation(true);
+  if (redial) await startConversation(true, renewing);
 }
 function release(attempt) {
   attempt.released = true;
@@ -1343,8 +1383,8 @@ function stopConversation(reason = '') {
 async function toggleConversation() {
   if ($('puppet').getAttribute('aria-disabled') === 'true') return;
   try {
-    if (starting) cancelStarting();
-    else if (conversation) stopConversation();
+    if (conversation) stopConversation();
+    else if (starting) cancelStarting();
     else await startConversation();
   } catch (error) {
     if (error.message === 'conversation start cancelled') return;

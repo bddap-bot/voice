@@ -171,6 +171,27 @@ test('the sign-off is found in a transcript regardless of case, spacing and punc
   for (const text of ['Goodnight, Corvus.', SIGN_OFF.split(' ').slice(0, -1).join(' '), SIGN_OFF.replace(' ', ' never '), SIGN_OFF.slice(0, -3)]) assert.equal(includesPhrase(text, SIGN_OFF), false, text);
 });
 
+test('a session is over its window at twice the window of turns, and continues from the last window', () => {
+  const trace = new ConversationTrace();
+  trace.window = 3;
+  trace.opened(0);
+  const over = [];
+  for (let index = 0; index < 4; index++) {
+    trace.heard(`q${index}`);
+    trace.delegated(`item_${index}`);
+    over.push(trace.overWindow());
+    trace.spoke(`a${index}`);
+    over.push(trace.overWindow());
+  }
+  assert.deepEqual(over, [false, false, false, false, false, true, true, true]);
+  const { context, wake } = trace.continuation();
+  assert.deepEqual(context, [{ speaker: 'live', text: 'a2' }, { speaker: 'user', text: 'q3' }, { speaker: 'live', text: 'a3' }]);
+  assert.match(wake, /continues the conversation/);
+  trace.opened(context.length);
+  assert.equal(trace.sessionTurns(), 3);
+  assert.equal(trace.overWindow(), false);
+});
+
 test('an ended session closes its undelegated turn, so the next session hands the hub only its own words', () => {
   const trace = new ConversationTrace();
   trace.heard('Goodnight, Corvus.');

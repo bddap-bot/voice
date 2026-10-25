@@ -380,6 +380,8 @@ function elapsed(ms) {
   return `${count} ${unit}${count === 1 ? '' : 's'}`;
 }
 
+const RENEWED = 'This session continues the conversation above, cut to its latest turns. Carry on as you were, without greeting or remarking on it.';
+
 const heardText = (turns) => boundedText(turns.map((text) => text.trim()).filter(Boolean), 8192);
 
 export class ConversationTrace {
@@ -395,6 +397,9 @@ export class ConversationTrace {
     this.lastOutputEnd = null;
     this.forceNewSpeech = false;
     this.sleeps = sleeps;
+    this.window = null;
+    this.sessionFrom = entries.length;
+    this.seeded = 0;
   }
   snapshot(limit = 1 << 18) {
     let start = this.entries.length;
@@ -430,8 +435,21 @@ export class ConversationTrace {
     }
     return { context: conversations.length ? memory() : [], wake: `The previous conversation ended and you went to sleep about ${elapsed(now - last.at)} ago. You have just been woken for a new conversation. Any earlier goodbye or request to sleep was already completed. Keep the earlier conversations as memory; greet briefly and listen for a new request.` };
   }
+  opened(seeded) {
+    this.sessionFrom = this.entries.length;
+    this.seeded = seeded;
+  }
+  sessionTurns() {
+    return this.seeded + this.entries.slice(this.sessionFrom).filter((item) => item.kind !== 'delegation').length;
+  }
+  overWindow() {
+    return this.sessionTurns() >= 2 * this.window;
+  }
+  continuation() {
+    return { context: this.context(), wake: RENEWED };
+  }
   context(excluded = new Set()) {
-    const context = this.entries.filter((item) => item.kind !== 'delegation' && !excluded.has(item)).slice(-20).map(spokenTurn);
+    const context = this.entries.filter((item) => item.kind !== 'delegation' && !excluded.has(item)).slice(-this.window).map(spokenTurn);
     while (context.length && new TextEncoder().encode(JSON.stringify(context)).length > 8192) context.shift();
     return context;
   }

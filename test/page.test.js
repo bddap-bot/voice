@@ -649,6 +649,16 @@ window.addEventListener('test-ready', () => {
   assert.deepEqual(result, [closed, { expanded: 'true', mute: true, rest: 4 }, closed, closed], stderr);
 });
 
+test('a page with no token opens on its token field', async () => {
+  const { result, stderr } = await runPage(`
+document.addEventListener('DOMContentLoaded', () => {
+  globalThis.fresh = { expanded: document.querySelector('#card-toggle').getAttribute('aria-expanded'), shown: document.querySelector('#token').getClientRects().length > 0, focused: document.activeElement.id };
+});
+window.addEventListener('test-ready', () => { document.body.dataset.result = JSON.stringify(fresh); });
+`);
+  assert.deepEqual(result, { expanded: 'true', shown: true, focused: 'token' }, stderr);
+});
+
 test('the live microphone can mute and resume without ending its session', async () => {
   const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {

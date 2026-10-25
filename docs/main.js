@@ -1540,4 +1540,5 @@ if (saved && !leavingForFormerOrigin) { setCard(false); start(saved).then(() => 
   recordSession('restore', JSON.stringify({ discarded: Boolean(document.wasDiscarded), awake: restored.awake, away_ms: Date.now() - restored.at }), null);
   if (restored.awake && Date.now() - restored.at < INACTIVITY_MS) toggleConversation();
 }, (error) => { localStorage.removeItem(KEY); savedState(false); setStatus(error.message, 'err'); }); }
+else if (!leavingForFormerOrigin) { savedState(false); $('token').focus(); }
 if (config.serviceWorker && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});

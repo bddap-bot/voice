@@ -2930,7 +2930,7 @@ test('a first hub reply reaches the model as it arrives, even mid-utterance; eac
   });
 });
 
-test('a hub instruction reaches Live as its own silent developer append only after the reply beside it has been spoken, an instructions-only reply ends the wait silently, and every 600 s of audio the identity goes in again with it', async () => {
+test('a hub instruction reaches Live as its own silent developer append only after the reply beside it has been spoken, and an instructions-only reply ends the wait silently', async () => {
   const result = await runWakePage(`
     const { LivePlayback } = await import('/live-playback.js');
     const quiet = [];
@@ -2955,43 +2955,47 @@ test('a hub instruction reaches Live as its own silent developer append only aft
     replyFromHub('silent', 'silent_reply', [], 5, { first: true, instructions: ['Answer in one short sentence; keep everything else unchanged.'] });
     await until(() => told().length === 4);
     const alone = { told: told().slice(3), pending, waiting: waiting(), speak: testPuppet.calls.filter(([name]) => name === 'speak').length };
-    for (const seconds of [300, 599]) emitLive({ type: 'session.usage.updated', usage: { audio_duration_ms: seconds * 1000 } });
-    await settled();
-    const early = told().length;
-    emitLive({ type: 'session.usage.updated', usage: { audio_duration_ms: 600000 } });
-    await until(() => told().length === 6);
-    for (const seconds of [601, 1199]) emitLive({ type: 'session.usage.updated', usage: { audio_duration_ms: seconds * 1000 } });
-    await settled();
-    return { beside, spoken, alone, early, rolled: told().slice(4), acks: hubAckFrames };
+    return { beside, spoken, alone, acks: hubAckFrames };
   `);
   const instructions = (text) => ['session.context.append', 'developer', null, text];
   assert.deepEqual(result, {
     beside: [['delegation.context.append', 'speakable', 'styled', 'The beacon is violet.']],
     spoken: [instructions('While a hub request is pending, hum softly instead of speaking.'), instructions('Keep everything else unchanged.')],
     alone: { told: [instructions('Answer in one short sentence; keep everything else unchanged.')], pending: true, waiting: false, speak: 1 },
-    early: 4,
-    rolled: [instructions(IDENTITY), instructions('Answer in one short sentence; keep everything else unchanged.')],
     acks: [{ id: 'styled', stamp: 'styled_reply' }, { id: 'silent', stamp: 'silent_reply' }],
   });
 });
 
-test('without hub instructions the identity alone goes in again after every 600 s of session audio', async () => {
-  const result = await runWakePage(`
-    const told = () => globalThis.told(({ channel }) => channel !== 'commentary');
-    emitLive({ type: 'session.usage.updated', usage: { audio_duration_ms: 599000 } });
-    await settled();
-    const early = told().length;
-    emitLive({ type: 'session.usage.updated', usage: { audio_duration_ms: 600000 } });
-    await until(() => told().length === 1);
-    emitLive({ type: 'session.usage.updated', usage: { audio_duration_ms: 1199000 } });
-    await settled();
-    const between = told().length;
-    emitLive({ type: 'session.usage.updated', usage: { audio_duration_ms: 1200000 } });
-    await until(() => told().length === 2);
-    return { early, between, told: told() };
-  `);
-  const identity = ['session.context.append', 'developer', null, IDENTITY];
-  assert.deepEqual(result, { early: 0, between: 1, told: [identity, identity] });
+test('a call past 600 s of audio renews at the next quiet moment and appends nothing to the call it leaves', async () => {
+  const { result, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const first = testChannel;
+  const exchange = async (index, seconds) => {
+    hear('question ' + index);
+    await wait(500);
+    say('answer ' + index, 0, 10);
+    emitLive({ type: 'session.usage.updated', usage: { audio_duration_ms: seconds * 1000 } });
+    await wait(6000);
+  };
+  await exchange(0, 599);
+  const early = offers.length;
+  await exchange(1, 600);
+  await until(() => offers.length === 2);
+  document.body.dataset.result = JSON.stringify({
+    early,
+    offers: offers.map(({ verb, wake }) => ({ verb, wake })),
+    left: (first.sent ?? []).filter(({ channel }) => channel !== 'commentary').map(({ channel, content }) => [channel, content[0].text]),
+    renewed: testChannel !== first,
+  });
+});
+`, { virtualTime: true });
+  assert.ok(result, stderr);
+  assert.equal(result.early, 1);
+  assert.deepEqual(result.offers.map(({ verb }) => verb), ['offer', 'renew']);
+  assert.match(result.offers[1].wake, /continues the conversation/);
+  assert.deepEqual(result.left, []);
+  assert.equal(result.renewed, true);
 });
 
 test('a restated hub direction is not appended again', async () => {
@@ -3006,7 +3010,7 @@ test('a restated hub direction is not appended again', async () => {
   assert.deepEqual(result, [['developer', 'Hum.'], ['developer', 'Whistle.']]);
 });
 
-test('pending hub instructions wait for every hub reply appended before them to be spoken, hold back a first reply that would otherwise jump the queue, and are not overwritten by a rollover re-append', async () => {
+test('pending hub instructions wait for every hub reply appended before them to be spoken, and hold back a first reply that would otherwise jump the queue', async () => {
   const result = await runWakePage(`
     const { LivePlayback } = await import('/live-playback.js');
     const quiet = [];
@@ -3018,7 +3022,6 @@ test('pending hub instructions wait for every hub reply appended before them to 
     replyFromHub('a', 'a', ['Reply A.'], 5, { instructions: ['New direction.'] });
     await until(() => told().length === 2);
     replyFromHub('b', 'b', ['Reply B.'], 5, { first: true });
-    emitLive({ type: 'session.usage.updated', usage: { audio_duration_ms: 600000 } });
     await until(() => globalThis.hubAcks?.includes('b'));
     const held = told();
     say('Reply A.');

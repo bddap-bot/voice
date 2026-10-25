@@ -24,7 +24,7 @@ const ALPN = 'voice-web/1';
 const UNANSWERED_MS = 3000;
 const HUB_TURN_START_MS = 20000;
 const HUB_TURN_QUIET_MS = 1500;
-const REFRESH_S = 600;
+const RENEW_AUDIO_S = 600;
 const RENEW_QUIET_MS = 4000;
 const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder();
@@ -875,7 +875,7 @@ function renewable(current) {
 async function renew() {
   const current = conversation;
   const scheduled = renewal;
-  if (!current || !trace.overWindow() || !renewable(current)) return;
+  if (!current || !(trace.overWindow() || usageSeconds >= RENEW_AUDIO_S) || !renewable(current)) return;
   await current.audioOwner.playback.quiet(HUB_TURN_QUIET_MS);
   if (renewal !== scheduled || !renewable(current)) return;
   recordSession('renew', String(trace.sessionTurns()), current.id);
@@ -1003,7 +1003,6 @@ function onLiveEvent(message, source) {
       recordPageError(new Error(`Live usage limit: ${JSON.stringify(limit)}`));
       sendFrame(`usage-limit\n${JSON.stringify(limit)}`).catch(recordPageError);
     }
-    if (conversation && !conversation.pendingStanding && usageSeconds - conversation.refreshedAt >= REFRESH_S) refresh();
   }
 }
 // Only a page still running reports a dropped call, so one that navigated away raises nothing.
@@ -1163,21 +1162,12 @@ function standBy(instructions) {
   applyStanding();
 }
 const sameInstructions = (a, b) => a.length === b.length && a.every((text, index) => text === b[index]);
-// The session's opening instructions fade as its audio grows, and with them the sign-off: every REFRESH_S of audio they go in again.
-function refresh() {
-  conversation.refreshedAt = usageSeconds;
-  conversation.pendingIdentity = true;
-  conversation.pendingStanding = conversation.standing;
-  applyStanding();
-}
 function applyStanding() {
   const current = conversation;
   if (!current?.pendingStanding || current.sleeping || current.renewing || current.replyUnspoken || current.settling || hubTurn || hubReplies.length) return;
   const instructions = current.pendingStanding;
   current.pendingStanding = null;
   current.standing = instructions;
-  if (current.pendingIdentity) tell(current.audioOwner, 'developer', IDENTITY);
-  current.pendingIdentity = false;
   instructions.forEach((content) => tell(current.audioOwner, 'developer', content));
 }
 function interruptHubReplies(reason) {
@@ -1250,7 +1240,7 @@ async function startConversation(redialed = false, renewing = null) {
     if (attempt.cancelled) return;
 
     render(trace.entries);
-    usageSeconds = 0;
+    if (!renewing) usageSeconds = 0;
     setStatus();
     attempt.stream = await openMicrophone(attempt);
     if (attempt.cancelled) return;
@@ -1308,7 +1298,8 @@ async function startConversation(redialed = false, renewing = null) {
       const previous = renewing.audioOwner;
       recordSession('close', 'renewed', renewing.id);
       renewing.transcript.flush();
-      Object.assign(renewing, { pc: attempt.pc, channel: attempt.channel, id: attempt.offerId, audioOwner: attempt, refreshedAt: 0, transcript, renewing: false });
+      Object.assign(renewing, { pc: attempt.pc, channel: attempt.channel, id: attempt.offerId, audioOwner: attempt, transcript, renewing: false });
+      usageSeconds = 0;
       recorderFlush = Promise.all([recorderFlush, release(previous)]).then(() => {});
       startRecorders(attempt, attempt.offerId);
       recordSession('open', 'renewed', attempt.offerId);
@@ -1317,7 +1308,7 @@ async function startConversation(redialed = false, renewing = null) {
     }
     tell(attempt, 'commentary', WOKEN);
     const clock = new SessionClock({ onTick: (seconds) => { $('elapsed').textContent = formatElapsed(seconds); } });
-    conversation = { pc: attempt.pc, channel: attempt.channel, clock, id: attempt.offerId, audioOwner: attempt, said: '', standing: [], refreshedAt: 0, transcript };
+    conversation = { pc: attempt.pc, channel: attempt.channel, clock, id: attempt.offerId, audioOwner: attempt, said: '', standing: [], transcript };
     startRecorders(attempt, attempt.offerId);
     clock.start();
     puppetRuntime?.pose('listen');

@@ -48,10 +48,9 @@ test('page uses config for startup, manual connect, storage and service worker',
   assert.match(page, /if \(config.serviceWorker && 'serviceWorker' in navigator\)/);
 });
 
-test('development smoke requires a started Live session and rejects deployed Live mode', async () => {
+test('development smoke requires a started Live session', async () => {
   const source = await readFile(new URL('../scripts/smoke.mjs', import.meta.url), 'utf8');
   assert.match(source, /const live = development/);
-  assert.match(source, /if \(development && deployed\) throw/);
   assert.match(source, /getAttribute\('aria-pressed'\) === 'true'/);
   assert.match(source, /livePageArgs\(viewport\)/);
   const args = livePageArgs({ width: 1, height: 1 });

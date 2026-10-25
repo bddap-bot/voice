@@ -11,14 +11,11 @@ import { serveDevelopment } from './dev.mjs';
 import { NAME, SIGN_OFF, WAKE_PHRASE } from '../docs/identity.js';
 import { includesPhrase } from '../docs/live.js';
 import { RATE } from '../docs/wake.js';
-import config from '../docs/config.js';
 
 const development = process.argv.includes('--dev');
 const mode = (development || process.argv.includes('--private')) ? 'private' : 'public';
 const live = development;
 if (process.argv.includes('--live') && !development) throw new Error('Live smoke requires --dev');
-const deployed = process.argv.includes('--deployed');
-if (development && deployed) throw new Error('--dev and --deployed are exclusive');
 const neutralSilhouette = mode === 'public';
 const transitions = mode === 'private' && !live
   ? ["__smokeRuntime.pose('stand')", "__smokeRuntime.pose('sit')"]
@@ -94,7 +91,6 @@ async function makeServer() {
     token = stdout.trim();
     main = main.replace('puppetRuntime = new PuppetRuntime($(\'puppet\'));', "puppetRuntime = new PuppetRuntime($('puppet')); globalThis.__smokeRuntime = puppetRuntime;");
   }
-  if (deployed) return { url: `${config.origin}/`, token, close() {} };
   mocks += `localStorage.setItem('voice.token', ${JSON.stringify(token)});`;
   index = index.replace('</head>', '<script src="/smoke-mocks.js"></script></head>');
   const server = http.createServer(async (request, response) => {

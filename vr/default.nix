@@ -26,14 +26,29 @@ let
     fangjun-test-sr-1 = { path = "test/fangjun-test-sr-1.wav"; sha256 = "9175e523081bf6a630ce72a55b05f92148eaafaf58cbbbe743686cd81c50848e"; };
     speaker2_a_en = { path = "test/3d-speaker/speaker2_a_en_16k.wav"; sha256 = "a723c134978a17fe12ca2374d0281a8003a56fa44ff9d2249a08791714983362"; };
   }));
+  # The newest glibc the standalone headset's SteamOS ships; the bundle runs on the system's own loader and libraries.
+  deviceGlibc = "2.39";
   host = target: let
+    cross = target.stdenv.hostPlatform != pkgs.stdenv.hostPlatform;
+    inherit (target.rust.envVars) ccForBuild cxxForBuild;
+    build = pkgs.stdenv.buildPlatform.rust.cargoEnvVarTarget;
     common = {
       version = "0.1.0";
       cargoRoot = "vr";
       buildAndTestSubdir = "vr";
       cargoLock.lockFile = ./Cargo.lock;
-      nativeBuildInputs = [ target.buildPackages.cmake target.rustPlatform.bindgenHook ];
+      nativeBuildInputs = [ target.buildPackages.cmake target.rustPlatform.bindgenHook ] ++ pkgs.lib.optionals cross [ pkgs.cargo-zigbuild ];
       dontUseCmakeConfigure = true;
+    } // pkgs.lib.optionalAttrs cross {
+      # nixpkgs' glibc outruns the headset's, and a linker binds each symbol at the newest version it sees; zig links against the headset's own.
+      auditable = false;
+      dontCargoBuild = true;
+      buildPhase = ''
+        runHook preBuild
+        export CARGO_ZIGBUILD_ZIG_PATH=${pkgs.zig}/bin/zig HOME=$TMPDIR ZIG_GLOBAL_CACHE_DIR=$TMPDIR/zig ZIG_LOCAL_CACHE_DIR=$TMPDIR/zig CARGO_TARGET_DIR=$PWD/target CARGO_PROFILE_RELEASE_STRIP=false
+        (cd vr && env CC_${build}=${ccForBuild} CXX_${build}=${cxxForBuild} CARGO_TARGET_${build}_LINKER=${ccForBuild} HOST_CC=${ccForBuild} HOST_CXX=${cxxForBuild} cargo zigbuild -j $NIX_BUILD_CORES --target ${target.stdenv.hostPlatform.rust.rustcTarget}.${deviceGlibc} --offline --profile release)
+        runHook postBuild
+      '';
     };
     # Keyed on the manifest alone, so every worktree and edit reuses one compile of the crate graph per target.
     deps = target.rustPlatform.buildRustPackage (common // {
@@ -72,8 +87,6 @@ let
   native = host pkgs;
   aarch64 = host pkgs.pkgsCross.aarch64-multiplatform;
   runtimeLibraries = pkgs.lib.makeLibraryPath [ pkgs.vulkan-loader pkgs.libglvnd pkgs.libuuid ];
-  # The newest glibc the standalone headset's SteamOS ships; the bundle runs on the system's own loader and libraries.
-  deviceGlibc = "2.39";
   bundle = pkgs.runCommand "voice-vr-aarch64-bundle" { nativeBuildInputs = [ pkgs.patchelf pkgs.binutils pkgs.nukeReferences ]; allowedReferences = [ ]; } ''
     mkdir -p $out/bin $out/share
     install -m755 ${aarch64}/bin/voice-vr $out/bin/voice-vr-host
@@ -87,7 +100,7 @@ let
     needed=$(readelf -d $out/bin/voice-vr-host | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | sort | tr '\n' ' ')
     for library in $needed; do
       case $library in
-        libc.so.6|libm.so.6|libgcc_s.so.1|libstdc++.so.6|ld-linux-aarch64.so.1) ;;
+        libc.so.6|libm.so.6|ld-linux-aarch64.so.1) ;;
         *) echo "voice-vr-host needs $library, which the headset may lack" >&2; exit 1 ;;
       esac
     done

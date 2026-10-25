@@ -35,7 +35,7 @@ const BACKLOG: usize = 3 * FRAME;
 pub enum Event {
     /// The relay is unreachable and is being dialed again.
     Waiting(String),
-    Open,
+    Open { window: usize, seeded: usize },
     Heard(String),
     Spoke(String),
     Delegated(String),
@@ -134,6 +134,11 @@ fn local_address() -> Result<SocketAddr, String> {
     Ok(SocketAddr::new(probe.local_addr().map_err(|error| error.to_string())?.ip(), 0))
 }
 
+fn answer_fields(value: &Value) -> Result<(String, usize), String> {
+    let window = value["context_turns"].as_u64().filter(|&n| n > 0 && n <= usize::MAX as u64).ok_or("the answer names no context window")? as usize;
+    Ok((value["sdp"].as_str().ok_or("the answer has no sdp")?.to_owned(), window))
+}
+
 fn stopped(stop: &AtomicBool) -> bool {
     stop.load(Ordering::Relaxed)
 }
@@ -159,25 +164,38 @@ impl Link {
         let mut audio = Audio::open(self.played.clone())?;
         let mut capturing = !self.muted.load(Ordering::Relaxed);
         audio.capture(capturing)?;
-        let socket = UdpSocket::bind(local_address()?).map_err(|error| format!("peer socket: {error}"))?;
-        let local = socket.local_addr().map_err(|error| error.to_string())?;
-        let mut rtc = Rtc::builder().clear_codecs().enable_opus(true, false).build(Instant::now());
-        rtc.add_local_candidate(Candidate::host(local, "udp").map_err(|error| format!("candidate: {error}"))?);
-        let mut change = rtc.sdp_api();
-        let mid = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
-        let channel = change.add_channel("oai-events".into());
-        let (offer, pending) = change.apply().ok_or("no offer to make")?;
-        let id = offer_id();
-        let mut body = serde_json::to_value(&wake).unwrap();
-        body["id"] = id.clone().into();
-        body["sdp"] = offer.to_sdp_string().into();
-        body["instructions"] = json!([identity().instructions]);
-        relay.post("offer", Some(&body))?;
         let frames = relay.listen();
-        let result = self.answer(&frames, &id, &mut audio, &mut capturing).and_then(|sdp| {
-            rtc.sdp_api().accept_answer(pending, SdpAnswer::from_sdp_string(&sdp).map_err(|error| format!("answer: {error}"))?).map_err(|error| format!("answer: {error}"))?;
-            self.converse(&mut rtc, &socket, &mut relay, &frames, &mut audio, mid, channel, &mut capturing)
-        });
+        let mut offered = wake;
+        let mut renewing = false;
+        let mut previous = None;
+        let result = loop {
+            let attempt = (|| {
+                let socket = UdpSocket::bind(local_address()?).map_err(|error| format!("peer socket: {error}"))?;
+                let local = socket.local_addr().map_err(|error| error.to_string())?;
+                let mut rtc = Rtc::builder().clear_codecs().enable_opus(true, false).build(Instant::now());
+                rtc.add_local_candidate(Candidate::host(local, "udp").map_err(|error| format!("candidate: {error}"))?);
+                let mut change = rtc.sdp_api();
+                let mid = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
+                let channel = change.add_channel("oai-events".into());
+                let (offer, pending) = change.apply().ok_or("no offer to make")?;
+                let id = offer_id();
+                let mut body = serde_json::to_value(&offered).unwrap();
+                body["id"] = id.clone().into();
+                body["sdp"] = offer.to_sdp_string().into();
+                body["instructions"] = json!([identity().instructions]);
+                relay.post(if renewing { "renew" } else { "offer" }, Some(&body))?;
+                let (sdp, window) = self.answer(&frames, &id, &mut audio, &mut capturing)?;
+                rtc.sdp_api().accept_answer(pending, SdpAnswer::from_sdp_string(&sdp).map_err(|error| format!("answer: {error}"))?).map_err(|error| format!("answer: {error}"))?;
+                let seeded = offered.context.as_ref().map_or(0, Vec::len);
+                let next = self.converse(&mut rtc, &socket, &mut relay, &frames, &mut audio, mid, channel, &mut capturing, &id, window, seeded, renewing, &mut previous)?;
+                previous = Some((rtc, socket));
+                Ok::<_, String>(next)
+            })();
+            match attempt {
+                Ok(next) => { offered = next; renewing = true; }
+                Err(reason) => break Err(reason),
+            }
+        };
         drop(audio);
         if let Err(error) = relay.post("cancel", None) {
             tracing::warn!("cancel not sent: {error}");
@@ -195,7 +213,7 @@ impl Link {
         Ok(())
     }
 
-    fn answer(&self, frames: &mpsc::Receiver<Result<Vec<u8>, String>>, id: &str, audio: &mut Audio, capturing: &mut bool) -> Result<String, String> {
+    fn answer(&self, frames: &mpsc::Receiver<Result<Vec<u8>, String>>, id: &str, audio: &mut Audio, capturing: &mut bool) -> Result<(String, usize), String> {
         let deadline = Instant::now() + ANSWER_TIMEOUT;
         loop {
             if stopped(&self.stop) {
@@ -214,7 +232,9 @@ impl Link {
             let value: Value = serde_json::from_slice(body).unwrap_or_default();
             let mine = value["offer_id"].as_str().or(value["id"].as_str()) == Some(id);
             match verb {
-                "answer" if mine => return value["sdp"].as_str().map(str::to_owned).ok_or_else(|| "the answer has no sdp".into()),
+                "answer" if mine => return answer_fields(&value),
+                "hub" => { let _ = self.events.send(Event::Hub(body.to_vec())); }
+                "hub-error" => self.hub_error(body),
                 "offer-error" if mine => return Err(format!("offer: {}", message(body))),
                 "closed" if mine => return Err("the call closed before its answer".into()),
                 _ => {}
@@ -222,8 +242,15 @@ impl Link {
         }
     }
 
+    fn hub_error(&self, body: &[u8]) {
+        let value: Value = serde_json::from_slice(body).unwrap_or_default();
+        if let Some(id) = value["id"].as_str() {
+            let _ = self.events.send(Event::HubError { id: id.to_owned(), message: message(body) });
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn converse(&self, rtc: &mut Rtc, socket: &UdpSocket, relay: &mut Relay, frames: &mpsc::Receiver<Result<Vec<u8>, String>>, audio: &mut Audio, mid: Mid, channel: ChannelId, capturing: &mut bool) -> Result<String, String> {
+    fn converse(&self, rtc: &mut Rtc, socket: &UdpSocket, relay: &mut Relay, frames: &mpsc::Receiver<Result<Vec<u8>, String>>, audio: &mut Audio, mid: Mid, channel: ChannelId, capturing: &mut bool, id: &str, window: usize, seeded: usize, renewing: bool, previous: &mut Option<(Rtc, UdpSocket)>) -> Result<Wake, String> {
         let mut encoder = opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip).map_err(|error| format!("opus encoder: {error}"))?;
         let mut decoder = opus::Decoder::new(RATE, opus::Channels::Mono).map_err(|error| format!("opus decoder: {error}"))?;
         let local = socket.local_addr().map_err(|error| error.to_string())?;
@@ -251,7 +278,7 @@ impl Link {
                             connected = true;
                             audio.captured.lock().unwrap().clear();
                         }
-                        RtcEvent::IceConnectionStateChange(IceConnectionState::Disconnected) => return Ok("the connection dropped".into()),
+                        RtcEvent::IceConnectionStateChange(IceConnectionState::Disconnected) => return Err("the connection dropped".into()),
                         RtcEvent::MediaData(data) => match decoder.decode_float(&data.data, &mut decoded, false) {
                             Ok(samples) => self.played.lock().unwrap().push(&decoded[..samples]),
                             Err(error) => tracing::warn!("opus decode: {error}"),
@@ -261,9 +288,12 @@ impl Link {
                             match event["type"].as_str().unwrap_or("") {
                                 "session.started" if !open => {
                                     open = true;
-                                    let mut channel = rtc.channel(channel).ok_or("the event channel closed")?;
-                                    channel.write(false, Tell::Session(hub::Channel::Commentary, identity().woken.clone()).event().to_string().as_bytes()).map_err(|error| format!("event channel: {error}"))?;
-                                    let _ = self.events.send(Event::Open);
+                                    if !renewing {
+                                        let mut channel = rtc.channel(channel).ok_or("the event channel closed")?;
+                                        channel.write(false, Tell::Session(hub::Channel::Commentary, identity().woken.clone()).event().to_string().as_bytes()).map_err(|error| format!("event channel: {error}"))?;
+                                    }
+                                    previous.take();
+                                    let _ = self.events.send(Event::Open { window, seeded });
                                 }
                                 "input_transcript.added" => {
                                     self.played.lock().unwrap().clear();
@@ -286,7 +316,7 @@ impl Link {
                                         limit_reported = true;
                                         tracing::warn!("Live usage limit: {limit}");
                                         if let Err(error) = relay.post("usage-limit", Some(&json!({ "status": limit["status"], "reset_seconds": limit["reset_seconds"] }))) {
-                                            return Ok(format!("the relay closed: {error}"));
+                                            return Err(format!("the relay closed: {error}"));
                                         }
                                     }
                                 }
@@ -294,13 +324,13 @@ impl Link {
                                 _ => {}
                             }
                         }
-                        RtcEvent::ChannelClose(id) if id == channel => return Ok("Session ended".into()),
+                        RtcEvent::ChannelClose(id) if id == channel => return Err("Session ended".into()),
                         _ => {}
                     },
                 }
             };
             if stopped(&self.stop) {
-                return Ok("dismissed".into());
+                return Err("dismissed".into());
             }
             if !open && started.elapsed() >= START_TIMEOUT {
                 return Err("Live session timed out".into());
@@ -311,29 +341,25 @@ impl Link {
             }
             loop {
                 match frames.try_recv() {
-                    Ok(Err(error)) => return Ok(format!("the relay closed: {error}")),
-                    Err(mpsc::TryRecvError::Disconnected) => return Ok("the relay closed".into()),
+                    Ok(Err(error)) => return Err(format!("the relay closed: {error}")),
+                    Err(mpsc::TryRecvError::Disconnected) => return Err("the relay closed".into()),
                     Err(mpsc::TryRecvError::Empty) => break,
                     Ok(Ok(frame)) => match split(&frame) {
                         ("hub", body) => {
                             let _ = self.events.send(Event::Hub(body.to_vec()));
                         }
-                        ("closed", body) => return Ok(format!("the provider closed it: {}", serde_json::from_slice::<Value>(body).ok().and_then(|value| value["reason"].as_str().map(str::to_owned)).unwrap_or_default())),
-                        ("hub-error", body) => {
-                            let value: Value = serde_json::from_slice(body).unwrap_or_default();
-                            if let Some(id) = value["id"].as_str() {
-                                let _ = self.events.send(Event::HubError { id: id.to_owned(), message: message(body) });
-                            }
-                        }
+                        ("closed", body) if serde_json::from_slice::<Value>(body).ok().is_some_and(|v| v["offer_id"].as_str().or(v["id"].as_str()) == Some(id)) => return Err(format!("the provider closed it: {}", serde_json::from_slice::<Value>(body).ok().and_then(|value| value["reason"].as_str().map(str::to_owned)).unwrap_or_default())),
+                        ("hub-error", body) => self.hub_error(body),
                         _ => {}
                     },
                 }
             }
             for command in self.commands.try_iter() {
                 match command {
+                    Command::Renew(wake) => return Ok(wake),
                     Command::Frame(verb, body) => {
                         if let Err(error) = relay.post(verb, Some(&body)) {
-                            return Ok(format!("the relay closed: {error}"));
+                            return Err(format!("the relay closed: {error}"));
                         }
                     }
                     Command::Tell(tell) => match rtc.channel(channel).filter(|_| open) {
@@ -390,5 +416,19 @@ impl Link {
             };
             rtc.handle_input(input).map_err(|error| format!("peer connection: {error}"))?;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_answer_must_name_a_positive_context_window() {
+        for window in [Value::Null, json!(0), json!(-1), json!(1.5), json!("20")] {
+            assert!(answer_fields(&json!({ "sdp": "answer", "context_turns": window })).is_err());
+        }
+        assert_eq!(answer_fields(&json!({ "sdp": "answer", "context_turns": 20 })).unwrap(), ("answer".into(), 20));
+        assert!(answer_fields(&json!({ "context_turns": 20 })).is_err());
     }
 }

@@ -58,6 +58,9 @@ pub enum Entry {
 #[derive(Default)]
 pub struct Trace {
     turns: Vec<Turn>,
+    pub window: usize,
+    session_from: usize,
+    seeded: usize,
     sleeps: Vec<(usize, Instant)>,
     /// The turn count at the last delegation or sleep; user turns from here on are the next delegation's text, and the next turn of either speaker starts fresh.
     pending_from: usize,
@@ -184,6 +187,27 @@ impl Trace {
         self.force_new_speech = true;
     }
 
+    pub fn opened(&mut self, window: usize, seeded: usize) {
+        self.window = window;
+        self.session_from = self.turns.len();
+        self.seeded = seeded;
+    }
+
+    pub fn over_window(&self) -> bool {
+        self.window > 0 && self.seeded + self.turns.len() - self.session_from >= 2 * self.window
+    }
+
+    pub fn continuation(&self) -> Wake {
+        let mut context = self.turns[self.turns.len().saturating_sub(self.window)..].to_vec();
+        while !context.is_empty() && serde_json::to_vec(&context).unwrap().len() > MAX_CONTEXT {
+            context.remove(0);
+        }
+        Wake {
+            context: Some(context.iter().map(|turn| serde_json::to_value(turn).unwrap()).collect()),
+            wake: Some("This session continues the conversation above, cut to its latest turns. Carry on as you were, without greeting or remarking on it.".into()),
+        }
+    }
+
     pub fn wake(&self, now: Instant) -> Wake {
         let Some(&(_, last)) = self.sleeps.last() else { return Wake::default() };
         let mut conversations: Vec<Archived> = self
@@ -210,6 +234,28 @@ impl Trace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renewal_counts_seeded_turns_and_carries_only_the_latest_window_without_a_greeting() {
+        let now = Instant::now();
+        let mut trace = Trace::default();
+        trace.opened(2, 1);
+        trace.heard("one", now);
+        trace.spoke("two");
+        assert!(!trace.over_window());
+        trace.heard("three", now);
+        assert!(trace.over_window());
+        let next = trace.continuation();
+        assert_eq!(next.context.as_ref().unwrap(), &vec![serde_json::json!({"speaker":"live", "text":"two"}), serde_json::json!({"speaker":"user", "text":"three"})]);
+        assert!(include_str!("../../docs/live.js").contains(next.wake.as_ref().unwrap()));
+        trace.opened(2, next.context.unwrap().len());
+        assert!(!trace.over_window());
+        trace.spoke("four");
+        trace.heard("five", now);
+        assert!(trace.over_window());
+        trace.spoke(&"x".repeat(MAX_CONTEXT));
+        assert!(trace.continuation().context.unwrap().is_empty());
+    }
 
     #[test]
     fn the_wake_texts_are_the_pages() {

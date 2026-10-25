@@ -23,6 +23,7 @@ const FAILED_HOLD: Duration = Duration::from_secs(10);
 struct Awake {
     session: Session,
     opened: bool,
+    audio_seconds: f64,
     said: String,
     activity: Instant,
     mouth: f32,
@@ -54,6 +55,10 @@ pub struct VoiceId {
     pub stored: bool,
     pub off: bool,
     pub learning: Option<f32>,
+}
+
+fn renewal_due(trace: &Trace, audio_seconds: f64, idle: Duration, quiet: bool) -> bool {
+    (trace.over_window() || audio_seconds >= 600.0) && idle >= Duration::from_secs(4) && quiet
 }
 
 impl Voice {
@@ -163,7 +168,7 @@ impl Voice {
         tracing::info!("summoned, opening the session");
         self.actions.reset();
         let session = Session::open(&self.token, &self.cache, self.trace.wake(Instant::now()), self.muted, self.hearing.clone());
-        self.awake = Some(Awake { session, opened: false, said: String::new(), activity: Instant::now(), mouth: 0.0, hub: Hub::default(), notice: None, failed: None, _span: tracing::info_span!("session") });
+        self.awake = Some(Awake { session, opened: false, audio_seconds: 0.0, said: String::new(), activity: Instant::now(), mouth: 0.0, hub: Hub::default(), notice: None, failed: None, _span: tracing::info_span!("session") });
     }
 
     /// Ends the session and releases the microphone; an opened session hands the hub what it never heard and becomes memory for the next.
@@ -178,7 +183,7 @@ impl Voice {
                     let sent = Relay::connect(&token, &cache).and_then(|mut relay| {
                         frames.iter().try_for_each(|frame| match frame {
                             hub::Command::Frame(verb, body) => relay.post(verb, Some(body)),
-                            hub::Command::Tell(_) => Ok(()),
+                            hub::Command::Tell(_) | hub::Command::Renew(_) => Ok(()),
                         })
                     });
                     if let Err(error) = sent {
@@ -235,7 +240,10 @@ impl Voice {
         for event in awake.session.events() {
             match event {
                 session::Event::Waiting(error) => awake.notice = Some(format!("No connection yet, still trying: {error}")),
-                session::Event::Open => {
+                session::Event::Open { window, seeded } => {
+                    self.trace.opened(window, seeded);
+                    awake.hub.renewing = false;
+                    awake.audio_seconds = 0.0;
                     tracing::info!("session open");
                     awake.notice = None;
                     awake.opened = true;
@@ -267,7 +275,7 @@ impl Voice {
                 session::Event::Delegated(id) => awake.hub.delegated(&id, &mut self.trace, Instant::now()),
                 session::Event::Hub(body) => awake.hub.reply(&body, &mut self.trace, Instant::now()),
                 session::Event::HubError { id, message } => awake.hub.failed(&id, &message, &mut self.trace),
-                session::Event::AudioSeconds(seconds) => awake.hub.usage(seconds),
+                session::Event::AudioSeconds(seconds) => awake.audio_seconds = seconds,
                 session::Event::Closed(reason) if !awake.opened => {
                     tracing::error!("Live session never opened: {reason}");
                     awake.notice = Some(format!("Could not connect: {reason}"));
@@ -297,6 +305,12 @@ impl Voice {
         if ended.is_none() && awake.opened && awake.activity.elapsed() >= identity().inactivity {
             ended = Some("inactivity".into());
         }
+        if ended.is_none() && awake.opened && awake.hub.renewable()
+            && renewal_due(&self.trace, awake.audio_seconds, awake.activity.elapsed(), awake.session.quiet(hub::TURN_QUIET))
+        {
+            awake.hub.renewing = true;
+            awake.session.send(hub::Command::Renew(self.trace.continuation()));
+        }
         if let Some(reason) = ended {
             self.dismiss(&reason);
         }
@@ -319,6 +333,22 @@ impl Voice {
 mod tests {
     use super::*;
     use base64::Engine;
+
+    #[test]
+    fn renewal_requires_a_long_call_and_both_transcript_and_playback_quiet() {
+        let trace = Trace::default();
+        assert!(!renewal_due(&trace, 599.0, Duration::from_secs(4), true));
+        assert!(!renewal_due(&trace, 600.0, Duration::from_millis(3999), true));
+        assert!(!renewal_due(&trace, 600.0, Duration::from_secs(4), false));
+        assert!(renewal_due(&trace, 600.0, Duration::from_secs(4), true));
+        let mut trace = Trace::default();
+        trace.opened(1, 0);
+        trace.heard("Hello", Instant::now());
+        trace.spoke("Hi");
+        assert!(renewal_due(&trace, 0.0, Duration::from_secs(4), true));
+        trace.opened(1, 1);
+        assert!(!renewal_due(&trace, 0.0, Duration::from_secs(4), true));
+    }
 
     fn voice(name: &str) -> (Voice, PathBuf) {
         let directory = std::env::temp_dir().join(format!("voice-vr-{name}-{}", std::process::id()));

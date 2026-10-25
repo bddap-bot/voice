@@ -16,8 +16,6 @@ const TURN_START: Duration = Duration::from_secs(20);
 pub const TURN_QUIET: Duration = Duration::from_millis(1500);
 const FAILED: &str = "The hub request failed.";
 const ASLEEP: &str = "Live is asleep";
-/// The page's `REFRESH_S`: the session's opening instructions fade as its audio grows, and with them the sign-off, so every this many audio seconds they go in again.
-const REFRESH_S: f64 = 600.0;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Channel {
@@ -56,6 +54,7 @@ impl Tell {
 pub enum Command {
     Frame(&'static str, Value),
     Tell(Tell),
+    Renew(crate::conversation::Wake),
 }
 
 #[derive(Deserialize, Debug)]
@@ -182,8 +181,7 @@ pub struct Hub {
     pending_standing: Standing,
     standing: Vec<String>,
     reply_unspoken: bool,
-    refreshed_at: f64,
-    pending_identity: bool,
+    pub renewing: bool,
     sleeping: bool,
     /// A presented reply's display, shown once the model starts speaking it.
     cued: Option<Display>,
@@ -393,7 +391,7 @@ impl Hub {
             ack["unspoken"] = unspoken.into();
         }
         let instructions = reply.instructions.clone();
-        if reply.first && self.turn.is_some() && instructions.is_empty() && matches!(self.pending_standing, Standing::None) {
+        if !self.renewing && reply.first && self.turn.is_some() && instructions.is_empty() && matches!(self.pending_standing, Standing::None) {
             self.present(reply, trace);
         } else {
             self.replies.push_back(reply);
@@ -439,7 +437,7 @@ impl Hub {
 
     /// The page's `playHubReplies`: one reply at a time, the next once the model has spoken this one and gone quiet.
     fn play(&mut self, trace: &mut Trace, now: Instant) {
-        if self.turn.is_some() {
+        if self.renewing || self.turn.is_some() {
             return;
         }
         while let Some(reply) = self.replies.pop_front() {
@@ -468,15 +466,12 @@ impl Hub {
     }
 
     fn apply_standing(&mut self) {
-        if self.sleeping || self.reply_unspoken || self.turn.is_some() || !self.replies.is_empty() {
+        if self.renewing || self.sleeping || self.reply_unspoken || self.turn.is_some() || !self.replies.is_empty() {
             return;
         }
         let Standing::Waiting(instructions) = &mut self.pending_standing else { return };
         let instructions = std::mem::take(instructions);
         self.pending_standing = Standing::None;
-        if std::mem::take(&mut self.pending_identity) {
-            self.out.push(Command::Tell(Tell::Session(Channel::Developer, crate::identity::identity().instructions.clone())));
-        }
         for content in &instructions {
             self.out.push(Command::Tell(Tell::Session(Channel::Developer, content.clone())));
         }
@@ -484,13 +479,11 @@ impl Hub {
         self.standing = instructions;
     }
 
-    pub fn usage(&mut self, audio_seconds: f64) {
-        if audio_seconds - self.refreshed_at >= REFRESH_S && matches!(self.pending_standing, Standing::None) && !self.sleeping {
-            self.refreshed_at = audio_seconds;
-            self.pending_identity = true;
-            self.pending_standing = Standing::Waiting(self.standing.clone());
-            self.apply_standing();
-        }
+    pub fn renewable(&self) -> bool {
+        !self.renewing && !self.sleeping && !self.reply_unspoken
+            && matches!(self.pending_standing, Standing::None)
+            && self.turn.is_none() && self.replies.is_empty()
+            && self.waiting.is_empty() && self.held.is_none()
     }
 
     fn interrupt(&mut self, reason: &str) {
@@ -517,9 +510,9 @@ impl Hub {
             } {
                 self.show_cued();
                 self.turn = None;
-                self.play(trace, now);
             }
         }
+        self.play(trace, now);
         if self.request_end.is_some_and(|at| now >= at) {
             let id = self.held.take().map_or_else(|| format!("turn_{}", stamp()), |held| held.id);
             self.hand_off(&id, trace, now);
@@ -811,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn standing_instructions_follow_the_spoken_reply_beside_them_an_instructions_only_reply_is_silent_and_every_600_audio_seconds_the_identity_goes_in_again_with_them() {
+    fn standing_instructions_follow_the_spoken_reply_and_an_instructions_only_reply_is_silent() {
         let mut f = Fixture::new();
         f.hear("Check the test beacon.");
         f.delegate("styled");
@@ -827,34 +820,35 @@ mod tests {
         f.reply(json!({ "id": "silent", "stamp": "s2", "first": true, "commentary": [], "instructions": ["Answer in one short sentence."] }));
         assert_eq!(f.told()[3..], [instructions("Answer in one short sentence.")]);
         assert!(f.hub.waiting.is_empty());
-        for seconds in [300.0, 599.0, 600.0, 601.0] {
-            f.hub.usage(seconds);
-        }
-        f.collect();
-        let refreshed = [instructions(&crate::identity::identity().instructions), instructions("Answer in one short sentence.")];
-        assert_eq!(f.told()[4..], refreshed);
-        f.hub.usage(1199.0);
-        f.collect();
-        assert_eq!(f.told().len(), 6);
-        f.hub.usage(1200.0);
-        f.collect();
-        assert_eq!(f.told()[6..], refreshed);
         assert_eq!(f.frames("hub-ack"), [json!({ "id": "styled", "stamp": "s1" }), json!({ "id": "silent", "stamp": "s2" })]);
     }
 
     #[test]
-    fn without_standing_instructions_the_identity_alone_goes_in_again_every_600_audio_seconds_until_the_sign_off() {
+    fn renewal_waits_for_hub_work_and_holds_replies_until_the_new_call_opens() {
         let mut f = Fixture::new();
-        f.hub.usage(599.0);
-        f.collect();
-        assert!(f.told().is_empty());
-        f.hub.usage(600.0);
-        f.collect();
-        assert_eq!(f.told(), [instructions(&crate::identity::identity().instructions)]);
-        f.hub.sleep();
-        f.hub.usage(1200.0);
-        f.collect();
+        assert!(f.hub.renewable());
+        f.hear("Check the beacon.");
+        f.delegate("a");
+        assert!(!f.hub.renewable());
+        f.reply(reply("a", "a", &["Violet."]));
+        assert!(!f.hub.renewable());
+        f.speak("Violet.");
+        f.wait(TURN_QUIET, true);
+        assert!(f.hub.renewable());
+        f.hub.renewing = true;
+        f.reply(json!({ "id": "a", "stamp": "b", "commentary": ["Still violet."], "instructions": ["Hum."] }));
+        f.wait(TURN_QUIET, true);
         assert_eq!(f.told().len(), 1);
+        assert!(!f.hub.renewable());
+        f.hub.renewing = false;
+        f.wait(Duration::ZERO, true);
+        assert_eq!(f.told()[1..], [speakable(json!("a"), "Still violet.")]);
+        f.speak("Still violet.");
+        f.wait(TURN_QUIET, true);
+        assert_eq!(f.told()[2..], [instructions("Hum.")]);
+        assert!(f.hub.renewable());
+        f.hub.sleep();
+        assert!(!f.hub.renewable());
     }
 
     #[test]
@@ -874,7 +868,6 @@ mod tests {
         f.reply(json!({ "id": "early", "stamp": "early", "commentary": [], "instructions": ["Old direction."] }));
         f.reply(json!({ "id": "a", "stamp": "a", "commentary": ["Reply A."], "instructions": ["New direction."] }));
         f.reply(json!({ "id": "b", "stamp": "b", "first": true, "commentary": ["Reply B."], "instructions": [] }));
-        f.hub.usage(900.0);
         f.collect();
         let early = [instructions("Old direction."), speakable(Value::Null, "Reply A.")];
         assert_eq!(f.told(), early);

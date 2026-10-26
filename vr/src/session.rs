@@ -183,10 +183,13 @@ impl Link {
                 body["id"] = id.clone().into();
                 body["sdp"] = offer.to_sdp_string().into();
                 body["instructions"] = json!([identity().instructions]);
-                relay.post(if renewing { "renew" } else { "offer" }, Some(&body))?;
-                let (sdp, window) = self.answer(&frames, &id, &mut audio, &mut capturing)?;
-                rtc.sdp_api().accept_answer(pending, SdpAnswer::from_sdp_string(&sdp).map_err(|error| format!("answer: {error}"))?).map_err(|error| format!("answer: {error}"))?;
                 let seeded = offered.context.as_ref().map_or(0, Vec::len);
+                let verb = if renewing { "renew" } else { "offer" };
+                relay.post(verb, Some(&body))?;
+                tracing::info!("{verb} {id} sent with {seeded} turns of context");
+                let (sdp, window) = self.answer(&frames, &id, &mut audio, &mut capturing)?;
+                tracing::info!("answer {id}: context_turns {window}");
+                rtc.sdp_api().accept_answer(pending, SdpAnswer::from_sdp_string(&sdp).map_err(|error| format!("answer: {error}"))?).map_err(|error| format!("answer: {error}"))?;
                 let next = self.converse(&mut rtc, &socket, &mut relay, &frames, &mut audio, mid, channel, &mut capturing, &id, window, seeded, renewing, &mut previous)?;
                 previous = Some((rtc, socket));
                 Ok::<_, String>(next)
@@ -292,7 +295,9 @@ impl Link {
                                         let mut channel = rtc.channel(channel).ok_or("the event channel closed")?;
                                         channel.write(false, Tell::Session(hub::Channel::Commentary, identity().woken.clone()).event().to_string().as_bytes()).map_err(|error| format!("event channel: {error}"))?;
                                     }
-                                    previous.take();
+                                    if previous.take().is_some() {
+                                        tracing::info!("call {id} started without a greeting; the previous call retired");
+                                    }
                                     let _ = self.events.send(Event::Open { window, seeded });
                                 }
                                 "input_transcript.added" => {

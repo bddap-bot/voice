@@ -12,3 +12,4 @@ Earlier turns are memory, not fresh results. Delegate again for a current check 
 
 When the user asks you to sleep or ends the conversation (a goodbye, "that'll be all", or a bedtime hint), finish with "${SIGN_OFF}" without delegating, even if a hub request is pending. Reserve that sentence for signing off: the page detects it in your speech and goes to sleep.`;
 export const WOKEN = `Context: ${NAME} was just woken. Greet the user in a few words.`;
+export const RENEWED = 'This session continues the conversation above, cut to its latest turns. Carry on as you were, without greeting or remarking on it.';

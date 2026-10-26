@@ -1,4 +1,4 @@
-import { HAND_OFF_PHRASE } from './identity.js';
+import { HAND_OFF_PHRASE, RENEWED } from './identity.js';
 
 export function modelToolFields(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
@@ -379,8 +379,6 @@ function elapsed(ms) {
   const count = Math.round(seconds / size);
   return `${count} ${unit}${count === 1 ? '' : 's'}`;
 }
-
-const RENEWED = 'This session continues the conversation above, cut to its latest turns. Carry on as you were, without greeting or remarking on it.';
 
 const heardText = (turns) => boundedText(turns.map((text) => text.trim()).filter(Boolean), 8192);
 

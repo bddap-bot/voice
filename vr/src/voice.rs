@@ -57,7 +57,7 @@ pub struct VoiceId {
     pub learning: Option<f32>,
 }
 
-fn renewal_due(trace: &Trace, audio_seconds: f64, idle: Duration, quiet: bool) -> bool {
+pub fn renewal_due(trace: &Trace, audio_seconds: f64, idle: Duration, quiet: bool) -> bool {
     (trace.over_window() || audio_seconds >= 600.0) && idle >= Duration::from_secs(4) && quiet
 }
 

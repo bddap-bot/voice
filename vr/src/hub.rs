@@ -534,6 +534,9 @@ mod tests {
     use super::*;
     use crate::calls::State;
 
+    /// A window unlike the broker's, so nothing passes on a number of its own.
+    const WINDOW: usize = 8;
+
     struct Fixture {
         hub: Hub,
         trace: Trace,
@@ -547,7 +550,9 @@ mod tests {
 
     impl Fixture {
         fn new() -> Fixture {
-            Fixture { hub: Hub::default(), trace: Trace::default(), now: Instant::now(), out: Vec::new(), listens: 0, verdict: Some(true), asks: Vec::new() }
+            let mut trace = Trace::default();
+            trace.opened(WINDOW, 0);
+            Fixture { hub: Hub::default(), trace, now: Instant::now(), out: Vec::new(), listens: 0, verdict: Some(true), asks: Vec::new() }
         }
         fn collect(&mut self) {
             if let Some(number) = self.hub.take_ask() {
@@ -821,6 +826,29 @@ mod tests {
         assert_eq!(f.told()[3..], [instructions("Answer in one short sentence.")]);
         assert!(f.hub.waiting.is_empty());
         assert_eq!(f.frames("hub-ack"), [json!({ "id": "styled", "stamp": "s1" }), json!({ "id": "silent", "stamp": "s2" })]);
+    }
+
+    #[test]
+    fn the_turns_one_call_holds_stay_within_two_windows_across_a_session_several_windows_long() {
+        let mut f = Fixture::new();
+        let (mut most, mut renewals) = (0, 0);
+        for exchange in 0..5 * WINDOW {
+            f.hear(&format!("Question {exchange}."));
+            f.delegate(&format!("item_{exchange}"));
+            f.reply(reply(&format!("item_{exchange}"), &format!("s{exchange}"), &[&format!("Answer {exchange}.")]));
+            f.speak(&format!("Answer {exchange}."));
+            f.wait(TURN_QUIET, true);
+            most = most.max(f.trace.session_turns());
+            if f.hub.renewable() && crate::voice::renewal_due(&f.trace, 0.0, Duration::from_secs(4), true) {
+                let next = f.trace.continuation();
+                assert_eq!(next.context.as_ref().unwrap().len(), WINDOW);
+                f.trace.opened(WINDOW, next.context.unwrap().len());
+                renewals += 1;
+            }
+        }
+        assert!(renewals >= 8, "{renewals}");
+        assert!(most <= 2 * WINDOW, "{most}");
+        assert_eq!(f.told().len(), 5 * WINDOW);
     }
 
     #[test]

@@ -156,7 +156,7 @@ impl Trace {
         without_trailing_phrase(&sent, &identity().hand_off_phrase) != sent
     }
 
-    /// The user's words since the last delegation, or since the last hand-off phrase when they end with it, and up to twenty turns before them.
+    /// The user's words since the last delegation, or since the last hand-off phrase when they end with it, and up to a window of turns before them.
     pub fn pending(&self, now: Instant) -> Delegation {
         let sent = self.heard_text(self.pending_from);
         let request = self.heard_text(self.request_from);
@@ -164,11 +164,7 @@ impl Trace {
             whole if self.ends_request() && !whole.is_empty() => whole.to_owned(),
             _ => sent,
         };
-        let visible: Vec<usize> = (0..self.turns.len()).filter(|&index| !self.is_pending(index)).collect();
-        let mut context: Vec<Turn> = visible[visible.len().saturating_sub(20)..].iter().map(|&index| self.turns[index].clone()).collect();
-        while !context.is_empty() && serde_json::to_string(&context).unwrap().len() > MAX_CONTEXT {
-            context.remove(0);
-        }
+        let context = self.context(|index| self.is_pending(index));
         let duration_ms = self.heard_at.map_or(0, |at| now.saturating_duration_since(at).as_millis() as u64);
         Delegation { text, context, duration_ms }
     }
@@ -193,19 +189,26 @@ impl Trace {
         self.seeded = seeded;
     }
 
+    pub fn session_turns(&self) -> usize {
+        self.seeded + self.turns.len() - self.session_from
+    }
+
     pub fn over_window(&self) -> bool {
-        self.window > 0 && self.seeded + self.turns.len() - self.session_from >= 2 * self.window
+        self.window > 0 && self.session_turns() >= 2 * self.window
     }
 
     pub fn continuation(&self) -> Wake {
-        let mut context = self.turns[self.turns.len().saturating_sub(self.window)..].to_vec();
-        while !context.is_empty() && serde_json::to_vec(&context).unwrap().len() > MAX_CONTEXT {
+        Wake { context: Some(self.context(|_| false).iter().map(|turn| serde_json::to_value(turn).unwrap()).collect()), wake: Some(identity().renewed.clone()) }
+    }
+
+    /// The newest window of turns not excluded, within the byte bound.
+    fn context(&self, excluded: impl Fn(usize) -> bool) -> Vec<Turn> {
+        let visible: Vec<usize> = (0..self.turns.len()).filter(|&index| !excluded(index)).collect();
+        let mut context: Vec<Turn> = visible[visible.len().saturating_sub(self.window)..].iter().map(|&index| self.turns[index].clone()).collect();
+        while !context.is_empty() && serde_json::to_string(&context).unwrap().len() > MAX_CONTEXT {
             context.remove(0);
         }
-        Wake {
-            context: Some(context.iter().map(|turn| serde_json::to_value(turn).unwrap()).collect()),
-            wake: Some("This session continues the conversation above, cut to its latest turns. Carry on as you were, without greeting or remarking on it.".into()),
-        }
+        context
     }
 
     pub fn wake(&self, now: Instant) -> Wake {
@@ -235,10 +238,19 @@ impl Trace {
 mod tests {
     use super::*;
 
+    /// A window unlike the broker's, so nothing passes on a number of its own.
+    const WINDOW: usize = 6;
+
+    fn opened() -> Trace {
+        let mut trace = Trace::default();
+        trace.opened(WINDOW, 0);
+        trace
+    }
+
     #[test]
     fn renewal_counts_seeded_turns_and_carries_only_the_latest_window_without_a_greeting() {
         let now = Instant::now();
-        let mut trace = Trace::default();
+        let mut trace = opened();
         trace.opened(2, 1);
         trace.heard("one", now);
         trace.spoke("two");
@@ -247,7 +259,8 @@ mod tests {
         assert!(trace.over_window());
         let next = trace.continuation();
         assert_eq!(next.context.as_ref().unwrap(), &vec![serde_json::json!({"speaker":"live", "text":"two"}), serde_json::json!({"speaker":"user", "text":"three"})]);
-        assert!(include_str!("../../docs/live.js").contains(next.wake.as_ref().unwrap()));
+        assert_eq!(next.wake.as_deref(), Some(identity().renewed.as_str()));
+        assert!(include_str!("../../docs/identity.js").contains(&format!("export const RENEWED = '{}';", identity().renewed)));
         trace.opened(2, next.context.unwrap().len());
         assert!(!trace.over_window());
         trace.spoke("four");
@@ -285,7 +298,7 @@ mod tests {
     #[test]
     fn turns_merge_by_speaker_and_split_at_each_sleep() {
         let start = Instant::now();
-        let mut trace = Trace::default();
+        let mut trace = opened();
         trace.heard("Hel", start);
         trace.heard("lo", start);
         trace.spoke("Hi.");
@@ -315,7 +328,7 @@ mod tests {
     #[test]
     fn a_session_with_no_turns_after_a_sleep_adds_no_archive() {
         let start = Instant::now();
-        let mut trace = Trace::default();
+        let mut trace = opened();
         trace.heard("one", start);
         trace.slept(start);
         trace.slept(start);
@@ -327,7 +340,7 @@ mod tests {
     #[test]
     fn memory_drops_its_oldest_turns_to_fit_the_bound() {
         let start = Instant::now();
-        let mut trace = Trace::default();
+        let mut trace = opened();
         for index in 0..400 {
             trace.heard(&format!("question {index} "), start);
             trace.spoke(&format!("answer {index} "));
@@ -347,7 +360,7 @@ mod tests {
     #[test]
     fn a_delegation_hands_over_what_was_heard_since_the_last_and_the_turns_before_it() {
         let start = Instant::now();
-        let mut trace = Trace::default();
+        let mut trace = opened();
         trace.heard("Hello there.", start);
         let first = trace.delegated(start + Duration::from_millis(700));
         assert_eq!(first, Delegation { text: "Hello there.".into(), context: vec![], duration_ms: 700 });
@@ -365,7 +378,7 @@ mod tests {
     #[test]
     fn a_request_ended_with_the_hand_off_phrase_carries_every_user_turn_since_the_last_such_request_or_sleep() {
         let start = Instant::now();
-        let mut trace = Trace::default();
+        let mut trace = opened();
         trace.heard("Egdod issue fourteen", start);
         trace.delegated(start);
         trace.spoke("Checking.");
@@ -390,7 +403,7 @@ mod tests {
     #[test]
     fn a_delegation_splits_turns_and_live_turns_after_it_are_context() {
         let start = Instant::now();
-        let mut trace = Trace::default();
+        let mut trace = opened();
         trace.heard("one", start);
         trace.delegated(start);
         trace.heard("two", start);
@@ -404,7 +417,7 @@ mod tests {
     #[test]
     fn a_hub_reply_starts_a_new_spoken_turn_only() {
         let start = Instant::now();
-        let mut trace = Trace::default();
+        let mut trace = opened();
         trace.spoke("Checking.");
         trace.hub_replied();
         trace.spoke("Four jobs.");
@@ -417,7 +430,7 @@ mod tests {
     #[test]
     fn a_boundary_splits_only_the_turn_after_it() {
         let start = Instant::now();
-        let mut trace = Trace::default();
+        let mut trace = opened();
         trace.heard("one", start);
         trace.delegated(start);
         trace.slept(start);
@@ -433,7 +446,7 @@ mod tests {
     #[test]
     fn a_sleep_ends_the_pending_words_without_sending_them() {
         let start = Instant::now();
-        let mut trace = Trace::default();
+        let mut trace = opened();
         trace.heard("before", start);
         trace.slept(start);
         trace.heard("after", start);
@@ -443,18 +456,19 @@ mod tests {
     }
 
     #[test]
-    fn context_keeps_the_last_twenty_turns_within_the_byte_bound() {
+    fn context_keeps_the_last_window_of_turns_within_the_byte_bound() {
         let start = Instant::now();
-        let mut trace = Trace::default();
+        let mut trace = opened();
         for index in 0..30 {
             trace.heard(&format!("q{index}"), start);
             trace.spoke(&format!("a{index}"));
         }
         trace.slept(start);
         let context = trace.delegated(start).context;
-        assert_eq!(context.len(), 20);
-        assert_eq!(context[0].text, "q20");
+        assert_eq!(context.len(), WINDOW);
+        assert_eq!(context[0].text, format!("q{}", 30 - WINDOW / 2));
         let mut trace = Trace::default();
+        trace.opened(10, 0);
         for _ in 0..4 {
             trace.heard(&"x".repeat(3000), start);
             trace.spoke("y");
@@ -468,7 +482,7 @@ mod tests {
     #[test]
     fn the_log_lists_turns_in_order_with_each_call_where_it_was_asked_and_keeps_the_newest() {
         let start = Instant::now();
-        let mut trace = Trace::default();
+        let mut trace = opened();
         trace.heard("Is the ", start);
         trace.heard("printer busy?", start);
         let request = trace.delegated(start).text;

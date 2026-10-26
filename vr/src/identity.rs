@@ -10,6 +10,7 @@ pub struct Identity {
     pub inactivity: Duration,
     pub instructions: String,
     pub woken: String,
+    pub renewed: String,
     pub vr_wake_phrase: String,
 }
 
@@ -51,6 +52,7 @@ pub fn identity() -> &'static Identity {
         Identity {
             instructions: text("IDENTITY", &names),
             woken: text("WOKEN", &names),
+            renewed: text("RENEWED", &names),
             vr_wake_phrase: text("VR_WAKE_PHRASE", &names),
             inactivity: Duration::from_millis(milliseconds("INACTIVITY_MS")),
             sign_off,

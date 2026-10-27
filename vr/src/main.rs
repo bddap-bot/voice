@@ -29,6 +29,7 @@ mod render;
 mod relay;
 mod reveal;
 mod wake;
+mod wear;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -106,6 +107,8 @@ struct Puppet {
     gaze: Gaze,
     springs: Springs,
     drawn: Appearance,
+    /// The vertices the last step's morph moved.
+    changed: Vec<u32>,
 }
 
 fn load(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer) -> Result<Puppet, String> {
@@ -134,7 +137,38 @@ fn load(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer) -> Result<P
     let height = (HEIGHT / fit.scale).clamp(FULL_HEIGHT[0], FULL_HEIGHT[1]);
     tracing::info!("appearance {} stands {height:.2} m full size", avatar.id);
     let drawn = renderer.appearance(&model, &skinned)?;
-    Ok(Puppet { model, skinned, fit, full: height / HEIGHT, standing, animator: Animator::new(clips, Random::seeded()), gaze: Gaze::default(), springs: Springs::default(), drawn })
+    Ok(Puppet { model, skinned, fit, full: height / HEIGHT, standing, animator: Animator::new(clips, Random::seeded()), gaze: Gaze::default(), springs: Springs::default(), drawn, changed: Vec::new() })
+}
+
+impl Puppet {
+    /// One frame of the figure standing at `stand`, `size` times its hand-held height: its clip, a point while `pointing` has a target, its gaze toward `head`, its blink and mouth, and its springs. Returns its joints in the model's space and the model's placement in the world.
+    fn step(&mut self, delta: f32, stand: &Pose, size: f32, head: Vec3, mouth: f32, pointing: &mut point::Pointing, now: Instant, locate: impl FnOnce(&str) -> Option<Vec3>) -> (Vec<glam::Mat4>, glam::Mat4) {
+        if let Some(idle) = self.animator.update(delta) {
+            tracing::info!("idle {idle}");
+        }
+        let mut pose = self.model.pose(&self.animator.humanoid(&self.standing, self.model.rest_hips()));
+        let mut worlds = self.model.worlds(&pose);
+        let body = stand.mat4() * glam::Mat4::from_scale(glam::Vec3::splat(size)) * self.fit.placement(&self.model, &worlds, 0.0);
+        let to_model = body.inverse();
+        if let Some((target, weight)) = pointing.step(now, delta, mouth, locate) {
+            if let Some(reach) = self.model.point_at(&mut pose, to_model.transform_point3(target.into()), weight, pointing.hand()) {
+                pointing.made(reach);
+            }
+            worlds = self.model.worlds(&pose);
+        }
+        self.gaze.look(&self.model, &mut pose, &worlds, to_model.transform_point3(head.into()), delta);
+        self.model.express(&mut pose, "blink", self.animator.blink());
+        self.model.express(&mut pose, "aa", mouth);
+        self.springs.step(&self.model, &mut pose, body, delta);
+        self.changed = self.skinned.morph(&pose.weights);
+        (self.model.worlds(&pose), body)
+    }
+
+    /// Skins the posed figure into its window's space for the next render.
+    fn draw(&mut self, posed: &[glam::Mat4], to_window: glam::Mat4) {
+        let palette = self.skinned.palette(posed, to_window);
+        self.drawn.update(&palette, &self.skinned.vertices, &self.changed);
+    }
 }
 
 /// The catalog clips the overlay plays: its idles and every gesture the page's classifier can reach.
@@ -434,31 +468,11 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             board_overlay.show();
         }
         let delta = interval.as_secs_f32().min(0.05);
-        if let Some(idle) = puppet.animator.update(delta) {
-            tracing::info!("idle {idle}");
-        }
-        let mut pose = puppet.model.pose(&puppet.animator.humanoid(&puppet.standing, puppet.model.rest_hips()));
-        let mut worlds = puppet.model.worlds(&pose);
-        let body = stand.mat4() * glam::Mat4::from_scale(glam::Vec3::splat(size)) * puppet.fit.placement(&puppet.model, &worlds, 0.0);
-        let to_model = body.inverse();
-        let mouth = voice.mouth();
-        if let Some((target, weight)) = pointing.step(started, delta, mouth, |name| objects.locate(name)) {
-            if let Some(reach) = puppet.model.point_at(&mut pose, to_model.transform_point3(target.into()), weight, pointing.hand()) {
-                pointing.made(reach);
-            }
-            worlds = puppet.model.worlds(&pose);
-        }
-        puppet.gaze.look(&puppet.model, &mut pose, &worlds, to_model.transform_point3(head.t.into()), delta);
-        puppet.model.express(&mut pose, "blink", puppet.animator.blink());
-        puppet.model.express(&mut pose, "aa", mouth);
-        puppet.springs.step(&puppet.model, &mut pose, body, delta);
-        let posed = puppet.model.worlds(&pose);
+        let (posed, body) = puppet.step(delta, &stand, size, head.t, voice.mouth(), &mut pointing, started, |name| objects.locate(name));
         let eye_points = eye_offsets.map(|eye: Pose| head.then(&eye).t);
         let (quad, half) = if size > 1.0 { grown_window(&puppet.skinned, &posed, body, &head, &eye_points, view) } else { (figure, QUAD / 2.0) };
         let local = quad.inverse();
-        let changed = puppet.skinned.morph(&pose.weights);
-        let palette = puppet.skinned.palette(&posed, local.mat4() * body);
-        puppet.drawn.update(&palette, &puppet.skinned.vertices, &changed);
+        puppet.draw(&posed, local.mat4() * body);
         match anchor {
             Anchor::Stuck(_) | Anchor::Grounded(_) => overlay.place_in_world(&quad),
             _ => overlay.place_on(device, &left.inverse().then(&quad)),
@@ -623,6 +637,9 @@ fn run() -> Result<(), String> {
     let token = std::fs::read_to_string(&token_file).map_err(|error| format!("{}: {error}", token_file.display()))?.trim().to_owned();
     if args.get(1).is_some_and(|mode| mode == "session") {
         return session(&Token::decode(&token)?, &state, &args[2..]);
+    }
+    if args.get(1).is_some_and(|mode| mode == "wear") {
+        return wear::run(&Token::decode(&token)?, &state, &args[2..]);
     }
     let runtime = Runtime::init()?;
     host(runtime, &Token::decode(&token)?, &state)

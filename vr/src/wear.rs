@@ -1,0 +1,150 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use crate::board::Board;
+use crate::placement::{facing, Pose, Vec3};
+use crate::point::Pointing;
+use crate::relay::{Relay, Token};
+use crate::render::{eye_projection, eye_texels, Renderer, PAGE_HEIGHT};
+use crate::vulkan::Gpu;
+use crate::{action, load, preview, FLOOR, HEIGHT, QUAD};
+
+const FRAME: Duration = Duration::from_micros(11_111);
+/// The wearer's head in the hand-held puppet's frame, its feet at the origin: a little above and in front, as the controller is held.
+const HEAD: Vec3 = [0.0, -FLOOR + 0.12, 0.5];
+const EYES: f32 = 0.032;
+const IDLE: Duration = Duration::from_secs(3);
+const GESTURE: Duration = Duration::from_millis(2500);
+/// Into a gesture, where its picture is taken.
+const GESTURE_PICTURE: Duration = Duration::from_millis(1000);
+const POINT: Duration = Duration::from_secs(3);
+const POINT_PICTURE: Duration = Duration::from_millis(1500);
+/// What the puppet points at: where the overlay's first object stands beside a hand-held puppet.
+const TARGET: Vec3 = [0.22, 0.12, 0.0];
+
+/// Wears each named appearance of the catalog, or all of it, as the host does off any headset: its idle, each gesture the page can reach while speaking, and a point at a spot beside it, each frame posed, skinned and drawn for both eyes through the host's own path.
+/// Writes the revealed appearance library and a picture of each phase per appearance under the out directory, and reports each appearance's per-frame work and, where the kernel counts it, its GPU time.
+pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
+    let usage = "usage: voice-vr wear <out-dir> [<catalog id>...]";
+    let (out, ids) = args.split_first().ok_or(usage)?;
+    let out = PathBuf::from(out);
+    std::fs::create_dir_all(&out).map_err(|error| format!("{}: {error}", out.display()))?;
+    let cache = state.join("assets");
+    let mut relay = Relay::connect(token, &cache)?;
+    let catalog = relay.catalog()?;
+    let worn: Vec<usize> = if ids.is_empty() {
+        (0..catalog.avatars.len()).collect()
+    } else {
+        ids.iter().map(|id| catalog.avatars.iter().position(|avatar| &avatar.id == id).ok_or_else(|| format!("appearance {id} is not in the catalog"))).collect::<Result<_, _>>()?
+    };
+    library(&catalog.avatars, worn[0], Relay::connect(token, &cache)?, &out.join("library.png"))?;
+    let gpu = std::rc::Rc::new(Gpu::new(None)?);
+    let mut renderer = Renderer::new(gpu, [eye_texels(QUAD); 2], HEIGHT / PAGE_HEIGHT)?;
+    for index in worn {
+        let avatar = &catalog.avatars[index];
+        let pictures = out.join(&avatar.id);
+        std::fs::create_dir_all(&pictures).map_err(|error| format!("{}: {error}", pictures.display()))?;
+        let mut puppet = load(&mut relay, avatar, &mut renderer)?;
+        let mut pointing = Pointing::default();
+        let mut work = Vec::new();
+        let mut played = Vec::new();
+        let gpu_before = gpu_time();
+        let mut frame = |puppet: &mut crate::Puppet, pointing: &mut Pointing, mouth: f32, picture: Option<&Path>| -> Result<(), String> {
+            let started = Instant::now();
+            let stand = Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0; 3]);
+            let (posed, body) = puppet.step(FRAME.as_secs_f32(), &stand, 1.0, HEAD, mouth, pointing, started, |_| Some(TARGET));
+            let quad = facing(stand.apply([0.0, -FLOOR, 0.0]), HEAD);
+            let local = quad.inverse();
+            puppet.draw(&posed, local.mat4() * body);
+            let eyes = [-EYES, EYES].map(|x| eye_projection(local.apply([HEAD[0] + x, HEAD[1], HEAD[2]]).into(), QUAD / 2.0, QUAD / 2.0));
+            renderer.render(&puppet.drawn, eyes)?;
+            work.push(started.elapsed());
+            if let Some(path) = picture {
+                save(&renderer.read()?, eye_texels(QUAD), path)?;
+            }
+            if let Some(wait) = (started + FRAME).checked_duration_since(Instant::now()) {
+                std::thread::sleep(wait);
+            }
+            Ok(())
+        };
+        let frames = |span: Duration| (span.as_secs_f64() / FRAME.as_secs_f64()) as usize;
+        for at in 0..frames(IDLE) {
+            frame(&mut puppet, &mut pointing, 0.0, (at + 1 == frames(IDLE)).then(|| pictures.join("idle.png")).as_deref())?;
+        }
+        for gesture in action::gestures() {
+            if !puppet.animator.gesture(gesture) {
+                continue;
+            }
+            played.push(gesture);
+            for at in 0..frames(GESTURE) {
+                frame(&mut puppet, &mut pointing, speaking(at), (at == frames(GESTURE_PICTURE)).then(|| pictures.join(format!("gesture-{gesture}.png"))).as_deref())?;
+            }
+        }
+        pointing.start("target".into(), Instant::now());
+        for at in 0..frames(POINT) {
+            frame(&mut puppet, &mut pointing, speaking(at), (at == frames(POINT_PICTURE)).then(|| pictures.join("point.png")).as_deref())?;
+        }
+        let pointed = pointing.hand().map_or("no reach".to_owned(), |hand| format!("{hand:?} hand"));
+        let gpu = gpu_before.zip(gpu_time()).map_or("not counted".to_owned(), |(before, after)| format!("{:.2} ms", (after - before) as f64 / 1e6 / work.len() as f64));
+        let measured: Vec<f64> = work.iter().skip(45).map(|time| time.as_secs_f64() * 1e3).collect();
+        let mut sorted = measured.clone();
+        sorted.sort_by(f64::total_cmp);
+        let report = format!(
+            "{}: {} vertices, {} joints, {} spring joints; gestures {played:?}; pointed with the {pointed}; {} frames past the first 45: work mean {:.2} p95 {:.2} max {:.2} ms; GPU {gpu} per frame",
+            avatar.id,
+            puppet.skinned.vertices.len(),
+            puppet.skinned.joints(),
+            puppet.model.spring_joints(),
+            measured.len(),
+            measured.iter().sum::<f64>() / measured.len() as f64,
+            sorted[sorted.len() * 95 / 100],
+            sorted[sorted.len() - 1],
+        );
+        println!("{report}");
+        std::fs::write(pictures.join("cost.txt"), report + "\n").map_err(|error| format!("{}: {error}", pictures.display()))?;
+    }
+    Ok(())
+}
+
+/// A mouth opening and closing as speech does.
+fn speaking(frame: usize) -> f32 {
+    0.3 + 0.25 * (frame as f32 * 0.7).sin()
+}
+
+/// The board with its appearance library revealed and every preview drawn, `active` framed.
+fn library(avatars: &[crate::relay::Avatar], active: usize, relay: Relay, path: &Path) -> Result<(), String> {
+    let mut board = Board::new(avatars.len(), active);
+    board.reveal(Instant::now());
+    for (index, image) in preview::spawn(relay, avatars.to_vec()) {
+        board.preview(index, image);
+    }
+    let canvas = board.take_image().ok_or("the board drew nothing")?;
+    let image = image::RgbaImage::from_raw(canvas.width, canvas.height, canvas.pixels).ok_or("the board's pixels do not fit its size")?;
+    image.save(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    println!("wrote {}", path.display());
+    Ok(())
+}
+
+/// The left eye of a stereo render, its premultiplied colour over a dark backdrop.
+fn save(stereo: &[u8], eye: u32, path: &Path) -> Result<(), String> {
+    let image = image::RgbImage::from_fn(eye, eye, |x, y| {
+        let at = ((y * 2 * eye + x) * 4) as usize;
+        let alpha = stereo[at + 3] as f32 / 255.0;
+        let shade = 0.17 - 0.08 * y as f32 / eye as f32;
+        image::Rgb([0, 1, 2].map(|channel| ((stereo[at + channel] as f32 / 255.0 + shade * (1.0 - alpha)).clamp(0.0, 1.0) * 255.0).round() as u8))
+    });
+    image.save(path).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+/// This process's GPU time, in nanoseconds, from the DRM clients' `drm-engine-*` counters in its fdinfo; None where the driver keeps none.
+fn gpu_time() -> Option<u64> {
+    let mut clients: HashMap<String, u64> = HashMap::new();
+    for entry in std::fs::read_dir("/proc/self/fdinfo").ok()?.flatten() {
+        let Ok(text) = std::fs::read_to_string(entry.path()) else { continue };
+        let Some(client) = text.lines().find_map(|line| line.strip_prefix("drm-client-id:")) else { continue };
+        let engines = text.lines().filter_map(|line| line.strip_prefix("drm-engine-")).filter_map(|line| line.split_once(':')?.1.trim().strip_suffix("ns")?.trim().parse::<u64>().ok()).sum();
+        clients.insert(client.trim().to_owned(), engines);
+    }
+    (!clients.is_empty()).then(|| clients.values().sum())
+}

@@ -38,8 +38,9 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
     } else {
         ids.iter().map(|id| catalog.avatars.iter().position(|avatar| &avatar.id == id).ok_or_else(|| format!("appearance {id} is not in the catalog"))).collect::<Result<_, _>>()?
     };
-    library(&catalog.avatars, worn[0], Relay::connect(token, &cache)?, &out.join("library.png"))?;
+    // Made first, as the host does: were the preview thread's device the process's only one, the loader would unload the driver before that thread's exit runs the driver's thread-local destructors.
     let gpu = std::rc::Rc::new(Gpu::new(None)?);
+    library(&catalog.avatars, worn[0], Relay::connect(token, &cache)?, &out.join("library.png"))?;
     let mut renderer = Renderer::new(gpu, [eye_texels(QUAD); 2], HEIGHT / PAGE_HEIGHT)?;
     for index in worn {
         let avatar = &catalog.avatars[index];

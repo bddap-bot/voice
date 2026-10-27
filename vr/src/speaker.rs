@@ -481,7 +481,7 @@ impl GrantedAudio {
         }
     }
 
-    pub fn read(&mut self, out: &mut [f32]) {
+    pub fn read(&mut self, out: &mut [f32]) -> usize {
         out.fill(0.0);
         let length = self.ring.len() as i64;
         let mut at = 0;
@@ -502,6 +502,7 @@ impl GrantedAudio {
             self.cursor += count;
             at += count as usize;
         }
+        at
     }
 }
 
@@ -681,6 +682,7 @@ struct Running {
     chunk: Vec<f32>,
     granted: GrantedAudio,
     failed: bool,
+    gap: crate::audio::AudioGap,
     #[cfg(test)]
     sent: usize,
     #[cfg(test)]
@@ -689,13 +691,14 @@ struct Running {
 
 /// The session side of the filter: what Live hears of each captured frame.
 pub struct Ear {
+    call: String,
     hearing: Arc<Mutex<Hearing>>,
     running: Option<(u64, Mode, Running)>,
 }
 
 impl Ear {
-    pub fn new(hearing: Arc<Mutex<Hearing>>) -> Ear {
-        Ear { hearing, running: None }
+    pub fn new(hearing: Arc<Mutex<Hearing>>, call: String) -> Ear {
+        Ear { hearing, call, running: None }
     }
 
     /// Starts afresh at the next frame, as the page builds a new filter for each microphone stream.
@@ -719,6 +722,7 @@ impl Ear {
                 chunk: Vec::new(),
                 granted,
                 failed: false,
+                gap: crate::audio::AudioGap::new("speaker-filter-withheld", &self.call),
                 #[cfg(test)]
                 sent: 0,
                 #[cfg(test)]
@@ -742,7 +746,7 @@ impl Ear {
             match &event {
                 Report::Open(at) => running.granted.open(at * DECIMATION as i64),
                 Report::Close(at) => running.granted.close(at * DECIMATION as i64),
-                Report::Score { .. } => tracing::info!("speaker {event:?}"),
+                Report::Score { .. } => tracing::info!(layer = "speaker-filter", threshold = page().threshold, "speaker {event:?}"),
                 Report::Error(error) if !running.failed => {
                     tracing::warn!("speaker filter off, hearing everyone: {error}");
                     running.failed = true;
@@ -754,8 +758,11 @@ impl Ear {
             }
         }
         match mode {
-            Mode::Filter(_) if running.failed => {}
-            Mode::Filter(_) => running.granted.read(frame),
+            Mode::Filter(_) if running.failed => { running.gap.finish("filter failed open"); }
+            Mode::Filter(_) => {
+                let granted = running.granted.read(frame);
+                running.gap.samples(frame.len() - granted);
+            },
             _ => frame.fill(0.0),
         }
     }
@@ -985,21 +992,24 @@ mod tests {
     fn granted_audio_is_replayed_in_order_skipping_what_was_never_granted() {
         let mut granted = GrantedAudio::new(1000);
         granted.write(&(1..=600).map(|value| value as f32).collect::<Vec<_>>());
+        let mut withheld = [1.0; 80];
+        assert_eq!(granted.read(&mut withheld), 0);
+        assert_eq!(withheld, [0.0; 80]);
         granted.open(100);
         granted.close(150);
         granted.open(400);
         let mut out = vec![0.0; 80];
-        granted.read(&mut out);
+        assert_eq!(granted.read(&mut out), 80);
         assert_eq!(out[..50], (101..151).map(|value| value as f32).collect::<Vec<_>>()[..]);
         assert_eq!(out[50..], (401..431).map(|value| value as f32).collect::<Vec<_>>()[..]);
         granted.close(460);
         granted.close(440);
-        granted.read(&mut out);
+        assert_eq!(granted.read(&mut out), 10);
         assert_eq!(out[..10], (431..441).map(|value| value as f32).collect::<Vec<_>>()[..]);
         assert!(out[10..].iter().all(|&value| value == 0.0));
         granted.write(&[0.0; 2000]);
         granted.open(0);
-        granted.read(&mut out);
+        assert_eq!(granted.read(&mut out), 80);
         assert_eq!(granted.cursor, 2600 - 1000 + 80, "audio already overwritten is skipped");
     }
 
@@ -1099,7 +1109,7 @@ mod tests {
     fn recorded_speech_from_the_enrolled_speaker_passes_and_others_are_filtered_with_voice_id_on_and_off() {
         let capture = crate::audio::RATE as f64;
         let hearing = Arc::new(Mutex::new(Hearing::default()));
-        let mut ear = Ear::new(hearing.clone());
+        let mut ear = Ear::new(hearing.clone(), "test".into());
 
         hearing.lock().unwrap().set(Mode::Learn);
         let mut enrollment = Vec::new();

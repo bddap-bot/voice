@@ -200,7 +200,7 @@ impl Voice {
     /// The microphone stops or starts and nothing else changes; the choice holds across sessions.
     pub fn toggle_mute(&mut self) -> bool {
         self.muted = !self.muted;
-        tracing::info!("microphone {}", if self.muted { "muted" } else { "unmuted" });
+        tracing::info!(layer = "capture", reason = "mute control", muted = self.muted, "microphone {}", if self.muted { "muted" } else { "unmuted" });
         if self.muted {
             self.stop_learning("voice learning stopped");
         }

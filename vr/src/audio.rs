@@ -1,7 +1,40 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use pulseaudio::protocol;
+
+pub struct AudioGap {
+    layer: &'static str,
+    call: String,
+    pending: Option<(Instant, usize)>,
+}
+
+impl AudioGap {
+    pub fn new(layer: &'static str, call: &str) -> Self {
+        Self { layer, call: call.to_owned(), pending: None }
+    }
+
+    pub fn samples(&mut self, count: usize) {
+        if count > 0 {
+            self.pending.get_or_insert((Instant::now(), 0)).1 += count;
+        } else {
+            self.finish("recovered");
+        }
+    }
+
+    pub fn finish(&mut self, end: &str) {
+        if let Some((start, samples)) = self.pending.take() {
+            tracing::info!(layer = self.layer, call = self.call.as_str(), end, samples, audio_ms = samples as u64 * 1000 / RATE as u64, elapsed_ms = start.elapsed().as_millis() as u64, "audio gap");
+        }
+    }
+}
+
+impl Drop for AudioGap {
+    fn drop(&mut self) {
+        self.finish("observer ended");
+    }
+}
 
 pub const RATE: u32 = 48_000;
 const SILENT: f32 = 0.001;

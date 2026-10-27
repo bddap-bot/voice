@@ -11,7 +11,7 @@ use str0m::media::{Direction, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event as RtcEvent, IceConnectionState, Input, Output, Rtc};
 
-use crate::audio::{Audio, PlaybackBuffer, RATE};
+use crate::audio::{Audio, AudioGap, PlaybackBuffer, RATE};
 use crate::conversation::Wake;
 use crate::identity::identity;
 use crate::hub::{self, Command, Tell};
@@ -169,6 +169,7 @@ impl Link {
         let mut renewing = false;
         let mut previous = None;
         let result = loop {
+            let setup_started = Instant::now();
             let attempt = (|| {
                 let socket = UdpSocket::bind(local_address()?).map_err(|error| format!("peer socket: {error}"))?;
                 let local = socket.local_addr().map_err(|error| error.to_string())?;
@@ -190,7 +191,7 @@ impl Link {
                 let (sdp, window) = self.answer(&frames, &id, &mut audio, &mut capturing)?;
                 tracing::info!("answer {id}: context_turns {window}");
                 rtc.sdp_api().accept_answer(pending, SdpAnswer::from_sdp_string(&sdp).map_err(|error| format!("answer: {error}"))?).map_err(|error| format!("answer: {error}"))?;
-                let next = self.converse(&mut rtc, &socket, &mut relay, &frames, &mut audio, mid, channel, &mut capturing, &id, window, seeded, renewing, &mut previous)?;
+                let next = self.converse(&mut rtc, &socket, &mut relay, &frames, &mut audio, mid, channel, &mut capturing, &id, window, seeded, renewing, setup_started, &mut previous)?;
                 previous = Some((rtc, socket));
                 Ok::<_, String>(next)
             })();
@@ -253,7 +254,7 @@ impl Link {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn converse(&self, rtc: &mut Rtc, socket: &UdpSocket, relay: &mut Relay, frames: &mpsc::Receiver<Result<Vec<u8>, String>>, audio: &mut Audio, mid: Mid, channel: ChannelId, capturing: &mut bool, id: &str, window: usize, seeded: usize, renewing: bool, previous: &mut Option<(Rtc, UdpSocket)>) -> Result<Wake, String> {
+    fn converse(&self, rtc: &mut Rtc, socket: &UdpSocket, relay: &mut Relay, frames: &mpsc::Receiver<Result<Vec<u8>, String>>, audio: &mut Audio, mid: Mid, channel: ChannelId, capturing: &mut bool, id: &str, window: usize, seeded: usize, renewing: bool, setup_started: Instant, previous: &mut Option<(Rtc, UdpSocket)>) -> Result<Wake, String> {
         let mut encoder = opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip).map_err(|error| format!("opus encoder: {error}"))?;
         let mut decoder = opus::Decoder::new(RATE, opus::Channels::Mono).map_err(|error| format!("opus decoder: {error}"))?;
         let local = socket.local_addr().map_err(|error| error.to_string())?;
@@ -265,8 +266,10 @@ impl Link {
         let mut packet = vec![0u8; 4000];
         let mut decoded = vec![0f32; 5760];
         let mut buffer = vec![0u8; 2000];
-        let mut ear = Ear::new(self.hearing.clone());
+        let mut ear = Ear::new(self.hearing.clone(), id.to_owned());
         let mut limit_reported = false;
+        let mut capture_gap = AudioGap::new("capture-queue", id);
+        let mut backlog_gap = AudioGap::new("send-backlog", id);
         loop {
             let timeout = loop {
                 match rtc.poll_output().map_err(|error| format!("peer connection: {error}"))? {
@@ -279,7 +282,9 @@ impl Link {
                     Output::Event(event) => match event {
                         RtcEvent::Connected => {
                             connected = true;
-                            audio.captured.lock().unwrap().clear();
+                            let mut captured = audio.captured.lock().unwrap();
+                            tracing::info!(layer = "transport", call = id, renewing, muted = !*capturing, elapsed_ms = setup_started.elapsed().as_millis() as u64, discarded_samples = captured.len(), "audio connection ready");
+                            captured.clear();
                         }
                         RtcEvent::IceConnectionStateChange(IceConnectionState::Disconnected) => return Err("the connection dropped".into()),
                         RtcEvent::MediaData(data) => match decoder.decode_float(&data.data, &mut decoded, false) {
@@ -342,6 +347,8 @@ impl Link {
             }
             self.follow_mute(audio, capturing)?;
             if !*capturing {
+                capture_gap.finish("muted");
+                backlog_gap.finish("muted");
                 ear.reset();
             }
             loop {
@@ -383,6 +390,10 @@ impl Link {
                     let mut captured = audio.captured.lock().unwrap();
                     let stale = captured.len().saturating_sub(BACKLOG);
                     captured.drain(..stale);
+                    if connected && *capturing {
+                        backlog_gap.samples(stale);
+                        capture_gap.samples(if captured.len() < FRAME { FRAME } else { 0 });
+                    }
                     if captured.len() >= FRAME {
                         for (slot, sample) in frame.iter_mut().zip(captured.drain(..FRAME)) {
                             *slot = sample;
@@ -427,6 +438,40 @@ impl Link {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_gaps_log_once_on_recovery_or_exit_and_keep_layers_separate() {
+        struct Writer(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = bytes.clone();
+        let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false).with_writer(move || Writer(sink.clone())).finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut capture = AudioGap::new("capture-queue", "test-call");
+            let mut backlog = AudioGap::new("send-backlog", "test-call");
+            capture.samples(0);
+            capture.samples(FRAME);
+            capture.samples(FRAME);
+            backlog.samples(3 * FRAME);
+            assert!(bytes.lock().unwrap().is_empty());
+            capture.samples(0);
+            capture.samples(0);
+            backlog.finish("muted");
+            capture.samples(FRAME);
+        });
+        let text = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "{text}");
+        assert!(lines[0].contains("layer=\"capture-queue\"") && lines[0].contains("samples=1920") && lines[0].contains("audio_ms=40") && lines[0].contains("recovered"), "{text}");
+        assert!(lines[1].contains("layer=\"send-backlog\"") && lines[1].contains("samples=2880") && lines[1].contains("muted"), "{text}");
+        assert!(lines[2].contains("observer ended") && lines[2].contains("samples=960") && lines[2].contains("test-call"), "{text}");
+    }
 
     #[test]
     fn an_answer_must_name_a_positive_context_window() {

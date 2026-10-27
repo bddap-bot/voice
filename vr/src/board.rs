@@ -2,10 +2,13 @@ use std::time::{Duration, Instant};
 
 use font8x8::legacy::BASIC_LEGACY;
 
+use std::collections::HashMap;
+
 use crate::calls::State;
 use crate::conversation::Entry;
 use crate::placement::{Anchor, Vec3};
 use crate::voice::VoiceId;
+use crate::vrm::expressions::{Control, Icon, Kind};
 
 pub const WIDTH: f32 = 0.2;
 /// How long the appearance library stays after a reveal.
@@ -13,8 +16,10 @@ pub const LIBRARY_SHOWN: Duration = Duration::from_secs(60);
 const PIXELS_PER_METRE: f32 = 2000.0;
 const ROW: f32 = 0.022;
 const GAP: f32 = 0.004;
-/// Dismiss, the microphone and reset, Voice ID, Learn my voice, and the log with setting the avatar down.
 const ROWS: usize = 5;
+const PAD_ROWS: usize = 4;
+const MENU_GLYPH_SCALE: u32 = 1;
+const ROW_PIXELS: u32 = (ROW * PIXELS_PER_METRE) as u32;
 const COLUMNS: usize = 6;
 const CELL: f32 = (WIDTH - (COLUMNS + 1) as f32 * GAP) / COLUMNS as f32;
 /// The highlight showing around a preview.
@@ -59,6 +64,9 @@ pub enum Press {
     Log,
     SetDown,
     Appearance(usize),
+    Menu,
+    Back,
+    Control(usize),
 }
 
 struct Button {
@@ -116,8 +124,23 @@ pub fn marker_at([width, height]: [f32; 2], tip: Option<Vec3>) -> Option<Vec3> {
     tip.filter(|&[x, y, z]| x.abs() <= width / 2.0 && y.abs() <= height / 2.0 && z <= NEAR).map(|[x, y, z]| [x, y, z.max(0.0)])
 }
 
+struct Menu {
+    controls: Vec<Control>,
+    icons: Vec<Icon>,
+    path: Vec<usize>,
+    open: bool,
+    values: HashMap<String, f32>,
+}
+
+impl Menu {
+    fn page(&self) -> &[Control] {
+        self.path.iter().fold(&self.controls, |controls, &at| &controls[at].controls)
+    }
+}
+
 pub struct Board {
     previews: Vec<Option<Vec<u8>>>,
+    menu: Option<Menu>,
     /// When the appearance library was last revealed, while it shows.
     library: Option<Instant>,
     shows_log: bool,
@@ -134,7 +157,7 @@ pub struct Board {
 
 impl Board {
     pub fn new(appearances: usize, active: usize) -> Board {
-        Board { previews: vec![None; appearances], library: None, shows_log: true, log: Vec::new(), active, pending: None, muted: false, voice: VoiceId::default(), anchor: Anchor::Riding, contact: Contact::default(), hover: None, dirty: true }
+        Board { previews: vec![None; appearances], menu: None, library: None, shows_log: true, log: Vec::new(), active, pending: None, muted: false, voice: VoiceId::default(), anchor: Anchor::Riding, contact: Contact::default(), hover: None, dirty: true }
     }
 
     /// As summoned: a hand already at the board must withdraw before it presses, and the appearance library is hidden.
@@ -142,13 +165,119 @@ impl Board {
         self.contact.reset();
         self.hover = None;
         self.library = None;
+        if let Some(menu) = &mut self.menu {
+            menu.open = false;
+            menu.path.clear();
+        }
         self.dirty = true;
     }
 
     /// Shows the appearance library below the buttons, growing the board downward, for `LIBRARY_SHOWN` from `now`.
     pub fn reveal(&mut self, now: Instant) {
         self.library = Some(now);
+        if let Some(menu) = &mut self.menu {
+            menu.open = false;
+        }
         self.dirty = true;
+    }
+
+    pub fn wear(&mut self, menu: Option<(Vec<Control>, Vec<Icon>)>, values: HashMap<String, f32>) {
+        self.menu = menu.filter(|(controls, _)| !controls.is_empty()).map(|(controls, icons)| Menu { controls, icons, path: Vec::new(), open: false, values });
+        self.dirty = true;
+    }
+
+    pub fn toggle_menu(&mut self) {
+        if let Some(menu) = &mut self.menu {
+            menu.open = !menu.open;
+            menu.path.clear();
+            self.library = None;
+            self.dirty = true;
+        }
+    }
+
+    pub fn back(&mut self) {
+        if let Some(menu) = &mut self.menu {
+            menu.path.pop();
+            self.dirty = true;
+        }
+    }
+
+    pub fn control(&mut self, index: usize) -> Option<Control> {
+        let menu = self.menu.as_mut()?;
+        let control = menu.page().get(index)?.clone();
+        if control.kind == Kind::Submenu {
+            menu.path.push(index);
+        }
+        self.dirty = true;
+        Some(control)
+    }
+
+    pub fn place_on(&self, index: usize, [x, y]: [f32; 2]) -> [f32; 2] {
+        let [left, bottom, right, top] = self.menu_rects().into_iter().find(|&(press, _)| press == Press::Control(index)).map_or([0.0, 0.0, 1.0, 1.0], |(_, rect)| rect);
+        [((x - left) / (right - left)).clamp(0.0, 1.0), ((y - bottom) / (top - bottom)).clamp(0.0, 1.0)]
+    }
+
+    pub fn set_values(&mut self, values: HashMap<String, f32>) {
+        if let Some(menu) = &mut self.menu {
+            if menu.values != values {
+                menu.values = values;
+                self.dirty = true;
+            }
+        }
+    }
+
+    fn rows(&self) -> usize {
+        ROWS + self.menu.is_some() as usize
+    }
+
+    fn menu_open(&self) -> Option<&Menu> {
+        self.menu.as_ref().filter(|menu| menu.open)
+    }
+
+    fn menu_rects(&self) -> Vec<(Press, [f32; 4])> {
+        let Some(menu) = self.menu_open() else { return Vec::new() };
+        let (left, right) = (-WIDTH / 2.0 + GAP, WIDTH / 2.0 - GAP);
+        let half = (right - left - GAP) / 2.0;
+        let mut top = self.height() / 2.0 - GAP - self.rows() as f32 * (ROW + GAP) - self.log_height();
+        let mut out = Vec::new();
+        let mut row = |height: f32, columns: &[(Press, f32, f32)], out: &mut Vec<(Press, [f32; 4])>| {
+            for &(press, from, to) in columns {
+                out.push((press, [from, top - height, to, top]));
+            }
+            top -= height + GAP;
+        };
+        if !menu.path.is_empty() {
+            row(ROW, &[(Press::Back, left, right)], &mut out);
+        }
+        let mut pending: Option<usize> = None;
+        for (index, control) in menu.page().iter().enumerate() {
+            match control.kind {
+                Kind::Radial => row(ROW, &[(Press::Control(index), left, right)], &mut out),
+                Kind::TwoAxis | Kind::FourAxis => row(PAD_ROWS as f32 * ROW + (PAD_ROWS - 1) as f32 * GAP, &[(Press::Control(index), left, right)], &mut out),
+                _ => match pending.take() {
+                    Some(first) => row(ROW, &[(Press::Control(first), left, left + half), (Press::Control(index), right - half, right)], &mut out),
+                    None => pending = Some(index),
+                },
+            }
+        }
+        if let Some(last) = pending {
+            row(ROW, &[(Press::Control(last), left, left + half)], &mut out);
+        }
+        out
+    }
+
+    fn menu_height(&self) -> f32 {
+        let Some(menu) = self.menu_open() else { return 0.0 };
+        let pad = PAD_ROWS as f32 * ROW + (PAD_ROWS - 1) as f32 * GAP;
+        let paired = menu.page().iter().filter(|control| !matches!(control.kind, Kind::Radial | Kind::TwoAxis | Kind::FourAxis)).count();
+        let heights = (!menu.path.is_empty()) as usize as f32 * (ROW + GAP)
+            + menu.page().iter().map(|control| match control.kind {
+                Kind::Radial => ROW + GAP,
+                Kind::TwoAxis | Kind::FourAxis => pad + GAP,
+                _ => 0.0,
+            }).sum::<f32>()
+            + paired.div_ceil(2) as f32 * (ROW + GAP);
+        heights
     }
 
     /// Hides the appearance library once `LIBRARY_SHOWN` has passed since its reveal.
@@ -213,7 +342,7 @@ impl Board {
 
     pub fn height(&self) -> f32 {
         let lines = if self.library() { self.previews.len().div_ceil(COLUMNS) } else { 0 };
-        ROWS as f32 * ROW + self.log_height() + lines as f32 * CELL + (ROWS + lines + 1) as f32 * GAP
+        self.rows() as f32 * ROW + self.log_height() + lines as f32 * CELL + (self.rows() + lines + 1) as f32 * GAP + self.menu_height()
     }
 
     pub fn pixels(&self) -> [u32; 2] {
@@ -226,7 +355,7 @@ impl Board {
     }
 
     fn cell(&self, index: usize) -> [f32; 4] {
-        let top = self.height() / 2.0 - GAP - ROWS as f32 * (ROW + GAP) - self.log_height() - (index / COLUMNS) as f32 * (CELL + GAP);
+        let top = self.height() / 2.0 - GAP - self.rows() as f32 * (ROW + GAP) - self.log_height() - (index / COLUMNS) as f32 * (CELL + GAP);
         let left = -WIDTH / 2.0 + GAP + (index % COLUMNS) as f32 * (CELL + GAP);
         [left, top - CELL, left + CELL, top]
     }
@@ -245,6 +374,10 @@ impl Board {
         if self.voice.stored {
             buttons.push(Button { press: Press::VoiceId, rect: self.row(2, left, right) });
         }
+        if self.menu.is_some() {
+            buttons.push(Button { press: Press::Menu, rect: self.row(ROWS, left, right) });
+        }
+        buttons.extend(self.menu_rects().into_iter().map(|(press, rect)| Button { press, rect }));
         let shown = if self.library() { self.previews.len() } else { 0 };
         buttons.extend((0..shown).map(|index| Button { press: Press::Appearance(index), rect: self.cell(index) }));
         buttons
@@ -300,6 +433,25 @@ impl Board {
                     Anchor::Settling(_) => (PENDING, "Set down".to_owned()),
                     Anchor::Stuck(_) | Anchor::Grounded(_) => (ACTIVE, "Pick up".to_owned()),
                 },
+                Press::Menu => (if self.menu_open().is_some() { ACTIVE } else { BUTTON }, "Menu".to_owned()),
+                Press::Back => {
+                    image.fill(area, BUTTON);
+                    image.small_label(area, "<");
+                    continue;
+                }
+                Press::Control(index) => {
+                    let menu = self.menu_open().expect("a control shows only with the menu open");
+                    let control = &menu.page()[index];
+                    let [left, top, right, bottom] = area;
+                    let icon = control.icon.map(|icon| &menu.icons[icon]).filter(|icon| icon.height <= ROW_PIXELS && 2 * icon.width <= right - left);
+                    let inset = icon.map_or(0, |icon| icon.width + (ROW_PIXELS - icon.height) / 2);
+                    self.draw_control(&mut image, area, inset, control, &menu.values);
+                    if let Some(icon) = icon {
+                        let margin = (ROW_PIXELS - icon.height) / 2;
+                        image.over([left + margin, top + margin.min(bottom - top - icon.height)], [icon.width, icon.height], &icon.rgba);
+                    }
+                    continue;
+                }
                 Press::Appearance(index) => {
                     let fill = if self.pending == Some(index) {
                         PENDING
@@ -321,7 +473,7 @@ impl Board {
             image.fill(area, fill);
             image.label(area, &label);
         }
-        let [left, _, _, bottom] = self.area(self.row(ROWS - 1, -WIDTH / 2.0 + GAP, WIDTH / 2.0 - GAP));
+        let [left, _, _, bottom] = self.area(self.row(self.rows() - 1, -WIDTH / 2.0 + GAP, WIDTH / 2.0 - GAP));
         let first = bottom + (GAP * PIXELS_PER_METRE) as u32 + PADDING;
         for (index, (line, ink, mark)) in self.log_lines().into_iter().enumerate() {
             let y = first + index as u32 * LINE;
@@ -332,6 +484,45 @@ impl Board {
             image.outline(self.area(button.rect), BORDER, HOVER);
         }
         image
+    }
+
+    fn draw_control(&self, image: &mut Canvas, area: [u32; 4], inset: u32, control: &Control, values: &HashMap<String, f32>) {
+        let value = |name: &str| values.get(name).copied().unwrap_or(0.0);
+        let [left, top, right, bottom] = area;
+        let labelled = [left + inset, top, right, bottom];
+        match control.kind {
+            Kind::Toggle | Kind::Button => {
+                let on = !control.parameter.is_empty() && value(&control.parameter) == control.value;
+                image.fill(area, if on { ACTIVE } else { BUTTON });
+                image.small_label(labelled, &control.name);
+            }
+            Kind::Submenu => {
+                image.fill(area, BUTTON);
+                image.small_label(labelled, &format!("{} >", control.name));
+            }
+            Kind::Radial => {
+                image.fill(area, BUTTON);
+                let fill = value(control.axes.first().map_or("", String::as_str)).clamp(0.0, 1.0);
+                image.fill([left, top, left + ((right - left) as f32 * fill).round() as u32, bottom], ACTIVE);
+                image.small_label(labelled, &control.name);
+            }
+            Kind::TwoAxis | Kind::FourAxis => {
+                image.fill(area, BUTTON);
+                let [x, y] = match control.kind {
+                    Kind::TwoAxis => [(value(control.axes.first().map_or("", String::as_str)) + 1.0) / 2.0, (value(control.axes.get(1).map_or("", String::as_str)) + 1.0) / 2.0],
+                    _ => {
+                        let axis = |at: usize| value(control.axes.get(at).map_or("", String::as_str));
+                        [(1.0 + axis(1) - axis(3)) / 2.0, (1.0 + axis(0) - axis(2)) / 2.0]
+                    }
+                };
+                let (cx, cy) = ((right - left) / 2 + left, (bottom - top) / 2 + top);
+                image.fill([cx, top, cx + 1, bottom], BACKGROUND);
+                image.fill([left, cy, right, cy + 1], BACKGROUND);
+                let dot = [left + ((right - left) as f32 * x.clamp(0.0, 1.0)) as u32, bottom - ((bottom - top) as f32 * y.clamp(0.0, 1.0)) as u32];
+                image.fill([dot[0].saturating_sub(BORDER).max(left), dot[1].saturating_sub(BORDER).max(top), (dot[0] + BORDER).min(right), (dot[1] + BORDER).min(bottom)], ACTIVE);
+                image.small_label([left + inset, top, right, top + ROW_PIXELS], &control.name);
+            }
+        }
     }
 
     /// Metres from the board's centre to left, top, right, bottom pixels.
@@ -420,6 +611,19 @@ impl Canvas {
         let x0 = left + (right - left - characters.len() as u32 * glyph) / 2;
         let y0 = top + (bottom - top).saturating_sub(glyph) / 2;
         self.text([x0, y0], &characters, GLYPH_SCALE, INK);
+    }
+
+    fn small_label(&mut self, [left, top, right, bottom]: [u32; 4], text: &str) {
+        let glyph = 8 * MENU_GLYPH_SCALE;
+        let fits = ((right - left).saturating_sub(2 * PADDING) / glyph) as usize;
+        let mut characters: Vec<char> = text.trim().chars().map(|c| if c.is_ascii() && !c.is_ascii_control() { c } else { '?' }).collect();
+        if characters.len() > fits {
+            characters.truncate(fits.saturating_sub(2));
+            characters.extend(['.', '.']);
+        }
+        let x0 = left + (right - left - characters.len() as u32 * glyph) / 2;
+        let y0 = top + (bottom - top).saturating_sub(glyph) / 2;
+        self.text([x0, y0], &characters, MENU_GLYPH_SCALE, INK);
     }
 
     /// ASCII glyphs `scale` canvas pixels per font pixel, the first glyph's top left corner at `at`.
@@ -986,5 +1190,54 @@ mod tests {
         assert!(board.library(), "a second reveal restarts the minute");
         board.tick(at(210));
         assert!(!board.library());
+    }
+
+    fn menu() -> Vec<Control> {
+        serde_json::from_value(serde_json::json!([
+            {"name": "Hat", "type": "toggle", "parameter": "Hat"},
+            {"name": "Colour", "type": "radial", "axes": ["Hue"]},
+            {"name": "Outfits", "type": "submenu", "controls": [{"name": "Coat", "type": "toggle", "parameter": "Coat"}, {"name": "Pose", "type": "twoAxis", "axes": ["X", "Y"]}]}
+        ]))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_menu_shows_only_for_an_avatar_with_one_and_each_control_presses_once() {
+        let mut board = Board::new(3, 0);
+        let plain = board.height();
+        assert!(board.buttons().iter().all(|button| button.press != Press::Menu));
+        board.wear(Some((menu(), Vec::new())), HashMap::from([("Hat".to_owned(), 1.0)]));
+        assert_eq!(poke_on(&mut board, Press::Menu, 0.01), [Press::Menu]);
+        board.toggle_menu();
+        assert!(board.height() > plain + 3.0 * ROW, "the menu's page grows the board");
+        for index in 0..3 {
+            assert_eq!(poke_on(&mut board, Press::Control(index), 0.01), [Press::Control(index)]);
+        }
+        board.reveal(Instant::now());
+        assert!(board.buttons().iter().all(|button| !matches!(button.press, Press::Control(_))), "the library takes the menu's place");
+    }
+
+    #[test]
+    fn a_submenu_opens_in_place_and_back_returns() {
+        let mut board = Board::new(1, 0);
+        board.wear(Some((menu(), Vec::new())), HashMap::new());
+        board.toggle_menu();
+        assert_eq!(board.control(2).map(|control| control.name), Some("Outfits".to_owned()));
+        assert_eq!(board.control(0).map(|control| control.name), Some("Coat".to_owned()));
+        assert!(board.buttons().iter().any(|button| button.press == Press::Back));
+        board.back();
+        assert_eq!(board.control(0).map(|control| control.name), Some("Hat".to_owned()));
+    }
+
+    #[test]
+    fn a_radial_reads_where_along_it_the_tip_crossed() {
+        let mut board = Board::new(1, 0);
+        board.wear(Some((menu(), Vec::new())), HashMap::new());
+        board.toggle_menu();
+        let [left, bottom, right, top] = rect_of(&board, Press::Control(1));
+        let [x, _] = board.place_on(1, [left + 0.25 * (right - left), (bottom + top) / 2.0]);
+        assert!((x - 0.25).abs() < 1e-4, "{x}");
+        let image = board.take_image().unwrap();
+        assert_eq!(pixel(&board, &image.pixels, left + 0.001, (bottom + top) / 2.0), BUTTON, "an unset radial shows no fill");
     }
 }

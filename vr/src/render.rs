@@ -104,6 +104,7 @@ struct DrawCall {
     pipeline: vk::Pipeline,
     material: u32,
     outline: bool,
+    switched: Option<usize>,
 }
 
 type Buffer = (vk::Buffer, vk::DeviceMemory, *mut u8);
@@ -134,6 +135,7 @@ pub struct Appearance {
     joints: usize,
     materials: Buffer,
     drawn: Vec<DrawCall>,
+    pub hidden: std::collections::HashSet<usize>,
 }
 
 fn color_range(levels: u32) -> vk::ImageSubresourceRange {
@@ -262,6 +264,7 @@ impl Renderer {
             joints,
             materials: upload(bytes_of(&material_data), vk::BufferUsageFlags::STORAGE_BUFFER)?,
             drawn: Vec::new(),
+            hidden: Default::default(),
         };
         for image in &model.images {
             appearance.textures.push(texture(gpu, image.width, image.height, &image.rgba)?);
@@ -291,7 +294,7 @@ impl Renderer {
             .iter()
             .flat_map(|draw| {
                 let material = &model.materials[draw.material];
-                let call = |outline| DrawCall { first: draw.first, count: draw.count, set: sets[draw.material], pipeline: self.pipelines[&key(material, outline)], material: draw.material as u32, outline };
+                let call = |outline| DrawCall { first: draw.first, count: draw.count, set: sets[draw.material], pipeline: self.pipelines[&key(material, outline)], material: draw.material as u32, outline, switched: draw.switched };
                 [Some(call(false)), material.outline.as_ref().map(|_| call(true))]
             })
             .flatten()
@@ -429,7 +432,7 @@ impl Renderer {
                     let x = (side as u32 * texels) as f32;
                     device.cmd_set_viewport(target.commands, 0, &[vk::Viewport { x, y: 0.0, width: texels as f32, height: texels as f32, min_depth: 0.0, max_depth: 1.0 }]);
                     device.cmd_set_scissor(target.commands, 0, &[vk::Rect2D { offset: vk::Offset2D { x: x as i32, y: 0 }, extent: vk::Extent2D { width: texels, height: texels } }]);
-                    for drawn in &appearance.drawn {
+                    for drawn in appearance.drawn.iter().filter(|drawn| drawn.switched.is_none_or(|node| !appearance.hidden.contains(&node))) {
                         let push = Push { view_projection: view_projection.to_cols_array(), material: drawn.material, outline: drawn.outline as u32, outline_scale: self.outline_scale };
                         let bytes = std::slice::from_raw_parts(&push as *const Push as *const u8, std::mem::size_of::<Push>());
                         device.cmd_bind_pipeline(target.commands, vk::PipelineBindPoint::GRAPHICS, drawn.pipeline);

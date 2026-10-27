@@ -7,9 +7,11 @@ mod chosen;
 mod playback;
 mod conversation;
 mod device;
+mod dress;
 mod gaze;
 mod identity;
 mod session;
+mod settings;
 mod speaker;
 mod telemetry;
 mod turn;
@@ -47,6 +49,7 @@ use relay::{Avatar, Relay, Token};
 use reveal::Reveal;
 use voice::Voice;
 use render::{eye_projection, eye_texels, Appearance, Renderer};
+use vrm::expressions::{Controller, Kind};
 use vrm::spring::Springs;
 use vrm::{Fit, Humanoid, Model, Skinned};
 
@@ -117,9 +120,10 @@ struct Puppet {
     drawn: Appearance,
     /// The vertices the last step's morph moved.
     changed: Vec<u32>,
+    controller: Option<Controller>,
 }
 
-fn load(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer) -> Result<Puppet, String> {
+fn load(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer, remembered: &HashMap<String, f32>) -> Result<Puppet, String> {
     let model = Model::parse(&relay.puppet(avatar)?).map_err(|error| format!("{}: {error}", avatar.id))?;
     let standing = model.standing();
     let mut clips = HashMap::new();
@@ -144,7 +148,8 @@ fn load(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer) -> Result<P
     let height = (HEIGHT / fit.scale).clamp(FULL_HEIGHT[0], FULL_HEIGHT[1]);
     tracing::info!("appearance {} stands {height:.2} m full size", avatar.id);
     let drawn = renderer.appearance(&model, &skinned)?;
-    Ok(Puppet { model, skinned, fit, full: height / HEIGHT, standing, animator: Animator::new(clips, own, Random::seeded()), gaze: Gaze::default(), springs: Springs::default(), drawn, changed: Vec::new() })
+    let controller = model.menu.as_ref().map(|menu| Controller::new(menu, remembered));
+    Ok(Puppet { model, skinned, fit, full: height / HEIGHT, standing, animator: Animator::new(clips, own, Random::seeded()), gaze: Gaze::default(), springs: Springs::default(), drawn, changed: Vec::new(), controller })
 }
 
 impl Puppet {
@@ -153,6 +158,14 @@ impl Puppet {
             tracing::info!("loop {clip}");
         }
         let mut pose = self.model.pose(&self.animator.humanoid(&self.standing, self.model.rest_hips()));
+        let mut retextured = Vec::new();
+        if let (Some(menu), Some(controller)) = (&self.model.menu, &mut self.controller) {
+            let values = controller.step(menu, delta);
+            self.drawn.hidden = menu.apply(&values, &mut pose);
+            for (node, moved) in menu.materials(&values) {
+                retextured.extend(self.skinned.retexture(node, moved));
+            }
+        }
         let mut worlds = self.model.worlds(&pose);
         let fitted = self.fit.placement(&self.model, &worlds, 0.0);
         let feet = self.model.feet(&worlds).map(|feet| feet.map(|foot| fitted.transform_point3(foot).to_array()));
@@ -173,6 +186,7 @@ impl Puppet {
         self.model.express(&mut pose, "aa", mouth);
         self.springs.step(&self.model, &mut pose, body, delta);
         self.changed = self.skinned.morph(&pose.weights);
+        self.changed.extend(retextured);
         (self.model.worlds(&pose), body, stand)
     }
 
@@ -181,6 +195,52 @@ impl Puppet {
         let palette = self.skinned.palette(posed, to_window);
         self.drawn.update(&palette, &self.skinned.vertices, &self.changed);
     }
+}
+
+/// How long a menu button holds its parameter after a press: VRChat holds it while the button is held, and a press here is one touch.
+const BUTTON_HOLD: Duration = Duration::from_millis(400);
+
+impl Puppet {
+    fn menu(&self) -> Option<(Vec<vrm::expressions::Control>, Vec<vrm::expressions::Icon>)> {
+        self.model.menu.as_ref().map(|menu| (menu.menu.clone(), menu.icons.clone()))
+    }
+
+    fn settings(&self) -> HashMap<String, f32> {
+        match (&self.model.menu, &self.controller) {
+            (Some(menu), Some(controller)) => settings::shown(&menu.menu, controller),
+            _ => HashMap::new(),
+        }
+    }
+}
+
+fn operate(controller: &mut Controller, control: &vrm::expressions::Control, [x, y]: [f32; 2]) -> Option<String> {
+    let axis = |at: usize| control.axes.get(at).map_or("", String::as_str);
+    match control.kind {
+        Kind::Toggle => {
+            let on = controller.get(&control.parameter) == control.value;
+            controller.set(&control.parameter, if on { 0.0 } else { control.value });
+        }
+        Kind::Button => {
+            controller.set(&control.parameter, control.value);
+            return Some(control.parameter.clone());
+        }
+        Kind::Radial | Kind::TwoAxis | Kind::FourAxis if !control.parameter.is_empty() => controller.set(&control.parameter, control.value),
+        _ => {}
+    }
+    match control.kind {
+        Kind::Radial => controller.set(axis(0), x),
+        Kind::TwoAxis => {
+            controller.set(axis(0), 2.0 * x - 1.0);
+            controller.set(axis(1), 2.0 * y - 1.0);
+        }
+        Kind::FourAxis => {
+            for (at, value) in [2.0 * y - 1.0, 2.0 * x - 1.0, 1.0 - 2.0 * y, 1.0 - 2.0 * x].into_iter().enumerate() {
+                controller.set(axis(at), value.max(0.0));
+            }
+        }
+        _ => {}
+    }
+    None
 }
 
 /// The catalog clips the overlay plays: its idles and every variant of a gesture or mood the page's classifier can reach.
@@ -214,9 +274,12 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
     let mut relay = Relay::connect(token, &cache)?;
     let catalog = relay.catalog()?;
     let active = chosen::read(&cache, &catalog.avatars)?;
-    let mut puppet = load(&mut relay, &catalog.avatars[active], &mut renderer)?;
+    let mut settings = settings::Settings::read(state);
+    let mut puppet = load(&mut relay, &catalog.avatars[active], &mut renderer, &settings.of(&catalog.avatars[active].id))?;
     let mut previews = None;
     let mut board = Board::new(catalog.avatars.len(), active);
+    board.wear(puppet.menu(), puppet.settings());
+    let mut released: Option<(Instant, String)> = None;
     let mut reveal = Reveal::new(HEIGHT);
     let mut board_image = vulkan::Flat::new(gpu.clone());
     let mut overlay = runtime.create_overlay("voice.puppet", "Puppet", QUAD, true)?;
@@ -452,21 +515,43 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
                     board_overlay.texture(&mut board_image.upload(&image)?)?;
                     board_overlay.show();
                 }
-                match Relay::connect(token, &cache).and_then(|mut relay| load(&mut relay, avatar, &mut renderer)) {
+                match Relay::connect(token, &cache).and_then(|mut relay| load(&mut relay, avatar, &mut renderer, &settings.of(&avatar.id))) {
                     Ok(loaded) => {
                         puppet = loaded;
                         if let Anchor::Grounded(floor) = &mut anchor {
                             *floor = placement::Floor::new(floor.pose);
                         }
                         board.active = index;
+                        board.wear(puppet.menu(), puppet.settings());
+                        released = None;
                     }
                     Err(error) => tracing::warn!("appearance {} not shown: {error}", avatar.id),
                 }
                 board.pending = None;
                 board.mark();
             }
+            Some(Press::Menu) => board.toggle_menu(),
+            Some(Press::Back) => board.back(),
+            Some(Press::Control(index)) => {
+                let at = touch.crossing.map(|crossing| board.place_on(index, crossing)).unwrap_or([0.5; 2]);
+                if let (Some(control), Some(controller)) = (board.control(index), puppet.controller.as_mut()) {
+                    tracing::info!("menu {:?} {:?} at {at:.2?}", control.kind, control.name);
+                    if let Some(button) = operate(controller, &control, at) {
+                        released = Some((started + BUTTON_HOLD, button));
+                    }
+                    if let Err(error) = settings.keep(&catalog.avatars[board.active].id, puppet.model.menu.as_ref().map_or(&[][..], |menu| &menu.menu), controller) {
+                        tracing::warn!("menu settings not kept: {error}");
+                    }
+                }
+            }
             _ => {}
         }
+        if let Some((_, parameter)) = released.take_if(|(at, _)| started >= *at) {
+            if let Some(controller) = puppet.controller.as_mut() {
+                controller.set(&parameter, 0.0);
+            }
+        }
+        board.set_values(puppet.settings());
         let log = voice.log(board::LOG_LINES);
         if board.log != log {
             board.log = log;
@@ -674,6 +759,9 @@ fn run() -> Result<(), String> {
     }
     if args.get(1).is_some_and(|mode| mode == "wear") {
         return wear::run(&Token::decode(&token)?, &state, &args[2..]);
+    }
+    if args.get(1).is_some_and(|mode| mode == "menu") {
+        return dress::run(&Token::decode(&token)?, &state, &args[2..]);
     }
     let runtime = Runtime::init()?;
     host(runtime, &Token::decode(&token)?, &state)

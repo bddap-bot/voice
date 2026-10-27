@@ -3,8 +3,10 @@ use std::collections::HashMap;
 use glam::{Mat4, Quat, Vec2, Vec3};
 use serde_json::Value;
 
+pub mod expressions;
 pub mod spring;
 
+use expressions::Expressions;
 use spring::Rig;
 
 const STANDING: &str = include_str!("../../docs/poses/standing.json");
@@ -184,6 +186,7 @@ pub struct Model {
     pub program: Option<ObjectProgram>,
     /// Whether the object's parts spread apart when the pointer pushes deep into it.
     pub spreads: bool,
+    pub menu: Option<Expressions>,
 }
 
 pub struct ObjectProgram {
@@ -209,6 +212,7 @@ pub struct Draw {
     pub first: u32,
     pub count: u32,
     pub material: usize,
+    pub switched: Option<usize>,
 }
 
 struct Delta {
@@ -236,6 +240,9 @@ pub struct Skinned {
     entries: Vec<(u32, u32)>,
     stamps: Vec<u32>,
     stamp: u32,
+    spans: HashMap<usize, std::ops::Range<usize>>,
+    uvs: Vec<[f32; 2]>,
+    moved: HashMap<usize, [f32; 4]>,
 }
 
 #[derive(Clone)]
@@ -882,7 +889,14 @@ impl Model {
             _ => None,
         };
         let spreads = object && extensions[SPREAD].is_object();
-        let mut model = Model { version, nodes, meshes, skins, materials, images, humanoid, expressions, own, look_at, rest_turns: Vec::new(), rig, program, spreads };
+        let menu = match extensions.get(expressions::EXTENSION) {
+            Some(value) => Some(Expressions::parse(value)?),
+            None => None,
+        };
+        if let Some(menu) = &menu {
+            menu.check(nodes.len(), &meshes)?;
+        }
+        let mut model = Model { version, nodes, meshes, skins, materials, images, humanoid, expressions, own, look_at, rest_turns: Vec::new(), rig, program, spreads, menu };
         for (side, direction) in [("left", Vec3::X), ("right", Vec3::NEG_X)] {
             let outward = model.facing() * direction;
             for (bone, child) in [("UpperArm", "LowerArm"), ("LowerArm", "Hand")] {
@@ -1095,19 +1109,26 @@ impl Model {
         let mut draws = Vec::new();
         let mut joints = Vec::new();
         let mut morphs = Vec::new();
+        let switched: std::collections::HashSet<usize> = self.menu.iter().flat_map(Expressions::switched).collect();
+        let mut spans = HashMap::new();
+        let mut skinned_at = HashMap::new();
         for (node, entry) in self.nodes.iter().enumerate() {
             let Some(mesh_index) = entry.mesh else { continue };
             let mesh = &self.meshes[mesh_index];
+            let start = vertices.len();
             let own = palette_index(joints.len())?;
             joints.push((node, Mat4::IDENTITY));
             let skin = match entry.skin {
-                Some(skin) => {
-                    let skin = &self.skins[skin];
-                    let first = joints.len();
-                    joints.extend(skin.joints.iter().copied().zip(skin.inverse_bind.iter().copied()));
-                    palette_index(joints.len())?;
-                    Some(first as u16)
-                }
+                Some(skin) => Some(match skinned_at.get(&skin) {
+                    Some(&first) => first,
+                    None => {
+                        let first = palette_index(joints.len())?;
+                        joints.extend(self.skins[skin].joints.iter().copied().zip(self.skins[skin].inverse_bind.iter().copied()));
+                        palette_index(joints.len())?;
+                        skinned_at.insert(skin, first);
+                        first
+                    }
+                }),
                 None => None,
             };
             for primitive in &mesh.primitives {
@@ -1125,14 +1146,17 @@ impl Model {
                         morphs.push(Morph { mesh: mesh_index, target, deltas });
                     }
                 }
-                draws.push(Draw { first: indices.len() as u32, count: primitive.indices.len() as u32, material: primitive.material.unwrap_or(self.materials.len() - 1) });
+                draws.push(Draw { first: indices.len() as u32, count: primitive.indices.len() as u32, material: primitive.material.unwrap_or(self.materials.len() - 1), switched: switched.contains(&node).then_some(node) });
                 indices.extend(primitive.indices.iter().map(|&vertex| vertex + base));
+            }
+            if switched.contains(&node) {
+                spans.insert(node, start..vertices.len());
             }
         }
         // Blended draws keep node order; the rest are order-independent, so each material's index ranges are laid end to end and draw in one call.
         let key = |at: usize, draw: &Draw| {
             let material = &self.materials[draw.material];
-            (material.queue, if material.alpha == Alpha::Blend { (usize::MAX, at) } else { (draw.material, 0) })
+            (material.queue, if material.alpha == Alpha::Blend { (usize::MAX, at) } else { (draw.material, draw.switched.map_or(0, |node| node + 1)) })
         };
         let mut order: Vec<(usize, Draw)> = draws.into_iter().enumerate().collect();
         order.sort_by_key(|(at, draw)| key(*at, draw));
@@ -1147,7 +1171,7 @@ impl Model {
             .collect();
         let indices = grouped;
         draws.dedup_by(|next, run| {
-            let joins = next.material == run.material && run.first + run.count == next.first;
+            let joins = next.material == run.material && next.switched == run.switched && run.first + run.count == next.first;
             if joins {
                 run.count += next.count;
             }
@@ -1173,13 +1197,28 @@ impl Model {
             }
         }
         let base = touched.iter().map(|&vertex| (Vec3::from(vertices[vertex as usize].position), Vec3::from(vertices[vertex as usize].normal))).collect();
-        let mut skinned = Skinned { vertices, indices, draws, joints, applied: vec![0.0; morphs.len()], stamps: vec![0; touched.len()], morphs, touched, base, offsets, entries, stamp: 0 };
+        let uvs = vertices.iter().map(|vertex| vertex.uv).collect();
+        let mut skinned = Skinned { vertices, indices, draws, joints, applied: vec![0.0; morphs.len()], stamps: vec![0; touched.len()], morphs, touched, base, offsets, entries, stamp: 0, spans, uvs, moved: HashMap::new() };
         skinned.morph(&self.rest().weights);
         Ok(skinned)
     }
 }
 
 impl Skinned {
+    pub fn retexture(&mut self, node: usize, moved: [f32; 4]) -> Vec<u32> {
+        let Some(span) = self.spans.get(&node).cloned() else { return Vec::new() };
+        if self.moved.get(&node).map_or(moved == [1.0, 1.0, 0.0, 0.0], |&last| last == moved) {
+            return Vec::new();
+        }
+        self.moved.insert(node, moved);
+        let [sx, sy, ox, oy] = moved;
+        for vertex in span.clone() {
+            let [u, v] = self.uvs[vertex];
+            self.vertices[vertex].uv = [u * sx + ox, v * sy + oy];
+        }
+        span.map(|vertex| vertex as u32).collect()
+    }
+
     pub fn palette(&self, worlds: &[Mat4], placement: Mat4) -> Vec<Mat4> {
         self.joints.iter().map(|&(node, inverse)| placement * worlds[node] * inverse).collect()
     }

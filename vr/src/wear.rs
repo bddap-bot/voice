@@ -54,7 +54,7 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
         let pictures = out.join(&avatar.id);
         let clip = pictures.join("clip");
         std::fs::create_dir_all(&clip).map_err(|error| format!("{}: {error}", clip.display()))?;
-        let mut puppet = load(&mut relay, avatar, &mut renderer)?;
+        let mut puppet = load(&mut relay, avatar, &mut renderer, &Default::default())?;
         let mut pointing = Pointing::default();
         let mut work = Vec::new();
         let mut played = Vec::new();

@@ -741,7 +741,7 @@ mod tests {
         let standing = model.standing();
         let mut clip = crate::motion::Clip::parse(motion, model.version, model.rest_hips()).unwrap();
         clip.anchor(&standing);
-        let mut animator = crate::motion::Animator::new([("idle".to_owned(), clip)].into(), crate::motion::Random::seeded());
+        let mut animator = crate::motion::Animator::new([("idle".to_owned(), clip)].into(), Vec::new(), crate::motion::Random::seeded());
         animator.update(golden.time);
         let mut pose = model.pose(&animator.humanoid(&standing, model.rest_hips()));
         model.express(&mut pose, "blink", 1.0);
@@ -775,7 +775,7 @@ mod tests {
         let golden = golden();
         let eyes = [eye_projection(Vec3::from(golden.eye), golden.quad / 2.0, golden.quad / 2.0), None];
         let frame = |gestures: bool, after: f32| {
-            let mut animator = crate::motion::Animator::new(clips(gestures), crate::motion::Random::seeded());
+            let mut animator = crate::motion::Animator::new(clips(gestures), Vec::new(), crate::motion::Random::seeded());
             for action in &decisions {
                 crate::act(&mut animator, action);
             }

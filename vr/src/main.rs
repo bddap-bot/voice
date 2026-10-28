@@ -40,7 +40,7 @@ use openvr::{Runtime, Signal};
 use board::{Board, Press};
 use placement::{beside, facing, local_tip, marker, under_controller, window, Anchor, Glide, Hand, Pose, Vec3, TIP};
 use gaze::Gaze;
-use motion::{Animator, Clip, Random, IDLES};
+use motion::{Animator, Clip, Random, IDLE};
 use gesture::{Recognizer, Templates};
 use relay::{Avatar, Relay, Token};
 use reveal::Reveal;
@@ -116,13 +116,13 @@ fn load(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer) -> Result<P
     let standing = model.standing();
     let mut clips = HashMap::new();
     for entry in relay.clips()?.iter().filter(|entry| played(&entry.action)) {
-        if entry.format != "fbx" {
+        if !["fbx", "motion"].contains(&entry.format.as_str()) {
             tracing::info!("{}: {} clips are not played natively", entry.name, entry.format);
             continue;
         }
         match relay.motion(entry).and_then(|bytes| Clip::parse(&bytes, model.version, model.rest_hips())) {
             Ok(mut clip) => {
-                if IDLES.contains(&entry.action.as_str()) {
+                if motion::family(&entry.action) == IDLE {
                     clip.anchor(&standing);
                 }
                 clips.insert(entry.action.clone(), clip);
@@ -130,14 +130,15 @@ fn load(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer) -> Result<P
             Err(error) => tracing::warn!("{}: {error}", entry.name),
         }
     }
-    let idles = clips.keys().filter(|name| IDLES.contains(&name.as_str())).count();
-    tracing::info!("appearance {} with {idles} standing idle clips, gestures {:?}, {} spring joints at gravity {}", avatar.id, clips.keys().filter(|name| !IDLES.contains(&name.as_str())).collect::<Vec<_>>(), model.spring_joints(), vrm::spring::GRAVITY);
+    let idles = clips.keys().filter(|name| motion::family(name) == IDLE).count();
+    let own = model.own_expressions();
+    tracing::info!("appearance {} with {idles} standing idle clips, gestures and moods {:?}, own expressions {own:?}, {} spring joints at gravity {}", avatar.id, clips.keys().filter(|name| motion::family(name) != IDLE).collect::<Vec<_>>(), model.spring_joints(), vrm::spring::GRAVITY);
     let skinned = model.skinned()?;
     let fit = Fit::new(&model, &skinned, HEIGHT);
     let height = (HEIGHT / fit.scale).clamp(FULL_HEIGHT[0], FULL_HEIGHT[1]);
     tracing::info!("appearance {} stands {height:.2} m full size", avatar.id);
     let drawn = renderer.appearance(&model, &skinned)?;
-    Ok(Puppet { model, skinned, fit, full: height / HEIGHT, standing, animator: Animator::new(clips, Random::seeded()), gaze: Gaze::default(), springs: Springs::default(), drawn, changed: Vec::new() })
+    Ok(Puppet { model, skinned, fit, full: height / HEIGHT, standing, animator: Animator::new(clips, own, Random::seeded()), gaze: Gaze::default(), springs: Springs::default(), drawn, changed: Vec::new() })
 }
 
 impl Puppet {
@@ -157,6 +158,9 @@ impl Puppet {
             worlds = self.model.worlds(&pose);
         }
         self.gaze.look(&self.model, &mut pose, &worlds, to_model.transform_point3(head.into()), delta);
+        for (name, weight) in self.animator.faces() {
+            self.model.express(&mut pose, name, weight);
+        }
         self.model.express(&mut pose, "blink", self.animator.blink());
         self.model.express(&mut pose, "aa", mouth);
         self.springs.step(&self.model, &mut pose, body, delta);
@@ -171,17 +175,21 @@ impl Puppet {
     }
 }
 
-/// The catalog clips the overlay plays: its idles and every gesture the page's classifier can reach.
+/// The catalog clips the overlay plays: its idles and every variant of a gesture or mood the page's classifier can reach.
 fn played(clip: &str) -> bool {
-    IDLES.contains(&clip) || action::gestures().any(|gesture| gesture == clip)
+    let family = motion::family(clip);
+    family == IDLE || action::gestures().chain(motion::moods()).any(|name| name == family)
 }
 
-/// Acts out one of the page's decisions as the page's `applyTranscriptAction` does; the page's moods are faces the overlay does not draw yet.
+/// Acts out one of the page's decisions as the page's `applyTranscriptAction` does.
 fn act(animator: &mut Animator, action: &action::Action) {
     let outcome = match action.kind {
         action::Kind::Gesture if animator.gesture(&action.name) => "played",
         action::Kind::Gesture => "refused, no clip",
-        action::Kind::Mood => "not drawn",
+        action::Kind::Mood => {
+            animator.mood(&action.name);
+            "drawn"
+        }
         action::Kind::None => "ignored",
     };
     tracing::info!("action {:?} {} {:.3} from {:?}: {outcome}", action.kind, action.name, action.score, action.sentence);

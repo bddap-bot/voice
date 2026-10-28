@@ -1450,7 +1450,7 @@ async function loadPuppet(id, epoch, request, stage) {
 function clipMotions() {
   const motions = puppetMotions ??= puppetChannel.clips().then(async (catalog) => {
     const clips = [];
-    for (const entry of catalog.clips) clips.push(entry.format === 'fbx' ? { ...entry, format: 'motion', data: JSON.parse(dec.decode(await puppetChannel.motionBytes(entry))) } : { ...entry, data: await puppetChannel.clipBytes(entry) });
+    for (const entry of catalog.clips) clips.push(['fbx', 'motion'].includes(entry.format) ? { ...entry, format: 'motion', data: JSON.parse(dec.decode(await puppetChannel.motionBytes(entry))) } : { ...entry, data: await puppetChannel.clipBytes(entry) });
     return clips;
   });
   motions.catch(() => { if (puppetMotions === motions) puppetMotions = undefined; });

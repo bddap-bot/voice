@@ -1,0 +1,404 @@
+{
+  "source": "CMU Graphics Lab Motion Capture Database",
+  "url": "http://mocap.cs.cmu.edu/subjects/{subject}/{file}",
+  "licence": "This data is free for use in research projects. You may include this data in commercially-sold products, but you may not resell this data directly, even in converted form. The data used in this project was obtained from mocap.cs.cmu.edu. The database was created with funding from NSF EIA-0196217.",
+  "takes": {
+    "140_06": {
+      "id": "140_06",
+      "subject": "140",
+      "description": "Idle",
+      "rate": 120,
+      "asf": "13d3c7488671d3902c0ea7faa672e1c79465c034c050de88668ace164e519a37",
+      "amc": "c3964ee9fc83bf1c92de5f0f413e47cf5fe50569774541b9615b60ffffbb30f9"
+    },
+    "140_07": {
+      "id": "140_07",
+      "subject": "140",
+      "description": "Idle",
+      "rate": 120,
+      "asf": "13d3c7488671d3902c0ea7faa672e1c79465c034c050de88668ace164e519a37",
+      "amc": "543b7172ddd9ef6dc11b2d50920647151c9626da4081f9c70448cf00f8499426"
+    },
+    "141_20": {
+      "id": "141_20",
+      "subject": "141",
+      "description": "Waiting",
+      "rate": 120,
+      "asf": "e32993b8079c0914ed4d865ad53f7b9646398808855233e6f650d4f4417df2bb",
+      "amc": "223616f94b053b965bdcf650c77fcb8ef00423405d819419a7d7af62428b06c2"
+    },
+    "40_10": {
+      "id": "40_10",
+      "subject": "40",
+      "description": "wait for bus",
+      "rate": 120,
+      "asf": "4783cfb2ea519adab0f7550bb01e5ac2602a3ba095663e6afb3bd9bd5af76e00",
+      "amc": "1caf1cf2968d715f261585fc2afcf01ee4eb179a370850e67b60d003a5a55eb4"
+    },
+    "40_11": {
+      "id": "40_11",
+      "subject": "40",
+      "description": "wait for bus",
+      "rate": 120,
+      "asf": "4783cfb2ea519adab0f7550bb01e5ac2602a3ba095663e6afb3bd9bd5af76e00",
+      "amc": "a64e2971ae65f02acb8c399ca8a268c78167ffd62ef13738cf37eec3156253ec"
+    },
+    "77_02": {
+      "id": "77_02",
+      "subject": "77",
+      "description": "standing",
+      "rate": 60,
+      "asf": "c72f244092c214c2c4fd496d214a20ec7bb58dbb626458dda2a2b953a465ae85",
+      "amc": "110a27cb2c1d1c5b051b10b3a7db204db3699e27302e23cf444205dccc41634a"
+    },
+    "141_16": {
+      "id": "141_16",
+      "subject": "141",
+      "description": "Wave Hello",
+      "rate": 120,
+      "asf": "e32993b8079c0914ed4d865ad53f7b9646398808855233e6f650d4f4417df2bb",
+      "amc": "755f065106adb3b40ba6bd118d6aa6f66858e2553851fa40b530705b12dee1ca"
+    },
+    "143_25": {
+      "id": "143_25",
+      "subject": "143",
+      "description": "Waving",
+      "rate": 120,
+      "asf": "6d7207da3bb9eceeaa32f23fb641b69f5836d11242b00c052e7d64f0cbe20a35",
+      "amc": "23b09138701a3796592fc1bf16e31ac1cb4501a130f57f5f0dd2238fab0bd72c"
+    },
+    "141_21": {
+      "id": "141_21",
+      "subject": "141",
+      "description": "Shrug",
+      "rate": 120,
+      "asf": "e32993b8079c0914ed4d865ad53f7b9646398808855233e6f650d4f4417df2bb",
+      "amc": "5d7a1fa9d3d805cbf233a33db13030b600bc928cc52744a720a65a2216a0a9b9"
+    },
+    "79_70": {
+      "id": "79_70",
+      "subject": "79",
+      "description": "laughing",
+      "rate": 60,
+      "asf": "aa7fb254b0e7b9155df59e0f0cf76cbe34c476c6f4b3f015e63d5ae170d2fe2d",
+      "amc": "120194615098cbb8f5c6e5c1658e4fd7845d8651d28aa9b94c6a5bf429b68a7b"
+    },
+    "80_44": {
+      "id": "80_44",
+      "subject": "80",
+      "description": "laughing",
+      "rate": 60,
+      "asf": "5fd77816c7506adcffe141fb4ce679aaf75102d1857e0f2da00e8dec2c49f7cc",
+      "amc": "aea1c89f49634056584eb79dbfc137869d07f8124edca96cff4b4dac31d6ed19"
+    },
+    "13_14": {
+      "id": "13_14",
+      "subject": "13",
+      "description": "laugh",
+      "rate": 120,
+      "asf": "eb33390bcbccb739d7622bd583fd9be55020868f68689aa6f2060ad688df10dc",
+      "amc": "75d6cfed6e11b185b67de6ba40e4dea150fc36f58f99aac7c8a392d5d337bd9f"
+    },
+    "14_17": {
+      "id": "14_17",
+      "subject": "14",
+      "description": "laugh",
+      "rate": 120,
+      "asf": "96a22ac52ac15bd464c296028936be0ae7d2f0ee4a056202b1aa17f4ad02ec7f",
+      "amc": "d02252f27332b765ecd309f4234bb1f813ddadd6f3633b2db87b5066ff4ae5de"
+    },
+    "141_13": {
+      "id": "141_13",
+      "subject": "141",
+      "description": "Stretch and Yawn",
+      "rate": 120,
+      "asf": "e32993b8079c0914ed4d865ad53f7b9646398808855233e6f650d4f4417df2bb",
+      "amc": "52a022db3474761ee5320ce4173a5d4084c055981f0de030833bca4410e81895"
+    },
+    "42_01": {
+      "id": "42_01",
+      "subject": "42",
+      "description": "stretch - rotate head, shoulders, arms, legs",
+      "rate": 60,
+      "asf": "e5270ba291902b6e87c2f51c91b7a1ad11a1628aa348982fa536ebade08fbff1",
+      "amc": "605abc979e3be82cc5482ecd6e6f07ea97e3c54717dc7d68d0e8a086dd7ad5dc"
+    },
+    "77_21": {
+      "id": "77_21",
+      "subject": "77",
+      "description": "stretching",
+      "rate": 60,
+      "asf": "c72f244092c214c2c4fd496d214a20ec7bb58dbb626458dda2a2b953a465ae85",
+      "amc": "da3ab4dc76c21bf50e79b2e1168993ed7f885058206ad483d8356e9a07974935"
+    },
+    "77_01": {
+      "id": "77_01",
+      "subject": "77",
+      "description": "looking around",
+      "rate": 60,
+      "asf": "c72f244092c214c2c4fd496d214a20ec7bb58dbb626458dda2a2b953a465ae85",
+      "amc": "f49c9a5375da9db1f5c1e75d347a0c91ee7162d19736063fcd2bd6291520b776"
+    },
+    "77_04": {
+      "id": "77_04",
+      "subject": "77",
+      "description": "Looking around",
+      "rate": 60,
+      "asf": "c72f244092c214c2c4fd496d214a20ec7bb58dbb626458dda2a2b953a465ae85",
+      "amc": "90c00a1c151565246d71eebdefc661753d63076245bcb5faacd7381c9876c543"
+    },
+    "141_26": {
+      "id": "141_26",
+      "subject": "141",
+      "description": "Curtsey",
+      "rate": 120,
+      "asf": "e32993b8079c0914ed4d865ad53f7b9646398808855233e6f650d4f4417df2bb",
+      "amc": "3e4b7861bf5573321582657a196a4fa1bb1c45842500420fbcb3da2c0cf6a775"
+    },
+    "80_43": {
+      "id": "80_43",
+      "subject": "80",
+      "description": "happy",
+      "rate": 60,
+      "asf": "5fd77816c7506adcffe141fb4ce679aaf75102d1857e0f2da00e8dec2c49f7cc",
+      "amc": "f5c8a866952043fafa1efb9e38d59385f697fd5a4528d49639bfed2fa54d9518"
+    },
+    "79_69": {
+      "id": "79_69",
+      "subject": "79",
+      "description": "very happy",
+      "rate": 60,
+      "asf": "aa7fb254b0e7b9155df59e0f0cf76cbe34c476c6f4b3f015e63d5ae170d2fe2d",
+      "amc": "326d7c6ac3f36bf3216c7660b11cf81e331ccc973ce28c9b9022f8980a5c5669"
+    },
+    "79_71": {
+      "id": "79_71",
+      "subject": "79",
+      "description": "sad",
+      "rate": 60,
+      "asf": "aa7fb254b0e7b9155df59e0f0cf76cbe34c476c6f4b3f015e63d5ae170d2fe2d",
+      "amc": "d1c498701cfdbb8bb16f3c76a3440f9735d315c7d11a9794ffe20bb161c0bb4f"
+    },
+    "141_27": {
+      "id": "141_27",
+      "subject": "141",
+      "description": "Mope",
+      "rate": 120,
+      "asf": "e32993b8079c0914ed4d865ad53f7b9646398808855233e6f650d4f4417df2bb",
+      "amc": "3247067d09c033dc758fc63f8e030e07217fcd5b5014aed84cae84ff6ce588a2"
+    },
+    "79_74": {
+      "id": "79_74",
+      "subject": "79",
+      "description": "upset",
+      "rate": 60,
+      "asf": "aa7fb254b0e7b9155df59e0f0cf76cbe34c476c6f4b3f015e63d5ae170d2fe2d",
+      "amc": "ed63764ca7a3062ee53b471c8b49873309a546e5b3b3cbe471fff01feef7a4a8"
+    },
+    "18_10": {
+      "id": "18_10",
+      "subject": "18",
+      "description": "quarrel - angry hand gestures (2 subjects - subject A)",
+      "rate": 120,
+      "asf": "1b85e296d50b0c1bbc87b154486ea5192ec4d99748e7bd9e9fb0419a0be8214b",
+      "amc": "026fa6e5a8a8a19038759d45660b0b0f8491b5665e273d1a2607b70bb32fd75d"
+    },
+    "79_73": {
+      "id": "79_73",
+      "subject": "79",
+      "description": "scared",
+      "rate": 60,
+      "asf": "aa7fb254b0e7b9155df59e0f0cf76cbe34c476c6f4b3f015e63d5ae170d2fe2d",
+      "amc": "052d7e43c7c0c2d6f88b3e081c3a2e62043399a93ce544c1eeeb8665f68249a9"
+    },
+    "143_30": {
+      "id": "143_30",
+      "subject": "143",
+      "description": "Stretch And Yawn",
+      "rate": 120,
+      "asf": "6d7207da3bb9eceeaa32f23fb641b69f5836d11242b00c052e7d64f0cbe20a35",
+      "amc": "ffd7b2b3344cf41eef16a3b9b2910424dc27c24ac1f4d6c3b68b6c719e7b22e3"
+    },
+    "83_22": {
+      "id": "83_22",
+      "subject": "83",
+      "description": "stretching",
+      "rate": 120,
+      "asf": "b4eabfbcaeadf39faba73e6a5b2857830da73a8549266c95370863155e177093",
+      "amc": "d7692a447636bf69cf694d9c979a5a01f3ab9cbeed0dda0779429ec35d225df8"
+    }
+  },
+  "clips": [
+    {
+      "action": "idle-4",
+      "take": "140_06",
+      "to": 12
+    },
+    {
+      "action": "idle-5",
+      "take": "140_06",
+      "from": 12,
+      "to": 24
+    },
+    {
+      "action": "idle-14",
+      "take": "140_06",
+      "from": 24
+    },
+    {
+      "action": "idle-6",
+      "take": "140_07"
+    },
+    {
+      "action": "idle-7",
+      "take": "141_20"
+    },
+    {
+      "action": "idle-8",
+      "take": "40_10",
+      "to": 7
+    },
+    {
+      "action": "idle-9",
+      "take": "40_10",
+      "from": 20,
+      "to": 29
+    },
+    {
+      "action": "idle-10",
+      "take": "40_10",
+      "from": 38,
+      "to": 46
+    },
+    {
+      "action": "idle-11",
+      "take": "40_11",
+      "to": 9
+    },
+    {
+      "action": "idle-12",
+      "take": "40_11",
+      "from": 30,
+      "to": 39
+    },
+    {
+      "action": "idle-13",
+      "take": "77_02"
+    },
+    {
+      "action": "wave-2",
+      "take": "141_16"
+    },
+    {
+      "action": "wave-3",
+      "take": "143_25"
+    },
+    {
+      "action": "shrug-2",
+      "take": "141_21"
+    },
+    {
+      "action": "laugh-2",
+      "take": "79_70",
+      "from": 3,
+      "to": 9
+    },
+    {
+      "action": "laugh-3",
+      "take": "80_44",
+      "from": 4,
+      "to": 10
+    },
+    {
+      "action": "laugh-4",
+      "take": "13_14",
+      "to": 6
+    },
+    {
+      "action": "laugh-5",
+      "take": "14_17",
+      "to": 6
+    },
+    {
+      "action": "stretch-2",
+      "take": "141_13"
+    },
+    {
+      "action": "stretch-3",
+      "take": "42_01"
+    },
+    {
+      "action": "stretch-4",
+      "take": "77_21",
+      "to": 8
+    },
+    {
+      "action": "stretch-5",
+      "take": "83_22",
+      "to": 8
+    },
+    {
+      "action": "stretch-6",
+      "take": "83_22",
+      "from": 13,
+      "to": 21
+    },
+    {
+      "action": "look-around-2",
+      "take": "77_01",
+      "to": 9
+    },
+    {
+      "action": "look-around-3",
+      "take": "77_04",
+      "to": 8
+    },
+    {
+      "action": "bow-2",
+      "take": "141_26"
+    },
+    {
+      "action": "pleased",
+      "take": "80_43",
+      "from": 5,
+      "to": 11
+    },
+    {
+      "action": "pleased-2",
+      "take": "79_69",
+      "from": 4,
+      "to": 10
+    },
+    {
+      "action": "sad",
+      "take": "79_71",
+      "from": 6,
+      "to": 12
+    },
+    {
+      "action": "sad-2",
+      "take": "141_27"
+    },
+    {
+      "action": "angry",
+      "take": "79_74",
+      "from": 5,
+      "to": 11
+    },
+    {
+      "action": "angry-2",
+      "take": "18_10",
+      "to": 6
+    },
+    {
+      "action": "alert",
+      "take": "79_73",
+      "from": 4,
+      "to": 10
+    },
+    {
+      "action": "sleepy",
+      "take": "143_30"
+    }
+  ]
+}

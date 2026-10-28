@@ -4,16 +4,22 @@ import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { VRMAnimationLoaderPlugin, createVRMAnimationClip } from '@pixiv/three-vrm-animation';
 
 import { standingPose, anchorStandingIdle } from './standing.js';
+import acting from '../docs/moods.json' with { type: 'json' };
 
 const VISEMES = ['aa', 'ih', 'ou', 'ee', 'oh'];
 const MOOD_EXPRESSIONS = ['happy', 'angry', 'sad', 'relaxed', 'surprised'];
+const PRESET_NAMES = new Set([...VISEMES, ...MOOD_EXPRESSIONS, 'neutral', 'blink', 'blinkleft', 'blinkright', 'lookup', 'lookdown', 'lookleft', 'lookright']);
+const ownExpressions = (manager) => Object.entries(manager?.customExpressionMap ?? {}).filter(([name]) => !PRESET_NAMES.has(name.toLowerCase()));
 
 const CLIP_GESTURES = new Set(['nod', 'shrug', 'think', 'wave', 'no', 'laugh', 'clap', 'bow', 'thumbs-up', 'stretch', 'look-around']);
 const ACTIVE_FPS = 60;
 const RESTING_FPS = 15;
 const FRAME_SLACK = 1;
 const ease = (perFrame, delta) => 1 - (1 - perFrame) ** (delta * ACTIVE_FPS);
-const IDLE_CLIPS = { stand: ['idle', 'idle-2', 'idle-3'], sit: ['sit-idle', 'sit-idle-2'] };
+const IDLES = { stand: 'idle', sit: 'sit-idle' };
+
+const clipFamily = (action) => action.replace(/-\d+$/, '');
+const pick = (names) => names[Math.floor(Math.random() * names.length)];
 
 const GAZE_POINTS = {
   camera: [0, 1.25, 6.4],
@@ -74,22 +80,7 @@ export async function animationClip(data, format, vrm) {
   throw new Error(`unsupported animation format ${format}`);
 }
 
-export const MOOD_TABLE = {
-  neutral: {},
-  curious: { surprised: 0.22 },
-  amused: { happy: 0.68, relaxed: 0.12 },
-  puzzled: { sad: 0.2, surprised: 0.12 },
-  thinking: { relaxed: 0.28 },
-  pleased: { happy: 0.76 },
-  sad: { sad: 0.78 },
-  angry: { angry: 0.78 },
-  apologetic: { sad: 0.48 },
-  alert: { surprised: 0.35 },
-  sleepy: { relaxed: 0.68 },
-  relaxed: { relaxed: 0.78 },
-  surprised: { surprised: 0.9 },
-  skeptical: { angry: 0.18 },
-};
+export const MOOD_TABLE = acting.moods;
 
 const LETTER_VISEMES = { a: 'aa', i: 'ih', u: 'ou', e: 'ee', y: 'ee', o: 'oh', w: 'oh' };
 
@@ -225,8 +216,9 @@ export class PuppetRuntime {
     if (vrm.lookAt) vrm.lookAt.target = this.gazeTarget;
     const head = vrm.humanoid?.getNormalizedBoneNode('head');
     this.head = head ? { node: head, base: head.quaternion.clone() } : null;
+    const own = new Set(ownExpressions(vrm.expressionManager).map(([, expression]) => expression));
     for (const expression of vrm.expressionManager?.expressions ?? []) {
-      if (!MOOD_EXPRESSIONS.includes(expression.expressionName.toLowerCase())) continue;
+      if (!MOOD_EXPRESSIONS.includes(expression.expressionName.toLowerCase()) && !own.has(expression)) continue;
       expression.overrideMouth = 'none';
       expression.overrideBlink = 'none';
       expression.overrideLookAt = 'none';
@@ -248,7 +240,7 @@ export class PuppetRuntime {
     for (const entry of entries) {
       const clip = await animationClip(entry.data, entry.format, vrm);
       if (this.vrm !== vrm) return;
-      if (IDLE_CLIPS.stand.includes(entry.action)) anchorStandingIdle(clip, vrm);
+      if (clipFamily(entry.action) === IDLES.stand) anchorStandingIdle(clip, vrm);
       clip.userData.action = entry.action;
       this.clips.set(entry.action, clip);
     }
@@ -258,14 +250,17 @@ export class PuppetRuntime {
   }
   prepareHandovers() {
     this.handovers.clear();
-    for (const [transition, idles] of [['stand', IDLE_CLIPS.stand], ['sit', IDLE_CLIPS.sit]]) {
+    for (const [transition, family] of Object.entries(IDLES)) {
       const from = this.clips.get(transition);
       if (!from) continue;
-      for (const idle of idles) {
+      for (const idle of this.variants(family)) {
         const to = this.clips.get(idle);
         if (to) this.handovers.set(`${transition}:${idle}`, handoverFor(from, to));
       }
     }
+  }
+  variants(family) {
+    return [...this.clips.keys()].filter((action) => clipFamily(action) === family);
   }
   clear() {
     if (!this.vrm) return;
@@ -352,12 +347,13 @@ export class PuppetRuntime {
       this.pendingGesture = { name };
       return true;
     }
-    this.playClip(name, this.poseName === 'sit' ? 'sit-idle' : 'idle');
+    const variant = pick(this.variants(name));
+    if (variant) this.playClip(variant, this.poseName === 'sit' ? 'sit-idle' : 'idle');
     this.clipGesture = name;
     return true;
   }
   clipStance(name) {
-    const position = this.clips.get(name)?.tracks.find((track) => track.name.endsWith('.position'));
+    const position = this.clips.get(this.variants(name)[0])?.tracks.find((track) => track.name.endsWith('.position'));
     const stand = this.clips.get('idle')?.tracks.find((track) => track.name.endsWith('.position'));
     const sit = this.clips.get('sit-idle')?.tracks.find((track) => track.name.endsWith('.position'));
     if (!position || !stand || !sit) return 'stand';
@@ -366,20 +362,25 @@ export class PuppetRuntime {
   }
   playIdle(now = performance.now()) {
     const pose = this.poseName === 'sit' ? 'sit' : 'stand';
-    const available = IDLE_CLIPS[pose].filter((name) => this.clips.has(name));
+    const available = this.variants(IDLES[pose]);
     const choices = available.filter((name) => name !== this.idleClip);
-    const name = choices[Math.floor(Math.random() * choices.length)] ?? available[0];
+    const name = pick(choices) ?? available[0];
     if (!name) return;
     this.idleClip = name;
     this.nextIdleAt = available.length > 1 ? now + 7000 + Math.random() * 7000 : Infinity;
     this.playClip(name, name);
+    if (Math.random() < acting.own.chance) this.showOwnExpression(now);
+  }
+  showOwnExpression(now = performance.now()) {
+    const own = ownExpressions(this.vrm?.expressionManager);
+    if (own.length) this.ownExpression = { name: pick(own)[0], until: now + acting.own.seconds * 1000 };
   }
   playClip(name, fallback) {
     const clip = this.clips.get(name);
     if (!clip) return;
     const previous = this.clipAction;
     const handover = previous && this.handovers?.get(`${previous.getClip().userData.action}:${name}`);
-    const duration = handover?.duration ?? (IDLE_CLIPS.stand.includes(name) ? 0.6 : 0.18);
+    const duration = handover?.duration ?? (clipFamily(name) === IDLES.stand ? 0.6 : 0.18);
     const scheduled = [...this.clips.values()].map((loaded) => this.mixer.existingAction(loaded, this.vrm.scene)).filter((existing) => existing?.isScheduled());
     for (const outgoing of scheduled) outgoing.setEffectiveWeight(outgoing.getEffectiveWeight()).fadeOut(duration);
     const action = this.mixer.clipAction(clip, this.vrm.scene).reset().setEffectiveWeight(1);
@@ -417,6 +418,10 @@ export class PuppetRuntime {
     if (name !== null && !MOOD_TABLE[name]) throw new Error(`unknown mood ${name}`);
     if (this.moodName === name) return;
     this.moodName = name;
+    const variant = name && this.poseName !== 'sit' && !this.clipGesture && pick(this.variants(name));
+    if (!variant) return;
+    this.playClip(variant, 'idle');
+    this.clipGesture = name;
   }
   updatePose(now) {
     if (this.clipAction?.isRunning() && this.clipAction.getClip() === this.clips.get(this.idleClip) && now >= this.nextIdleAt) {
@@ -440,12 +445,14 @@ export class PuppetRuntime {
     this.mixer.update(delta);
     this.head?.base.copy(this.head.node.quaternion);
   }
-  updateMood(manager, delta = 1 / ACTIVE_FPS) {
+  updateMood(manager, now = performance.now(), delta = 1 / ACTIVE_FPS) {
     const mood = MOOD_TABLE[this.moodName];
+    const own = this.ownExpression && now < this.ownExpression.until ? this.ownExpression.name : null;
     for (const expression of manager.expressions) {
       const name = expression.expressionName.toLowerCase();
-      if (MOOD_EXPRESSIONS.includes(name)) expression.weight = THREE.MathUtils.lerp(expression.weight, mood?.[name] ?? 0, ease(0.12, delta));
+      if (MOOD_EXPRESSIONS.includes(name)) expression.weight = THREE.MathUtils.lerp(expression.weight, own ? 0 : mood?.[name] ?? 0, ease(0.12, delta));
     }
+    for (const [name, expression] of ownExpressions(manager)) expression.weight = THREE.MathUtils.lerp(expression.weight, name === own ? 1 : 0, ease(0.12, delta));
   }
   updateFace(now, delta = 1 / ACTIVE_FPS) {
     const manager = this.vrm?.expressionManager;
@@ -457,7 +464,7 @@ export class PuppetRuntime {
         this.blinkStart = 0;
         this.nextBlink = now + 2200 + Math.random() * 4200;
       }
-      this.updateMood(manager, delta);
+      this.updateMood(manager, now, delta);
       this.updateMouth(manager, now, delta);
     }
     this.updateGaze(now, delta);

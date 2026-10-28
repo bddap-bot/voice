@@ -5,11 +5,46 @@ use serde::Deserialize;
 
 use crate::vrm::{Humanoid, Version};
 
-pub const IDLES: [&str; 3] = ["idle", "idle-2", "idle-3"];
+/// The family of the standing idles: the overlay rotates through every clip of it.
+pub const IDLE: &str = "idle";
+/// docs/moods.json: the face each mood draws and how the figure shows its own expressions.
+const ACTING: &str = include_str!("../../docs/moods.json");
+/// The page's easing of a face weight toward its mood, per frame at 60 fps.
+const FACE_EASE: f32 = 0.12;
 const IDLE_FADE: f32 = 0.6;
 /// The page's crossfade into a gesture.
 const GESTURE_FADE: f32 = 0.18;
 const BLINK: f32 = 0.18;
+
+#[derive(Deserialize)]
+struct Acting {
+    moods: HashMap<String, HashMap<String, f32>>,
+    own: Own,
+}
+
+#[derive(Deserialize)]
+struct Own {
+    chance: f32,
+    seconds: f32,
+}
+
+fn acting() -> &'static Acting {
+    static PARSED: std::sync::OnceLock<Acting> = std::sync::OnceLock::new();
+    PARSED.get_or_init(|| serde_json::from_str(ACTING).expect("docs/moods.json"))
+}
+
+/// The page's moods, each a clip family too when the catalog has one.
+pub fn moods() -> impl Iterator<Item = &'static str> {
+    acting().moods.keys().map(String::as_str)
+}
+
+/// A clip's family: its action without a trailing `-<n>`, so `wave-2` is another `wave`.
+pub fn family(action: &str) -> &str {
+    match action.rsplit_once('-') {
+        Some((family, number)) if !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()) => family,
+        _ => action,
+    }
+}
 
 #[derive(Deserialize)]
 struct Track {
@@ -136,23 +171,58 @@ pub struct Animator {
     blink_start: Option<f32>,
     now: f32,
     random: Random,
+    /// The figure's own expressions, those its file names beyond the VRM presets.
+    own: Vec<String>,
+    mood: Option<String>,
+    shown: Option<(String, f32)>,
+    faces: HashMap<String, f32>,
 }
 
 impl Animator {
-    pub fn new(clips: HashMap<String, Clip>, random: Random) -> Animator {
-        let mut animator = Animator { clips, actions: Vec::new(), idle: None, gesture: None, next_idle: f32::INFINITY, next_blink: 1.2, blink_start: None, now: 0.0, random };
+    pub fn new(clips: HashMap<String, Clip>, own: Vec<String>, random: Random) -> Animator {
+        let mut animator = Animator { clips, actions: Vec::new(), idle: None, gesture: None, next_idle: f32::INFINITY, next_blink: 1.2, blink_start: None, now: 0.0, random, own, mood: None, shown: None, faces: HashMap::new() };
         animator.play_idle();
         animator
     }
 
+    fn variants(&self, of: &str) -> Vec<String> {
+        let mut variants: Vec<String> = self.clips.keys().filter(|action| family(action) == of).cloned().collect();
+        variants.sort();
+        variants
+    }
+
+    fn pick(&mut self, from: &[String]) -> Option<String> {
+        from.get(((self.random.next() * from.len() as f32) as usize).min(from.len().saturating_sub(1))).cloned()
+    }
+
     fn play_idle(&mut self) {
-        let available: Vec<&str> = IDLES.into_iter().filter(|name| self.clips.contains_key(*name)).collect();
-        let choices: Vec<&str> = available.iter().copied().filter(|name| Some(*name) != self.idle.as_deref()).collect();
-        let Some(name) = choices.get((self.random.next() * choices.len() as f32) as usize).or(available.first()).map(|name| name.to_string()) else { return };
+        let available = self.variants(IDLE);
+        let choices: Vec<String> = available.iter().filter(|name| Some(name.as_str()) != self.idle.as_deref()).cloned().collect();
+        let Some(name) = self.pick(&choices).or(available.first().cloned()) else { return };
         self.next_idle = if available.len() > 1 { self.now + 7.0 + self.random.next() * 7.0 } else { f32::INFINITY };
         self.play(&name, IDLE_FADE, false);
         self.idle = Some(name);
         self.gesture = None;
+        if self.random.next() < acting().own.chance {
+            let own = self.own.clone();
+            self.shown = self.pick(&own).map(|name| (name, self.now + acting().own.seconds));
+        }
+    }
+
+    /// Shows a mood as the page's `mood` does: its face, and once its body clip when it changes and no gesture plays.
+    pub fn mood(&mut self, name: &str) {
+        if self.mood.as_deref() == Some(name) {
+            return;
+        }
+        self.mood = Some(name.to_owned());
+        if self.gesture.is_none() {
+            self.gesture(name);
+        }
+    }
+
+    /// The face weights to draw this frame: the mood's, or one of the figure's own expressions while it shows.
+    pub fn faces(&self) -> impl Iterator<Item = (&str, f32)> {
+        self.faces.iter().map(|(name, &weight)| (name.as_str(), weight))
     }
 
     fn play(&mut self, name: &str, length: f32, once: bool) {
@@ -166,10 +236,9 @@ impl Animator {
 
     /// Plays a gesture clip once, as the page's `gesture`, then returns to an idle; false without its clip.
     pub fn gesture(&mut self, name: &str) -> bool {
-        if !self.clips.contains_key(name) {
-            return false;
-        }
-        self.play(name, GESTURE_FADE, true);
+        let variants = self.variants(name);
+        let Some(variant) = self.pick(&variants) else { return false };
+        self.play(&variant, GESTURE_FADE, true);
         self.gesture = Some(name.to_owned());
         true
     }
@@ -193,6 +262,19 @@ impl Animator {
         if switched {
             self.play_idle();
         }
+        let shown = self.shown.as_ref().filter(|(_, until)| self.now < *until).map(|(name, _)| name.clone());
+        let targets: HashMap<String, f32> = match shown {
+            Some(name) => HashMap::from([(name, 1.0)]),
+            None => self.mood.as_ref().and_then(|mood| acting().moods.get(mood)).cloned().unwrap_or_default(),
+        };
+        let ease = 1.0 - (1.0 - FACE_EASE).powf(delta * 60.0);
+        for name in targets.keys() {
+            self.faces.entry(name.clone()).or_insert(0.0);
+        }
+        for (name, weight) in &mut self.faces {
+            *weight += (targets.get(name).copied().unwrap_or(0.0) - *weight) * ease;
+        }
+        self.faces.retain(|name, weight| targets.contains_key(name) || *weight > 1e-3);
         if self.blink_start.is_none() && self.now >= self.next_blink {
             self.blink_start = Some(self.now);
         }
@@ -301,7 +383,7 @@ mod tests {
 
     fn animator(names: &[&str]) -> Animator {
         let clips = names.iter().enumerate().map(|(at, name)| (name.to_string(), Clip::parse(&motion(&[at as f32 * 0.5; 20], None), Version::One, None).unwrap())).collect();
-        Animator::new(clips, Random(7))
+        Animator::new(clips, Vec::new(), Random(7))
     }
 
     #[test]
@@ -337,7 +419,7 @@ mod tests {
         let second = serde_json::json!({ "name": "b", "duration": 1.0, "tracks": [{ "name": "spine.quaternion", "times": [0.0], "values": [0.0, 0.0, 0.0, 1.0] }] });
         let rest = Some(Vec3::new(0.0, 1.0, 0.0));
         let clips = [("idle", first), ("idle-2", second)].map(|(name, json)| (name.to_owned(), Clip::parse(&serde_json::to_vec(&json).unwrap(), Version::One, rest).unwrap()));
-        let mut animator = Animator::new(HashMap::new(), Random(3));
+        let mut animator = Animator::new(HashMap::new(), Vec::new(), Random(3));
         animator.clips = clips.into_iter().collect();
         animator.play("idle", IDLE_FADE, false);
         animator.play("idle-2", IDLE_FADE, false);
@@ -392,5 +474,71 @@ mod tests {
         assert!(closed[0] > 1.2 && closed[0] < 1.2 + BLINK, "the first blink comes after 1.2 s: {}", closed[0]);
         let gaps: Vec<f32> = closed.windows(2).map(|pair| pair[1] - pair[0]).filter(|gap| *gap > 0.5).collect();
         assert!(!gaps.is_empty() && gaps.iter().all(|gap| (2.2..=6.6).contains(gap)), "blinks recur 2.2 to 6.4 s apart: {gaps:?}");
+    }
+
+    #[test]
+    fn a_numbered_clip_is_another_of_its_family() {
+        assert_eq!(family("wave-2"), "wave");
+        assert_eq!(family("idle-13"), "idle");
+        assert_eq!(family("thumbs-up"), "thumbs-up");
+        assert_eq!(family("look-around"), "look-around");
+        assert_eq!(family("sit-idle-2"), "sit-idle");
+    }
+
+    #[test]
+    fn every_idle_and_gesture_variant_takes_its_turn() {
+        let mut animator = animator(&["idle", "idle-2", "idle-14", "wave", "wave-3"]);
+        let mut idles = std::collections::HashSet::new();
+        let mut waves = std::collections::HashSet::new();
+        for _ in 0..60 {
+            animator.play_idle();
+            idles.insert(animator.idle.clone().unwrap());
+            assert!(animator.gesture("wave"));
+            waves.insert(animator.actions.last().unwrap().clip.clone());
+        }
+        assert_eq!(idles.len(), 3, "{idles:?}");
+        assert_eq!(waves, ["wave", "wave-3"].map(String::from).into());
+        assert!(!animator.gesture("nod"), "a gesture without a clip of its family is refused");
+    }
+
+    #[test]
+    fn a_mood_eases_its_face_in_and_plays_its_body_clip_once() {
+        let mut animator = animator(&["idle", "sad"]);
+        animator.mood("sad");
+        assert_eq!(animator.gesture.as_deref(), Some("sad"));
+        for _ in 0..120 {
+            animator.update(1.0 / 60.0);
+        }
+        let faces: HashMap<&str, f32> = animator.faces().collect();
+        assert!((faces["sad"] - acting().moods["sad"]["sad"]).abs() < 0.01, "{faces:?}");
+        let playing = animator.actions.len();
+        animator.mood("sad");
+        assert_eq!(animator.actions.len(), playing, "the same mood again replays nothing");
+        animator.mood("neutral");
+        for _ in 0..240 {
+            animator.update(1.0 / 60.0);
+        }
+        assert_eq!(animator.faces().count(), 0, "neutral clears the face");
+    }
+
+    #[test]
+    fn an_idle_change_sometimes_shows_one_of_the_figures_own_expressions_over_the_mood() {
+        let clips = ["idle", "idle-2"].iter().map(|name| (name.to_string(), Clip::parse(&motion(&[0.0; 4], None), Version::One, None).unwrap())).collect();
+        let mut animator = Animator::new(clips, vec!["smug".into()], Random(11));
+        animator.mood("pleased");
+        let mut shown = 0;
+        for _ in 0..200 {
+            animator.play_idle();
+            for _ in 0..60 {
+                animator.update(1.0 / 60.0);
+            }
+            let faces: HashMap<&str, f32> = animator.faces().collect();
+            if faces.get("smug").is_some_and(|weight| *weight > 0.9) {
+                shown += 1;
+                assert!(faces.get("happy").map_or(true, |weight| *weight < 0.1), "the own expression replaces the mood's face: {faces:?}");
+            }
+        }
+        let expected = acting().own.chance * 200.0;
+        assert!((shown as f32 - expected).abs() < 30.0, "shown {shown} of 200 idle changes, expected about {expected}");
     }
 }

@@ -135,7 +135,18 @@
     },
     {
       "paths": [
-        "docs/poses/standing.json"
+        "scripts/mocap.mjs",
+        "docs/poses/mocap.json"
+      ],
+      "tests": [
+        "node --test test/mocap.test.js"
+      ],
+      "why": "the mocap converter writes the licensed capture clips the server serves; its test checks the retarget against the capture's own joint directions"
+    },
+    {
+      "paths": [
+        "docs/poses/standing.json",
+        "docs/moods.json"
       ],
       "tests": [
         "npm run build",
@@ -146,7 +157,7 @@
         "nix-build vr/default.nix -A bundle --no-out-link",
         "nix-build vr/default.nix -A simulatedController --no-out-link"
       ],
-      "why": "the rest pose is read by the page and compiled into the native overlay host"
+      "why": "the rest pose and the moods' faces are read by the page and compiled into the native overlay host"
     },
     {
       "paths": [

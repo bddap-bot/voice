@@ -176,6 +176,8 @@ pub struct Model {
     pub images: Vec<Image>,
     humanoid: HashMap<String, usize>,
     expressions: HashMap<String, Expression>,
+    /// The expressions the file names beyond the VRM presets, as it orders them.
+    own: Vec<String>,
     look_at: LookAt,
     rest_turns: Vec<Quat>,
     rig: Rig,
@@ -317,6 +319,9 @@ fn floats<const N: usize>(value: &Value, fallback: [f32; N]) -> [f32; N] {
 fn index(value: &Value) -> Option<usize> {
     value.as_u64().map(|value| value as usize)
 }
+
+/// VRM 1.0's preset names and VRM 0.x's, lowercased: a custom expression of one of these names is no expression of the figure's own.
+const PRESETS: &[&str] = &["aa", "ih", "ou", "ee", "oh", "happy", "angry", "sad", "relaxed", "surprised", "neutral", "blink", "blinkleft", "blinkright", "lookup", "lookdown", "lookleft", "lookright", "joy", "sorrow", "fun"];
 
 fn expression_one(name: &str) -> &str {
     match name {
@@ -829,24 +834,35 @@ impl Model {
             }
         }
         let mut expressions = HashMap::new();
+        let mut own = Vec::new();
         match version {
             Version::One => {
-                for (name, expression) in extensions["VRMC_vrm"]["expressions"]["preset"].as_object().into_iter().flatten() {
-                    let binds = expression["morphTargetBinds"].as_array().unwrap_or(&empty).iter().filter_map(|bind| Some((nodes.get(index(&bind["node"])?)?.mesh?, index(&bind["index"])?, number(&bind["weight"], 0.0)))).collect();
-                    expressions.insert(name.clone(), Expression { binds, binary: expression["isBinary"].as_bool() == Some(true) });
+                for kind in ["preset", "custom"] {
+                    for (name, expression) in extensions["VRMC_vrm"]["expressions"][kind].as_object().into_iter().flatten() {
+                        let binds = expression["morphTargetBinds"].as_array().unwrap_or(&empty).iter().filter_map(|bind| Some((nodes.get(index(&bind["node"])?)?.mesh?, index(&bind["index"])?, number(&bind["weight"], 0.0)))).collect();
+                        if kind == "custom" && !PRESETS.contains(&name.to_lowercase().as_str()) {
+                            own.push(name.clone());
+                        }
+                        expressions.entry(name.clone()).or_insert(Expression { binds, binary: expression["isBinary"].as_bool() == Some(true) });
+                    }
                 }
             }
             Version::Zero => {
                 for group in extensions["VRM"]["blendShapeMaster"]["blendShapeGroups"].as_array().into_iter().flatten() {
-                    let Some(name) = group["presetName"].as_str().filter(|name| !name.is_empty() && *name != "unknown") else { continue };
+                    let preset = group["presetName"].as_str().filter(|name| !name.is_empty() && *name != "unknown");
+                    let Some(name) = preset.map(|name| expression_one(name).to_owned()).or_else(|| group["name"].as_str().map(str::to_owned)) else { continue };
                     let binds = group["binds"].as_array().unwrap_or(&empty).iter().filter_map(|bind| Some((index(&bind["mesh"])?, index(&bind["index"])?, number(&bind["weight"], 0.0) / 100.0))).collect();
-                    expressions.insert(expression_one(name).to_owned(), Expression { binds, binary: group["isBinary"].as_bool() == Some(true) });
+                    if preset.is_none() && !PRESETS.contains(&name.to_lowercase().as_str()) && !expressions.contains_key(&name) {
+                        own.push(name.clone());
+                    }
+                    expressions.entry(name).or_insert(Expression { binds, binary: group["isBinary"].as_bool() == Some(true) });
                 }
             }
         }
         for expression in expressions.values_mut() {
             expression.binds.retain(|&(mesh, target, _)| meshes.get(mesh).is_some_and(|mesh| target < mesh.weights.len()));
         }
+        own.retain(|name| !expressions[name].binds.is_empty());
         let mut look_at = look_at(version, extensions);
         look_at.moves &= if look_at.expression {
             ["lookLeft", "lookRight", "lookUp", "lookDown"].iter().any(|name| expressions.get(*name).is_some_and(|expression| !expression.binds.is_empty()))
@@ -863,7 +879,7 @@ impl Model {
             _ => None,
         };
         let spreads = object && extensions[SPREAD].is_object();
-        let mut model = Model { version, nodes, meshes, skins, materials, images, humanoid, expressions, look_at, rest_turns: Vec::new(), rig, program, spreads };
+        let mut model = Model { version, nodes, meshes, skins, materials, images, humanoid, expressions, own, look_at, rest_turns: Vec::new(), rig, program, spreads };
         model.rest_turns = model.worlds(&model.rest()).iter().map(rotation).collect();
         Ok(model)
     }
@@ -980,6 +996,11 @@ impl Model {
             pose.translations[hips] = parent.inverse().transform_point3(position);
         }
         pose
+    }
+
+    /// The expressions the figure's file names beyond the VRM presets.
+    pub fn own_expressions(&self) -> Vec<String> {
+        self.own.clone()
     }
 
     pub fn express(&self, pose: &mut Pose, name: &str, weight: f32) {
@@ -1632,6 +1653,30 @@ pub mod tests {
         skinned.morph(&rest.weights);
         assert_eq!(skinned.vertices[2].position, [0.0, 1.0, 0.0]);
         assert_eq!(skinned.vertices[1].position, [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn a_figures_own_expressions_are_its_custom_ones_beyond_the_presets_in_either_version() {
+        let one = serde_json::json!({ "VRMC_vrm": { "humanoid": { "humanBones": {} }, "expressions": {
+            "preset": { "happy": { "morphTargetBinds": [{ "node": 0, "index": 0, "weight": 1.0 }] } },
+            "custom": { "smug": { "morphTargetBinds": [{ "node": 0, "index": 1, "weight": 0.5 }] }, "Surprised": { "morphTargetBinds": [{ "node": 0, "index": 0, "weight": 1.0 }] }, "empty": {} } } } });
+        let zero = serde_json::json!({ "VRM": { "humanoid": { "humanBones": [] }, "blendShapeMaster": { "blendShapeGroups": [
+            { "presetName": "joy", "binds": [{ "mesh": 0, "index": 0, "weight": 100 }] },
+            { "presetName": "unknown", "name": "smug", "binds": [{ "mesh": 0, "index": 1, "weight": 50 }] }] } } });
+        for extensions in [one, zero] {
+            let mut builder = Builder::new(extensions);
+            let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+            let first = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0]);
+            let second = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0]);
+            builder.set("nodes", serde_json::json!([{ "mesh": 0 }]));
+            builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position }, "targets": [{ "POSITION": first }, { "POSITION": second }] }] }]));
+            let model = Model::parse(&builder.glb()).unwrap();
+            assert_eq!(model.own_expressions(), vec!["smug".to_owned()]);
+            let mut pose = model.rest();
+            model.express(&mut pose, "smug", 1.0);
+            model.express(&mut pose, "happy", 0.25);
+            assert_eq!(pose.weights[0], vec![0.25, 0.5]);
+        }
     }
 
     #[test]

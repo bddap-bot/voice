@@ -70,7 +70,7 @@ let
     pname = "voice-vr";
     src = pkgs.lib.fileset.toSource {
       root = ./..;
-      fileset = pkgs.lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./build.rs ./src ./shaders ./golden ../docs/poses/standing.json ../docs/identity.js ../docs/live.js ../docs/speaker.js ../docs/turn.js ../docs/wake/melspectrogram.onnx ../docs/wake/embedding_model.onnx ../scripts/wake-demo.json ../test/fixtures/delegated-reply-capture.json ];
+      fileset = pkgs.lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./build.rs ./src ./shaders ./golden ../docs/poses/standing.json ../docs/moods.json ../docs/identity.js ../docs/live.js ../docs/speaker.js ../docs/turn.js ../docs/wake/melspectrogram.onnx ../docs/wake/embedding_model.onnx ../scripts/wake-demo.json ../test/fixtures/delegated-reply-capture.json ];
     };
     preBuild = ''
       # Cargo reads a dependency newer than its dependent as rebuilt; the store's one mtime keeps copy order out of that test.

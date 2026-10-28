@@ -60,12 +60,67 @@ test('named clip gestures play during a pending hub wait', () => {
   const played = [];
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
     waitingForHub: true,
-    clips: new Map(), clipGesture: null, pendingGesture: null, poseName: 'stand',
+    clips: new Map([['wave', {}]]), clipGesture: null, pendingGesture: null, poseName: 'stand',
     playClip: (name) => played.push(name),
   });
   assert.equal(runtime.gesture('wave'), true);
   assert.deepEqual(played, ['wave']);
   assert.equal(runtime.clipGesture, 'wave');
+});
+
+test('a gesture plays one of its numbered variants, and a mood with a body clip plays it once while standing', () => {
+  const played = [];
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+    clips: new Map(['wave', 'wave-2', 'wave-3', 'waved', 'sad', 'idle'].map((name) => [name, {}])), clipGesture: null, pendingGesture: null, poseName: 'stand', moodName: null,
+    playClip: (name, fallback) => played.push([name, fallback]),
+  });
+  const random = Math.random;
+  try {
+    for (const draw of [0, 0.5, 0.99]) {
+      Math.random = () => draw;
+      runtime.clipGesture = null;
+      runtime.gesture('wave');
+    }
+    assert.deepEqual(played.map(([name]) => name), ['wave', 'wave-2', 'wave-3']);
+    played.length = 0;
+    runtime.clipGesture = null;
+    runtime.mood('sad');
+    runtime.mood('sad');
+    assert.deepEqual(played, [['sad', 'idle']]);
+    assert.equal(runtime.clipGesture, 'sad');
+    runtime.clipGesture = null;
+    runtime.mood('pleased');
+    runtime.poseName = 'sit';
+    runtime.mood('sad');
+    assert.deepEqual(played, [['sad', 'idle']], 'a mood without a clip, or a seated puppet, plays no body clip');
+  } finally { Math.random = random; }
+});
+
+test("an idle switch sometimes shows one of the avatar's own expressions in place of the mood", async () => {
+  const { VRMExpression, VRMExpressionManager, VRMExpressionMorphTargetBind } = await import('@pixiv/three-vrm');
+  const manager = new VRMExpressionManager();
+  const mesh = new THREE.Mesh();
+  mesh.morphTargetInfluences = [0, 0];
+  for (const [index, name] of ['happy', 'smug'].entries()) {
+    const expression = new VRMExpression(name);
+    expression.addBind(new VRMExpressionMorphTargetBind({ primitives: [mesh], index, weight: 1 }));
+    manager.registerExpression(expression);
+  }
+  assert.deepEqual(Object.keys(manager.customExpressionMap), ['smug']);
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
+    moodName: 'pleased', vrm: { expressionManager: manager }, clips: new Map([['idle', {}], ['idle-2', {}]]), poseName: 'stand',
+    playClip: () => {},
+  });
+  const settle = (now) => { for (let i = 0; i < 120; i++) { runtime.updateMood(manager, now); manager.update(); } };
+  const random = Math.random;
+  try {
+    Math.random = () => 0;
+    runtime.playIdle(1000);
+  } finally { Math.random = random; }
+  settle(1000);
+  assert.ok(mesh.morphTargetInfluences[1] > 0.95 && mesh.morphTargetInfluences[0] < 0.05, mesh.morphTargetInfluences.join());
+  settle(1000 + 60000);
+  assert.ok(mesh.morphTargetInfluences[1] < 0.05 && mesh.morphTargetInfluences[0] > 0.7, mesh.morphTargetInfluences.join());
 });
 
 test('a standing gesture requested while seated stands first and then plays', () => {
@@ -407,7 +462,8 @@ test('asleep holds the eyes shut and waking reopens them, with no droop on the h
     moodName: null, sleeping: false, nextBlink: Infinity, blinkStart: 0,
     mouthValues: { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 }, audio: null,
     head: { node: head },
-    vrm: { expressionManager: { expressions: [], setValue: (name, value) => { values[name] = value; } } },
+    vrm: { expressionManager: { expressions: [], customExpressionMap: {}, setValue: (name, value) => { values[name] = value; } } },
+    clips: new Map(), poseName: 'sit',
   });
   runtime.asleep(true);
   for (const now of [1000, 9000]) {
@@ -434,7 +490,7 @@ for (const name of ['surprised', 'Surprised', 'SURPRISED']) test(`mood actions r
     expression.addBind(new VRMExpressionMorphTargetBind({ primitives: [mesh], index, weight: 1 }));
     manager.registerExpression(expression);
   }
-  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), { moodName: null });
+  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), { moodName: null, clips: new Map() });
   const settle = () => {
     for (let i = 0; i < 120; i++) {
       runtime.updateMood(manager);

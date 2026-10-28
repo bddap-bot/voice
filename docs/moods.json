@@ -1,0 +1,50 @@
+{
+  "moods": {
+    "neutral": {},
+    "curious": {
+      "surprised": 0.22
+    },
+    "amused": {
+      "happy": 0.68,
+      "relaxed": 0.12
+    },
+    "puzzled": {
+      "sad": 0.2,
+      "surprised": 0.12
+    },
+    "thinking": {
+      "relaxed": 0.28
+    },
+    "pleased": {
+      "happy": 0.76
+    },
+    "sad": {
+      "sad": 0.78
+    },
+    "angry": {
+      "angry": 0.78
+    },
+    "apologetic": {
+      "sad": 0.48
+    },
+    "alert": {
+      "surprised": 0.35
+    },
+    "sleepy": {
+      "relaxed": 0.68
+    },
+    "relaxed": {
+      "relaxed": 0.78
+    },
+    "surprised": {
+      "surprised": 0.9
+    },
+    "skeptical": {
+      "angry": 0.18
+    }
+  },
+  "own": {
+    "chance": 0.35,
+    "seconds": 2.5
+  }
+}

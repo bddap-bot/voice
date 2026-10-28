@@ -276,7 +276,7 @@ pub const OBJECT_NODES: usize = 4096;
 pub const OBJECT_DEPTH: usize = 64;
 /// Values an accessor with no buffer view may claim, and all of an object's together, each read counted again; they cost memory their file never paid for. Puppet exporters share one sparse accessor across many morph targets, so a puppet's are not totalled.
 const UNSTORED: usize = 1 << 24;
-/// How much darker than lit an object's unlit side is; puppets without MToon stay flat as three-vrm draws them.
+/// How much darker than lit an object's unlit side is.
 const OBJECT_SHADE: f32 = 0.15;
 /// Objects shade smoothly so their form reads; MToon's default is a near-hard terminator.
 const OBJECT_TOONY: f32 = 0.2;
@@ -609,7 +609,12 @@ fn material_one(document: &Document, material: &Value) -> Material {
         Some("screenCoordinates") => Some(OutlineWidth::Screen),
         _ => None,
     };
-    let unlit = if document.object { OBJECT_SHADE } else { 1.0 };
+    // A puppet's plain material is the page's MeshStandardMaterial: toony 0.5 and shift -0.5 turn the toon ramp into clamp(n·l), and a black shade without equalization leaves three.js's Lambert term.
+    let (unlit, toony, shift, equalization) = match (lit, document.object) {
+        (false, _) => (0.0, 0.9, 0.0, 0.9),
+        (true, true) => (OBJECT_SHADE, OBJECT_TOONY, 0.0, 0.9),
+        (true, false) => (0.0, 0.5, -0.5, 0.0),
+    };
     Material {
         base,
         base_image,
@@ -618,9 +623,9 @@ fn material_one(document: &Document, material: &Value) -> Material {
         alpha,
         depth_write,
         double_sided: material["doubleSided"].as_bool() == Some(true),
-        shading_shift: number(&toon["shadingShiftFactor"], 0.0),
-        shading_toony: number(&toon["shadingToonyFactor"], if lit && document.object { OBJECT_TOONY } else { 0.9 }),
-        equalization: number(&toon["giEqualizationFactor"], 0.9),
+        shading_shift: number(&toon["shadingShiftFactor"], shift),
+        shading_toony: number(&toon["shadingToonyFactor"], toony),
+        equalization: number(&toon["giEqualizationFactor"], equalization),
         queue,
         outline: width.map(|width| Outline {
             width,

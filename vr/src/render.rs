@@ -692,6 +692,23 @@ mod tests {
     }
 
     #[test]
+    fn a_plain_puppet_material_is_lit_by_the_key_light() {
+        let mut builder = crate::vrm::tests::Builder::new(serde_json::json!({ "VRMC_vrm": { "humanoid": { "humanBones": {} } } }));
+        let position = builder.accessor("VEC3", &[-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0]);
+        let [toward, away] = [[0.4685, 0.7496, 0.5622], [-0.4685, -0.7496, 0.5622]];
+        let normal = builder.accessor("VEC3", &[toward.repeat(4), away.repeat(4)].concat());
+        let indices = builder.indices(&[0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]);
+        builder.set("nodes", serde_json::json!([{ "mesh": 0 }]));
+        builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position, "NORMAL": normal }, "indices": indices, "material": 0 }] }]));
+        builder.set("materials", serde_json::json!([{ "pbrMetallicRoughness": { "baseColorFactor": [0.3, 0.3, 0.3, 1.0] } }]));
+        let model = Model::parse(&builder.glb()).unwrap();
+        let pixels = draw(&model, &model.rest(), [32, 32], [eye_projection(Vec3::new(0.0, 0.0, 0.4), 0.2, 0.2), None], Vec3::ZERO);
+        let [lit, dark] = [8, 24].map(|x| pixel(&pixels, 64, x, 16));
+        assert!(lit[3] == 255 && dark[3] == 255, "both halves cover the eye: {lit:?} {dark:?}");
+        assert!(u32::from(lit[0]) > 2 * u32::from(dark[0]), "the half facing the key light is brighter than the half facing away: {lit:?} {dark:?}");
+    }
+
+    #[test]
     fn a_new_appearance_draws_in_place_on_the_same_device() {
         let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [32, 32], crate::HEIGHT / PAGE_HEIGHT).unwrap();
         let eyes = [eye_projection(Vec3::new(0.0, 0.0, 0.4), 0.2, 0.2), None];

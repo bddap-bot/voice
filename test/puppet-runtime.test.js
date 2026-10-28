@@ -579,8 +579,8 @@ test('the feet anchor the puppet through sitting, gestures and standing while th
   runtime.pose('stand');
   advance(5);
   const spread = (axis) => Math.max(...hipsSeen.map((point) => point[axis])) - Math.min(...hipsSeen.map((point) => point[axis]));
-  assert.ok(spread('y') > 0.6, `hips height spread ${spread('y')}`);
-  assert.ok(spread('z') > 0.8, `hips depth spread ${spread('z')}`);
+  assert.ok(Math.abs(spread('y') - 1.7 * 0.45 * (1 - Math.cos(1.5))) < 1e-6, `hips height spread ${spread('y')}`);
+  assert.ok(Math.abs(spread('z') - 1.7 * 0.45 * Math.sin(1.5)) < 1e-6, `hips depth spread ${spread('z')}`);
 });
 
 function gestureRuntime() {

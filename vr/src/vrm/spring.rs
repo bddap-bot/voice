@@ -48,11 +48,6 @@ fn object(value: &Value) -> Option<Vec3> {
 }
 
 impl Rig {
-    /// The nodes the springs turn.
-    pub(super) fn nodes(&self) -> impl Iterator<Item = usize> + '_ {
-        self.joints.iter().map(|joint| joint.node)
-    }
-
     /// Reads VRMC_springBone or VRM 0 secondaryAnimation as three-vrm reads them, skipping what it skips.
     pub(super) fn parse(version: Version, extensions: &Value, nodes: &[Node], children: &[Vec<usize>]) -> Rig {
         let empty = Vec::new();

@@ -50,6 +50,7 @@ const AXIS: f32 = 0.02;
 pub trait Surface {
     fn place_in_world(&self, pose: &Pose);
     fn texture(&self, texture: &mut openvr_sys::VRVulkanTextureData_t) -> Result<(), String>;
+    fn part(&mut self, _: f32) {}
     fn show(&mut self);
     fn hide(&mut self);
 }
@@ -60,6 +61,9 @@ impl Surface for Overlay<'_> {
     }
     fn texture(&self, texture: &mut openvr_sys::VRVulkanTextureData_t) -> Result<(), String> {
         Overlay::texture(self, texture)
+    }
+    fn part(&mut self, part: f32) {
+        Overlay::part(self, part)
     }
     fn show(&mut self) {
         Overlay::show(self)
@@ -391,7 +395,7 @@ impl<S: Surface> Object<S> {
     }
 
     fn loading(surface: S, gpu: Rc<Gpu>, bytes: Vec<u8>, work: Work, budget: Budget, now: Instant) -> Result<Object<S>, String> {
-        Ok(Object { place: 0, drawn: None, renderer: Renderer::new(gpu, [eye_texels(QUAD); 2], 1.0)?, runner: Runner::start(bytes, work)?, surface, handling: Handling::new(now), data: None, budget, cost: 0.0, worst: 0.0, frames: 0 })
+        Ok(Object { place: 0, drawn: None, renderer: Renderer::new(gpu, [eye_texels(QUAD, crate::render::NEAREST); 2], 1.0)?, runner: Runner::start(bytes, work)?, surface, handling: Handling::new(now), data: None, budget, cost: 0.0, worst: 0.0, frames: 0 })
     }
 
     pub fn hide(&mut self) {
@@ -465,9 +469,11 @@ impl<S: Surface> Object<S> {
         let local = quad.inverse();
         drawn.placed = Mat4::from_translation(center.into()) * turned;
         drawn.appearance.update(&drawn.skinned.palette(&drawn.parts.spread(&drawn.worlds, self.handling.spread), local.mat4() * drawn.placed), &drawn.skinned.vertices, &[]);
-        let eyes = view.eyes.map(|eye| eye_projection(local.apply(view.head.then(&eye).t).into(), QUAD / 2.0, QUAD / 2.0));
+        let seen = view.eyes.map(|eye| local.apply(view.head.then(&eye).t));
+        let texels = self.renderer.texels(QUAD, seen[0][2].min(seen[1][2]));
+        self.surface.part(texels as f32 / self.renderer.eye[0] as f32);
         let started = Instant::now();
-        let texture = self.renderer.render(&drawn.appearance, eyes)?;
+        let texture = self.renderer.render(&drawn.appearance, seen.map(|eye| eye_projection(eye.into(), QUAD / 2.0, QUAD / 2.0)), texels)?;
         let spent = started.elapsed();
         self.frames += 1;
         let measured = self.frames as f32 - WINDOW;
@@ -751,7 +757,7 @@ pub mod tests {
         let fit = object.drawn.as_ref().unwrap().radius;
         assert!(fit >= SIZE / 2.0 && fit <= SIZE * 3f32.sqrt() / 2.0, "a turned 3 m cube shows with its largest side at {SIZE} m: radius {fit}");
         let pixels = object.read().unwrap();
-        let eye = eye_texels(QUAD) as usize;
+        let eye = ((pixels.len() / 8) as f64).sqrt() as usize;
         for half in 0..2 {
             let mut covered = std::collections::HashSet::new();
             for y in 0..eye {

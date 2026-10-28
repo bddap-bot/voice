@@ -173,7 +173,7 @@ impl Runtime {
         call!(self.overlay, SetOverlayFlag, handle, sys::VROverlayFlags_SideBySide_Parallel, stereo);
         call!(self.overlay, SetOverlayFlag, handle, sys::VROverlayFlags_IsPremultiplied, true);
         call!(self.overlay, SetOverlayWidthInMeters, handle, width);
-        Ok(Overlay { runtime: self, handle, shown: false, width })
+        Ok(Overlay { runtime: self, handle, shown: false, width, part: 1.0 })
     }
 }
 
@@ -193,6 +193,7 @@ pub struct Overlay<'a> {
     handle: sys::VROverlayHandle_t,
     shown: bool,
     width: f32,
+    part: f32,
 }
 
 impl Overlay<'_> {
@@ -210,6 +211,15 @@ impl Overlay<'_> {
         if width != self.width {
             call!(self.runtime.overlay, SetOverlayWidthInMeters, self.handle, width);
             self.width = width;
+        }
+    }
+
+    /// Shows the top left `part` of each eye's texture across the whole overlay, the eyes packed side by side as `Renderer::render` packs them.
+    pub fn part(&mut self, part: f32) {
+        if part != self.part {
+            let mut bounds = sys::VRTextureBounds_t { uMin: 0.0, vMin: 0.0, uMax: part, vMax: part };
+            call!(self.runtime.overlay, SetOverlayTextureBounds, self.handle, &mut bounds);
+            self.part = part;
         }
     }
 

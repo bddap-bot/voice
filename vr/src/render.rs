@@ -63,9 +63,9 @@ enum Cull {
     Front,
 }
 
-/// Texels across one eye's image of a window `width` metres wide, as dense as the display at the window's centre seen from `NEAREST`.
-pub fn eye_texels(width: f32) -> u32 {
-    (DISPLAY_DENSITY * width / NEAREST).ceil() as u32
+/// Texels across one eye's image of a window `width` metres wide seen from `distance`, as dense as the display at the window's centre: the compositor samples a window without mipmaps, so a denser image aliases.
+pub fn eye_texels(width: f32, distance: f32) -> u32 {
+    (DISPLAY_DENSITY * width / distance.max(NEAREST)).ceil() as u32
 }
 
 pub fn eye_projection(eye: Vec3, half_width: f32, half_height: f32) -> Option<Mat4> {
@@ -121,7 +121,7 @@ pub struct Renderer {
     sampler: vk::Sampler,
     pub outline_scale: f32,
     next: usize,
-    last: Option<usize>,
+    last: Option<(usize, u32)>,
 }
 
 pub struct Appearance {
@@ -399,19 +399,26 @@ impl Renderer {
         Ok(Target { texture, framebuffer, commands, fence })
     }
 
-    pub fn render(&mut self, appearance: &Appearance, eyes: [Option<Mat4>; 2]) -> Result<openvr_sys::VRVulkanTextureData_t, String> {
+    /// Texels per eye for a window `width` metres wide seen from `distance`, at most what the target holds.
+    pub fn texels(&self, width: f32, distance: f32) -> u32 {
+        eye_texels(width, distance).min(self.eye[0]).min(self.eye[1])
+    }
+
+    /// Draws each eye's image `texels` square, packed from the target's top left; the overlay shows that part through `Overlay::part`.
+    pub fn render(&mut self, appearance: &Appearance, eyes: [Option<Mat4>; 2], texels: u32) -> Result<openvr_sys::VRVulkanTextureData_t, String> {
         let device = &self.gpu.device;
         let target = &self.targets[self.next];
         unsafe { device.wait_for_fences(&[target.fence], true, u64::MAX) }.map_err(vk_error("vkWaitForFences"))?;
         unsafe { device.reset_fences(&[target.fence]) }.map_err(vk_error("vkResetFences"))?;
         let [width, height] = self.eye;
+        assert!(texels <= width && texels <= height, "{texels} texels per eye overflow the {width}x{height} target");
         let clear = [vk::ClearValue { color: vk::ClearColorValue { float32: [0.0; 4] } }, vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } }];
         unsafe {
             device.reset_command_buffer(target.commands, vk::CommandBufferResetFlags::empty()).map_err(vk_error("vkResetCommandBuffer"))?;
             device.begin_command_buffer(target.commands, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).map_err(vk_error("vkBeginCommandBuffer"))?;
             device.cmd_begin_render_pass(
                 target.commands,
-                &vk::RenderPassBeginInfo::default().render_pass(self.render_pass).framebuffer(target.framebuffer).render_area(vk::Rect2D { offset: vk::Offset2D::default(), extent: vk::Extent2D { width: width * 2, height } }).clear_values(&clear),
+                &vk::RenderPassBeginInfo::default().render_pass(self.render_pass).framebuffer(target.framebuffer).render_area(vk::Rect2D { offset: vk::Offset2D::default(), extent: vk::Extent2D { width: texels * 2, height: texels } }).clear_values(&clear),
                 vk::SubpassContents::INLINE,
             );
             {
@@ -419,9 +426,9 @@ impl Renderer {
                 device.cmd_bind_index_buffer(target.commands, appearance.indices.0, 0, vk::IndexType::UINT32);
                 for (side, view_projection) in eyes.iter().enumerate() {
                     let Some(view_projection) = view_projection else { continue };
-                    let x = (side as u32 * width) as f32;
-                    device.cmd_set_viewport(target.commands, 0, &[vk::Viewport { x, y: 0.0, width: width as f32, height: height as f32, min_depth: 0.0, max_depth: 1.0 }]);
-                    device.cmd_set_scissor(target.commands, 0, &[vk::Rect2D { offset: vk::Offset2D { x: x as i32, y: 0 }, extent: vk::Extent2D { width, height } }]);
+                    let x = (side as u32 * texels) as f32;
+                    device.cmd_set_viewport(target.commands, 0, &[vk::Viewport { x, y: 0.0, width: texels as f32, height: texels as f32, min_depth: 0.0, max_depth: 1.0 }]);
+                    device.cmd_set_scissor(target.commands, 0, &[vk::Rect2D { offset: vk::Offset2D { x: x as i32, y: 0 }, extent: vk::Extent2D { width: texels, height: texels } }]);
                     for drawn in &appearance.drawn {
                         let push = Push { view_projection: view_projection.to_cols_array(), material: drawn.material, outline: drawn.outline as u32, outline_scale: self.outline_scale };
                         let bytes = std::slice::from_raw_parts(&push as *const Push as *const u8, std::mem::size_of::<Push>());
@@ -438,14 +445,17 @@ impl Renderer {
             device.queue_submit(self.gpu.queue, &[vk::SubmitInfo::default().command_buffers(&buffers)], target.fence).map_err(vk_error("vkQueueSubmit"))?;
             device.wait_for_fences(&[target.fence], true, u64::MAX).map_err(vk_error("vkWaitForFences"))?;
         }
-        self.last = Some(self.next);
+        self.last = Some((self.next, texels));
         self.next = (self.next + 1) % RING;
         Ok(self.gpu.texture_data(target.texture.image, width * 2, height, FORMAT))
     }
 
+    /// The last frame's two eye images side by side, at the size it drew them.
     pub fn read(&self) -> Result<Vec<u8>, String> {
         let [width, height] = self.eye;
-        self.gpu.read(self.targets[self.last.ok_or("nothing rendered")?].texture.image, width * 2, height)
+        let (target, texels) = self.last.ok_or("nothing rendered")?;
+        let whole = self.gpu.read(self.targets[target].texture.image, width * 2, height)?;
+        Ok(whole.chunks_exact(width as usize * 8).take(texels as usize).flat_map(|row| &row[..texels as usize * 8]).copied().collect())
     }
 }
 
@@ -614,7 +624,7 @@ mod tests {
         let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), eye, height / PAGE_HEIGHT).unwrap();
         let mut appearance = renderer.appearance(model, &skinned).unwrap();
         appearance.update(&palette, &skinned.vertices, &changed);
-        renderer.render(&appearance, eyes).unwrap();
+        renderer.render(&appearance, eyes, eye[0]).unwrap();
         renderer.read().unwrap()
     }
 
@@ -643,6 +653,31 @@ mod tests {
                 assert_eq!(middle[3], 255, "eye {eye}: the opaque cutout figure covers the middle ({version:?})");
                 assert!(middle[0] > 0 || middle[1] > 0 || middle[2] > 0);
             }
+        }
+    }
+
+    #[test]
+    fn a_farther_window_draws_no_denser_than_the_display_sees_it() {
+        assert_eq!(eye_texels(0.4, 0.2), eye_texels(0.4, NEAREST), "nearer than the closest, the target's size");
+        assert!(eye_texels(0.4, 4.0) as f32 <= DISPLAY_DENSITY * 0.4 / 4.0 + 1.0);
+        let model = Model::parse(&figure(Version::One)).unwrap();
+        let mut skinned = model.skinned().unwrap();
+        let changed = skinned.morph(&model.rest().weights);
+        let fit = crate::vrm::Fit::new(&model, &skinned, crate::HEIGHT);
+        let worlds = model.worlds(&model.rest());
+        let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [64, 64], crate::HEIGHT / PAGE_HEIGHT).unwrap();
+        let mut appearance = renderer.appearance(&model, &skinned).unwrap();
+        appearance.update(&skinned.palette(&worlds, fit.placement(&model, &worlds, crate::FLOOR)), &skinned.vertices, &changed);
+        let eyes = [-0.032, 0.032].map(|x| eye_projection(Vec3::new(x, 0.0, 0.4), 0.2, 0.2));
+        renderer.render(&appearance, eyes, 64).unwrap();
+        let full = renderer.read().unwrap();
+        renderer.render(&appearance, eyes, 16).unwrap();
+        let far = renderer.read().unwrap();
+        assert_eq!(far.len(), 32 * 16 * 4, "the image holds the drawn part alone");
+        for eye in 0..2 {
+            assert_eq!(pixel(&far, 32, eye * 16 + 8, 10)[3], 255, "eye {eye} draws the figure in its own half");
+            assert_eq!(pixel(&far, 32, eye * 16, 0), [0; 4]);
+            assert_eq!(pixel(&full, 128, eye * 64 + 32, 40)[3], 255);
         }
     }
 
@@ -719,7 +754,7 @@ mod tests {
             let loaded = renderer.appearance(model, &skinned).unwrap();
             let shown = appearance.insert(loaded);
             shown.update(&skinned.palette(&worlds, fit.placement(model, &worlds, crate::FLOOR)), &skinned.vertices, &[]);
-            renderer.render(shown, eyes).unwrap();
+            renderer.render(shown, eyes, 32).unwrap();
             pixel(&renderer.read().unwrap(), 64, 16, 16)
         };
         let mut shown = None;

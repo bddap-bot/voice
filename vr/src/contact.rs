@@ -204,7 +204,7 @@ fn film(renderer: &mut Renderer, figure: &str, motions: &Path, name: &str, at: O
                 let local = quad.inverse();
                 drawn.update(&skinned.palette(&worlds, local.mat4() * placed), &skinned.vertices, &changed);
                 let eye = local.apply(head);
-                renderer.render(&drawn, [eye_projection(eye.into(), QUAD / 2.0, QUAD / 2.0), None])?;
+                renderer.render(&drawn, [eye_projection(eye.into(), QUAD / 2.0, QUAD / 2.0), None], TEXELS)?;
                 panels.push(crate::wear::eye(&renderer.read()?, TEXELS));
             }
         }

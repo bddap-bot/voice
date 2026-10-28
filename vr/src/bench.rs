@@ -7,7 +7,7 @@ use glam::Vec3 as V3;
 use crate::object::{Budget, Object, Offscreen, View, BUDGET, QUAD, UNBUDGETED};
 use crate::placement::{facing, Pose, Vec3};
 use crate::program::Program;
-use crate::render::{eye_projection, eye_texels, Renderer, DISPLAY_DENSITY, PAGE_HEIGHT};
+use crate::render::{eye_projection, eye_texels, Renderer, DISPLAY_DENSITY, NEAREST, PAGE_HEIGHT};
 use crate::vrm::{Fit, Model};
 use crate::vulkan::Gpu;
 
@@ -153,7 +153,7 @@ fn frames(gpu: Rc<Gpu>, bytes: &[u8], options: &Options, budget: Budget) -> Resu
 /// The puppet in its standing pose on its own quad, the left eye's texels, as the host draws it.
 fn puppet(gpu: Rc<Gpu>, file: &Path) -> Result<Vec<u8>, String> {
     let model = Model::parse(&std::fs::read(file).map_err(|error| format!("{}: {error}", file.display()))?)?;
-    let mut renderer = Renderer::new(gpu, [eye_texels(crate::QUAD); 2], crate::HEIGHT / PAGE_HEIGHT)?;
+    let mut renderer = Renderer::new(gpu, [eye_texels(crate::QUAD, NEAREST); 2], crate::HEIGHT / PAGE_HEIGHT)?;
     let mut skinned = model.skinned()?;
     let fit = Fit::new(&model, &skinned, crate::HEIGHT);
     let pose = model.pose(&model.standing());
@@ -162,7 +162,7 @@ fn puppet(gpu: Rc<Gpu>, file: &Path) -> Result<Vec<u8>, String> {
     let palette = skinned.palette(&worlds, fit.placement(&model, &worlds, crate::FLOOR));
     let mut appearance = renderer.appearance(&model, &skinned)?;
     appearance.update(&palette, &skinned.vertices, &changed);
-    renderer.render(&appearance, [eye_projection(V3::from(VIEWER), crate::QUAD / 2.0, crate::QUAD / 2.0), None])?;
+    renderer.render(&appearance, [eye_projection(V3::from(VIEWER), crate::QUAD / 2.0, crate::QUAD / 2.0), None], renderer.eye[0])?;
     renderer.read()
 }
 
@@ -201,7 +201,7 @@ fn sample(quad: &Pose, texels: &[u8], size: f32, target: Vec3) -> Option<(f32, [
     if distance <= 0.0 || !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
         return None;
     }
-    let eye = eye_texels(size);
+    let eye = ((texels.len() / 8) as f64).sqrt() as u32;
     let at = (((v * eye as f32) as usize * 2 * eye as usize) + (u * eye as f32) as usize) * 4;
     let texel: [u8; 4] = texels.get(at..at + 4)?.try_into().ok()?;
     Some((distance, texel.map(|channel| channel as f32 / 255.0)))

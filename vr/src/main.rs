@@ -206,8 +206,8 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
     let mut recognizer = Recognizer::new(Templates::parse(&std::fs::read(&gesture_file).map_err(|error| format!("{}: {error}", gesture_file.display()))?)?);
     let gpu = Rc::new(vulkan::Gpu::new(Some(runtime))?);
     let runtime = gpu.vr.as_ref().expect("the overlay's device was made for SteamVR");
-    tracing::info!("display {:.0} px/rad, windows sized for {:.0} px/rad at {} m: puppet {} texels per eye, object {}", runtime.display_density(), render::DISPLAY_DENSITY, render::NEAREST, eye_texels(QUAD), eye_texels(object::QUAD));
-    let mut renderer = Renderer::new(gpu.clone(), [eye_texels(QUAD); 2], HEIGHT / render::PAGE_HEIGHT)?;
+    tracing::info!("display {:.0} px/rad, windows sized for {:.0} px/rad at {} m: puppet {} texels per eye, object {}", runtime.display_density(), render::DISPLAY_DENSITY, render::NEAREST, eye_texels(QUAD, render::NEAREST), eye_texels(object::QUAD, render::NEAREST));
+    let mut renderer = Renderer::new(gpu.clone(), [eye_texels(QUAD, render::NEAREST); 2], HEIGHT / render::PAGE_HEIGHT)?;
     let cache = state.join("assets");
     let mut relay = Relay::connect(token, &cache)?;
     let catalog = relay.catalog()?;
@@ -493,8 +493,10 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         }
         overlay.resize(2.0 * half);
         renderer.outline_scale = HEIGHT * size / render::PAGE_HEIGHT;
-        let eyes = eye_points.map(|eye| eye_projection(local.apply(eye).into(), half, half));
-        overlay.texture(&mut renderer.render(&puppet.drawn, eyes)?)?;
+        let seen = eye_points.map(|eye| local.apply(eye));
+        let texels = renderer.texels(2.0 * half, seen[0][2].min(seen[1][2]));
+        overlay.part(texels as f32 / renderer.eye[0] as f32);
+        overlay.texture(&mut renderer.render(&puppet.drawn, seen.map(|eye| eye_projection(eye.into(), half, half)), texels)?)?;
         overlay.show();
         meter.frame(interval, started.elapsed());
         runtime.wait_frame();
@@ -713,12 +715,12 @@ mod tests {
             let mut drawn = renderer.appearance(&model, &skinned).unwrap();
             let local = window.inverse();
             drawn.update(&skinned.palette(&worlds, local.mat4() * body), &skinned.vertices, &changed);
-            renderer.render(&drawn, [eye_projection(local.apply(eye).into(), half, half), None]).unwrap();
+            renderer.render(&drawn, [eye_projection(local.apply(eye).into(), half, half), None], texels).unwrap();
             left_eye(&renderer.read().unwrap(), texels)
         };
         let direct = draw(&field, FIELD, SEEN);
         let (window, half) = grown_window(&skinned, &worlds, body, &head, &[eye, head.apply([0.032, 0.0, 0.0])], FIELD);
-        let texels = eye_texels(QUAD);
+        let texels = eye_texels(QUAD, render::NEAREST);
         let quad = draw(&window, half, texels);
         let to_window = window.inverse();
         let origin = to_window.apply(eye);

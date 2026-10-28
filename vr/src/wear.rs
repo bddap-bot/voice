@@ -6,7 +6,7 @@ use crate::board::Board;
 use crate::placement::{facing, Pose, Vec3};
 use crate::point::Pointing;
 use crate::relay::{Relay, Token};
-use crate::render::{eye_projection, eye_texels, Renderer, PAGE_HEIGHT};
+use crate::render::{eye_projection, eye_texels, Renderer, NEAREST, PAGE_HEIGHT};
 use crate::vulkan::Gpu;
 use crate::{action, load, preview, FLOOR, HEIGHT, QUAD};
 
@@ -48,7 +48,7 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
     // Made first, as the host does: were the preview thread's device the process's only one, the loader would unload the driver before that thread's exit runs the driver's thread-local destructors.
     let gpu = std::rc::Rc::new(Gpu::new(None)?);
     library(&catalog.avatars, worn[0], Relay::connect(token, &cache)?, &out.join("library.png"))?;
-    let mut renderer = Renderer::new(gpu, [eye_texels(QUAD); 2], HEIGHT / PAGE_HEIGHT)?;
+    let mut renderer = Renderer::new(gpu, [eye_texels(QUAD, NEAREST); 2], HEIGHT / PAGE_HEIGHT)?;
     for index in worn {
         let avatar = &catalog.avatars[index];
         let pictures = out.join(&avatar.id);
@@ -67,13 +67,13 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
             let local = quad.inverse();
             puppet.draw(&posed, local.mat4() * body);
             let eyes = [-EYES, EYES].map(|x| eye_projection(local.apply([HEAD[0] + x, HEAD[1], HEAD[2]]).into(), QUAD / 2.0, QUAD / 2.0));
-            renderer.render(&puppet.drawn, eyes)?;
+            renderer.render(&puppet.drawn, eyes, renderer.eye[0])?;
             work.push(started.elapsed());
             let kept = (work.len() % CLIP_EVERY == 1).then(|| clip.join(format!("{clipped:05}.png")));
             if picture.is_some() || kept.is_some() {
                 let stereo = renderer.read()?;
                 for path in picture.into_iter().chain(kept.as_deref()) {
-                    save(&stereo, eye_texels(QUAD), path)?;
+                    save(&stereo, renderer.eye[0], path)?;
                 }
                 clipped += kept.is_some() as usize;
             }

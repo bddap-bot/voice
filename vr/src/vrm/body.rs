@@ -13,6 +13,9 @@ const PARTS: [&str; 18] = [
 const TORSO: [&str; 4] = ["hips", "spine", "chest", "upperChest"];
 /// How readily each arm joint gives way: a wrist turned aside reads as wrong sooner than a shoulder or elbow.
 const ARM: [(&str, f32); 3] = [("UpperArm", 1.0), ("LowerArm", 1.0), ("Hand", 0.3)];
+const HEAD: [(&str, f32); 2] = [("neck", 1.0), ("head", 1.0)];
+/// The head's share of a contact with an arm, against the arm's 1: a hand at the face moves before the head does.
+const HEAD_YIELDS: f32 = 0.25;
 /// The most any joint turns in one pass, radians.
 const STEP: f32 = 0.35;
 /// The most any joint turns in all, radians: a pose turned further reads as more wrong than the contact it would clear.
@@ -57,8 +60,10 @@ struct Part {
     slot: usize,
     /// Points spread over its skin, each in the frame of the joint that moves it most (as a finger's), by that joint's place in `Body::nodes`: what may not enter another part's flesh.
     skin: Vec<(usize, Vec3)>,
-    /// The arm joints, shoulder first, whose turn moves this part, each with how readily it gives; empty for the torso, head and legs, which keep their pose.
+    /// The joints, nearest the body first, whose turn moves this part, each with how readily it gives: the arm's for an arm, the neck and head for those; empty for the torso and legs, which keep their pose.
     chain: Vec<(usize, f32)>,
+    /// Its share of a contact against another part that moves.
+    yields: f32,
 }
 
 /// Collision proxies fitted to a figure's own skin, and the pose change that keeps its arms out of its body and each other.
@@ -216,12 +221,14 @@ impl Body {
             let (ends, radius) = ends;
             let outer = quantile(points.iter().map(|point| from_axis(*point, ends)).collect(), 0.98).max(radius);
             let side = ["left", "right"].into_iter().find(|side| name.starts_with(side));
-            let chain: Vec<(usize, f32)> = match side {
-                Some(side) if name.contains("Arm") || name.ends_with("Hand") => ARM.iter().filter_map(|&(bone, give)| Some((present.iter().position(|&(other, _)| *other == format!("{side}{bone}"))?, give))).filter(|&(joint, _)| joint <= index).collect(),
-                _ => Vec::new(),
+            let (joints, yields): (Vec<(String, f32)>, f32) = match side {
+                Some(side) if name.contains("Arm") || name.ends_with("Hand") => (ARM.iter().map(|&(bone, give)| (format!("{side}{bone}"), give)).collect(), 1.0),
+                None if name == "neck" || name == "head" => (HEAD.iter().map(|&(bone, give)| (bone.to_owned(), give)).collect(), HEAD_YIELDS),
+                _ => (Vec::new(), 0.0),
             };
+            let chain: Vec<(usize, f32)> = joints.iter().filter_map(|(bone, give)| Some((present.iter().position(|&(other, _)| other == bone)?, *give))).filter(|&(joint, _)| joint <= index).collect();
             let skin = spread(points, SPACING, SAMPLES).into_iter().map(|at| (slot(holders[index][at]), worlds[holders[index][at]].inverse().transform_point3(points[at]))).collect();
-            parts.push(Part { name, node, slot: slot(node), parent: parents[index], ends: ends.map(|end| worlds[node].inverse().transform_point3(end)), radius, outer, skin, chain });
+            parts.push(Part { name, node, slot: slot(node), parent: parents[index], ends: ends.map(|end| worlds[node].inverse().transform_point3(end)), radius, outer, skin, chain, yields });
         }
         let mut body = Body { parts, nodes, pairs: Vec::new(), owners };
         // A part with no skin of its own, as a bare neck, is a joint: the parts either side of it join.
@@ -312,7 +319,7 @@ impl Body {
             .collect()
     }
 
-    /// Turns the arms by the least angles that take each out of the body, the head, the legs and each other, no deeper than its skin already meets at rest or standing.
+    /// Turns the arms, and the neck and head, by the least angles that take each out of the body, the legs and each other, no deeper than its skin already meets at rest or standing.
     /// Starts from the turns `held` from the last frame, eased back toward the authored pose over `RELEASE`, so a correction follows the motion instead of jumping between ways out; returns the largest turn, radians.
     pub fn separate(&self, model: &Model, pose: &mut Pose, held: &mut Held, delta: f32) -> f32 {
         if !self.moves() {
@@ -381,9 +388,9 @@ impl Body {
                     let centre = |part: usize| (axes[part][0] + axes[part][1]) / 2.0;
                     (centre(a) - centre(b)).try_normalize().unwrap_or(Vec3::X)
                 });
-                let moving = [a, b].iter().filter(|&&part| !self.parts[part].chain.is_empty()).count() as f32;
+                let yields = [a, b].iter().filter(|&&part| !self.parts[part].chain.is_empty()).map(|&part| self.parts[part].yields).sum::<f32>();
                 for (part, at, push) in [(a, p, apart), (b, q, -apart)] {
-                    let share = 1.0 / moving;
+                    let share = self.parts[part].yields / yields;
                     let levers: Vec<(usize, f32, Vec3)> = self.parts[part].chain.iter().map(|&(joint, give)| (joint, give, (at - motion[joint].transform_point3(origins[joint])).cross(push))).collect();
                     let sum: f32 = levers.iter().map(|(_, give, lever)| give * lever.length_squared()).sum();
                     if sum < 1e-10 {

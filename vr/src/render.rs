@@ -791,8 +791,7 @@ mod tests {
     fn golden_render(model: &Model, motion: &[u8]) -> Vec<u8> {
         let golden = golden();
         let standing = model.standing();
-        let mut clip = crate::motion::Clip::parse(motion, model.version, model.rest_hips()).unwrap();
-        clip.anchor(&standing);
+        let clip = crate::motion::Clip::parse(motion, model.version, model.rest_hips()).unwrap();
         let mut animator = crate::motion::Animator::new([("idle".to_owned(), clip)].into(), Vec::new(), crate::motion::Random::seeded());
         animator.update(golden.time);
         let mut pose = model.pose(&animator.humanoid(&standing, model.rest_hips()));
@@ -816,8 +815,7 @@ mod tests {
         let raised = Quat::from_rotation_z(-1.2).to_array().repeat(2);
         let wave = serde_json::json!({ "name": "test wave", "duration": 2.0, "tracks": [{ "name": "rightUpperArm.quaternion", "times": [0.0, 2.0], "values": raised }] });
         let clips = |gestures: bool| {
-            let mut idle = crate::motion::Clip::parse(include_bytes!("../golden/idle.json"), model.version, model.rest_hips()).unwrap();
-            idle.anchor(&standing);
+            let idle = crate::motion::Clip::parse(include_bytes!("../golden/idle.json"), model.version, model.rest_hips()).unwrap();
             let mut clips = std::collections::HashMap::from([("idle".to_owned(), idle)]);
             if gestures {
                 clips.insert("wave".to_owned(), crate::motion::Clip::parse(&serde_json::to_vec(&wave).unwrap(), model.version, model.rest_hips()).unwrap());

@@ -122,15 +122,10 @@ impl Clip {
         self.duration
     }
 
-    pub fn anchor(&mut self, standing: &Humanoid) {
-        for (bone, rotation) in &standing.rotations {
-            match self.rotations.iter_mut().find(|(name, _)| name == bone) {
-                Some((_, keys)) => {
-                    let anchor = *rotation * keys.values[0].inverse();
-                    keys.values.iter_mut().for_each(|value| *value = (anchor * *value).normalize());
-                }
-                None => self.rotations.push((bone.clone(), Keys { times: vec![0.0, self.duration], values: vec![*rotation; 2] })),
-            }
+    pub fn sample(&self, time: f32) -> Humanoid {
+        Humanoid {
+            rotations: self.rotations.iter().map(|(name, keys)| (name.clone(), keys.sample(time, |a, b, t| a.slerp(b, t)))).collect(),
+            hips: self.hips.as_ref().map(|keys| keys.sample(time, Vec3::lerp)),
         }
     }
 }
@@ -297,19 +292,17 @@ impl Animator {
         let mut rotations: HashMap<String, (Quat, f32)> = HashMap::new();
         let mut hips: Option<(Vec3, f32)> = None;
         for action in self.actions.iter().filter(|action| action.weight > 0.0) {
-            let clip = &self.clips[&action.clip];
-            for (bone, keys) in &clip.rotations {
-                let value = keys.sample(action.time, |a, b, t| a.slerp(b, t));
+            let sampled = self.clips[&action.clip].sample(action.time);
+            for (bone, value) in sampled.rotations {
                 rotations
-                    .entry(bone.clone())
+                    .entry(bone)
                     .and_modify(|(sum, total)| {
                         *total += action.weight;
                         *sum = sum.slerp(value, action.weight / *total);
                     })
                     .or_insert((value, action.weight));
             }
-            if let Some(keys) = &clip.hips {
-                let value = keys.sample(action.time, Vec3::lerp);
+            if let Some(value) = sampled.hips {
                 hips = Some(match hips {
                     Some((sum, total)) => (sum.lerp(value, action.weight / (total + action.weight)), total + action.weight),
                     None => (value, action.weight),
@@ -375,14 +368,16 @@ mod tests {
     }
 
     #[test]
-    fn anchoring_starts_a_standing_idle_from_the_standing_pose() {
-        let mut clip = Clip::parse(&motion(&[0.3, 0.5], None), Version::One, None).unwrap();
-        let standing = Humanoid { rotations: HashMap::from([("spine".to_owned(), Quat::from_rotation_z(1.0)), ("neck".to_owned(), Quat::from_rotation_x(0.2))]), hips: None };
-        clip.anchor(&standing);
-        let spine = &clip.rotations.iter().find(|(bone, _)| bone == "spine").unwrap().1;
-        assert!((angle(spine.values[0]) - 1.0).abs() < 1e-5 && (angle(spine.values[1]) - 1.2).abs() < 1e-5, "the clip moves relative to its first frame");
-        let neck = &clip.rotations.iter().find(|(bone, _)| bone == "neck").unwrap().1;
-        assert!(neck.values.iter().all(|value| value.abs_diff_eq(Quat::from_rotation_x(0.2), 1e-6)), "a standing bone the clip lacks holds still");
+    fn a_single_clip_keeps_its_authored_pose_instead_of_the_fallback() {
+        let clip = Clip::parse(&motion(&[0.3, 0.5], Some(&[50.0, 60.0])), Version::One, Some(Vec3::Y)).unwrap();
+        let standing = Humanoid { rotations: HashMap::from([("spine".to_owned(), Quat::from_rotation_z(1.0))]), hips: None };
+        let mut animator = Animator::new(HashMap::from([("idle".to_owned(), clip)]), Vec::new(), Random(7));
+        for (delta, expected) in [(0.0, 0.3), (0.5, 0.4), (0.5, 0.5)] {
+            animator.update(delta);
+            let posed = animator.humanoid(&standing, Some(Vec3::Y));
+            assert!((angle(posed.rotations["spine"]) - expected).abs() < 1e-5);
+            assert!((posed.hips.unwrap().y - (0.5 + animator.now * 0.1)).abs() < 1e-5);
+        }
     }
 
     fn animator(names: &[&str]) -> Animator {

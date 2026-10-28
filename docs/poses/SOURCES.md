@@ -6,7 +6,7 @@ The server serves the puppet's idles, chair sit and gestures with its own catalo
 
 ## standing.json
 
-The rest pose. The standing idle clips are re-anchored to it. It is the `Standing` preset of the VRM viewer at https://vrm-viewer.ownverse.world/, exported from that viewer as a bone-to-quaternion map. One viewer-specific field was dropped.
+The rest pose. It is used before a clip is available and for bones without a track. Clips retain their authored poses. It is the `Standing` preset of the VRM viewer at https://vrm-viewer.ownverse.world/, exported from that viewer as a bone-to-quaternion map. One viewer-specific field was dropped.
 
 ## mocap.json
 

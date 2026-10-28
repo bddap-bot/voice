@@ -3,7 +3,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { VRMAnimationLoaderPlugin, createVRMAnimationClip } from '@pixiv/three-vrm-animation';
 
-import { standingPose, anchorStandingIdle } from './standing.js';
+import { standingPose } from './standing.js';
 import acting from '../docs/moods.json' with { type: 'json' };
 
 const VISEMES = ['aa', 'ih', 'ou', 'ee', 'oh'];
@@ -240,7 +240,6 @@ export class PuppetRuntime {
     for (const entry of entries) {
       const clip = await animationClip(entry.data, entry.format, vrm);
       if (this.vrm !== vrm) return;
-      if (clipFamily(entry.action) === IDLES.stand) anchorStandingIdle(clip, vrm);
       clip.userData.action = entry.action;
       this.clips.set(entry.action, clip);
     }

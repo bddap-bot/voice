@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as THREE from 'three';
-import { standingPose, anchorStandingIdle } from '../src/standing.js';
+import { standingPose } from '../src/standing.js';
 import { PuppetRuntime } from '../src/puppet.js';
 
 function rig(version) {
@@ -29,44 +29,19 @@ test('Standing converts the facing convention and legacy thumb joints without ch
   assert.deepEqual(standingPose(rig('0')), old);
 });
 
-for (const version of ['0', '1']) test(`standing idle preserves motion and returns from a gesture continuously in VRM ${version}`, () => {
+for (const version of ['0', '1']) test(`loading an idle keeps authored arm and leg tracks in VRM ${version}`, async () => {
   const vrm = rig(version);
-  const pose = standingPose(vrm);
-  for (const [name, value] of Object.entries(pose)) vrm.humanoid.getNormalizedBoneNode(name).quaternion.fromArray(value.rotation);
-  const first = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.3, -0.4, 0.2));
-  const delta = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.02, 0.03, -0.01));
-  const peak = first.clone().multiply(delta);
-  const idle = anchorStandingIdle(new THREE.AnimationClip('idle', 2, [
-    new THREE.QuaternionKeyframeTrack('head.quaternion', [0, 1, 2], [...first.toArray(), ...peak.toArray(), ...first.toArray()]),
-    new THREE.VectorKeyframeTrack('hips.position', [0, 1, 2], [0.1, 0.9, 0.2, 0.1, 0.92, 0.2, 0.1, 0.9, 0.2]),
-  ]), vrm);
-  const headTrack = idle.tracks.find(track => track.name === 'head.quaternion');
-  const target = new THREE.Quaternion().fromArray(pose.head.rotation);
-  assert.ok(new THREE.Quaternion().fromArray(headTrack.values).normalize().angleTo(target) < 1e-6);
-  assert.ok(new THREE.Quaternion().fromArray(headTrack.values, 4).normalize().angleTo(target.clone().multiply(delta)) < 1e-6);
-  assert.equal(idle.tracks.filter(track => track.name.endsWith('.quaternion')).length, Object.keys(pose).length);
-  const gesture = new THREE.AnimationClip('wave', 0.5, [new THREE.QuaternionKeyframeTrack('head.quaternion', [0, 0.5], [0, 0, 0, 1, 0.3, 0, 0, Math.sqrt(0.91)])]);
+  const rotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.3, -0.4, 0.2)).toArray();
+  const tracks = ['leftUpperArm', 'leftLowerArm', 'leftUpperLeg', 'leftLowerLeg'].map(bone => ({ name: `${bone}.quaternion`, times: [0, 1], values: [...rotation, ...rotation] }));
   const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
-    vrm, mixer: new THREE.AnimationMixer(vrm.scene), clips: new Map([['idle', idle], ['wave', gesture]]),
-    poseName: 'stand', idleClip: null, nextIdleAt: Infinity,
+    vrm, clips: new Map(), poseName: 'stand', clipAction: {}, prepareHandovers() {},
   });
-  runtime.playIdle(0);
-  runtime.mixer.update(0);
-  runtime.gesture('wave');
-  let previous = vrm.humanoid.getNormalizedBoneNode('head').quaternion.clone();
-  let peakStep = 0;
-  for (let frame = 0; frame < 150; frame++) {
-    runtime.updateBasePose(1 / 60);
-    runtime.updatePose(frame * 1000 / 60);
-    const rotation = vrm.humanoid.getNormalizedBoneNode('head').quaternion;
-    peakStep = Math.max(peakStep, previous.angleTo(rotation));
-    previous.copy(rotation);
-  }
-  assert.ok(peakStep < 0.1, `peak frame rotation ${peakStep}`);
-  assert.equal(runtime.clipGesture, null);
-  for (const [name, value] of Object.entries(pose)) {
-    const distance = vrm.humanoid.getNormalizedBoneNode(name).quaternion.angleTo(new THREE.Quaternion().fromArray(value.rotation));
-    assert.ok(distance < 0.04, `${name}: ${distance}`);
+  await runtime.loadClips([{ action: 'idle', format: 'motion', data: { name: 'idle', duration: 1, tracks } }]);
+  const clip = runtime.clips.get('idle');
+  assert.equal(clip.tracks.length, tracks.length);
+  for (const track of clip.tracks) {
+    const expected = rotation.map((v, i) => version === '0' && i % 2 === 0 ? -v : v);
+    assert.ok(new THREE.Quaternion().fromArray(track.values).normalize().angleTo(new THREE.Quaternion().fromArray(expected)) < 1e-6, track.name);
   }
 });
 

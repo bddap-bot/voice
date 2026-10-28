@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use glam::{Mat4, Quat, Vec2, Vec3};
 use serde_json::Value;
 
+pub mod body;
 pub mod spring;
 
 use spring::Rig;

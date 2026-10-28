@@ -127,15 +127,18 @@ fn library(avatars: &[crate::relay::Avatar], active: usize, relay: Relay, path: 
     Ok(())
 }
 
+fn save(stereo: &[u8], eye_texels: u32, path: &Path) -> Result<(), String> {
+    eye(stereo, eye_texels).save(path).map_err(|error| format!("{}: {error}", path.display()))
+}
+
 /// The left eye of a stereo render, its premultiplied colour over a dark backdrop.
-fn save(stereo: &[u8], eye: u32, path: &Path) -> Result<(), String> {
-    let image = image::RgbImage::from_fn(eye, eye, |x, y| {
+pub fn eye(stereo: &[u8], eye: u32) -> image::RgbImage {
+    image::RgbImage::from_fn(eye, eye, |x, y| {
         let at = ((y * 2 * eye + x) * 4) as usize;
         let alpha = stereo[at + 3] as f32 / 255.0;
         let shade = 0.17 - 0.08 * y as f32 / eye as f32;
         image::Rgb([0, 1, 2].map(|channel| ((stereo[at + channel] as f32 / 255.0 + shade * (1.0 - alpha)).clamp(0.0, 1.0) * 255.0).round() as u8))
-    });
-    image.save(path).map_err(|error| format!("{}: {error}", path.display()))
+    })
 }
 
 /// This process's GPU time, in nanoseconds, from the DRM clients' `drm-engine-*` counters in its fdinfo; None where the driver keeps none.

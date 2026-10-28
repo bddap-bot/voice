@@ -4,6 +4,7 @@ mod bench;
 mod board;
 mod calls;
 mod chosen;
+mod contact;
 mod conversation;
 mod device;
 mod gaze;
@@ -47,6 +48,7 @@ use reveal::Reveal;
 use voice::Voice;
 use render::{eye_projection, eye_texels, Appearance, Renderer};
 use vrm::spring::Springs;
+use vrm::body::{Body, Held};
 use vrm::{Fit, Humanoid, Model, Skinned};
 
 const QUAD: f32 = 0.4;
@@ -106,6 +108,8 @@ struct Puppet {
     animator: Animator,
     gaze: Gaze,
     springs: Springs,
+    body: Body,
+    held: Held,
     drawn: Appearance,
     /// The vertices the last step's morph moved.
     changed: Vec<u32>,
@@ -138,11 +142,12 @@ fn load(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer) -> Result<P
     let height = (HEIGHT / fit.scale).clamp(FULL_HEIGHT[0], FULL_HEIGHT[1]);
     tracing::info!("appearance {} stands {height:.2} m full size", avatar.id);
     let drawn = renderer.appearance(&model, &skinned)?;
-    Ok(Puppet { model, skinned, fit, full: height / HEIGHT, standing, animator: Animator::new(clips, own, Random::seeded()), gaze: Gaze::default(), springs: Springs::default(), drawn, changed: Vec::new() })
+    let body = Body::fit(&model, &skinned);
+    Ok(Puppet { model, skinned, fit, full: height / HEIGHT, standing, animator: Animator::new(clips, own, Random::seeded()), gaze: Gaze::default(), springs: Springs::default(), body, held: Held::default(), drawn, changed: Vec::new() })
 }
 
 impl Puppet {
-    /// One frame of the figure standing at `stand`, `size` times its hand-held height: its clip, a point while `pointing` has a target, its gaze toward `head`, its blink and mouth, and its springs. Returns its joints in the model's space and the model's placement in the world.
+    /// One frame of the figure standing at `stand`, `size` times its hand-held height: its clip, a point while `pointing` has a target, its gaze toward `head`, its arms and head kept out of its body, its blink and mouth, and its springs. Returns its joints in the model's space and the model's placement in the world.
     fn step(&mut self, delta: f32, stand: &Pose, size: f32, head: Vec3, mouth: f32, pointing: &mut point::Pointing, now: Instant, locate: impl FnOnce(&str) -> Option<Vec3>) -> (Vec<glam::Mat4>, glam::Mat4) {
         if let Some(idle) = self.animator.update(delta) {
             tracing::info!("idle {idle}");
@@ -158,6 +163,7 @@ impl Puppet {
             worlds = self.model.worlds(&pose);
         }
         self.gaze.look(&self.model, &mut pose, &worlds, to_model.transform_point3(head.into()), delta);
+        self.body.separate(&self.model, &mut pose, &mut self.held, delta);
         for (name, weight) in self.animator.faces() {
             self.model.express(&mut pose, name, weight);
         }
@@ -629,6 +635,9 @@ fn run() -> Result<(), String> {
     }
     if args.get(1).is_some_and(|mode| mode == "card") {
         return card(&args[2..]);
+    }
+    if args.get(1).is_some_and(|mode| mode == "contact") {
+        return contact::run(&args[2..]);
     }
     if args.get(1).is_some_and(|mode| mode == "turn") {
         return turn::replay(&args[2..]);

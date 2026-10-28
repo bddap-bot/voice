@@ -118,6 +118,10 @@ impl Clip {
         Ok(Clip { duration: source.duration, rotations, hips })
     }
 
+    pub fn duration(&self) -> f32 {
+        self.duration
+    }
+
     pub fn anchor(&mut self, standing: &Humanoid) {
         for (bone, rotation) in &standing.rotations {
             match self.rotations.iter_mut().find(|(name, _)| name == bone) {

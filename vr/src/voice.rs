@@ -242,7 +242,7 @@ impl Voice {
                 session::Event::Waiting(error) => awake.notice = Some(format!("No connection yet, still trying: {error}")),
                 session::Event::Open { window, seeded } => {
                     self.trace.opened(window, seeded);
-                    awake.hub.renewing = false;
+                    awake.hub.opened();
                     awake.audio_seconds = 0.0;
                     tracing::info!("session open");
                     awake.notice = None;

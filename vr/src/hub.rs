@@ -168,7 +168,7 @@ pub struct Hub {
     out: Vec<Command>,
     listen: bool,
     waiting: HashSet<String>,
-    /// Delegations Live itself created this session; a reply to one carries its id.
+    /// Delegations the current call's Live created; a reply to one carries its id, and a renewed call knows none of the last call's.
     owned: HashSet<String>,
     /// The newest hand-off sent to the hub.
     sent: Option<String>,
@@ -477,6 +477,13 @@ impl Hub {
         }
         tracing::info!("standing instructions applied");
         self.standing = instructions;
+    }
+
+    /// A call opened: replies to the previous call's delegations go to the session.
+    pub fn opened(&mut self) {
+        self.renewing = false;
+        self.owned.clear();
+        self.joined.clear();
     }
 
     pub fn renewable(&self) -> bool {
@@ -868,9 +875,9 @@ mod tests {
         f.wait(TURN_QUIET, true);
         assert_eq!(f.told().len(), 1);
         assert!(!f.hub.renewable());
-        f.hub.renewing = false;
+        f.hub.opened();
         f.wait(Duration::ZERO, true);
-        assert_eq!(f.told()[1..], [speakable(json!("a"), "Still violet.")]);
+        assert_eq!(f.told()[1..], [speakable(Value::Null, "Still violet.")]);
         f.speak("Still violet.");
         f.wait(TURN_QUIET, true);
         assert_eq!(f.told()[2..], [instructions("Hum.")]);

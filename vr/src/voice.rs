@@ -18,11 +18,16 @@ const SIGN_OFF_QUIET: Duration = Duration::from_secs(2);
 const MOUTH_EASING: f32 = 0.65;
 /// How long a session that never opened stays up to show why before going dormant.
 const FAILED_HOLD: Duration = Duration::from_secs(10);
+/// An opened call that dies is reopened with the conversation, at most once in this long.
+const REOPEN_EVERY: Duration = Duration::from_secs(30);
 
 /// The open session and what the page tracks alongside it.
 struct Awake {
     session: Session,
     opened: bool,
+    /// Whether the current call opened; a call that never did is not reopened.
+    call_opened: bool,
+    reopened: Option<Instant>,
     audio_seconds: f64,
     said: String,
     activity: Instant,
@@ -168,7 +173,7 @@ impl Voice {
         tracing::info!("summoned, opening the session");
         self.actions.reset();
         let session = Session::open(&self.token, &self.cache, self.trace.wake(Instant::now()), self.muted, self.hearing.clone());
-        self.awake = Some(Awake { session, opened: false, audio_seconds: 0.0, said: String::new(), activity: Instant::now(), mouth: 0.0, hub: Hub::default(), notice: None, failed: None, _span: tracing::info_span!("session") });
+        self.awake = Some(Awake { session, opened: false, call_opened: false, reopened: None, audio_seconds: 0.0, said: String::new(), activity: Instant::now(), mouth: 0.0, hub: Hub::default(), notice: None, failed: None, _span: tracing::info_span!("session") });
     }
 
     /// Ends the session and releases the microphone; an opened session hands the hub what it never heard and becomes memory for the next.
@@ -243,6 +248,7 @@ impl Voice {
                 session::Event::Open { window, seeded } => {
                     self.trace.opened(window, seeded);
                     awake.hub.opened();
+                    awake.call_opened = true;
                     awake.audio_seconds = 0.0;
                     tracing::info!("session open");
                     awake.notice = None;
@@ -284,7 +290,14 @@ impl Voice {
                 }
                 session::Event::Closed(reason) => {
                     tracing::error!("Live session closed: {reason}");
-                    ended = Some(format!("session closed: {reason}"));
+                    if std::mem::take(&mut awake.call_opened) && !awake.hub.sleeping() && awake.reopened.is_none_or(|at| at.elapsed() >= REOPEN_EVERY) {
+                        tracing::info!("reopening the session with the conversation");
+                        awake.hub.renewing = true;
+                        awake.reopened = Some(Instant::now());
+                        awake.session = Session::open(&self.token, &self.cache, self.trace.continuation(), self.muted, self.hearing.clone());
+                    } else {
+                        ended = Some(format!("session closed: {reason}"));
+                    }
                     break;
                 }
             }

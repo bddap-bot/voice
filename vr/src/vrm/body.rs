@@ -208,8 +208,10 @@ impl Body {
                     })
                     .collect();
                 let radius = quantile(around, 0.5);
-                let tip = if open && length > 0.0 { origin + axis * ((length - radius).max(0.0) / length) } else { tip };
-                ([origin, tip], radius)
+                // The rounded ends stop at the joints: the base's cap would otherwise hang into the part above, as a head's into the chest.
+                let at = |along: f32| if length > 0.0 { origin + axis * (along / length) } else { origin };
+                let base = radius.min(length / 2.0);
+                ([at(base), at(if open { (length - radius).max(base) } else { length })], radius)
             };
             let (ends, radius) = ends;
             let outer = quantile(points.iter().map(|point| from_axis(*point, ends)).collect(), 0.98).max(radius);
@@ -228,7 +230,9 @@ impl Body {
             let joins = |child: usize, parent: usize| up(child) == Some(parent) || up(child).is_some_and(|between| body.parts[between].skin.is_empty() && up(between) == Some(parent));
             joins(a, b) || joins(b, a)
         };
-        let pairs: Vec<(usize, usize)> = (0..body.parts.len()).flat_map(|a| (a + 1..body.parts.len()).map(move |b| (a, b))).filter(|&(a, b)| !adjacent(a, b)).collect();
+        // The torso bends as one body: its segments press together but never pass through each other.
+        let torso = |part: usize| TORSO.contains(&body.parts[part].name);
+        let pairs: Vec<(usize, usize)> = (0..body.parts.len()).flat_map(|a| (a + 1..body.parts.len()).map(move |b| (a, b))).filter(|&(a, b)| !adjacent(a, b) && !(torso(a) && torso(b))).collect();
         let standing = model.pose(&model.standing());
         let baselines = [rest, standing].map(|pose| {
             let worlds = model.worlds(&pose);
@@ -358,8 +362,8 @@ impl Body {
         let eased: Vec<Quat> = held.turns.iter().map(|turn| Quat::IDENTITY.slerp(*turn, keep)).collect();
         let (mut turns, mut motion) = start(&eased);
         let mut found = contacts(&placed(&motion));
-        if !found.is_empty() && held.turns != eased {
-            // Easing off would let the contact back in: keep last frame's correction rather than ease in and push out again, which would shimmer.
+        if !found.is_empty() && held.turns != eased && !contacts(&placed(&start(&vec![Quat::IDENTITY; count]).1)).is_empty() {
+            // The authored pose still meets itself, and easing off would let that back in: keep last frame's correction rather than ease in and push out again, which would shimmer.
             let (kept_turns, kept_motion) = start(&held.turns);
             let kept_found = contacts(&placed(&kept_motion));
             if kept_found.is_empty() {

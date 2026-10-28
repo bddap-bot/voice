@@ -1,13 +1,14 @@
 use openvr_sys as sys;
 use std::ffi::{CStr, CString};
 
-use crate::placement::{Hand, HandPose, Pose, Vec3};
+use crate::placement::{Hand, HandPose, PlayArea, Pose, Vec3};
 
 pub struct Runtime {
     system: &'static sys::VR_IVRSystem_FnTable,
     overlay: &'static sys::VR_IVROverlay_FnTable,
     compositor: &'static sys::VR_IVRCompositor_FnTable,
     render_models: &'static sys::VR_IVRRenderModels_FnTable,
+    chaperone: &'static sys::VR_IVRChaperone_FnTable,
 }
 
 fn table<T>(version: &[u8]) -> Result<&'static T, String> {
@@ -41,7 +42,7 @@ impl Runtime {
         if error != 0 {
             return Err(init_error(error));
         }
-        Ok(Runtime { system: table(sys::IVRSystem_Version)?, overlay: table(sys::IVROverlay_Version)?, compositor: table(sys::IVRCompositor_Version)?, render_models: table(sys::IVRRenderModels_Version)? })
+        Ok(Runtime { system: table(sys::IVRSystem_Version)?, overlay: table(sys::IVROverlay_Version)?, compositor: table(sys::IVRCompositor_Version)?, render_models: table(sys::IVRRenderModels_Version)?, chaperone: table(sys::IVRChaperone_Version)? })
     }
 
     pub fn instance_extensions(&self) -> Vec<CString> {
@@ -77,6 +78,11 @@ impl Runtime {
         let mut poses: Vec<sys::TrackedDevicePose_t> = vec![unsafe { std::mem::zeroed() }; sys::k_unMaxTrackedDeviceCount as usize];
         call!(self.system, GetDeviceToAbsoluteTrackingPose, sys::ETrackingUniverseOrigin_TrackingUniverseStanding, 0.0, poses.as_mut_ptr(), poses.len() as u32);
         poses
+    }
+
+    pub fn play_area(&self) -> Option<PlayArea> {
+        let mut rect: sys::HmdQuad_t = unsafe { std::mem::zeroed() };
+        call!(self.chaperone, GetPlayAreaRect, &mut rect).then(|| PlayArea::new(rect.vCorners.map(|corner| corner.v))).flatten()
     }
 
     pub fn head(&self, poses: &[sys::TrackedDevicePose_t]) -> Option<Pose> {

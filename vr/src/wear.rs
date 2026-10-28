@@ -62,7 +62,7 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
         let mut clipped = 0;
         let mut frame = |puppet: &mut crate::Puppet, pointing: &mut Pointing, stand: Pose, mouth: f32, picture: Option<&Path>| -> Result<(), String> {
             let started = Instant::now();
-            let (posed, body) = puppet.step(FRAME.as_secs_f32(), &stand, 1.0, HEAD, mouth, pointing, started, |_| Some(TARGET));
+            let (posed, body, _) = puppet.step(FRAME.as_secs_f32(), |_, _| stand, 1.0, HEAD, mouth, pointing, started, |_| Some(TARGET));
             let quad = facing(stand.apply([0.0, -FLOOR, 0.0]), HEAD);
             let local = quad.inverse();
             puppet.draw(&posed, local.mat4() * body);

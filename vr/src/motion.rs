@@ -7,6 +7,7 @@ use crate::vrm::{Humanoid, Version};
 
 /// The family of the standing idles: the overlay rotates through every clip of it.
 pub const IDLE: &str = "idle";
+pub const WALK: &str = "walk";
 /// docs/moods.json: the face each mood draws and how the figure shows its own expressions.
 const ACTING: &str = include_str!("../../docs/moods.json");
 /// The page's easing of a face weight toward its mood, per frame at 60 fps.
@@ -163,9 +164,10 @@ impl Random {
 pub struct Animator {
     clips: HashMap<String, Clip>,
     actions: Vec<Action>,
-    idle: Option<String>,
+    loop_clip: Option<String>,
+    walking: bool,
     gesture: Option<String>,
-    next_idle: f32,
+    next_loop: f32,
     next_blink: f32,
     blink_start: Option<f32>,
     now: f32,
@@ -179,8 +181,8 @@ pub struct Animator {
 
 impl Animator {
     pub fn new(clips: HashMap<String, Clip>, own: Vec<String>, random: Random) -> Animator {
-        let mut animator = Animator { clips, actions: Vec::new(), idle: None, gesture: None, next_idle: f32::INFINITY, next_blink: 1.2, blink_start: None, now: 0.0, random, own, mood: None, shown: None, faces: HashMap::new() };
-        animator.play_idle();
+        let mut animator = Animator { clips, actions: Vec::new(), loop_clip: None, walking: false, gesture: None, next_loop: f32::INFINITY, next_blink: 1.2, blink_start: None, now: 0.0, random, own, mood: None, shown: None, faces: HashMap::new() };
+        animator.play_loop();
         animator
     }
 
@@ -194,18 +196,29 @@ impl Animator {
         from.get(((self.random.next() * from.len() as f32) as usize).min(from.len().saturating_sub(1))).cloned()
     }
 
-    fn play_idle(&mut self) {
-        let available = self.variants(IDLE);
-        let choices: Vec<String> = available.iter().filter(|name| Some(name.as_str()) != self.idle.as_deref()).cloned().collect();
-        let Some(name) = self.pick(&choices).or(available.first().cloned()) else { return };
-        self.next_idle = if available.len() > 1 { self.now + 7.0 + self.random.next() * 7.0 } else { f32::INFINITY };
-        self.play(&name, IDLE_FADE, false);
-        self.idle = Some(name);
+    fn play_loop(&mut self) {
+        let available = self.variants(if self.walking { WALK } else { IDLE });
+        let choices: Vec<String> = available.iter().filter(|name| Some(name.as_str()) != self.loop_clip.as_deref()).cloned().collect();
+        let name = self.pick(&choices).or(available.first().cloned());
+        self.next_loop = if available.len() > 1 { self.now + 7.0 + self.random.next() * 7.0 } else { f32::INFINITY };
+        self.play(name.as_deref(), IDLE_FADE, false);
+        self.loop_clip = name;
         self.gesture = None;
         if self.random.next() < acting().own.chance {
             let own = self.own.clone();
             self.shown = self.pick(&own).map(|name| (name, self.now + acting().own.seconds));
         }
+    }
+
+    pub fn walk(&mut self, walking: bool) {
+        let walking = walking && self.clips.keys().any(|name| family(name) == WALK);
+        if self.walking == walking { return; }
+        self.walking = walking;
+        if self.gesture.is_none() { self.play_loop(); }
+    }
+
+    pub fn walking(&self) -> bool {
+        self.actions.iter().any(|action| action.weight > 0.0 && family(&action.clip) == WALK)
     }
 
     /// Shows a mood as the page's `mood` does: its face, and once its body clip when it changes and no gesture plays.
@@ -224,20 +237,21 @@ impl Animator {
         self.faces.iter().map(|(name, &weight)| (name.as_str(), weight))
     }
 
-    fn play(&mut self, name: &str, length: f32, once: bool) {
+    fn play(&mut self, name: Option<&str>, length: f32, once: bool) {
         let fading = self.actions.iter().any(|action| action.weight > 0.0);
         for action in &mut self.actions {
             action.fade = Some(Fade { start: self.now, length, from: action.weight, to: 0.0 });
         }
+        let Some(name) = name else { return };
         self.actions.retain(|action| action.clip != name);
         self.actions.push(Action { clip: name.to_owned(), time: 0.0, weight: if fading { 0.0 } else { 1.0 }, fade: fading.then_some(Fade { start: self.now, length, from: 0.0, to: 1.0 }), once });
     }
 
-    /// Plays a gesture clip once, as the page's `gesture`, then returns to an idle; false without its clip.
+    /// Plays a gesture clip once, as the page's `gesture`, then resumes the loop; false without its clip.
     pub fn gesture(&mut self, name: &str) -> bool {
         let variants = self.variants(name);
         let Some(variant) = self.pick(&variants) else { return false };
-        self.play(&variant, GESTURE_FADE, true);
+        self.play(Some(&variant), GESTURE_FADE, true);
         self.gesture = Some(name.to_owned());
         true
     }
@@ -257,9 +271,9 @@ impl Animator {
         }
         self.actions.retain(|action| action.weight > 0.0 || action.fade.is_some());
         let finished = self.gesture.is_some() && self.actions.last().is_some_and(|action| action.once && action.time >= self.clips[&action.clip].duration);
-        let switched = finished || (self.gesture.is_none() && self.now >= self.next_idle);
+        let switched = finished || (self.gesture.is_none() && self.now >= self.next_loop);
         if switched {
-            self.play_idle();
+            self.play_loop();
         }
         let shown = self.shown.as_ref().filter(|(_, until)| self.now < *until).map(|(name, _)| name.clone());
         let targets: HashMap<String, f32> = match shown {
@@ -281,7 +295,7 @@ impl Animator {
             self.blink_start = None;
             self.next_blink = self.now + 2.2 + self.random.next() * 4.2;
         }
-        switched.then(|| self.idle.as_deref()).flatten()
+        switched.then(|| self.loop_clip.as_deref()).flatten()
     }
 
     pub fn blink(&self) -> f32 {
@@ -380,6 +394,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_bundled_walk_has_no_leg_jump_at_the_loop_seam() {
+        let bytes = include_bytes!("../motions/walk.json");
+        for version in [Version::Zero, Version::One] {
+            let clip = Clip::parse(bytes, version, Some(Vec3::Y)).unwrap();
+            let (start, end) = (clip.sample(0.0), clip.sample(clip.duration()));
+            for bone in ["leftUpperLeg", "leftLowerLeg", "leftFoot", "rightUpperLeg", "rightLowerLeg", "rightFoot"] {
+                assert!(start.rotations[bone].angle_between(end.rotations[bone]) < 1e-3, "{bone}");
+            }
+            assert!(start.hips.unwrap().abs_diff_eq(end.hips.unwrap(), 1e-5));
+        }
+    }
+
     fn animator(names: &[&str]) -> Animator {
         let clips = names.iter().enumerate().map(|(at, name)| (name.to_string(), Clip::parse(&motion(&[at as f32 * 0.5; 20], None), Version::One, None).unwrap())).collect();
         Animator::new(clips, Vec::new(), Random(7))
@@ -389,14 +416,14 @@ mod tests {
     fn an_idle_change_crossfades_over_the_fade_time() {
         let mut animator = animator(&["idle", "idle-2"]);
         let standing = Humanoid::default();
-        let first = animator.idle.clone().unwrap();
+        let first = animator.loop_clip.clone().unwrap();
         let first_angle = angle(animator.humanoid(&standing, None).rotations["spine"]);
-        let switch = animator.next_idle;
+        let switch = animator.next_loop;
         assert!((7.0..=14.0).contains(&switch), "the next idle comes 7 to 14 s later: {switch}");
         while animator.now < switch {
             animator.update(0.05);
         }
-        let second = animator.idle.clone().unwrap();
+        let second = animator.loop_clip.clone().unwrap();
         assert_ne!(first, second, "the next idle differs from the last");
         animator.update(IDLE_FADE / 2.0);
         let middle = angle(animator.humanoid(&standing, None).rotations["spine"]);
@@ -420,8 +447,8 @@ mod tests {
         let clips = [("idle", first), ("idle-2", second)].map(|(name, json)| (name.to_owned(), Clip::parse(&serde_json::to_vec(&json).unwrap(), Version::One, rest).unwrap()));
         let mut animator = Animator::new(HashMap::new(), Vec::new(), Random(3));
         animator.clips = clips.into_iter().collect();
-        animator.play("idle", IDLE_FADE, false);
-        animator.play("idle-2", IDLE_FADE, false);
+        animator.play(Some("idle"), IDLE_FADE, false);
+        animator.play(Some("idle-2"), IDLE_FADE, false);
         animator.update(IDLE_FADE / 2.0);
         let standing = Humanoid { rotations: HashMap::from([("neck".to_owned(), Quat::from_rotation_x(0.2))]), hips: None };
         let mixed = animator.humanoid(&standing, rest);
@@ -432,8 +459,8 @@ mod tests {
     #[test]
     fn a_lone_idle_loops_without_switching() {
         let mut animator = animator(&["idle", "wave"]);
-        assert_eq!(animator.idle.as_deref(), Some("idle"));
-        assert_eq!(animator.next_idle, f32::INFINITY);
+        assert_eq!(animator.loop_clip.as_deref(), Some("idle"));
+        assert_eq!(animator.next_loop, f32::INFINITY);
         for _ in 0..1000 {
             animator.update(0.05);
         }
@@ -442,10 +469,67 @@ mod tests {
     }
 
     #[test]
+    fn walking_loops_and_fades_back_to_idle() {
+        let mut animator = animator(&["idle", "walk-2"]);
+        animator.walk(true);
+        animator.update(IDLE_FADE);
+        assert!(animator.walking());
+        assert_eq!(animator.loop_clip.as_deref(), Some("walk-2"));
+        for _ in 0..1000 { animator.update(0.05); }
+        assert_eq!(animator.actions.len(), 1);
+        assert!(animator.actions[0].time < 20.0);
+        animator.walk(false);
+        assert!(animator.walking(), "the outgoing walk still contributes to the feet");
+        animator.update(IDLE_FADE + 0.01);
+        assert!(!animator.walking());
+        assert_eq!(animator.loop_clip.as_deref(), Some("idle"));
+    }
+
+    #[test]
+    fn a_gesture_interrupts_walking_then_resumes_the_requested_loop() {
+        let mut animator = animator(&["idle", "walk", "wave"]);
+        animator.walk(true);
+        animator.update(IDLE_FADE);
+        assert!(animator.gesture("wave"));
+        animator.update(GESTURE_FADE);
+        assert!(!animator.walking());
+        animator.update(20.0);
+        animator.update(IDLE_FADE);
+        assert!(animator.walking());
+        assert!(animator.gesture("wave"));
+        animator.walk(false);
+        animator.update(20.0);
+        animator.update(IDLE_FADE);
+        assert!(!animator.walking());
+        assert_eq!(animator.loop_clip.as_deref(), Some("idle"));
+    }
+
+    #[test]
+    fn without_a_walk_clip_the_idle_keeps_playing() {
+        let mut animator = animator(&["idle"]);
+        animator.walk(true);
+        animator.update(IDLE_FADE);
+        assert!(!animator.walking());
+        assert_eq!(animator.loop_clip.as_deref(), Some("idle"));
+    }
+
+    #[test]
+    fn stopping_without_an_idle_clip_returns_to_standing() {
+        let mut animator = animator(&["walk"]);
+        animator.walk(true);
+        animator.update(IDLE_FADE);
+        assert!(animator.walking());
+        animator.walk(false);
+        animator.update(IDLE_FADE);
+        assert!(!animator.walking());
+        assert!(animator.humanoid(&Humanoid::default(), None).rotations.is_empty());
+    }
+
+    #[test]
     fn a_gesture_plays_once_over_the_idle_then_an_idle_returns() {
         let mut animator = animator(&["idle", "idle-2", "wave"]);
         assert!(!animator.gesture("bow"), "a gesture without its clip is refused");
-        animator.next_idle = 1.0;
+        animator.next_loop = 1.0;
         assert!(animator.gesture("wave"));
         let standing = Humanoid::default();
         animator.update(GESTURE_FADE);
@@ -490,8 +574,8 @@ mod tests {
         let mut idles = std::collections::HashSet::new();
         let mut waves = std::collections::HashSet::new();
         for _ in 0..60 {
-            animator.play_idle();
-            idles.insert(animator.idle.clone().unwrap());
+            animator.play_loop();
+            idles.insert(animator.loop_clip.clone().unwrap());
             assert!(animator.gesture("wave"));
             waves.insert(animator.actions.last().unwrap().clip.clone());
         }
@@ -528,7 +612,7 @@ mod tests {
         let mut shown = 0;
         for _ in 0..200 {
             animator.shown = None;
-            animator.play_idle();
+            animator.play_loop();
             for _ in 0..60 {
                 animator.update(1.0 / 60.0);
             }

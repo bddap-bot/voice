@@ -1,0 +1,3 @@
+`walk.json` is the **Walk** animation from [Mesh2Motion's human base library](https://github.com/mesh2motion/mesh2motion-app/blob/eef2de986dab53283cb636f860d502d64b8073e7/static/animations/human-base-animations.glb), dedicated to the public domain under [CC0 1.0](https://github.com/mesh2motion/mesh2motion-app/blob/eef2de986dab53283cb636f860d502d64b8073e7/LICENSE-CC0.MD).
+
+`python3 vr/motions/import-walk.py` regenerates it from the pinned source. The conversion expresses each rotation in normalized humanoid rest coordinates and the hips position in the upright frame. It preserves the authored keys, timing and loop seam; no leg correction or travel speed is baked in. The source URL and SHA-256 are recorded in the asset.

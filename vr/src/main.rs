@@ -135,9 +135,10 @@ fn load(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer) -> Result<P
             Err(error) => tracing::warn!("{}: {error}", entry.name),
         }
     }
+    clips.insert(motion::WALK.to_owned(), Clip::parse(include_bytes!("../motions/walk.json"), model.version, model.rest_hips())?);
     let idles = clips.keys().filter(|name| motion::family(name) == IDLE).count();
     let own = model.own_expressions();
-    tracing::info!("appearance {} with {idles} standing idle clips, gestures and moods {:?}, own expressions {own:?}, {} spring joints at gravity {}", avatar.id, clips.keys().filter(|name| motion::family(name) != IDLE).collect::<Vec<_>>(), model.spring_joints(), vrm::spring::GRAVITY);
+    tracing::info!("appearance {} with {idles} standing idle clips, other clips {:?}, own expressions {own:?}, {} spring joints at gravity {}", avatar.id, clips.keys().filter(|name| motion::family(name) != IDLE).collect::<Vec<_>>(), model.spring_joints(), vrm::spring::GRAVITY);
     let skinned = model.skinned()?;
     let fit = Fit::new(&model, &skinned, HEIGHT);
     let height = (HEIGHT / fit.scale).clamp(FULL_HEIGHT[0], FULL_HEIGHT[1]);
@@ -147,14 +148,16 @@ fn load(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer) -> Result<P
 }
 
 impl Puppet {
-    /// One frame of the figure standing at `stand`, `size` times its hand-held height: its clip, a point while `pointing` has a target, its gaze toward `head`, its blink and mouth, and its springs. Returns its joints in the model's space and the model's placement in the world.
-    fn step(&mut self, delta: f32, stand: &Pose, size: f32, head: Vec3, mouth: f32, pointing: &mut point::Pointing, now: Instant, locate: impl FnOnce(&str) -> Option<Vec3>) -> (Vec<glam::Mat4>, glam::Mat4) {
-        if let Some(idle) = self.animator.update(delta) {
-            tracing::info!("idle {idle}");
+    fn step(&mut self, delta: f32, place: impl FnOnce(Option<[Vec3; 2]>, bool) -> Pose, size: f32, head: Vec3, mouth: f32, pointing: &mut point::Pointing, now: Instant, locate: impl FnOnce(&str) -> Option<Vec3>) -> (Vec<glam::Mat4>, glam::Mat4, Pose) {
+        if let Some(clip) = self.animator.update(delta) {
+            tracing::info!("loop {clip}");
         }
         let mut pose = self.model.pose(&self.animator.humanoid(&self.standing, self.model.rest_hips()));
         let mut worlds = self.model.worlds(&pose);
-        let body = stand.mat4() * glam::Mat4::from_scale(glam::Vec3::splat(size)) * self.fit.placement(&self.model, &worlds, 0.0);
+        let fitted = self.fit.placement(&self.model, &worlds, 0.0);
+        let feet = self.model.feet(&worlds).map(|feet| feet.map(|foot| fitted.transform_point3(foot).to_array()));
+        let stand = place(feet, self.animator.walking());
+        let body = stand.mat4() * glam::Mat4::from_scale(glam::Vec3::splat(size)) * fitted;
         let to_model = body.inverse();
         if let Some((target, weight)) = pointing.step(now, delta, mouth, locate) {
             if let Some(reach) = self.model.point_at(&mut pose, to_model.transform_point3(target.into()), weight, pointing.hand()) {
@@ -170,7 +173,7 @@ impl Puppet {
         self.model.express(&mut pose, "aa", mouth);
         self.springs.step(&self.model, &mut pose, body, delta);
         self.changed = self.skinned.morph(&pose.weights);
-        (self.model.worlds(&pose), body)
+        (self.model.worlds(&pose), body, stand)
     }
 
     /// Skins the posed figure into its window's space for the next render.
@@ -395,7 +398,6 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             }
         }
         let right = hand(Hand::Right).zip(right_device);
-        objects.step(started, &object::View { stand, size, head, eyes: eye_offsets, tip: right.map(|(right, _)| right.apply(tip)) });
         let touch = board.touch(right.map(|(right, _)| local_tip(&board_pose, &right, tip)));
         if let Some([x, y]) = touch.crossing {
             tracing::info!("board crossed at ({x:.3}, {y:.3}) m: {}", touch.press.map_or("none".to_owned(), |press| format!("{press:?}")));
@@ -453,6 +455,9 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
                 match Relay::connect(token, &cache).and_then(|mut relay| load(&mut relay, avatar, &mut renderer)) {
                     Ok(loaded) => {
                         puppet = loaded;
+                        if let Anchor::Grounded(floor) = &mut anchor {
+                            *floor = placement::Floor::new(floor.pose);
+                        }
                         board.active = index;
                     }
                     Err(error) => tracing::warn!("appearance {} not shown: {error}", avatar.id),
@@ -467,7 +472,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             board.log = log;
             board.mark();
         }
-        if board.anchor != anchor {
+        if std::mem::discriminant(&board.anchor) != std::mem::discriminant(&anchor) {
             eprintln!("puppet {} at {:.2} m above the floor", match anchor { Anchor::Riding => "riding", Anchor::Settling(_) => "settling", Anchor::Stuck(_) => "set down", Anchor::Grounded(_) => "standing on the floor" }, held.t[1]);
             board.anchor = anchor;
             board.mark();
@@ -481,7 +486,19 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             board_overlay.show();
         }
         let delta = interval.as_secs_f32().min(0.05);
-        let (posed, body) = puppet.step(delta, &stand, size, head.t, voice.mouth(), &mut pointing, started, |name| objects.locate(name));
+        let area = anchor.grounded().then(|| runtime.play_area()).flatten();
+        puppet.animator.walk(anchor.grounded() && size == puppet.full && area.is_some());
+        let full = puppet.full;
+        let (posed, body, stand) = puppet.step(delta, |feet, walking| {
+            match &mut anchor {
+                Anchor::Grounded(floor) => {
+                    let placed = floor.step(feet.map(|feet| feet.map(|foot| placement::scale(foot, full))), area.as_ref(), walking && size == full, delta);
+                    if size == full { placed } else { stand }
+                }
+                _ => stand,
+            }
+        }, size, head.t, voice.mouth(), &mut pointing, started, |name| objects.locate(name));
+        objects.step(started, &object::View { stand, size, head, eyes: eye_offsets, tip: right.map(|(right, _)| right.apply(tip)) });
         let eye_points = eye_offsets.map(|eye: Pose| head.then(&eye).t);
         let (quad, half) = if size > 1.0 { grown_window(&puppet.skinned, &posed, body, &head, &eye_points, view) } else { (figure, QUAD / 2.0) };
         let local = quad.inverse();

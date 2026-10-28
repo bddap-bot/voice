@@ -528,6 +528,7 @@ mod tests {
         animator.mood("pleased");
         let mut shown = 0;
         for _ in 0..200 {
+            animator.shown = None;
             animator.play_idle();
             for _ in 0..60 {
                 animator.update(1.0 / 60.0);

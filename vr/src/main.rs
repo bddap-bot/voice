@@ -60,8 +60,15 @@ const DORMANT_POLL: Duration = Duration::from_micros(11_111);
 const SPOTTER_RETRY: Duration = Duration::from_secs(10);
 
 fn grown_window(skinned: &Skinned, worlds: &[glam::Mat4], body: glam::Mat4, head: &Pose, eyes: &[Vec3], view: f32) -> (Pose, f32) {
-    let balls: Vec<(Vec3, f32)> = skinned.reach(worlds, body).into_iter().map(|(center, radius)| (center.into(), radius)).collect();
-    window(&balls, head, eyes, view)
+    let points = skinned.positions(&skinned.palette(worlds, head.inverse().mat4() * body));
+    let (low, high) = vrm::bounds(&points);
+    // Bound the posed mesh in the view's axes, with room for its outline. A bone's
+    // reach sphere can spend most of the texture on empty space around the figure.
+    let corners: Vec<Vec3> = (0..8).map(|corner| {
+        let point = std::array::from_fn(|axis| if corner & (1 << axis) == 0 { low[axis] - MARGIN } else { high[axis] + MARGIN });
+        head.apply(point)
+    }).collect();
+    window(&corners, head, eyes, view)
 }
 
 fn directory(variable: &str, fallback: &str) -> PathBuf {
@@ -763,6 +770,21 @@ mod tests {
             }
         }
         image.save(std::path::Path::new(&directory).join(format!("{name}.png"))).unwrap();
+    }
+
+    #[test]
+    fn a_floor_puppets_window_does_not_spend_its_resolution_on_empty_bone_reach() {
+        let model = Model::parse(include_bytes!("../golden/figure.vrm")).unwrap();
+        let skinned = model.skinned().unwrap();
+        let fit = Fit::new(&model, &skinned, HEIGHT);
+        let worlds = model.worlds(&model.pose(&model.standing()));
+        let body = glam::Mat4::from_scale(glam::Vec3::splat(1.7 / HEIGHT)) * fit.placement(&model, &worlds, 0.0);
+        let head = pitched([0.0, 1.6, 3.0], 0.0);
+        let eyes = [-0.032, 0.032].map(|x| head.apply([x, 0.0, 0.0]));
+        let (quad, half) = grown_window(&skinned, &worlds, body, &head, &eyes, FIELD);
+        assert!(2.0 * half < 2.0, "the 1.7 m fixture, including its projected depth and outline margin, fits two metres: {} m", 2.0 * half);
+        let depth = quad.inverse().apply(head.t)[2];
+        assert!(eye_texels(2.0 * half, depth) <= eye_texels(QUAD, render::NEAREST), "at three metres the full display density fits the target");
     }
 
     #[test]

@@ -13,11 +13,19 @@ use crate::{load, operate, Puppet, FLOOR, HEIGHT, QUAD};
 const SETTLE: usize = 90;
 const DELTA: f32 = 0.011_111;
 const MOVED: u8 = 8;
-const HEAD: [f32; 3] = [0.0, -FLOOR + 0.12, 0.5];
 
 pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
-    let usage = "usage: voice-vr menu <out-dir> [<catalog id>...]";
-    let (out, ids) = args.split_first().ok_or(usage)?;
+    let usage = "usage: voice-vr menu <out-dir> [--eye <x> <y> <z>] [<catalog id>...]";
+    let (out, mut ids) = args.split_first().ok_or(usage)?;
+    let mut head = [0.0, -FLOOR + 0.12, 0.5];
+    if ids.first().is_some_and(|arg| arg == "--eye") {
+        for (coordinate, arg) in head.iter_mut().zip(ids.get(1..4).ok_or(usage)?) {
+            *coordinate = arg.parse::<f32>().map_err(|_| usage)?;
+            if !coordinate.is_finite() { return Err(usage.into()); }
+        }
+        if head[0] * head[0] + head[2] * head[2] < 0.0001 { return Err("the camera must be outside the avatar's vertical axis".into()); }
+        ids = &ids[4..];
+    }
     let out = PathBuf::from(out);
     std::fs::create_dir_all(&out).map_err(|error| format!("{}: {error}", out.display()))?;
     let cache = state.join("assets");
@@ -57,9 +65,9 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
             if matches!(control.kind, Kind::Radial | Kind::TwoAxis | Kind::FourAxis) {
                 operate(controller, control, if control.kind == Kind::Radial { [0.0, 0.0] } else { [0.5, 0.5] });
             }
-            let before = still(&mut puppet, &mut renderer, &mut figure, runtime)?;
+            let before = still(&mut puppet, &mut renderer, &mut figure, runtime, head)?;
             operate(puppet.controller.as_mut().unwrap(), control, if control.kind == Kind::Radial { [0.5, 0.5] } else { [1.0, 1.0] });
-            let after = still(&mut puppet, &mut renderer, &mut figure, runtime)?;
+            let after = still(&mut puppet, &mut renderer, &mut figure, runtime, head)?;
             let difference = changed(&before, &after);
             let picture = pictures.join(format!("{number:03}.png"));
             pair(&before, &after, &picture)?;
@@ -70,7 +78,7 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
                 settings.keep(&avatar.id, &menu.menu, puppet.controller.as_ref().unwrap())?;
                 let values = &puppet.controller.as_ref().unwrap().values;
                 let mut again = load(&mut relay, avatar, &mut renderer, &Settings::read(&pictures).of(&avatar.id))?;
-                let worn = still(&mut again, &mut renderer, &mut figure, runtime)?;
+                let worn = still(&mut again, &mut renderer, &mut figure, runtime, head)?;
                 let differs = changed(&after, &worn);
                 let parameters: Vec<_> = values.iter().zip(&again.controller.as_ref().unwrap().values).zip(&menu.parameters).filter(|((before, after), _)| before != after).map(|((before, after), parameter)| serde_json::json!({"name": parameter.name, "before": before, "after": after})).collect();
                 let line = serde_json::json!({"avatar": avatar.id, "rewear": path, "differs": differs, "parametersChanged": parameters, "hiddenBefore": puppet.drawn.hidden, "hiddenAfter": again.drawn.hidden});
@@ -116,7 +124,7 @@ fn board_pages(controls: &[Control], path: &mut Vec<usize>, puppet: &Puppet, out
     Ok(())
 }
 
-fn still(puppet: &mut Puppet, renderer: &mut Renderer, overlay: &mut Overlay, runtime: &Runtime) -> Result<Vec<u8>, String> {
+fn still(puppet: &mut Puppet, renderer: &mut Renderer, overlay: &mut Overlay, runtime: &Runtime, head: [f32; 3]) -> Result<Vec<u8>, String> {
     let stand = Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0; 3]);
     let (menu, controller) = (puppet.model.menu.as_ref().unwrap(), puppet.controller.as_mut().unwrap());
     let mut pose = puppet.model.pose(&puppet.standing);
@@ -134,10 +142,11 @@ fn still(puppet: &mut Puppet, renderer: &mut Renderer, overlay: &mut Overlay, ru
     let body = stand.mat4() * puppet.fit.placement(&puppet.model, &worlds, 0.0);
     puppet.changed = puppet.skinned.morph(&pose.weights);
     puppet.changed.extend(retextured);
-    let quad = facing(stand.apply([0.0, -FLOOR, 0.0]), HEAD);
+    let quad = facing(stand.apply([0.0, -FLOOR, 0.0]), head);
     let local = quad.inverse();
     puppet.draw(&worlds, local.mat4() * body);
-    let eyes = [-0.032, 0.032].map(|x| eye_projection(local.apply([HEAD[0] + x, HEAD[1], HEAD[2]]).into(), QUAD / 2.0, QUAD / 2.0));
+    let eye = local.apply(head);
+    let eyes = [-0.032, 0.032].map(|x| eye_projection([eye[0] + x, eye[1], eye[2]].into(), QUAD / 2.0, QUAD / 2.0));
     overlay.texture(&mut renderer.render(&puppet.drawn, eyes, renderer.eye[0])?)?;
     overlay.show();
     runtime.wait_frame();

@@ -36,9 +36,9 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
     for avatar in catalog.avatars.iter().filter(|avatar| ids.is_empty() || ids.contains(&avatar.id)) {
         let pictures = out.join(&avatar.id);
         std::fs::create_dir_all(&pictures).map_err(|error| format!("{}: {error}", pictures.display()))?;
-        let _ = std::fs::remove_file(pictures.join("menus.json"));
         let mut settings = Settings::read(&pictures);
-        let mut puppet = load(&mut relay, avatar, &mut renderer, &settings.of(&avatar.id))?;
+        let configuration = settings.of(&avatar.id);
+        let mut puppet = load(&mut relay, avatar, &mut renderer, &configuration)?;
         let Some(menu) = puppet.model.menu.clone() else {
             println!("{}: no menu", avatar.id);
             continue;
@@ -48,7 +48,7 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
         flatten(&menu.menu, "", &mut controls);
         let mut kept = None;
         for (number, (path, control)) in controls.iter().enumerate() {
-            puppet.controller = Some(Controller::new(&menu, &Default::default()));
+            puppet.controller = Some(Controller::new(&menu, &configuration));
             let controller = puppet.controller.as_mut().unwrap();
             if control.kind == Kind::Toggle && control.value == 0.0 {
                 if let Some((_, alternative)) = controls.iter().find(|(_, candidate)| candidate.parameter == control.parameter && candidate.value != control.value) {

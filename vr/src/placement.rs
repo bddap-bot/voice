@@ -159,8 +159,8 @@ impl Floor {
 
     pub fn step(&mut self, feet: Option<[Vec3; 2]>, walking: bool) -> Pose {
         let previous = self.feet;
-        self.feet = feet.filter(|_| walking);
-        if let (Some(previous), Some(feet)) = (previous, self.feet) {
+        self.feet = feet;
+        if let (true, Some(previous), Some(feet)) = (walking, previous, feet) {
             let support = usize::from(previous[1][2] - feet[1][2] > previous[0][2] - feet[0][2]);
             self.pose.t = add(self.pose.t, self.pose.rotate(sub(previous[support], feet[support])));
             self.pose.t[1] = 0.0;
@@ -410,6 +410,7 @@ mod tests {
             for frame in 0..900 {
                 assert_eq!(floor.step(Some(walking_feet(frame as f32 / 90.0)), false), initial);
             }
+            floor.step(Some(walking_feet(0.7)), false);
             assert_eq!(floor.step(Some(walking_feet(0.7)), true), initial);
             for frame in 1..=900 {
                 let pose = floor.step(Some(walking_feet(0.7 + frame as f32 / 90.0)), true);
@@ -440,6 +441,17 @@ mod tests {
                 previous = Some(hips);
             }
         }
+    }
+
+    #[test]
+    fn an_idle_to_stride_transition_keeps_the_support_foot_planted() {
+        let mut floor = Floor::new(turned(0.0, [2.0, 0.0, 3.0]));
+        let standing = [[-0.2, 0.08, 0.018], [0.2, 0.078, -0.018]];
+        let stepping = [[-0.197, 0.081, 0.023], [0.197, 0.078, -0.023]];
+        floor.step(Some(standing), false);
+        let planted = floor.pose.apply(standing[1]);
+        let next = floor.step(Some(stepping), true);
+        assert!(close(next.apply(stepping[1]), planted));
     }
 
     #[test]

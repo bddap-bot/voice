@@ -69,15 +69,16 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
             lines.push(line.to_string());
             if kept.is_none() && changed > 0.0 && control.kind == Kind::Toggle {
                 settings.keep(&avatar.id, &menu.menu, puppet.controller.as_ref().unwrap())?;
-                kept = Some((path.clone(), after.clone()));
+                kept = Some((path.clone(), after.clone(), puppet.controller.as_ref().unwrap().values.clone(), puppet.drawn.hidden.clone()));
             }
 
         }
-        if let Some((path, seen)) = kept {
+        if let Some((path, seen, values, hidden)) = kept {
             let mut again = load(&mut relay, avatar, &mut renderer, &Settings::read(&pictures).of(&avatar.id))?;
             let worn = still(&mut again, &mut renderer, &mut figure, runtime)?;
             let differs = changed(&seen, &worn);
-            let line = serde_json::json!({"avatar": avatar.id, "rewear": path, "differs": differs});
+            let parameters: Vec<_> = values.iter().zip(&again.controller.as_ref().unwrap().values).zip(&menu.parameters).filter(|((before, after), _)| before != after).map(|((before, after), parameter)| serde_json::json!({"name": parameter.name, "before": before, "after": after})).collect();
+            let line = serde_json::json!({"avatar": avatar.id, "rewear": path, "differs": differs, "parametersChanged": parameters, "hiddenBefore": hidden, "hiddenAfter": again.drawn.hidden});
             println!("{line}");
             lines.push(line.to_string());
             pair(&seen, &worn, &pictures.join("rewear.png"))?;

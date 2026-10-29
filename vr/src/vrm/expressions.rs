@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub const EXTENSION: &str = "VRCHAT_expressions";
 /// Instant transitions followed in one layer in one frame, so a cycle of them cannot hold the frame.
@@ -218,6 +219,8 @@ pub struct Shown {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Expressions {
+    #[serde(skip)]
+    source: String,
     pub menu: Vec<Control>,
     pub parameters: Vec<Parameter>,
     layers: Vec<Layer>,
@@ -254,6 +257,7 @@ fn icon(encoded: &str) -> Result<Icon, String> {
 impl Expressions {
     pub fn parse(value: &serde_json::Value) -> Result<Expressions, String> {
         let mut expressions = Expressions::deserialize(value).map_err(|error| format!("{EXTENSION}: {error}"))?;
+        expressions.source = format!("{:x}", Sha256::digest(value.to_string().as_bytes()));
         expressions.icons = expressions.encoded_icons.iter().map(|encoded| icon(encoded)).collect::<Result<_, _>>().map_err(|error| format!("{EXTENSION}: an icon: {error}"))?;
         expressions.encoded_icons.clear();
         fn icons_valid(controls: &[Control], icons: usize) -> bool {
@@ -324,11 +328,17 @@ impl Expressions {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default, Deserialize, Serialize)]
+pub struct Configuration {
+    pub parameters: HashMap<String, f32>,
+    source: String,
+    held: Vec<HashMap<usize, f32>>,
+}
+
+#[derive(Clone, Copy)]
 struct Playing {
     state: usize,
     time: f32,
-    held: HashMap<usize, f32>,
 }
 
 pub struct Controller {
@@ -336,13 +346,26 @@ pub struct Controller {
     index: HashMap<String, usize>,
     playing: Vec<Option<Playing>>,
     random: u64,
+    source: String,
+    held: Vec<HashMap<usize, f32>>,
 }
 
 impl Controller {
-    pub fn new(expressions: &Expressions, remembered: &HashMap<String, f32>) -> Controller {
+    pub fn new(expressions: &Expressions, remembered: &Configuration) -> Controller {
         let index = expressions.parameters.iter().enumerate().map(|(at, parameter)| (parameter.name.clone(), at)).collect();
-        let values = expressions.parameters.iter().map(|parameter| remembered.get(&parameter.name).copied().unwrap_or(parameter.default)).collect();
-        Controller { values, index, playing: vec![None; expressions.layers.len()], random: 0x9e37_79b9_7f4a_7c15 }
+        let values = expressions.parameters.iter().map(|parameter| remembered.parameters.get(&parameter.name).copied().unwrap_or(parameter.default)).collect();
+        let held = (0..expressions.layers.len()).map(|layer| {
+            if remembered.source == expressions.source {
+                remembered.held.get(layer).cloned().unwrap_or_default().into_iter().filter(|(target, _)| *target < expressions.targets.len()).collect()
+            } else {
+                HashMap::new()
+            }
+        }).collect();
+        Controller { values, index, playing: vec![None; expressions.layers.len()], random: 0x9e37_79b9_7f4a_7c15, source: expressions.source.clone(), held }
+    }
+
+    pub fn configuration(&self, parameters: HashMap<String, f32>) -> Configuration {
+        Configuration { parameters, source: self.source.clone(), held: self.held.clone() }
     }
 
     pub fn get(&self, name: &str) -> f32 {
@@ -394,8 +417,7 @@ impl Controller {
     }
 
     fn enter(&mut self, expressions: &Expressions, layer: usize, state: usize) {
-        let held = self.playing[layer].take().map(|playing| playing.held).unwrap_or_default();
-        self.playing[layer] = Some(Playing { state, time: 0.0, held });
+        self.playing[layer] = Some(Playing { state, time: 0.0 });
         self.drive(expressions, &expressions.layers[layer].states[state].drivers);
     }
 
@@ -436,17 +458,17 @@ impl Controller {
         }
         let mut out: Vec<f32> = expressions.targets.iter().map(|target| target.default).collect();
         for (layer, playing) in expressions.layers.iter().zip(0..) {
-            let Some(current) = self.playing[playing].clone() else { continue };
+            let Some(current) = self.playing[playing] else { continue };
             let state = &layer.states[current.state];
             let mut written = HashMap::new();
             self.sample(expressions, &state.motion, current.time, 1.0, &mut written);
             let weight = layer.weight.clamp(0.0, 1.0);
-            let playing = self.playing[playing].as_mut().unwrap();
+            let held = &mut self.held[playing];
             let values: Vec<(usize, f32)> = if state.write_defaults {
                 written.into_iter().collect()
             } else {
-                playing.held.extend(written);
-                playing.held.iter().map(|(&target, &value)| (target, value)).collect()
+                held.extend(written);
+                held.iter().map(|(&target, &value)| (target, value)).collect()
             };
             for (target, value) in values {
                 out[target] += (value - out[target]) * weight;
@@ -583,10 +605,39 @@ mod tests {
     }
 
     #[test]
+    fn rewear_keeps_values_an_animation_leaves_unchanged() {
+        let data = serde_json::json!({
+            "menu": [], "parameters": [{"name": "Outfit", "type": "int"}],
+            "layers": [{"states": [
+                {"writeDefaults": false, "transitions": [{"to": 1, "conditions": [{"parameter": "Outfit", "mode": "equals", "threshold": 1}]}]},
+                {"writeDefaults": false, "motion": {"clip": 0}, "transitions": [{"to": 0, "conditions": [{"parameter": "Outfit", "mode": "equals", "threshold": 0}]}]}
+            ]}],
+            "clips": [{"curves": [{"target": 0, "keys": [[0, 1]]}]}],
+            "targets": [{"effect": {"morph": [[0, 0]]}}]
+        });
+        let menu = Expressions::parse(&data).unwrap();
+        let mut worn = Controller::new(&menu, &Configuration::default());
+        worn.set("Outfit", 1.0);
+        worn.step(&menu, 0.1);
+        worn.set("Outfit", 0.0);
+        let seen = worn.step(&menu, 0.1);
+        assert_eq!(seen, vec![1.0]);
+        let saved = worn.configuration(HashMap::from([("Outfit".to_owned(), 0.0)]));
+        let read = serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
+        assert_eq!(Controller::new(&menu, &read).step(&menu, 0.1), seen);
+        let mut changed = data;
+        changed["targets"][0]["effect"]["morph"][0][1] = serde_json::json!(1);
+        let updated = Expressions::parse(&changed).unwrap();
+        let mut again = Controller::new(&updated, &read);
+        assert_eq!(again.get("Outfit"), 0.0);
+        assert_eq!(again.step(&updated, 0.1), vec![0.0]);
+    }
+
+    #[test]
     fn a_toggle_switches_its_target_and_back_with_or_without_write_defaults() {
         for write_defaults in [true, false] {
             let expressions = toggle(write_defaults);
-            let mut controller = Controller::new(&expressions, &HashMap::new());
+            let mut controller = Controller::new(&expressions, &Configuration::default());
             assert_eq!(controller.step(&expressions, 0.011)[0], 0.0);
             controller.set("Hat", 1.0);
             assert_eq!(controller.step(&expressions, 0.011)[0], 1.0, "write defaults {write_defaults}");
@@ -598,7 +649,7 @@ mod tests {
     #[test]
     fn a_radial_sets_its_clip_time_and_a_remembered_value_applies_from_the_first_frame() {
         let expressions = toggle(true);
-        let mut controller = Controller::new(&expressions, &HashMap::from([("Size".to_owned(), 0.75), ("Hat".to_owned(), 1.0)]));
+        let mut controller = Controller::new(&expressions, &Configuration { parameters: HashMap::from([("Size".to_owned(), 0.75), ("Hat".to_owned(), 1.0)]), ..Default::default() });
         let values = controller.step(&expressions, 0.011);
         assert_eq!(values, vec![1.0, 0.75]);
         controller.set("Size", 0.5);
@@ -625,7 +676,7 @@ mod tests {
             "clips": [{"length": 1, "curves": [{"target": 0, "keys": [[0, 0], [1, 1]]}]}],
             "targets": [{"effect": "switch"}]
         })).unwrap();
-        let mut controller = Controller::new(&expressions, &HashMap::new());
+        let mut controller = Controller::new(&expressions, &Configuration::default());
         assert_eq!(controller.step(&expressions, 0.25), vec![0.75]);
         assert_eq!(controller.step(&expressions, 1.0), vec![0.0]);
         controller.set("Choice", 1.0);
@@ -647,7 +698,7 @@ mod tests {
             "clips": [], "targets": []
         }))
         .unwrap();
-        let mut controller = Controller::new(&expressions, &HashMap::new());
+        let mut controller = Controller::new(&expressions, &Configuration::default());
         controller.set("Preset", 1.0);
         controller.step(&expressions, 0.011);
         assert_eq!((controller.get("Hat"), controller.get("Preset")), (1.0, 0.0));

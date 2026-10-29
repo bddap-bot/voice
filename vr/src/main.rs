@@ -123,7 +123,7 @@ struct Puppet {
     controller: Option<Controller>,
 }
 
-fn load(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer, remembered: &HashMap<String, f32>) -> Result<Puppet, String> {
+fn load(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer, remembered: &vrm::expressions::Configuration) -> Result<Puppet, String> {
     let model = Model::parse(&relay.puppet(avatar)?).map_err(|error| format!("{}: {error}", avatar.id))?;
     let standing = model.standing();
     let mut clips = HashMap::new();
@@ -507,6 +507,11 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             Some(Press::Log) => board.toggle_log(),
             Some(Press::SetDown) => anchor.toggle(started),
             Some(Press::Appearance(index)) if index != board.active => {
+                if let Some(controller) = &puppet.controller {
+                    if let Err(error) = settings.keep(&catalog.avatars[board.active].id, puppet.model.menu.as_ref().map_or(&[][..], |menu| &menu.menu), controller) {
+                        tracing::warn!("menu settings not kept: {error}");
+                    }
+                }
                 let avatar = &catalog.avatars[index];
                 tracing::info!("picked appearance {}", avatar.id);
                 board.pending = Some(index);

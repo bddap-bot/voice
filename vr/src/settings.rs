@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::vrm::expressions::{Controller, Control, Kind};
+use crate::vrm::expressions::{Configuration, Controller, Control, Kind};
 
 pub struct Settings {
     file: std::path::PathBuf,
-    avatars: HashMap<String, HashMap<String, f32>>,
+    avatars: HashMap<String, Configuration>,
 }
 
 impl Settings {
@@ -21,12 +21,12 @@ impl Settings {
         Settings { file, avatars }
     }
 
-    pub fn of(&self, avatar: &str) -> HashMap<String, f32> {
+    pub fn of(&self, avatar: &str) -> Configuration {
         self.avatars.get(avatar).cloned().unwrap_or_default()
     }
 
     pub fn keep(&mut self, avatar: &str, controls: &[Control], controller: &Controller) -> Result<(), String> {
-        self.avatars.insert(avatar.to_owned(), shown(controls, controller));
+        self.avatars.insert(avatar.to_owned(), controller.configuration(shown(controls, controller)));
         let bytes = serde_json::to_vec_pretty(&self.avatars).map_err(|error| error.to_string())?;
         let pending = self.file.with_extension("json.new");
         std::fs::write(&pending, bytes).and_then(|()| std::fs::rename(&pending, &self.file)).map_err(|error| format!("{}: {error}", self.file.display()))
@@ -71,8 +71,8 @@ mod tests {
         controller.set("Wave", 1.0);
         settings.keep("a", &expressions.menu, &controller).unwrap();
         let again = Settings::read(&directory);
-        assert_eq!(again.of("a"), HashMap::from([("Hat".to_owned(), 1.0)]));
-        assert!(again.of("b").is_empty());
+        assert_eq!(again.of("a").parameters, HashMap::from([("Hat".to_owned(), 1.0)]));
+        assert!(again.of("b").parameters.is_empty());
         assert_eq!(Controller::new(&expressions, &again.of("a")).get("Hat"), 1.0);
     }
 }

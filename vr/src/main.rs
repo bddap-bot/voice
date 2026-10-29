@@ -34,7 +34,7 @@ mod reveal;
 mod wake;
 mod wear;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -62,8 +62,8 @@ const FULL_HEIGHT: [f32; 2] = [0.5, 2.5];
 const DORMANT_POLL: Duration = Duration::from_micros(11_111);
 const SPOTTER_RETRY: Duration = Duration::from_secs(10);
 
-fn grown_window(skinned: &Skinned, worlds: &[glam::Mat4], body: glam::Mat4, head: &Pose, eyes: &[Vec3], view: f32) -> (Pose, f32) {
-    let points = skinned.positions(&skinned.palette(worlds, head.inverse().mat4() * body));
+fn grown_window(skinned: &Skinned, hidden: &HashSet<usize>, worlds: &[glam::Mat4], body: glam::Mat4, head: &Pose, eyes: &[Vec3], view: f32) -> (Pose, f32) {
+    let points = skinned.positions(&skinned.palette(worlds, head.inverse().mat4() * body), hidden);
     let (low, high) = vrm::bounds(&points);
     // Bound the posed mesh in the view's axes, with room for its outline. A bone's
     // reach sphere can spend most of the texture on empty space around the figure.
@@ -584,7 +584,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         }, size, head.t, voice.mouth(), &mut pointing, started, |name| objects.locate(name));
         objects.step(started, &object::View { stand, size, head, eyes: eye_offsets, tip: right.map(|(right, _)| right.apply(tip)) });
         let eye_points = eye_offsets.map(|eye: Pose| head.then(&eye).t);
-        let (quad, half) = if size > 1.0 { grown_window(&puppet.skinned, &posed, body, &head, &eye_points, view) } else { (figure, QUAD / 2.0) };
+        let (quad, half) = if size > 1.0 { grown_window(&puppet.skinned, &puppet.drawn.hidden, &posed, body, &head, &eye_points, view) } else { (figure, QUAD / 2.0) };
         let local = quad.inverse();
         puppet.draw(&posed, local.mat4() * body);
         match anchor {
@@ -822,7 +822,7 @@ mod tests {
             left_eye(&renderer.read().unwrap(), texels)
         };
         let direct = draw(&field, FIELD, SEEN);
-        let (window, half) = grown_window(&skinned, &worlds, body, &head, &[eye, head.apply([0.032, 0.0, 0.0])], FIELD);
+        let (window, half) = grown_window(&skinned, &HashSet::new(), &worlds, body, &head, &[eye, head.apply([0.032, 0.0, 0.0])], FIELD);
         let texels = eye_texels(QUAD, render::NEAREST);
         let quad = draw(&window, half, texels);
         let to_window = window.inverse();
@@ -885,7 +885,7 @@ mod tests {
         let body = glam::Mat4::from_scale(glam::Vec3::splat(1.7 / HEIGHT)) * fit.placement(&model, &worlds, 0.0);
         let head = pitched([0.0, 1.6, 3.0], 0.0);
         let eyes = [-0.032, 0.032].map(|x| head.apply([x, 0.0, 0.0]));
-        let (quad, half) = grown_window(&skinned, &worlds, body, &head, &eyes, FIELD);
+        let (quad, half) = grown_window(&skinned, &HashSet::new(), &worlds, body, &head, &eyes, FIELD);
         assert!(2.0 * half < 2.0, "the 1.7 m fixture, including its projected depth and outline margin, fits two metres: {} m", 2.0 * half);
         let depth = quad.inverse().apply(head.t)[2];
         assert!(eye_texels(2.0 * half, depth) <= eye_texels(QUAD, render::NEAREST), "at three metres the full display density fits the target");

@@ -5,7 +5,7 @@ use crate::placement::{facing, Pose};
 use crate::relay::{Relay, Token};
 use crate::render::{eye_projection, eye_texels, Renderer, NEAREST, PAGE_HEIGHT};
 use crate::settings::Settings;
-use crate::vrm::expressions::{Control, Kind};
+use crate::vrm::expressions::{Control, Controller, Kind};
 use crate::vulkan::Gpu;
 use crate::{load, operate, Puppet, FLOOR, HEIGHT, QUAD};
 
@@ -40,16 +40,18 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
         flatten(&menu.menu, "", &mut controls);
         let mut kept = None;
         for (number, (path, control)) in controls.iter().enumerate() {
-            let before_at = match control.kind {
-                Kind::Radial => [0.0, 0.0],
-                _ => [0.5, 0.5],
-            };
-            let restore = crate::settings::shown(&menu.menu, puppet.controller.as_ref().unwrap());
+            puppet.controller = Some(Controller::new(&menu, &Default::default()));
+            let controller = puppet.controller.as_mut().unwrap();
+            if control.kind == Kind::Toggle && control.value == 0.0 {
+                if let Some((_, alternative)) = controls.iter().find(|(_, candidate)| candidate.parameter == control.parameter && candidate.value != control.value) {
+                    controller.set(&control.parameter, alternative.value);
+                }
+            }
             if matches!(control.kind, Kind::Radial | Kind::TwoAxis | Kind::FourAxis) {
-                operate(puppet.controller.as_mut().unwrap(), control, before_at);
+                operate(controller, control, if control.kind == Kind::Radial { [0.0, 0.0] } else { [0.5, 0.5] });
             }
             let before = still(&mut puppet, &mut renderer)?;
-            operate(puppet.controller.as_mut().unwrap(), control, [1.0, 1.0]);
+            operate(puppet.controller.as_mut().unwrap(), control, if control.kind == Kind::Radial { [0.5, 0.5] } else { [1.0, 1.0] });
             let after = still(&mut puppet, &mut renderer)?;
             let changed = changed(&before, &after);
             let picture = pictures.join(format!("{number:03}.png"));
@@ -61,13 +63,7 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
                 settings.keep(&avatar.id, &menu.menu, puppet.controller.as_ref().unwrap())?;
                 kept = Some((path.clone(), after.clone()));
             }
-            let controller = puppet.controller.as_mut().unwrap();
-            for (name, value) in &restore {
-                controller.set(name, *value);
-            }
-            if control.kind == Kind::Button {
-                controller.set(&control.parameter, 0.0);
-            }
+
         }
         if let Some((path, seen)) = kept {
             let mut again = load(&mut relay, avatar, &mut renderer, &Settings::read(&pictures).of(&avatar.id))?;

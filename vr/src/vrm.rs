@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use glam::{Mat4, Quat, Vec2, Vec3};
 use serde_json::Value;
@@ -1223,10 +1223,16 @@ impl Skinned {
         self.joints.iter().map(|&(node, inverse)| placement * worlds[node] * inverse).collect()
     }
 
-    pub fn positions(&self, palette: &[Mat4]) -> Vec<Vec3> {
+    pub fn positions(&self, palette: &[Mat4], hidden: &HashSet<usize>) -> Vec<Vec3> {
+        let mut visible = vec![true; self.vertices.len()];
+        for span in hidden.iter().filter_map(|node| self.spans.get(node)) {
+            visible[span.clone()].fill(false);
+        }
         self.vertices
             .iter()
-            .map(|vertex| {
+            .zip(visible)
+            .filter(|(_, visible)| *visible)
+            .map(|(vertex, _)| {
                 let matrix = vertex.joints.iter().zip(vertex.weights).filter(|(_, weight)| *weight > 0.0).fold(Mat4::ZERO, |sum, (&joint, weight)| sum + palette[joint as usize] * weight);
                 matrix.transform_point3(vertex.position.into())
             })
@@ -1287,8 +1293,10 @@ pub struct Fit {
 
 impl Fit {
     pub fn new(model: &Model, skinned: &Skinned, height: f32) -> Fit {
-        let worlds = model.worlds(&model.rest());
-        let points = skinned.positions(&skinned.palette(&worlds, Mat4::IDENTITY));
+        let mut pose = model.rest();
+        let hidden = model.menu.as_ref().map_or_else(HashSet::new, |menu| menu.apply(&menu.targets.iter().map(|target| target.default).collect::<Vec<_>>(), &mut pose));
+        let worlds = model.worlds(&pose);
+        let points = skinned.positions(&skinned.palette(&worlds, Mat4::IDENTITY), &hidden);
         let (low, high) = bounds(&points);
         let size = high.y - low.y;
         let feet = model.feet(&worlds).map_or(low.y, |feet| feet[0].y.min(feet[1].y));
@@ -1580,7 +1588,7 @@ pub mod tests {
 
     fn positions(model: &Model, pose: &Pose) -> Vec<Vec3> {
         let skinned = model.skinned().unwrap();
-        skinned.positions(&skinned.palette(&model.worlds(pose), Mat4::IDENTITY))
+        skinned.positions(&skinned.palette(&model.worlds(pose), Mat4::IDENTITY), &HashSet::new())
     }
 
     #[test]
@@ -1673,11 +1681,37 @@ pub mod tests {
             let fit = Fit::new(&model, &skinned, 0.3);
             let worlds = model.worlds(&model.rest());
             let placement = fit.placement(&model, &worlds, -0.17);
-            let (low, high) = bounds(&skinned.positions(&skinned.palette(&worlds, placement)));
+            let (low, high) = bounds(&skinned.positions(&skinned.palette(&worlds, placement), &HashSet::new()));
             assert!((low.y + 0.17).abs() < 1e-5 && (high.y - 0.13).abs() < 1e-5, "{low} {high}");
             let facing = placement.transform_vector3(Vec3::from(skinned.vertices[0].normal));
             assert!(facing.z > 0.0, "a VRM 0 figure faces -Z and is turned toward the viewer ({version:?})");
         }
+    }
+
+    #[test]
+    fn hidden_parts_do_not_shrink_the_avatar_or_expand_its_window() {
+        let mut builder = Builder::new(serde_json::json!({
+            "VRMC_vrm": {"humanoid": {"humanBones": {}}},
+            "VRCHAT_expressions": {
+                "menu": [], "parameters": [], "layers": [], "clips": [],
+                "targets": [{"effect": "switch", "default": 0}],
+                "shown": [{"node": 1, "when": [[0, 1]]}]
+            }
+        }));
+        let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        builder.set("nodes", serde_json::json!([{"mesh": 0}, {"mesh": 0, "translation": [0, 100, 0], "scale": [100, 100, 100]}]));
+        builder.set("meshes", serde_json::json!([{"primitives": [{"attributes": {"POSITION": position}}]}]));
+        let model = Model::parse(&builder.glb()).unwrap();
+        let skinned = model.skinned().unwrap();
+        let fit = Fit::new(&model, &skinned, 0.3);
+        assert!((fit.scale - 0.3).abs() < 1e-6);
+        let mut pose = model.rest();
+        let menu = model.menu.as_ref().unwrap();
+        let hidden = menu.apply(&[0.0], &mut pose);
+        let palette = skinned.palette(&model.worlds(&pose), Mat4::IDENTITY);
+        assert_eq!(bounds(&skinned.positions(&palette, &hidden)).1.y, 1.0);
+        let shown = menu.apply(&[1.0], &mut pose);
+        assert_eq!(bounds(&skinned.positions(&palette, &shown)).1.y, 200.0);
     }
 
     #[test]

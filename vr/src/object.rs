@@ -150,7 +150,7 @@ fn load(bytes: &[u8], stop: &AtomicBool) -> Result<Geometry, String> {
     let skinned = model.skinned()?;
     go()?;
     let rest = model.worlds(&model.rest());
-    let points = skinned.positions(&skinned.palette(&rest, Mat4::IDENTITY));
+    let points = skinned.positions(&skinned.palette(&rest, Mat4::IDENTITY), &Default::default());
     go()?;
     let (low, high) = bounds(&points);
     let extent = (high - low).max_element();

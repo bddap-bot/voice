@@ -34,12 +34,14 @@ struct Vertex {
     @location(2) uv: vec2<f32>,
     @location(3) joints: vec4<u32>,
     @location(4) weights: vec4<f32>,
+    @location(5) hue: vec4<f32>,
 }
 
 struct Varying {
     @builtin(position) clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) uv: vec2<f32>,
+    @location(2) hue: vec4<f32>,
 }
 
 @vertex
@@ -65,6 +67,7 @@ fn vertex(input: Vertex) -> Varying {
     }
     out.normal = normal;
     out.uv = input.uv;
+    out.hue = input.hue;
     return out;
 }
 
@@ -81,14 +84,43 @@ fn toon(material: Material, normal: vec3<f32>, direction: vec3<f32>) -> f32 {
     return clamp((dot(normal, direction) + material.shading_shift - (-1.0 + toony)) / max(2.0 - 2.0 * toony, 1e-4), 0.0, 1.0);
 }
 
+fn hue(color: vec3<f32>, settings: vec4<f32>) -> vec3<f32> {
+    if settings.w == 0.0 { return color; }
+    if settings.y > 0.5 {
+        let high = max(color.r, max(color.g, color.b));
+        let low = min(color.r, min(color.g, color.b));
+        let delta = high - low;
+        if delta < 1e-7 { return color; }
+        var angle = (color.g - color.b) / delta;
+        if high == color.g { angle = (color.b - color.r) / delta + 2.0; }
+        else if high == color.b { angle = (color.r - color.g) / delta + 4.0; }
+        angle = fract(angle / 6.0 * settings.z + settings.x);
+        let rgb = clamp(abs(fract(vec3<f32>(angle) + vec3<f32>(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0, vec3<f32>(0.0), vec3<f32>(1.0));
+        return vec3<f32>(low) + rgb * delta;
+    }
+    let lms = pow(max(vec3<f32>(
+        dot(color, vec3<f32>(0.4122214708, 0.5363325363, 0.0514459929)),
+        dot(color, vec3<f32>(0.2119034982, 0.6806995451, 0.1073969566)),
+        dot(color, vec3<f32>(0.0883024619, 0.2817188376, 0.6299787005))), vec3<f32>(0.0)), vec3<f32>(1.0 / 3.0));
+    let light = dot(lms, vec3<f32>(0.2104542553, 0.7936177850, -0.0040720468));
+    var ab = vec2<f32>(dot(lms, vec3<f32>(1.9779984951, -2.4285922050, 0.4505937099)), dot(lms, vec3<f32>(0.0259040371, 0.7827717662, -0.8086757660)));
+    if settings.z < 0.5 { ab = vec2<f32>(length(ab), 0.0); }
+    let angle = settings.x * 6.28318530718;
+    ab = vec2<f32>(cos(angle) * ab.x - sin(angle) * ab.y, sin(angle) * ab.x + cos(angle) * ab.y);
+    let roots = vec3<f32>(light + 0.3963377774 * ab.x + 0.2158037573 * ab.y, light - 0.1055613458 * ab.x - 0.0638541728 * ab.y, light - 0.0894841775 * ab.x - 1.2914855480 * ab.y);
+    let cubes = roots * roots * roots;
+    return max(vec3<f32>(dot(cubes, vec3<f32>(4.0767416621, -3.3077115913, 0.2309699292)), dot(cubes, vec3<f32>(-1.2684380046, 2.6097574011, -0.3413193965)), dot(cubes, vec3<f32>(-0.0041960863, -0.7034186147, 1.7076147010))), vec3<f32>(0.0));
+}
+
 @fragment
 fn fragment(input: Varying, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let material = materials[draw.material];
-    let base = textureSample(base_texture, texture_sampler, input.uv) * material.base;
+    let sampled = textureSample(base_texture, texture_sampler, input.uv) * material.base;
+    let base = vec4<f32>(hue(sampled.rgb, input.hue), sampled.a);
     if base.a < material.cutoff {
         discard;
     }
-    let shade = textureSample(shade_texture, texture_sampler, input.uv).rgb * material.shade;
+    let shade = hue(textureSample(shade_texture, texture_sampler, input.uv).rgb * material.shade, input.hue);
     var normal = normalize(input.normal);
     if !front {
         normal = -normal;

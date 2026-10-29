@@ -321,6 +321,7 @@ impl Renderer {
             vk::VertexInputAttributeDescription::default().location(2).format(vk::Format::R32G32_SFLOAT).offset(24),
             vk::VertexInputAttributeDescription::default().location(3).format(vk::Format::R16G16B16A16_UINT).offset(32),
             vk::VertexInputAttributeDescription::default().location(4).format(vk::Format::R32G32B32A32_SFLOAT).offset(40),
+            vk::VertexInputAttributeDescription::default().location(5).format(vk::Format::R32G32B32A32_SFLOAT).offset(56),
         ];
         let input = vk::PipelineVertexInputStateCreateInfo::default().vertex_binding_descriptions(&vertex_bindings).vertex_attribute_descriptions(&vertex_attributes);
         let assembly = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
@@ -681,6 +682,46 @@ mod tests {
             assert_eq!(pixel(&far, 32, eye * 16 + 8, 10)[3], 255, "eye {eye} draws the figure in its own half");
             assert_eq!(pixel(&far, 32, eye * 16, 0), [0; 4]);
             assert_eq!(pixel(&full, 128, eye * 64 + 32, 40)[3], 255);
+        }
+    }
+
+    #[test]
+    fn hue_controls_change_color_without_changing_coverage() {
+        let mut builder = crate::vrm::tests::Builder::new(serde_json::json!({"VRMC_vrm": {"humanoid": {"humanBones": {}}}}));
+        let position = builder.accessor("VEC3", &[-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0]);
+        let normal = builder.accessor("VEC3", &[0.0, 0.0, 1.0].repeat(8));
+        let uv = builder.accessor("VEC2", &[[0.25, 0.25].repeat(4), [0.75, 0.25].repeat(4)].concat());
+        let indices = builder.indices(&[0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]);
+        builder.set("nodes", serde_json::json!([{"mesh": 0}]));
+        builder.set("meshes", serde_json::json!([{"primitives": [{"attributes": {"POSITION": position, "NORMAL": normal, "TEXCOORD_0": uv}, "indices": indices, "material": 0}]}]));
+        builder.set("materials", serde_json::json!([{"pbrMetallicRoughness": {"baseColorFactor": [1.0, 0.0, 0.0, 1.0]}}]));
+        let model = Model::parse(&builder.glb()).unwrap();
+        let mut skinned = model.skinned().unwrap();
+        let worlds = model.worlds(&model.rest());
+        let fit = crate::vrm::Fit::new(&model, &skinned, crate::HEIGHT);
+        let palette = skinned.palette(&worlds, fit.placement(&model, &worlds, crate::FLOOR));
+        let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [32, 32], crate::HEIGHT / PAGE_HEIGHT).unwrap();
+        let mut appearance = renderer.appearance(&model, &skinned).unwrap();
+        let eyes = [eye_projection(Vec3::new(0.0, 0.0, 0.4), 0.2, 0.2), None];
+        let mut capture = |vertices: &[crate::vrm::Vertex], changed: &[u32]| {
+            appearance.update(&palette, vertices, changed);
+            renderer.render(&appearance, eyes, 32).unwrap();
+            renderer.read().unwrap()
+        };
+        let before = capture(&skinned.vertices, &[]);
+        for (space, value) in [(1.0, 1.0 / 3.0), (0.0, 0.5)] {
+            let region = crate::vrm::expressions::Hue { node: 0, rect: [0.0, 0.0, 0.5, 1.0], space, shift: 1.0 };
+            let changed = skinned.recolor(&region, value);
+            assert_eq!(changed.len(), 4);
+            assert!(skinned.recolor(&region, value).is_empty());
+            let after = capture(&skinned.vertices, &changed);
+            assert!(before.chunks_exact(4).zip(after.chunks_exact(4)).all(|(a, b)| a[3] == b[3]));
+            let center = pixel(&after, 64, 8, 16);
+            assert_eq!(pixel(&after, 64, 24, 16), pixel(&before, 64, 24, 16), "the neighboring atlas region stays unchanged");
+            assert!(center[1] > center[0], "hue in space {space} moves red toward green: {center:?}");
+            let restored = skinned.recolor(&region, 0.0);
+            let again = capture(&skinned.vertices, &restored);
+            assert!(before.iter().zip(again).all(|(&a, b)| a.abs_diff(b) <= 1));
         }
     }
 

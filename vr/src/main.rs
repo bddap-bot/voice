@@ -163,6 +163,9 @@ impl Puppet {
         if let (Some(menu), Some(controller)) = (&self.model.menu, &mut self.controller) {
             let values = controller.step(menu, delta);
             self.drawn.hidden = menu.apply(&values, &mut pose);
+            for (region, value) in menu.hues(&values) {
+                retextured.extend(self.skinned.recolor(region, value));
+            }
             for (node, moved) in menu.materials(&values) {
                 retextured.extend(self.skinned.retexture(node, moved));
             }

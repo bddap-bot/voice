@@ -130,6 +130,9 @@ fn still(puppet: &mut Puppet, renderer: &mut Renderer, overlay: &mut Overlay, ru
     }
     puppet.drawn.hidden = menu.apply(&values, &mut pose);
     let mut retextured = Vec::new();
+    for (region, value) in menu.hues(&values) {
+        retextured.extend(puppet.skinned.recolor(region, value));
+    }
     for (node, moved) in menu.materials(&values) {
         retextured.extend(puppet.skinned.retexture(node, moved));
     }

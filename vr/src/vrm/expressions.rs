@@ -196,9 +196,18 @@ struct Clip {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Hue {
+    pub node: usize,
+    pub rect: [f32; 4],
+    pub space: f32,
+    pub shift: f32,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum Effect {
     Switch,
+    Hue(Vec<Hue>),
     Morph(Vec<[usize; 2]>),
     Scale { node: usize, axis: usize },
     Material { node: usize, choices: Vec<[f32; 4]> },
@@ -290,6 +299,7 @@ impl Expressions {
     pub(super) fn check(&self, nodes: usize, meshes: &[super::Mesh]) -> Result<(), String> {
         let fits = self.targets.iter().all(|target| match &target.effect {
             Effect::Switch => true,
+            Effect::Hue(regions) => regions.iter().all(|region| region.node < nodes && region.rect.iter().all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
             Effect::Morph(binds) => binds.iter().all(|&[mesh, morph]| meshes.get(mesh).is_some_and(|mesh| morph < mesh.weights.len())),
             Effect::Scale { node, axis } => *node < nodes && *axis < 3,
             Effect::Material { node, choices } => *node < nodes && !choices.is_empty(),
@@ -302,6 +312,13 @@ impl Expressions {
 
     pub fn switched(&self) -> impl Iterator<Item = usize> + '_ {
         self.shown.iter().map(|shown| shown.node)
+    }
+
+    pub fn hues<'a>(&'a self, values: &'a [f32]) -> impl Iterator<Item = (&'a Hue, f32)> + 'a {
+        self.targets.iter().zip(values).flat_map(|(target, &value)| {
+            let regions: &[Hue] = match &target.effect { Effect::Hue(regions) => regions, _ => &[] };
+            regions.iter().map(move |region| (region, value))
+        })
     }
 
     pub fn materials<'a>(&'a self, values: &'a [f32]) -> impl Iterator<Item = (usize, [f32; 4])> + 'a {
@@ -321,7 +338,7 @@ impl Expressions {
                     }
                 }
                 Effect::Scale { node, axis } => pose.scales[*node][*axis] *= value,
-                Effect::Material { .. } => {}
+                Effect::Material { .. } | Effect::Hue(_) => {}
             }
         }
         self.shown.iter().filter(|shown| shown.when.iter().any(|&(target, value)| (values[target] - value).abs() >= 0.5)).map(|shown| shown.node).collect()

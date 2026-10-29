@@ -143,7 +143,7 @@ fn load(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer, remembered:
     clips.insert(motion::WALK.to_owned(), Clip::parse(include_bytes!("../motions/walk.json"), model.version, model.rest_hips())?);
     let idles = clips.keys().filter(|name| motion::family(name) == IDLE).count();
     let own = model.own_expressions();
-    tracing::info!("appearance {} with {idles} standing idle clips, other clips {:?}, own expressions {own:?}, {} spring joints at gravity {}", avatar.id, clips.keys().filter(|name| motion::family(name) != IDLE).collect::<Vec<_>>(), model.spring_joints(), vrm::spring::GRAVITY);
+    tracing::info!("appearance {} with {idles} standing idle clips, other clips {:?}, own expressions {own:?}, {} spring joints", avatar.id, clips.keys().filter(|name| motion::family(name) != IDLE).collect::<Vec<_>>(), model.spring_joints());
     let skinned = model.skinned()?;
     let fit = Fit::new(&model, &skinned, HEIGHT);
     let height = (HEIGHT / fit.scale).clamp(FULL_HEIGHT[0], FULL_HEIGHT[1]);

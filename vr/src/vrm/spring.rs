@@ -3,9 +3,6 @@ use serde_json::Value;
 
 use super::{floats, index, number, Model, Node, Pose, Version};
 
-/// One pull for every appearance in place of each file's gravityPower, which is mostly 0 and leaves hair floating.
-pub const GRAVITY: f32 = 0.3;
-
 #[derive(Clone, Copy)]
 struct Settings {
     stiffness: f32,
@@ -82,7 +79,7 @@ impl Rig {
                         let settings = Settings {
                             stiffness: number(&joint["stiffness"], 1.0),
                             drag: number(&joint["dragForce"], 0.4),
-                            gravity: Vec3::from(floats(&joint["gravityDir"], [0.0, -1.0, 0.0])) * GRAVITY,
+                            gravity: Vec3::from(floats(&joint["gravityDir"], [0.0, -1.0, 0.0])) * number(&joint["gravityPower"], 0.0),
                             radius: number(&joint["hitRadius"], 0.0),
                         };
                         bones.push(Bone { node: at, child: Some(child), settings, groups: groups.clone() });
@@ -106,7 +103,7 @@ impl Rig {
                     let settings = Settings {
                         stiffness: number(&group["stiffiness"], 1.0),
                         drag: number(&group["dragForce"], 0.4),
-                        gravity: object(&group["gravityDir"]).unwrap_or(Vec3::NEG_Y) * GRAVITY,
+                        gravity: object(&group["gravityDir"]).unwrap_or(Vec3::NEG_Y) * number(&group["gravityPower"], 0.0),
                         radius: number(&group["hitRadius"], 0.0),
                     };
                     for root in list(&group["bones"]).iter().filter_map(node) {
@@ -278,9 +275,8 @@ mod tests {
         Model::parse(&builder.glb()).unwrap()
     }
 
-    /// `fall` scales the file's gravity direction; 0 takes the pull away.
-    fn hair(stiffness: f32, fall: f32) -> Model {
-        strand(serde_json::json!({ "bones": [2], "stiffiness": stiffness, "dragForce": 0.1, "gravityDir": { "x": 0, "y": -fall, "z": 0 }, "hitRadius": 0.0, "center": 1 }), serde_json::json!([]))
+    fn hair(stiffness: f32, gravity: f32) -> Model {
+        strand(serde_json::json!({ "bones": [2], "stiffiness": stiffness, "dragForce": 0.1, "gravityPower": gravity, "gravityDir": { "x": 0, "y": -1, "z": 0 }, "hitRadius": 0.0, "center": 1 }), serde_json::json!([]))
     }
 
     fn tip(model: &Model, pose: &Pose, anchor: Mat4) -> Vec3 {
@@ -339,9 +335,11 @@ mod tests {
     }
 
     #[test]
-    fn every_joint_pulls_with_the_shared_gravity_whatever_power_its_file_names() {
-        let model = strand(serde_json::json!({ "bones": [2], "gravityPower": 0.0 }), serde_json::json!([]));
-        assert!(model.rig.joints.iter().all(|joint| joint.settings.gravity == Vec3::NEG_Y * GRAVITY));
+    fn each_joint_pulls_with_its_own_files_gravity_and_none_where_the_file_names_none() {
+        let pulled = strand(serde_json::json!({ "bones": [2], "gravityPower": 0.7, "gravityDir": { "x": 1, "y": 0, "z": 0 } }), serde_json::json!([]));
+        assert!(pulled.rig.joints.iter().all(|joint| joint.settings.gravity == Vec3::new(0.7, 0.0, 0.0)));
+        let unpulled = strand(serde_json::json!({ "bones": [2] }), serde_json::json!([]));
+        assert!(unpulled.rig.joints.iter().all(|joint| joint.settings.gravity == Vec3::ZERO));
     }
 
     #[test]
@@ -390,7 +388,7 @@ mod tests {
     #[test]
     fn a_collider_keeps_the_strand_out_of_the_body() {
         let hanging = |colliders: Value| {
-            let model = strand(serde_json::json!({ "bones": [2], "stiffiness": 0.0, "dragForce": 0.4, "hitRadius": 0.0, "colliderGroups": [0] }), colliders);
+            let model = strand(serde_json::json!({ "bones": [2], "stiffiness": 0.0, "dragForce": 0.4, "gravityPower": 1.0, "hitRadius": 0.0, "colliderGroups": [0] }), colliders);
             let mut springs = Springs::default();
             run(&model, &mut springs, |_| Mat4::IDENTITY, 0.0, 3.0);
             let mut pose = model.rest();
@@ -421,8 +419,8 @@ mod tests {
         let mut builder = Builder::new(serde_json::json!({
             "VRMC_vrm": { "humanoid": { "humanBones": { "hips": { "node": 1 } } } },
             "VRMC_springBone": { "springs": [
-                { "joints": [{ "node": 2, "stiffness": 0.0 }, { "node": 3 }] },
-                { "joints": [{ "node": 4, "stiffness": 0.0 }, { "node": 5 }] }
+                { "joints": [{ "node": 2, "stiffness": 0.0, "gravityPower": 1.0 }, { "node": 3 }] },
+                { "joints": [{ "node": 4, "stiffness": 0.0, "gravityPower": 1.0 }, { "node": 5 }] }
             ] }
         }));
         let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
@@ -439,7 +437,7 @@ mod tests {
 
     #[test]
     fn a_turned_bone_hangs_down_too() {
-        let mut builder = Builder::new(serde_json::json!({ "VRM": { "humanoid": { "humanBones": [{ "bone": "hips", "node": 1 }] }, "secondaryAnimation": { "boneGroups": [{ "bones": [2], "stiffiness": 0.0, "dragForce": 0.4 }], "colliderGroups": [] } } }));
+        let mut builder = Builder::new(serde_json::json!({ "VRM": { "humanoid": { "humanBones": [{ "bone": "hips", "node": 1 }] }, "secondaryAnimation": { "boneGroups": [{ "bones": [2], "stiffiness": 0.0, "dragForce": 0.4, "gravityPower": 1.0 }], "colliderGroups": [] } } }));
         let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
         let side = std::f32::consts::FRAC_1_SQRT_2;
         builder.set("nodes", serde_json::json!([{ "children": [1], "mesh": 0 }, { "translation": [0.0, 1.0, 0.0], "children": [2] }, { "translation": [0.0, 0.0, 0.1], "rotation": [0.0, side, 0.0, side], "children": [3] }, { "translation": [0.0, 0.0, 0.1], "children": [4] }, { "translation": [0.0, 0.0, 0.1] }]));

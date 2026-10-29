@@ -883,6 +883,16 @@ impl Model {
         };
         let spreads = object && extensions[SPREAD].is_object();
         let mut model = Model { version, nodes, meshes, skins, materials, images, humanoid, expressions, own, look_at, rest_turns: Vec::new(), rig, program, spreads };
+        for (side, direction) in [("left", Vec3::X), ("right", Vec3::NEG_X)] {
+            let outward = model.facing() * direction;
+            for (bone, child) in [("UpperArm", "LowerArm"), ("LowerArm", "Hand")] {
+                let (Some(&node), Some(&end)) = (model.humanoid.get(&format!("{side}{bone}")), model.humanoid.get(&format!("{side}{child}"))) else { continue };
+                let worlds = model.worlds(&model.rest());
+                let Some(arm) = (worlds[end].w_axis - worlds[node].w_axis).truncate().try_normalize() else { continue };
+                let parent = model.nodes[node].parent.map_or(Quat::IDENTITY, |parent| rotation(&worlds[parent]));
+                model.nodes[node].rotation = (parent.inverse() * Quat::from_rotation_arc(arm, outward) * parent * model.nodes[node].rotation).normalize();
+            }
+        }
         model.rest_turns = model.worlds(&model.rest()).iter().map(rotation).collect();
         Ok(model)
     }
@@ -1541,6 +1551,41 @@ pub mod tests {
         assert_eq!((skinned.vertices.len(), skinned.indices.len(), skinned.joints()), (8, 12, 3));
         for (vertex, expected) in positions(&model, &model.rest()).iter().zip([[-0.2, 0.0], [0.2, 0.0], [0.2, 1.0], [-0.2, 1.0], [0.2, 0.9], [0.6, 0.9], [0.6, 1.0], [0.2, 1.0]]) {
             assert!((vertex.x - expected[0]).abs() < 1e-5 && (vertex.y - expected[1]).abs() < 1e-5, "{vertex}");
+        }
+    }
+
+    #[test]
+    fn lowered_rest_arms_do_not_cross_when_a_t_pose_motion_lowers_them() {
+        for version in [Version::Zero, Version::One] {
+            let mut builder = Builder::new(match version {
+                Version::One => serde_json::json!({"VRMC_vrm": {"humanoid": {"humanBones": {
+                    "leftUpperArm": {"node": 1}, "leftLowerArm": {"node": 2}, "leftHand": {"node": 3},
+                    "rightUpperArm": {"node": 4}, "rightLowerArm": {"node": 5}, "rightHand": {"node": 6}
+                }}}}),
+                Version::Zero => serde_json::json!({"VRM": {"humanoid": {"humanBones": [
+                    {"bone": "leftUpperArm", "node": 1}, {"bone": "leftLowerArm", "node": 2}, {"bone": "leftHand", "node": 3},
+                    {"bone": "rightUpperArm", "node": 4}, {"bone": "rightLowerArm", "node": 5}, {"bone": "rightHand", "node": 6}
+                ]}}}),
+            });
+            let side = if version == Version::One { 1.0 } else { -1.0 };
+            let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+            builder.set("meshes", serde_json::json!([{"primitives": [{"attributes": {"POSITION": position}}]}]));
+            let mut nodes = vec![serde_json::json!({"mesh": 0, "children": [1, 4]})];
+            for (first, outward) in [(1, side), (4, -side)] {
+                nodes.extend([
+                    serde_json::json!({"translation": [outward * 0.2, 1.4, 0.0], "rotation": Quat::from_rotation_z(-outward * 0.8).to_array(), "children": [first + 1]}),
+                    serde_json::json!({"translation": [outward * 0.4, 0.0, 0.0], "children": [first + 2]}),
+                    serde_json::json!({"translation": [outward * 0.4, 0.0, 0.0]}),
+                ]);
+            }
+            builder.set("nodes", serde_json::json!(nodes));
+            let model = Model::parse(&builder.glb()).unwrap();
+            let walk = crate::motion::Clip::parse(include_bytes!("../motions/walk.json"), version, None).unwrap();
+            for frame in 0..100 {
+                let worlds = model.worlds(&model.pose(&walk.sample(walk.duration() * frame as f32 / 100.0)));
+                assert!(worlds[3].w_axis.x * side > 0.1, "{version:?} frame {frame}: left hand crossed the body: {:?}", worlds[3].w_axis);
+                assert!(worlds[6].w_axis.x * side < -0.1, "{version:?} frame {frame}: right hand crossed the body: {:?}", worlds[6].w_axis);
+            }
         }
     }
 

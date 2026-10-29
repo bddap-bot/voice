@@ -46,7 +46,6 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
         board_pages(&menu.menu, &mut Vec::new(), &puppet, &pictures, &mut board, &mut board_image)?;
         let mut controls = Vec::new();
         flatten(&menu.menu, "", &mut controls);
-        let mut kept = None;
         for (number, (path, control)) in controls.iter().enumerate() {
             puppet.controller = Some(Controller::new(&menu, &configuration));
             let controller = puppet.controller.as_mut().unwrap();
@@ -61,27 +60,24 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
             let before = still(&mut puppet, &mut renderer, &mut figure, runtime)?;
             operate(puppet.controller.as_mut().unwrap(), control, if control.kind == Kind::Radial { [0.5, 0.5] } else { [1.0, 1.0] });
             let after = still(&mut puppet, &mut renderer, &mut figure, runtime)?;
-            let changed = changed(&before, &after);
+            let difference = changed(&before, &after);
             let picture = pictures.join(format!("{number:03}.png"));
             pair(&before, &after, &picture)?;
-            let line = serde_json::json!({"avatar": avatar.id, "control": path, "kind": format!("{:?}", control.kind), "changed": changed, "picture": picture});
+            let line = serde_json::json!({"avatar": avatar.id, "control": path, "kind": format!("{:?}", control.kind), "changed": difference, "picture": picture});
             println!("{line}");
             lines.push(line.to_string());
-            if kept.is_none() && changed > 0.0 && control.kind == Kind::Toggle {
+            if matches!(control.kind, Kind::Toggle | Kind::Radial | Kind::TwoAxis | Kind::FourAxis) {
                 settings.keep(&avatar.id, &menu.menu, puppet.controller.as_ref().unwrap())?;
-                kept = Some((path.clone(), after.clone(), puppet.controller.as_ref().unwrap().values.clone(), puppet.drawn.hidden.clone()));
+                let values = &puppet.controller.as_ref().unwrap().values;
+                let mut again = load(&mut relay, avatar, &mut renderer, &Settings::read(&pictures).of(&avatar.id))?;
+                let worn = still(&mut again, &mut renderer, &mut figure, runtime)?;
+                let differs = changed(&after, &worn);
+                let parameters: Vec<_> = values.iter().zip(&again.controller.as_ref().unwrap().values).zip(&menu.parameters).filter(|((before, after), _)| before != after).map(|((before, after), parameter)| serde_json::json!({"name": parameter.name, "before": before, "after": after})).collect();
+                let line = serde_json::json!({"avatar": avatar.id, "rewear": path, "differs": differs, "parametersChanged": parameters, "hiddenBefore": puppet.drawn.hidden, "hiddenAfter": again.drawn.hidden});
+                println!("{line}");
+                lines.push(line.to_string());
+                pair(&after, &worn, &pictures.join(format!("rewear-{number:03}.png")))?;
             }
-
-        }
-        if let Some((path, seen, values, hidden)) = kept {
-            let mut again = load(&mut relay, avatar, &mut renderer, &Settings::read(&pictures).of(&avatar.id))?;
-            let worn = still(&mut again, &mut renderer, &mut figure, runtime)?;
-            let differs = changed(&seen, &worn);
-            let parameters: Vec<_> = values.iter().zip(&again.controller.as_ref().unwrap().values).zip(&menu.parameters).filter(|((before, after), _)| before != after).map(|((before, after), parameter)| serde_json::json!({"name": parameter.name, "before": before, "after": after})).collect();
-            let line = serde_json::json!({"avatar": avatar.id, "rewear": path, "differs": differs, "parametersChanged": parameters, "hiddenBefore": hidden, "hiddenAfter": again.drawn.hidden});
-            println!("{line}");
-            lines.push(line.to_string());
-            pair(&seen, &worn, &pictures.join("rewear.png"))?;
         }
     }
     let file = out.join("menu.jsonl");

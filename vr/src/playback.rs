@@ -50,7 +50,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         for (panel, pose) in [&stages[0].1, &stages.last().unwrap().1].iter().enumerate() {
             let changed = skinned.morph(&pose.weights);
             let worlds = model.worlds(pose);
-            drawn.update(&skinned.palette(&worlds, local.mat4() * fit.placement(&model, &worlds, 0.0)), &skinned.vertices, &changed);
+            drawn.update(&skinned.palette(&worlds, local.mat4() * fit.placement(&model, &worlds, 0.0)), &skinned, &changed);
             renderer.render(&drawn, [eye_projection(local.apply(head).into(), QUAD/2.0, QUAD/2.0), None], 560)?;
             image::imageops::replace(&mut row, &crate::wear::eye(&renderer.read()?, 560), panel as i64 * 560, 0);
         }

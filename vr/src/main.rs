@@ -163,9 +163,7 @@ impl Puppet {
         if let (Some(menu), Some(controller)) = (&self.model.menu, &mut self.controller) {
             let values = controller.step(menu, delta);
             self.drawn.hidden = menu.apply(&values, &mut pose);
-            for (region, value) in menu.hues(&values) {
-                retextured.extend(self.skinned.recolor(region, value));
-            }
+            self.skinned.surface_values(menu, &values);
             for (node, moved) in menu.materials(&values) {
                 retextured.extend(self.skinned.retexture(node, moved));
             }
@@ -196,10 +194,9 @@ impl Puppet {
         (self.model.worlds(&pose), body, stand)
     }
 
-    /// Skins the posed figure into its window's space for the next render.
     fn draw(&mut self, posed: &[glam::Mat4], to_window: glam::Mat4) {
         let palette = self.skinned.palette(posed, to_window);
-        self.drawn.update(&palette, &self.skinned.vertices, &self.changed);
+        self.drawn.update(&palette, &self.skinned, &self.changed);
     }
 }
 
@@ -829,7 +826,7 @@ mod tests {
             renderer.outline_scale = HEIGHT * size / render::PAGE_HEIGHT;
             let mut drawn = renderer.appearance(&model, &skinned).unwrap();
             let local = window.inverse();
-            drawn.update(&skinned.palette(&worlds, local.mat4() * body), &skinned.vertices, &changed);
+            drawn.update(&skinned.palette(&worlds, local.mat4() * body), &skinned, &changed);
             renderer.render(&drawn, [eye_projection(local.apply(eye).into(), half, half), None], texels).unwrap();
             left_eye(&renderer.read().unwrap(), texels)
         };

@@ -24,6 +24,13 @@ var<push_constant> draw: Draw;
 @group(0) @binding(0) var base_texture: texture_2d<f32>;
 @group(0) @binding(1) var shade_texture: texture_2d<f32>;
 @group(0) @binding(6) var hue_mask: texture_2d<f32>;
+struct Surface {
+    hue: vec4<f32>,
+    color: vec4<f32>,
+}
+@group(0) @binding(7) var<storage, read> surfaces: array<Surface>;
+@group(0) @binding(8) var color_texture: texture_2d<f32>;
+
 @group(0) @binding(2) var texture_sampler: sampler;
 @group(0) @binding(3) var outline_width_texture: texture_2d<f32>;
 @group(0) @binding(4) var<storage, read> palette: array<mat4x4<f32>>;
@@ -35,14 +42,14 @@ struct Vertex {
     @location(2) uv: vec2<f32>,
     @location(3) joints: vec4<u32>,
     @location(4) weights: vec4<f32>,
-    @location(5) hue: vec4<f32>,
+    @location(5) surface: u32,
 }
 
 struct Varying {
     @builtin(position) clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) uv: vec2<f32>,
-    @location(2) hue: vec4<f32>,
+    @location(2) @interpolate(flat) surface: u32,
 }
 
 @vertex
@@ -68,7 +75,7 @@ fn vertex(input: Vertex) -> Varying {
     }
     out.normal = normal;
     out.uv = input.uv;
-    out.hue = input.hue;
+    out.surface = input.surface;
     return out;
 }
 
@@ -122,13 +129,15 @@ fn hue(color: vec3<f32>, settings: vec4<f32>, mask: f32) -> vec3<f32> {
 @fragment
 fn fragment(input: Varying, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let material = materials[draw.material];
+    let surface = surfaces[input.surface];
+    let raw = textureSample(color_texture, texture_sampler, input.uv).rgb * surface.color.rgb;
     let sampled = textureSample(base_texture, texture_sampler, input.uv) * material.base;
     let mask = textureSample(hue_mask, texture_sampler, input.uv).r;
-    let base = vec4<f32>(hue(sampled.rgb, input.hue, mask), sampled.a);
+    let base = vec4<f32>(hue(mix(sampled.rgb, raw * material.base.rgb, surface.color.a), surface.hue, mask), sampled.a);
     if base.a < material.cutoff {
         discard;
     }
-    let shade = hue(textureSample(shade_texture, texture_sampler, input.uv).rgb * material.shade, input.hue, mask);
+    let shade = hue(mix(textureSample(shade_texture, texture_sampler, input.uv).rgb, raw, surface.color.a) * material.shade, surface.hue, mask);
     var normal = normalize(input.normal);
     if !front {
         normal = -normal;

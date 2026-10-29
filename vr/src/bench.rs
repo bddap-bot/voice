@@ -161,7 +161,7 @@ fn puppet(gpu: Rc<Gpu>, file: &Path) -> Result<Vec<u8>, String> {
     let worlds = model.worlds(&pose);
     let palette = skinned.palette(&worlds, fit.placement(&model, &worlds, crate::FLOOR));
     let mut appearance = renderer.appearance(&model, &skinned)?;
-    appearance.update(&palette, &skinned.vertices, &changed);
+    appearance.update(&palette, &skinned, &changed);
     renderer.render(&appearance, [eye_projection(V3::from(VIEWER), crate::QUAD / 2.0, crate::QUAD / 2.0), None], renderer.eye[0])?;
     renderer.read()
 }

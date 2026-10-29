@@ -205,10 +205,19 @@ pub struct Hue {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Color {
+    pub node: usize,
+    pub rect: [f32; 4],
+    pub channel: usize,
+    pub color: [f32; 3],
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum Effect {
     Switch,
     Hue(Vec<Hue>),
+    Color(Vec<Color>),
     Morph(Vec<[usize; 2]>),
     Scale { node: usize, axis: usize },
     Material { node: usize, choices: Vec<[f32; 4]> },
@@ -246,28 +255,37 @@ pub struct Expressions {
     encoded_hue_mask: Option<String>,
     #[serde(skip)]
     pub hue_mask: Option<Image>,
+    #[serde(default, rename = "colorAtlas")]
+    encoded_color_atlas: Option<String>,
+    #[serde(skip)]
+    pub color_atlas: Option<Image>,
 }
 
 fn image(encoded: &str) -> Result<Image, String> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|error| error.to_string())?;
-    let mut image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png).map_err(|error| error.to_string())?.into_rgba8();
-    for pixel in image.pixels_mut() {
-        let alpha = pixel[3] as u32;
+    let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png).map_err(|error| error.to_string())?.into_rgba8();
+    Ok(Image { width: image.width(), height: image.height(), rgba: image.into_raw() })
+}
+
+fn icon(encoded: &str) -> Result<Image, String> {
+    let mut image = image(encoded)?;
+    for pixel in image.rgba.chunks_exact_mut(4) {
         for channel in 0..3 {
-            pixel[channel] = (pixel[channel] as u32 * alpha / 255) as u8;
+            pixel[channel] = (pixel[channel] as u32 * pixel[3] as u32 / 255) as u8;
         }
     }
-    Ok(Image { width: image.width(), height: image.height(), rgba: image.into_raw() })
+    Ok(image)
 }
 
 impl Expressions {
     pub fn parse(value: &serde_json::Value) -> Result<Expressions, String> {
         let mut expressions = Expressions::deserialize(value).map_err(|error| format!("{EXTENSION}: {error}"))?;
         expressions.source = format!("{:x}", Sha256::digest(value.to_string().as_bytes()));
-        expressions.icons = expressions.encoded_icons.iter().map(|encoded| image(encoded)).collect::<Result<_, _>>().map_err(|error| format!("{EXTENSION}: an icon: {error}"))?;
+        expressions.icons = expressions.encoded_icons.iter().map(|encoded| icon(encoded)).collect::<Result<_, _>>().map_err(|error| format!("{EXTENSION}: an icon: {error}"))?;
         expressions.encoded_icons.clear();
         expressions.hue_mask = expressions.encoded_hue_mask.take().map(|encoded| image(&encoded)).transpose().map_err(|error| format!("{EXTENSION}: hue mask: {error}"))?;
+        expressions.color_atlas = expressions.encoded_color_atlas.take().map(|encoded| image(&encoded)).transpose().map_err(|error| format!("{EXTENSION}: color atlas: {error}"))?;
         fn icons_valid(controls: &[Control], icons: usize) -> bool {
             controls.iter().all(|control| control.icon.is_none_or(|icon| icon < icons) && icons_valid(&control.controls, icons))
         }
@@ -299,6 +317,7 @@ impl Expressions {
         let fits = self.targets.iter().all(|target| match &target.effect {
             Effect::Switch => true,
             Effect::Hue(regions) => regions.iter().all(|region| region.node < nodes && region.rect.iter().all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
+            Effect::Color(regions) => regions.iter().all(|region| region.node < nodes && region.channel < 3 && region.color.iter().chain(&region.rect).all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
             Effect::Morph(binds) => binds.iter().all(|&[mesh, morph]| meshes.get(mesh).is_some_and(|mesh| morph < mesh.weights.len())),
             Effect::Scale { node, axis } => *node < nodes && *axis < 3,
             Effect::Material { node, choices } => *node < nodes && !choices.is_empty(),
@@ -311,13 +330,6 @@ impl Expressions {
 
     pub fn switched(&self) -> impl Iterator<Item = usize> + '_ {
         self.shown.iter().map(|shown| shown.node)
-    }
-
-    pub fn hues<'a>(&'a self, values: &'a [f32]) -> impl Iterator<Item = (&'a Hue, f32)> + 'a {
-        self.targets.iter().zip(values).flat_map(|(target, &value)| {
-            let regions: &[Hue] = match &target.effect { Effect::Hue(regions) => regions, _ => &[] };
-            regions.iter().map(move |region| (region, value))
-        })
     }
 
     pub fn materials<'a>(&'a self, values: &'a [f32]) -> impl Iterator<Item = (usize, [f32; 4])> + 'a {
@@ -337,7 +349,7 @@ impl Expressions {
                     }
                 }
                 Effect::Scale { node, axis } => pose.scales[*node][*axis] *= value,
-                Effect::Material { .. } | Effect::Hue(_) => {}
+                Effect::Material { .. } | Effect::Hue(_) | Effect::Color(_) => {}
             }
         }
         self.shown.iter().filter(|shown| shown.when.iter().any(|&(target, value)| (values[target] - value).abs() >= 0.5)).map(|shown| shown.node).collect()

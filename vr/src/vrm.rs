@@ -208,7 +208,7 @@ pub struct Vertex {
     pub uv: [f32; 2],
     pub joints: [u16; 4],
     pub weights: [f32; 4],
-    pub hue: [f32; 4],
+    pub surface: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -231,6 +231,17 @@ struct Morph {
     deltas: Vec<Delta>,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Surface {
+    pub hue: [f32; 4],
+    pub color: [f32; 4],
+}
+
+impl Default for Surface {
+    fn default() -> Self { Self { hue: [0.0; 4], color: [1.0, 1.0, 1.0, 0.0] } }
+}
+
 pub struct Skinned {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
@@ -245,7 +256,8 @@ pub struct Skinned {
     stamps: Vec<u32>,
     stamp: u32,
     spans: HashMap<usize, std::ops::Range<usize>>,
-    hues: HashMap<(usize, [u32; 4]), [f32; 4]>,
+    regions: HashMap<(usize, [u32; 4]), usize>,
+    pub surfaces: Vec<Surface>,
     uvs: Vec<[f32; 2]>,
     moved: HashMap<usize, [f32; 4]>,
 }
@@ -1144,7 +1156,7 @@ impl Model {
                         (Some(first), Some(slots), Some(weights)) if weights.iter().any(|&weight| weight > 0.0) => (slots.map(|slot| first + slot as u16), *weights),
                         _ => ([own; 4], [1.0, 0.0, 0.0, 0.0]),
                     };
-                    vertices.push(Vertex { position: primitive.positions[vertex].into(), normal: primitive.normals[vertex].into(), uv: primitive.uvs[vertex].into(), joints: slots, weights, hue: [0.0; 4] });
+                    vertices.push(Vertex { position: primitive.positions[vertex].into(), normal: primitive.normals[vertex].into(), uv: primitive.uvs[vertex].into(), joints: slots, weights, surface: 0 });
                 }
                 for (target, data) in primitive.targets.iter().enumerate() {
                     let deltas: Vec<Delta> = (0..primitive.positions.len()).filter(|&vertex| data.positions[vertex] != Vec3::ZERO || data.normals[vertex] != Vec3::ZERO).map(|vertex| Delta { slot: base + vertex as u32, position: data.positions[vertex], normal: data.normals[vertex] }).collect();
@@ -1202,29 +1214,46 @@ impl Model {
         }
         let base = touched.iter().map(|&vertex| (Vec3::from(vertices[vertex as usize].position), Vec3::from(vertices[vertex as usize].normal))).collect();
         let uvs = vertices.iter().map(|vertex| vertex.uv).collect();
-        let mut skinned = Skinned { vertices, indices, draws, joints, applied: vec![0.0; morphs.len()], stamps: vec![0; touched.len()], morphs, touched, base, offsets, entries, stamp: 0, spans, uvs, moved: HashMap::new(), hues: HashMap::new() };
+        let mut skinned = Skinned { vertices, indices, draws, joints, applied: vec![0.0; morphs.len()], stamps: vec![0; touched.len()], morphs, touched, base, offsets, entries, stamp: 0, spans, uvs, moved: HashMap::new(), regions: HashMap::new(), surfaces: vec![Surface::default()] };
+        if let Some(menu) = &self.menu {
+            let hues = menu.targets.iter().filter_map(|target| match &target.effect { expressions::Effect::Hue(regions) => Some(regions), _ => None }).flatten().map(|region| (region.node, region.rect));
+            let colors = menu.targets.iter().filter_map(|target| match &target.effect { expressions::Effect::Color(regions) => Some(regions), _ => None }).flatten().map(|region| (region.node, region.rect));
+            for (node, rect) in hues.chain(colors) {
+                let key = (node, rect.map(f32::to_bits));
+                if skinned.regions.contains_key(&key) { continue; }
+                let surface = skinned.surfaces.len();
+                skinned.regions.insert(key, surface);
+                skinned.surfaces.push(Surface::default());
+                let [left, top, right, bottom] = rect;
+                for at in skinned.spans.get(&node).into_iter().cloned().flatten() {
+                    let [u, v] = skinned.uvs[at];
+                    if u >= left && u <= right && v >= top && v <= bottom { skinned.vertices[at].surface = surface as u32; }
+                }
+            }
+            skinned.surface_values(menu, &menu.targets.iter().map(|target| target.default).collect::<Vec<_>>());
+        }
         skinned.morph(&self.rest().weights);
         Ok(skinned)
     }
 }
 
 impl Skinned {
-    pub fn recolor(&mut self, region: &expressions::Hue, value: f32) -> Vec<u32> {
-        let Some(span) = self.spans.get(&region.node) else { return Vec::new() };
-        let hue = [value, region.space, region.shift, 1.0];
-        let key = (region.node, region.rect.map(f32::to_bits));
-        if self.hues.get(&key) == Some(&hue) { return Vec::new(); }
-        self.hues.insert(key, hue);
-        let [left, top, right, bottom] = region.rect;
-        let mut changed = Vec::new();
-        for at in span.clone() {
-            let [u, v] = self.uvs[at];
-            if u >= left && u <= right && v >= top && v <= bottom && self.vertices[at].hue != hue {
-                self.vertices[at].hue = hue;
-                changed.push(at as u32);
+    pub fn surface_values(&mut self, menu: &expressions::Expressions, values: &[f32]) {
+        for (target, &value) in menu.targets.iter().zip(values) {
+            match &target.effect {
+                expressions::Effect::Hue(regions) => for region in regions {
+                    let at = self.regions[&(region.node, region.rect.map(f32::to_bits))];
+                    self.surfaces[at].hue = [value, region.space, region.shift, 1.0];
+                },
+                expressions::Effect::Color(regions) => for region in regions {
+                    let at = self.regions[&(region.node, region.rect.map(f32::to_bits))];
+                    let color = &mut self.surfaces[at].color;
+                    if color[3] == 0.0 { *color = [region.color[0], region.color[1], region.color[2], 1.0]; }
+                    color[region.channel] = value;
+                },
+                _ => {}
             }
         }
-        changed
     }
 
     pub fn retexture(&mut self, node: usize, moved: [f32; 4]) -> Vec<u32> {

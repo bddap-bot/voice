@@ -134,6 +134,7 @@ pub struct Appearance {
     palette: Buffer,
     joints: usize,
     materials: Buffer,
+    surfaces: Buffer,
     drawn: Vec<DrawCall>,
     pub hidden: std::collections::HashSet<usize>,
 }
@@ -187,6 +188,8 @@ impl Renderer {
             vk::DescriptorSetLayoutBinding::default().binding(4).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX),
             vk::DescriptorSetLayoutBinding::default().binding(5).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(both),
             vk::DescriptorSetLayoutBinding::default().binding(6).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default().binding(7).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default().binding(8).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
         ];
         let set_layout = unsafe { device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None) }.map_err(vk_error("vkCreateDescriptorSetLayout"))?;
         let set_layouts = [set_layout];
@@ -243,9 +246,9 @@ impl Renderer {
         let device = &gpu.device;
         let set_count = model.materials.len() as u32;
         let sizes = [
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: 4 * set_count },
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: 5 * set_count },
             vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLER, descriptor_count: set_count },
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 2 * set_count },
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 3 * set_count },
         ];
         let descriptors = unsafe { device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(set_count).pool_sizes(&sizes), None) }.map_err(vk_error("vkCreateDescriptorPool"))?;
         let upload = |bytes: &[u8], usage| -> Result<Buffer, String> {
@@ -264,6 +267,7 @@ impl Renderer {
             palette: gpu.host_buffer((joints.max(1) * std::mem::size_of::<Mat4>()) as u64, vk::BufferUsageFlags::STORAGE_BUFFER)?,
             joints,
             materials: upload(bytes_of(&material_data), vk::BufferUsageFlags::STORAGE_BUFFER)?,
+            surfaces: upload(bytes_of(&skinned.surfaces), vk::BufferUsageFlags::STORAGE_BUFFER)?,
             drawn: Vec::new(),
             hidden: Default::default(),
         };
@@ -275,6 +279,11 @@ impl Renderer {
             appearance.textures.push(texture(gpu, mask.width, mask.height, &mask.rgba, vk::Format::R8G8B8A8_UNORM)?);
             Some(index)
         } else { None };
+        let color_atlas = if let Some(atlas) = model.menu.as_ref().and_then(|menu| menu.color_atlas.as_ref()) {
+            let index = appearance.textures.len();
+            appearance.textures.push(texture(gpu, atlas.width, atlas.height, &atlas.rgba, FORMAT)?);
+            Some(index)
+        } else { None };
         let white = appearance.textures.len();
         appearance.textures.push(texture(gpu, 1, 1, &[255; 4], FORMAT)?);
         let layouts = vec![self.set_layout; model.materials.len()];
@@ -283,6 +292,8 @@ impl Renderer {
             let image = |index: Option<usize>| [vk::DescriptorImageInfo::default().image_view(appearance.textures[index.unwrap_or(white)].view).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
             let (base, shade, width) = (image(material.base_image), image(material.shade_image), image(material.outline.as_ref().and_then(|outline| outline.width_image)));
             let mask = image(hue_mask);
+            let color = image(color_atlas);
+            let surfaces = [vk::DescriptorBufferInfo::default().buffer(appearance.surfaces.0).range(vk::WHOLE_SIZE)];
             let sampler = [vk::DescriptorImageInfo::default().sampler(self.sampler)];
             let palette = [vk::DescriptorBufferInfo::default().buffer(appearance.palette.0).range(vk::WHOLE_SIZE)];
             let materials = [vk::DescriptorBufferInfo::default().buffer(appearance.materials.0).range(vk::WHOLE_SIZE)];
@@ -294,6 +305,8 @@ impl Renderer {
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(4).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&palette),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(5).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&materials),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(6).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&mask),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(7).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&surfaces),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(8).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&color),
             ];
             unsafe { device.update_descriptor_sets(&writes, &[]) };
         }
@@ -329,7 +342,7 @@ impl Renderer {
             vk::VertexInputAttributeDescription::default().location(2).format(vk::Format::R32G32_SFLOAT).offset(24),
             vk::VertexInputAttributeDescription::default().location(3).format(vk::Format::R16G16B16A16_UINT).offset(32),
             vk::VertexInputAttributeDescription::default().location(4).format(vk::Format::R32G32B32A32_SFLOAT).offset(40),
-            vk::VertexInputAttributeDescription::default().location(5).format(vk::Format::R32G32B32A32_SFLOAT).offset(56),
+            vk::VertexInputAttributeDescription::default().location(5).format(vk::Format::R32_UINT).offset(56),
         ];
         let input = vk::PipelineVertexInputStateCreateInfo::default().vertex_binding_descriptions(&vertex_bindings).vertex_attribute_descriptions(&vertex_attributes);
         let assembly = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
@@ -497,13 +510,15 @@ fn material_data(material: &crate::vrm::Material) -> MaterialData {
 }
 
 impl Appearance {
-    pub fn update(&mut self, palette: &[Mat4], vertices: &[Vertex], changed: &[u32]) {
+    pub fn update(&mut self, palette: &[Mat4], skinned: &Skinned, changed: &[u32]) {
         assert_eq!(palette.len(), self.joints, "the palette has one matrix per joint");
         let bytes = bytes_of(palette);
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.palette.2, bytes.len()) };
+        let bytes = bytes_of(&skinned.surfaces);
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.surfaces.2, bytes.len()) };
         let target = self.vertices.2 as *mut Vertex;
         for &vertex in changed {
-            unsafe { target.add(vertex as usize).write(vertices[vertex as usize]) };
+            unsafe { target.add(vertex as usize).write(skinned.vertices[vertex as usize]) };
         }
     }
 }
@@ -521,7 +536,7 @@ impl Drop for Appearance {
         let device = &self.gpu.device;
         unsafe {
             let _ = device.device_wait_idle();
-            for buffer in [self.vertices, self.indices, self.palette, self.materials] {
+            for buffer in [self.vertices, self.indices, self.palette, self.materials, self.surfaces] {
                 self.gpu.free_buffer(buffer);
             }
             for texture in &self.textures {
@@ -635,7 +650,7 @@ mod tests {
         let palette = skinned.palette(&worlds, Mat4::from_translation(shift) * fit.placement(model, &worlds, floor));
         let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), eye, height / PAGE_HEIGHT).unwrap();
         let mut appearance = renderer.appearance(model, &skinned).unwrap();
-        appearance.update(&palette, &skinned.vertices, &changed);
+        appearance.update(&palette, &skinned, &changed);
         renderer.render(&appearance, eyes, eye[0]).unwrap();
         renderer.read().unwrap()
     }
@@ -679,7 +694,7 @@ mod tests {
         let worlds = model.worlds(&model.rest());
         let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [64, 64], crate::HEIGHT / PAGE_HEIGHT).unwrap();
         let mut appearance = renderer.appearance(&model, &skinned).unwrap();
-        appearance.update(&skinned.palette(&worlds, fit.placement(&model, &worlds, crate::FLOOR)), &skinned.vertices, &changed);
+        appearance.update(&skinned.palette(&worlds, fit.placement(&model, &worlds, crate::FLOOR)), &skinned, &changed);
         let eyes = [-0.032, 0.032].map(|x| eye_projection(Vec3::new(x, 0.0, 0.4), 0.2, 0.2));
         renderer.render(&appearance, eyes, 64).unwrap();
         let full = renderer.read().unwrap();
@@ -694,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn hue_controls_change_color_without_changing_coverage() {
+    fn material_controls_change_color_without_changing_coverage() {
         let mut builder = crate::vrm::tests::Builder::new(serde_json::json!({"VRMC_vrm": {"humanoid": {"humanBones": {}}}}));
         let position = builder.accessor("VEC3", &[-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0]);
         let normal = builder.accessor("VEC3", &[0.0, 0.0, 1.0].repeat(8));
@@ -702,36 +717,46 @@ mod tests {
         let indices = builder.indices(&[0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]);
         builder.set("nodes", serde_json::json!([{"mesh": 0}]));
         builder.set("meshes", serde_json::json!([{"primitives": [{"attributes": {"POSITION": position, "NORMAL": normal, "TEXCOORD_0": uv}, "indices": indices, "material": 0}]}]));
-        builder.set("materials", serde_json::json!([{"pbrMetallicRoughness": {"baseColorFactor": [1.0, 0.0, 0.0, 1.0]}}]));
-        let mut model = Model::parse(&builder.glb()).unwrap();
-        let mut menu = crate::vrm::expressions::Expressions::parse(&serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": []})).unwrap();
-        menu.hue_mask = Some(crate::vrm::Image { width: 2, height: 1, rgba: vec![255, 255, 255, 255, 0, 0, 0, 255] });
-        model.menu = Some(menu);
-        let mut skinned = model.skinned().unwrap();
-        let worlds = model.worlds(&model.rest());
-        let fit = crate::vrm::Fit::new(&model, &skinned, crate::HEIGHT);
-        let palette = skinned.palette(&worlds, fit.placement(&model, &worlds, crate::FLOOR));
-        let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [32, 32], crate::HEIGHT / PAGE_HEIGHT).unwrap();
-        let mut appearance = renderer.appearance(&model, &skinned).unwrap();
-        let eyes = [eye_projection(Vec3::new(0.0, 0.0, 0.4), 0.2, 0.2), None];
-        let mut capture = |vertices: &[crate::vrm::Vertex], changed: &[u32]| {
-            appearance.update(&palette, vertices, changed);
-            renderer.render(&appearance, eyes, 32).unwrap();
-            renderer.read().unwrap()
-        };
-        let before = capture(&skinned.vertices, &[]);
-        for (space, value) in [(1.0, 1.0 / 3.0), (0.0, 0.5), (2.0, std::f32::consts::TAU / 3.0)] {
-            let region = crate::vrm::expressions::Hue { node: 0, rect: [0.0, 0.0, if space == 2.0 { 1.0 } else { 0.5 }, 1.0], space, shift: 1.0 };
-            let changed = skinned.recolor(&region, value);
-            assert_eq!(changed.len(), if space == 2.0 { 8 } else { 4 });
-            assert!(skinned.recolor(&region, value).is_empty());
-            let after = capture(&skinned.vertices, &changed);
+        builder.set("materials", serde_json::json!([{"pbrMetallicRoughness": {"baseColorFactor": [1.0, 1.0, 1.0, 1.0]}}]));
+        let data = builder.glb();
+        for (space, value) in [(1.0, 1.0 / 3.0), (0.0, 0.5), (2.0, std::f32::consts::TAU / 3.0), (3.0, 1.0)] {
+            let mut model = Model::parse(&data).unwrap();
+            model.images.push(crate::vrm::Image { width: 1, height: 1, rgba: vec![255, 0, 0, 255] });
+            model.materials[0].base_image = Some(0);
+            model.materials[0].shade_image = Some(0);
+            let rect = [0.0, 0.0, if space == 2.0 { 1.0 } else { 0.5 }, 1.0];
+            let effect = if space == 3.0 {
+                serde_json::json!({"color": [{"node": 0, "rect": rect, "channel": 1, "color": [0.0, 0.0, 0.0]}]})
+            } else {
+                serde_json::json!({"hue": [{"node": 0, "rect": rect, "space": space, "shift": 1.0}]})
+            };
+            let mut menu = crate::vrm::expressions::Expressions::parse(&serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": [{"effect": effect, "default": 0.0}]})).unwrap();
+            menu.hue_mask = Some(crate::vrm::Image { width: 2, height: 1, rgba: vec![255, 255, 255, 255, 0, 0, 0, 255] });
+            menu.color_atlas = Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![255; 4] });
+            model.menu = Some(menu);
+            let mut skinned = model.skinned().unwrap();
+            let original_vertices = bytes_of(&skinned.vertices).to_vec();
+            let worlds = model.worlds(&model.rest());
+            let fit = crate::vrm::Fit::new(&model, &skinned, crate::HEIGHT);
+            let palette = skinned.palette(&worlds, fit.placement(&model, &worlds, crate::FLOOR));
+            let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [32, 32], crate::HEIGHT / PAGE_HEIGHT).unwrap();
+            let mut appearance = renderer.appearance(&model, &skinned).unwrap();
+            let eyes = [eye_projection(Vec3::new(0.0, 0.0, 0.4), 0.2, 0.2), None];
+            let mut capture = |skinned: &Skinned| {
+                appearance.update(&palette, skinned, &[]);
+                renderer.render(&appearance, eyes, 32).unwrap();
+                renderer.read().unwrap()
+            };
+            let before = capture(&skinned);
+            skinned.surface_values(model.menu.as_ref().unwrap(), &[value]);
+            let after = capture(&skinned);
+            assert_eq!(bytes_of(&skinned.vertices), original_vertices, "material animation does not rewrite the mesh");
             assert!(before.chunks_exact(4).zip(after.chunks_exact(4)).all(|(a, b)| a[3] == b[3]));
             let center = pixel(&after, 64, 8, 16);
             assert_eq!(pixel(&after, 64, 24, 16), pixel(&before, 64, 24, 16), "the neighboring atlas region or masked texel stays unchanged");
-            assert!(center[1] > center[0], "hue in space {space} moves red toward green: {center:?}");
-            let restored = skinned.recolor(&region, 0.0);
-            let again = capture(&skinned.vertices, &restored);
+            assert!(center[1] > center[0], "material control {space} produces green: {center:?}");
+            skinned.surface_values(model.menu.as_ref().unwrap(), &[0.0]);
+            let again = capture(&skinned);
             assert!(before.iter().zip(again).all(|(&a, b)| a.abs_diff(b) <= 1));
         }
     }
@@ -808,7 +833,7 @@ mod tests {
             let worlds = model.worlds(&model.rest());
             let loaded = renderer.appearance(model, &skinned).unwrap();
             let shown = appearance.insert(loaded);
-            shown.update(&skinned.palette(&worlds, fit.placement(model, &worlds, crate::FLOOR)), &skinned.vertices, &[]);
+            shown.update(&skinned.palette(&worlds, fit.placement(model, &worlds, crate::FLOOR)), &skinned, &[]);
             renderer.render(shown, eyes, 32).unwrap();
             pixel(&renderer.read().unwrap(), 64, 16, 16)
         };

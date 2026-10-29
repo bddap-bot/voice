@@ -8,7 +8,8 @@ use crate::calls::State;
 use crate::conversation::Entry;
 use crate::placement::{Anchor, Vec3};
 use crate::voice::VoiceId;
-use crate::vrm::expressions::{Control, Icon, Kind};
+use crate::vrm::expressions::{Control, Kind};
+use crate::vrm::Image;
 
 pub const WIDTH: f32 = 0.2;
 /// How long the appearance library stays after a reveal.
@@ -126,7 +127,7 @@ pub fn marker_at([width, height]: [f32; 2], tip: Option<Vec3>) -> Option<Vec3> {
 
 struct Menu {
     controls: Vec<Control>,
-    icons: Vec<Icon>,
+    icons: Vec<Image>,
     path: Vec<usize>,
     open: bool,
     values: HashMap<String, f32>,
@@ -181,7 +182,7 @@ impl Board {
         self.dirty = true;
     }
 
-    pub fn wear(&mut self, menu: Option<(Vec<Control>, Vec<Icon>)>, values: HashMap<String, f32>) {
+    pub fn wear(&mut self, menu: Option<(Vec<Control>, Vec<Image>)>, values: HashMap<String, f32>) {
         self.menu = menu.filter(|(controls, _)| !controls.is_empty()).map(|(controls, icons)| Menu { controls, icons, path: Vec::new(), open: false, values });
         self.dirty = true;
     }

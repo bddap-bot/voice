@@ -23,6 +23,7 @@ var<push_constant> draw: Draw;
 
 @group(0) @binding(0) var base_texture: texture_2d<f32>;
 @group(0) @binding(1) var shade_texture: texture_2d<f32>;
+@group(0) @binding(6) var hue_mask: texture_2d<f32>;
 @group(0) @binding(2) var texture_sampler: sampler;
 @group(0) @binding(3) var outline_width_texture: texture_2d<f32>;
 @group(0) @binding(4) var<storage, read> palette: array<mat4x4<f32>>;
@@ -84,8 +85,14 @@ fn toon(material: Material, normal: vec3<f32>, direction: vec3<f32>) -> f32 {
     return clamp((dot(normal, direction) + material.shading_shift - (-1.0 + toony)) / max(2.0 - 2.0 * toony, 1e-4), 0.0, 1.0);
 }
 
-fn hue(color: vec3<f32>, settings: vec4<f32>) -> vec3<f32> {
+fn hue(color: vec3<f32>, settings: vec4<f32>, mask: f32) -> vec3<f32> {
     if settings.w == 0.0 { return color; }
+    if settings.y > 1.5 {
+        let axis = vec3<f32>(0.57735026919);
+        let sine = sin(settings.x);
+        let cosine = cos(settings.x);
+        return mix(color, color * cosine + cross(axis, color) * sine + axis * dot(axis, color) * (1.0 - cosine), mask);
+    }
     if settings.y > 0.5 {
         let high = max(color.r, max(color.g, color.b));
         let low = min(color.r, min(color.g, color.b));
@@ -116,11 +123,12 @@ fn hue(color: vec3<f32>, settings: vec4<f32>) -> vec3<f32> {
 fn fragment(input: Varying, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let material = materials[draw.material];
     let sampled = textureSample(base_texture, texture_sampler, input.uv) * material.base;
-    let base = vec4<f32>(hue(sampled.rgb, input.hue), sampled.a);
+    let mask = textureSample(hue_mask, texture_sampler, input.uv).r;
+    let base = vec4<f32>(hue(sampled.rgb, input.hue, mask), sampled.a);
     if base.a < material.cutoff {
         discard;
     }
-    let shade = hue(textureSample(shade_texture, texture_sampler, input.uv).rgb * material.shade, input.hue);
+    let shade = hue(textureSample(shade_texture, texture_sampler, input.uv).rgb * material.shade, input.hue, mask);
     var normal = normalize(input.normal);
     if !front {
         normal = -normal;

@@ -207,7 +207,7 @@ impl Puppet {
 const BUTTON_HOLD: Duration = Duration::from_millis(400);
 
 impl Puppet {
-    fn menu(&self) -> Option<(Vec<vrm::expressions::Control>, Vec<vrm::expressions::Icon>)> {
+    fn menu(&self) -> Option<(Vec<vrm::expressions::Control>, Vec<vrm::Image>)> {
         self.model.menu.as_ref().map(|menu| (menu.menu.clone(), menu.icons.clone()))
     }
 

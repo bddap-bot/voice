@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use super::Image;
 
 pub const EXTENSION: &str = "VRCHAT_expressions";
 /// Instant transitions followed in one layer in one frame, so a cycle of them cannot hold the frame.
@@ -240,17 +241,14 @@ pub struct Expressions {
     #[serde(default, rename = "icons")]
     encoded_icons: Vec<String>,
     #[serde(skip)]
-    pub icons: Vec<Icon>,
+    pub icons: Vec<Image>,
+    #[serde(default, rename = "hueMask")]
+    encoded_hue_mask: Option<String>,
+    #[serde(skip)]
+    pub hue_mask: Option<Image>,
 }
 
-#[derive(Clone, Debug)]
-pub struct Icon {
-    pub width: u32,
-    pub height: u32,
-    pub rgba: Vec<u8>,
-}
-
-fn icon(encoded: &str) -> Result<Icon, String> {
+fn image(encoded: &str) -> Result<Image, String> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|error| error.to_string())?;
     let mut image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png).map_err(|error| error.to_string())?.into_rgba8();
@@ -260,15 +258,16 @@ fn icon(encoded: &str) -> Result<Icon, String> {
             pixel[channel] = (pixel[channel] as u32 * alpha / 255) as u8;
         }
     }
-    Ok(Icon { width: image.width(), height: image.height(), rgba: image.into_raw() })
+    Ok(Image { width: image.width(), height: image.height(), rgba: image.into_raw() })
 }
 
 impl Expressions {
     pub fn parse(value: &serde_json::Value) -> Result<Expressions, String> {
         let mut expressions = Expressions::deserialize(value).map_err(|error| format!("{EXTENSION}: {error}"))?;
         expressions.source = format!("{:x}", Sha256::digest(value.to_string().as_bytes()));
-        expressions.icons = expressions.encoded_icons.iter().map(|encoded| icon(encoded)).collect::<Result<_, _>>().map_err(|error| format!("{EXTENSION}: an icon: {error}"))?;
+        expressions.icons = expressions.encoded_icons.iter().map(|encoded| image(encoded)).collect::<Result<_, _>>().map_err(|error| format!("{EXTENSION}: an icon: {error}"))?;
         expressions.encoded_icons.clear();
+        expressions.hue_mask = expressions.encoded_hue_mask.take().map(|encoded| image(&encoded)).transpose().map_err(|error| format!("{EXTENSION}: hue mask: {error}"))?;
         fn icons_valid(controls: &[Control], icons: usize) -> bool {
             controls.iter().all(|control| control.icon.is_none_or(|icon| icon < icons) && icons_valid(&control.controls, icons))
         }

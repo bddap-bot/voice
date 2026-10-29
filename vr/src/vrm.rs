@@ -18,6 +18,7 @@ pub enum Version {
     One,
 }
 
+#[derive(Clone, Debug)]
 pub struct Image {
     pub width: u32,
     pub height: u32,

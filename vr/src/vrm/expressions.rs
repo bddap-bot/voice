@@ -213,11 +213,19 @@ pub struct Color {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Tone {
+    pub node: usize,
+    pub rect: [f32; 4],
+    pub channel: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum Effect {
     Switch,
     Hue(Vec<Hue>),
     Color(Vec<Color>),
+    Tone(Vec<Tone>),
     Morph(Vec<[usize; 2]>),
     Scale { node: usize, axis: usize },
     Material { node: usize, choices: Vec<[f32; 4]> },
@@ -318,6 +326,7 @@ impl Expressions {
             Effect::Switch => true,
             Effect::Hue(regions) => regions.iter().all(|region| region.node < nodes && region.rect.iter().all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
             Effect::Color(regions) => regions.iter().all(|region| region.node < nodes && region.channel < 3 && region.color.iter().chain(&region.rect).all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
+            Effect::Tone(regions) => regions.iter().all(|region| region.node < nodes && region.channel < 3 && region.rect.iter().all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
             Effect::Morph(binds) => binds.iter().all(|&[mesh, morph]| meshes.get(mesh).is_some_and(|mesh| morph < mesh.weights.len())),
             Effect::Scale { node, axis } => *node < nodes && *axis < 3,
             Effect::Material { node, choices } => *node < nodes && !choices.is_empty(),
@@ -349,7 +358,7 @@ impl Expressions {
                     }
                 }
                 Effect::Scale { node, axis } => pose.scales[*node][*axis] *= value,
-                Effect::Material { .. } | Effect::Hue(_) | Effect::Color(_) => {}
+                Effect::Material { .. } | Effect::Hue(_) | Effect::Color(_) | Effect::Tone(_) => {}
             }
         }
         self.shown.iter().filter(|shown| shown.when.iter().any(|&(target, value)| (values[target] - value).abs() >= 0.5)).map(|shown| shown.node).collect()

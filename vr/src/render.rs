@@ -719,19 +719,30 @@ mod tests {
         builder.set("meshes", serde_json::json!([{"primitives": [{"attributes": {"POSITION": position, "NORMAL": normal, "TEXCOORD_0": uv}, "indices": indices, "material": 0}]}]));
         builder.set("materials", serde_json::json!([{"pbrMetallicRoughness": {"baseColorFactor": [1.0, 1.0, 1.0, 1.0]}}]));
         let data = builder.glb();
-        for (space, value) in [(1.0, 1.0 / 3.0), (0.0, 0.5), (2.0, std::f32::consts::TAU / 3.0), (3.0, 1.0)] {
+        for (space, value) in [(1.0, 1.0 / 3.0), (0.0, 0.5), (2.0, std::f32::consts::TAU / 3.0), (3.0, 1.0), (4.0, 2.0), (5.0, -1.0), (6.0, 1.0)] {
             let mut model = Model::parse(&data).unwrap();
-            model.images.push(crate::vrm::Image { width: 1, height: 1, rgba: vec![255, 0, 0, 255] });
+            model.images.push(crate::vrm::Image { width: 1, height: 1, rgba: if space >= 4.0 { vec![128, 64, 32, 255] } else { vec![255, 0, 0, 255] } });
             model.materials[0].base_image = Some(0);
             model.materials[0].shade_image = Some(0);
-            let rect = [0.0, 0.0, if space == 2.0 { 1.0 } else { 0.5 }, 1.0];
+            let rect = [0.0, 0.0, if space == 2.0 || space >= 4.0 { 1.0 } else { 0.5 }, 1.0];
             let effect = if space == 3.0 {
                 serde_json::json!({"color": [{"node": 0, "rect": rect, "channel": 1, "color": [0.0, 0.0, 0.0]}]})
+            } else if space >= 4.0 {
+                serde_json::json!({"tone": [{"node": 0, "rect": rect, "channel": (space - 4.0) as usize}]})
             } else {
                 serde_json::json!({"hue": [{"node": 0, "rect": rect, "space": space, "shift": 1.0}]})
             };
-            let mut menu = crate::vrm::expressions::Expressions::parse(&serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": [{"effect": effect, "default": 0.0}]})).unwrap();
-            menu.hue_mask = Some(crate::vrm::Image { width: 2, height: 1, rgba: vec![255, 255, 255, 255, 0, 0, 0, 255] });
+            let rest = if space == 4.0 { 1.0 } else { 0.0 };
+            let mut menu = crate::vrm::expressions::Expressions::parse(&serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": [{"effect": effect, "default": rest}]})).unwrap();
+            let mut mask = vec![255, 255, 255, 255, 0, 0, 0, 255];
+            if space >= 4.0 {
+                let channel = [3, 2, 1][(space - 4.0) as usize];
+                mask[..4].fill(0);
+                mask[4..].fill(255);
+                mask[channel] = 255;
+                mask[4 + channel] = 0;
+            }
+            menu.hue_mask = Some(crate::vrm::Image { width: 2, height: 1, rgba: mask });
             menu.color_atlas = Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![255; 4] });
             model.menu = Some(menu);
             let mut skinned = model.skinned().unwrap();
@@ -754,8 +765,12 @@ mod tests {
             assert!(before.chunks_exact(4).zip(after.chunks_exact(4)).all(|(a, b)| a[3] == b[3]));
             let center = pixel(&after, 64, 8, 16);
             assert_eq!(pixel(&after, 64, 24, 16), pixel(&before, 64, 24, 16), "the neighboring atlas region or masked texel stays unchanged");
-            assert!(center[1] > center[0], "material control {space} produces green: {center:?}");
-            skinned.surface_values(model.menu.as_ref().unwrap(), &[0.0]);
+            let initial = pixel(&before, 64, 8, 16);
+            if space == 4.0 { assert!(center[0] < initial[0], "gamma darkens the midtone"); }
+            else if space == 5.0 { assert!(center[0] < initial[0] && center[1] > initial[1], "desaturation moves red toward luminance"); }
+            else if space == 6.0 { assert!(center[0] > initial[0], "brightness raises the midtone"); }
+            else { assert!(center[1] > center[0], "material control {space} produces green: {center:?}"); }
+            skinned.surface_values(model.menu.as_ref().unwrap(), &[rest]);
             let again = capture(&skinned);
             assert!(before.iter().zip(again).all(|(&a, b)| a.abs_diff(b) <= 1));
         }

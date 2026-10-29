@@ -236,10 +236,11 @@ struct Morph {
 pub struct Surface {
     pub hue: [f32; 4],
     pub color: [f32; 4],
+    pub tone: [f32; 4],
 }
 
 impl Default for Surface {
-    fn default() -> Self { Self { hue: [0.0; 4], color: [1.0, 1.0, 1.0, 0.0] } }
+    fn default() -> Self { Self { hue: [0.0; 4], color: [1.0, 1.0, 1.0, 0.0], tone: [1.0, 0.0, 0.0, 0.0] } }
 }
 
 pub struct Skinned {
@@ -1218,7 +1219,8 @@ impl Model {
         if let Some(menu) = &self.menu {
             let hues = menu.targets.iter().filter_map(|target| match &target.effect { expressions::Effect::Hue(regions) => Some(regions), _ => None }).flatten().map(|region| (region.node, region.rect));
             let colors = menu.targets.iter().filter_map(|target| match &target.effect { expressions::Effect::Color(regions) => Some(regions), _ => None }).flatten().map(|region| (region.node, region.rect));
-            for (node, rect) in hues.chain(colors) {
+            let tones = menu.targets.iter().filter_map(|target| match &target.effect { expressions::Effect::Tone(regions) => Some(regions), _ => None }).flatten().map(|region| (region.node, region.rect));
+            for (node, rect) in hues.chain(colors).chain(tones) {
                 let key = (node, rect.map(f32::to_bits));
                 if skinned.regions.contains_key(&key) { continue; }
                 let surface = skinned.surfaces.len();
@@ -1244,6 +1246,11 @@ impl Skinned {
                 expressions::Effect::Hue(regions) => for region in regions {
                     let at = self.regions[&(region.node, region.rect.map(f32::to_bits))];
                     self.surfaces[at].hue = [value, region.space, region.shift, 1.0];
+                },
+                expressions::Effect::Tone(regions) => for region in regions {
+                    let at = self.regions[&(region.node, region.rect.map(f32::to_bits))];
+                    self.surfaces[at].tone[region.channel] = value;
+                    self.surfaces[at].tone[3] = 1.0;
                 },
                 expressions::Effect::Color(regions) => for region in regions {
                     let at = self.regions[&(region.node, region.rect.map(f32::to_bits))];

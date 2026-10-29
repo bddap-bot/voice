@@ -27,6 +27,7 @@ var<push_constant> draw: Draw;
 struct Surface {
     hue: vec4<f32>,
     color: vec4<f32>,
+    tone: vec4<f32>,
 }
 @group(0) @binding(7) var<storage, read> surfaces: array<Surface>;
 @group(0) @binding(8) var color_texture: texture_2d<f32>;
@@ -92,13 +93,13 @@ fn toon(material: Material, normal: vec3<f32>, direction: vec3<f32>) -> f32 {
     return clamp((dot(normal, direction) + material.shading_shift - (-1.0 + toony)) / max(2.0 - 2.0 * toony, 1e-4), 0.0, 1.0);
 }
 
-fn hue(color: vec3<f32>, settings: vec4<f32>, mask: f32) -> vec3<f32> {
+fn hue(color: vec3<f32>, settings: vec4<f32>) -> vec3<f32> {
     if settings.w == 0.0 { return color; }
     if settings.y > 1.5 {
         let axis = vec3<f32>(0.57735026919);
         let sine = sin(settings.x);
         let cosine = cos(settings.x);
-        return mix(color, color * cosine + cross(axis, color) * sine + axis * dot(axis, color) * (1.0 - cosine), mask);
+        return color * cosine + cross(axis, color) * sine + axis * dot(axis, color) * (1.0 - cosine);
     }
     if settings.y > 0.5 {
         let high = max(color.r, max(color.g, color.b));
@@ -126,18 +127,28 @@ fn hue(color: vec3<f32>, settings: vec4<f32>, mask: f32) -> vec3<f32> {
     return max(vec3<f32>(dot(cubes, vec3<f32>(4.0767416621, -3.3077115913, 0.2309699292)), dot(cubes, vec3<f32>(-1.2684380046, 2.6097574011, -0.3413193965)), dot(cubes, vec3<f32>(-0.0041960863, -0.7034186147, 1.7076147010))), vec3<f32>(0.0));
 }
 
+fn adjust(color: vec3<f32>, surface: Surface, mask: vec4<f32>) -> vec3<f32> {
+    var result = mix(color, hue(color, surface.hue), mask.r);
+    if surface.tone.w != 0.0 {
+        result = mix(result, pow(abs(result), vec3<f32>(surface.tone.x)), mask.a);
+        result = mix(result, vec3<f32>(dot(result, vec3<f32>(0.3, 0.59, 0.11))), -surface.tone.y * mask.b);
+        result = clamp(mix(result, result * (surface.tone.z + 1.0), mask.g), vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    return result;
+}
+
 @fragment
 fn fragment(input: Varying, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let material = materials[draw.material];
     let surface = surfaces[input.surface];
     let raw = textureSample(color_texture, texture_sampler, input.uv).rgb * surface.color.rgb;
     let sampled = textureSample(base_texture, texture_sampler, input.uv) * material.base;
-    let mask = textureSample(hue_mask, texture_sampler, input.uv).r;
-    let base = vec4<f32>(hue(mix(sampled.rgb, raw * material.base.rgb, surface.color.a), surface.hue, mask), sampled.a);
+    let mask = textureSample(hue_mask, texture_sampler, input.uv);
+    let base = vec4<f32>(adjust(mix(sampled.rgb, raw * material.base.rgb, surface.color.a), surface, mask), sampled.a);
     if base.a < material.cutoff {
         discard;
     }
-    let shade = hue(mix(textureSample(shade_texture, texture_sampler, input.uv).rgb, raw, surface.color.a) * material.shade, surface.hue, mask);
+    let shade = adjust(mix(textureSample(shade_texture, texture_sampler, input.uv).rgb, raw, surface.color.a) * material.shade, surface, mask);
     var normal = normalize(input.normal);
     if !front {
         normal = -normal;

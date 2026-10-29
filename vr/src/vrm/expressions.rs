@@ -370,9 +370,11 @@ pub struct Configuration {
     pub parameters: HashMap<String, f32>,
     source: String,
     held: Vec<HashMap<usize, f32>>,
+    #[serde(default)]
+    playing: Vec<Option<Playing>>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
 struct Playing {
     state: usize,
     time: f32,
@@ -398,11 +400,15 @@ impl Controller {
                 HashMap::new()
             }
         }).collect();
-        Controller { values, index, playing: vec![None; expressions.layers.len()], random: 0x9e37_79b9_7f4a_7c15, source: expressions.source.clone(), held }
+        let playing = expressions.layers.iter().enumerate().map(|(layer, definition)| {
+            (remembered.source == expressions.source).then(|| remembered.playing.get(layer).copied().flatten()).flatten()
+                .filter(|playing| playing.state < definition.states.len() && playing.time.is_finite())
+        }).collect();
+        Controller { values, index, playing, random: 0x9e37_79b9_7f4a_7c15, source: expressions.source.clone(), held }
     }
 
     pub fn configuration(&self, parameters: HashMap<String, f32>) -> Configuration {
-        Configuration { parameters, source: self.source.clone(), held: self.held.clone() }
+        Configuration { parameters, source: self.source.clone(), held: self.held.clone(), playing: self.playing.clone() }
     }
 
     pub fn get(&self, name: &str) -> f32 {
@@ -668,6 +674,32 @@ mod tests {
         let mut again = Controller::new(&updated, &read);
         assert_eq!(again.get("Outfit"), 0.0);
         assert_eq!(again.step(&updated, 0.1), vec![0.0]);
+    }
+
+    #[test]
+    fn rewear_resumes_layers_without_replaying_entry_drivers() {
+        let menu = Expressions::parse(&serde_json::json!({
+            "menu": [], "parameters": [{"name": "Parent", "type": "bool"}, {"name": "Child", "type": "bool"}],
+            "layers": [{"any": [
+                {"to": 1, "notToSelf": true, "conditions": [{"parameter": "Parent", "mode": "ifNot"}]},
+                {"to": 2, "notToSelf": true, "conditions": [{"parameter": "Parent", "mode": "if"}]}
+            ], "states": [{}, {"drivers": [{"parameter": "Child", "drive": "set", "value": 0}]}, {}]}],
+            "clips": [], "targets": []
+        })).unwrap();
+        let mut worn = Controller::new(&menu, &Configuration::default());
+        worn.step(&menu, 0.1);
+        worn.set("Child", 1.0);
+        worn.step(&menu, 0.1);
+        let saved = worn.configuration(HashMap::from([("Parent".to_owned(), 0.0), ("Child".to_owned(), 1.0)]));
+        let read = serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
+        let mut again = Controller::new(&menu, &read);
+        again.step(&menu, 0.1);
+        assert_eq!(again.get("Child"), 1.0);
+        again.set("Parent", 1.0);
+        again.step(&menu, 0.1);
+        again.set("Parent", 0.0);
+        again.step(&menu, 0.1);
+        assert_eq!(again.get("Child"), 0.0, "changing the parent still enters its reset state");
     }
 
     #[test]

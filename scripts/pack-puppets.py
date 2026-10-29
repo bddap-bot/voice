@@ -1,10 +1,54 @@
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 import struct
 import subprocess
 import tempfile
+
+
+ARM_REST_TOLERANCE = math.radians(10)
+
+
+def turn(q, v):
+    x, y, z, w = q
+    t = [2 * (y * v[2] - z * v[1]), 2 * (z * v[0] - x * v[2]), 2 * (x * v[1] - y * v[0])]
+    return [v[0] + w * t[0] + y * t[2] - z * t[1], v[1] + w * t[1] + z * t[0] - x * t[2], v[2] + w * t[2] + x * t[1] - y * t[0]]
+
+
+def times(a, b):
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return [aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx, aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz]
+
+
+def check_arm_rest(doc):
+    extensions = doc.get('extensions', {})
+    one = extensions.get('VRMC_vrm', {}).get('humanoid', {}).get('humanBones', {})
+    zero = extensions.get('VRM', {}).get('humanoid', {}).get('humanBones', [])
+    bones = {name: bone['node'] for name, bone in one.items()} | {bone['bone']: bone['node'] for bone in zero}
+    nodes = doc.get('nodes', [])
+    parent = {child: i for i, node in enumerate(nodes) for child in node.get('children', [])}
+    worlds = {}
+    def world(i):
+        if i not in worlds:
+            node = nodes[i]
+            rotation, origin = node.get('rotation', [0, 0, 0, 1]), node.get('translation', [0, 0, 0])
+            if i in parent:
+                up_rotation, up_origin, up_scale = world(parent[i])
+                worlds[i] = times(up_rotation, rotation), [a + b for a, b in zip(up_origin, turn(up_rotation, [o * s for o, s in zip(origin, up_scale)]))], [a * b for a, b in zip(up_scale, node.get('scale', [1, 1, 1]))]
+            else:
+                worlds[i] = rotation, origin, node.get('scale', [1, 1, 1])
+        return worlds[i]
+    for side in ('left', 'right'):
+        for bone, end in (('UpperArm', 'LowerArm'), ('LowerArm', 'Hand')):
+            if side + bone not in bones or side + end not in bones:
+                continue
+            arm = [b - a for a, b in zip(world(bones[side + bone])[1], world(bones[side + end])[1])]
+            off = math.acos(min(1.0, abs(arm[0]) / math.hypot(*arm)))
+            if off > ARM_REST_TOLERANCE:
+                raise ValueError(f'{side}{bone} rests {math.degrees(off):.1f} degrees off the T-pose; the humanoid must rest in T-pose')
 
 
 def pack(data, scratch):
@@ -15,6 +59,7 @@ def pack(data, scratch):
     if kind != b'JSON':
         raise ValueError('missing JSON chunk')
     doc = json.loads(data[20:20 + size])
+    check_arm_rest(doc)
     if not doc.get('images'):
         return data
     binary_size, kind = struct.unpack_from('<I4s', data, 20 + size)
@@ -136,7 +181,7 @@ def pack(data, scratch):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Pack embedded VRM textures as exact lossless WebP, shrink the metadata thumbnail, and sparsify morphs. Replaces each input atomically.')
+    parser = argparse.ArgumentParser(description='Refuse a humanoid whose arms do not rest in T-pose, then pack embedded VRM textures as exact lossless WebP, shrink the metadata thumbnail, and sparsify morphs. Replaces each input atomically.')
     parser.add_argument('models', nargs='+', type=Path)
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix='.pack-puppets-', dir=Path.cwd()) as directory:

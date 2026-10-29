@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import math
 import copy
 from pathlib import Path
 import struct
@@ -24,6 +25,25 @@ class Packing(unittest.TestCase):
     def test_untextured_is_untouched(self):
         source = glb({'asset': {'version': '2.0'}}, b'')
         self.assertEqual(packer.pack(source, Path('.')), source)
+
+    def test_arms_must_rest_in_t_pose(self):
+        for lowered in (0.0, 0.8):
+            for version in ('VRM', 'VRMC_vrm'):
+                nodes = [{'children': [1, 4]}]
+                for first, outward in ((1, 1), (4, -1)):
+                    nodes += [
+                        {'translation': [outward * 0.2, 1.4, 0], 'rotation': [0, 0, -outward * math.sin(lowered / 2), math.cos(lowered / 2)], 'children': [first + 1]},
+                        {'translation': [outward * 0.4, 0, 0], 'children': [first + 2]},
+                        {'translation': [outward * 0.4, 0, 0]},
+                    ]
+                names = ['leftUpperArm', 'leftLowerArm', 'leftHand', 'rightUpperArm', 'rightLowerArm', 'rightHand']
+                humanoid = {'humanBones': [{'bone': name, 'node': i + 1} for i, name in enumerate(names)]} if version == 'VRM' else {'humanBones': {name: {'node': i + 1} for i, name in enumerate(names)}}
+                source = glb({'asset': {'version': '2.0'}, 'nodes': nodes, 'extensions': {version: {'humanoid': humanoid}}}, b'')
+                if lowered:
+                    with self.assertRaisesRegex(ValueError, 'leftUpperArm rests 45.8 degrees off the T-pose'):
+                        packer.pack(source, Path('.'))
+                else:
+                    self.assertEqual(packer.pack(source, Path('.')), source)
 
     def test_thumbnail_dimensions_and_metadata(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:

@@ -255,14 +255,123 @@ pub struct Tone {
     pub channel: usize,
 }
 
+/// A value of the looks a material lays over its albedo and adds to its light, by its row in `Surface::look`.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum Field {
+    Decal,
+    DecalIntensity,
+    Emission,
+    EmissionHue,
+    MatcapHueShift,
+    MatcapIntensity,
+    MatcapReplace,
+    MatcapMultiply,
+    MatcapAdd,
+    MatcapMixed,
+}
+
+pub const FIELDS: usize = Field::MatcapMixed as usize + 1;
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
-pub struct Decal {
+pub struct LookRegion {
     pub node: usize,
     pub rect: [f32; 4],
+    pub field: Field,
     pub slot: usize,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum Mapping {
+    /// The normal against the view, held upright.
+    Normal,
+    /// The reflected view against the world's axes.
+    Reflection,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct MatcapHue {
+    pub shift: f32,
+    pub space: f32,
+    pub select: f32,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Circle {
+    pub border: f32,
+    pub blur: f32,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Matcap {
+    pub texture: Option<u32>,
+    pub mode: Mapping,
+    pub border: f32,
+    pub color: [f32; 4],
+    pub intensity: f32,
+    pub base_mix: f32,
+    pub replace: f32,
+    pub multiply: f32,
+    pub add: f32,
+    pub screen: f32,
+    pub mixed: f32,
+    pub light_add: f32,
+    pub emission: f32,
+    pub light_mask: f32,
+    pub hue: Option<MatcapHue>,
+    pub circle: Option<Circle>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Decal {
+    pub alpha: f32,
+    pub intensity: f32,
     pub multiply: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Emission {
+    pub color: [f32; 3],
+    pub strength: f32,
+    pub hue: f32,
+    pub shifts_hue: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Look {
+    pub decals: [Option<Decal>; 4],
+    pub matcaps: [Option<Matcap>; 4],
+    pub emission: Option<Emission>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EncodedLooks {
+    index: String,
+    materials: Vec<Look>,
     #[serde(default)]
-    pub intensity: bool,
+    decals: Vec<String>,
+    #[serde(default)]
+    matcaps: Vec<String>,
+    #[serde(default)]
+    matcap_masks: Option<String>,
+    #[serde(default)]
+    emission: Option<String>,
+}
+
+/// What each atlas texel's material lays over the albedo: `index`'s red channel names a texel's entry in `materials`,
+/// one-based, zero for none.
+#[derive(Clone, Debug)]
+pub struct Looks {
+    pub index: Image,
+    pub materials: Vec<Look>,
+    pub decals: Vec<Image>,
+    pub matcaps: Vec<Image>,
+    pub matcap_masks: Option<Image>,
+    pub emission: Option<Image>,
 }
 
 /// One component of a node's Unity local rotation: of `rest` read as localEulerAngles in degrees when it has three, a quaternion when four.
@@ -296,7 +405,7 @@ pub enum Effect {
     Hue(Vec<Hue>),
     Color(Vec<Color>),
     Tone(Vec<Tone>),
-    Decal(Vec<Decal>),
+    Look(Vec<LookRegion>),
     Morph(Vec<[usize; 2]>),
     Scale { node: usize, axis: usize },
     Rotation(Rotation),
@@ -341,10 +450,10 @@ pub struct Expressions {
     encoded_color_atlas: Option<String>,
     #[serde(skip)]
     pub color_atlas: Option<Image>,
-    #[serde(default, rename = "decals")]
-    encoded_decals: Vec<String>,
+    #[serde(default, rename = "looks")]
+    encoded_looks: Option<EncodedLooks>,
     #[serde(skip)]
-    pub decals: Vec<Image>,
+    pub looks: Option<Looks>,
 }
 
 fn image(encoded: &str) -> Result<Image, String> {
@@ -352,6 +461,29 @@ fn image(encoded: &str) -> Result<Image, String> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|error| error.to_string())?;
     let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png).map_err(|error| error.to_string())?.into_rgba8();
     Ok(Image { width: image.width(), height: image.height(), rgba: image.into_raw() })
+}
+
+fn looks(encoded: EncodedLooks) -> Result<Looks, String> {
+    let layers = |encoded: &[String], what: &str| -> Result<Vec<Image>, String> {
+        let layers: Vec<Image> = encoded.iter().map(|encoded| image(encoded)).collect::<Result<_, _>>().map_err(|error| format!("{EXTENSION}: {what}: {error}"))?;
+        if layers.iter().any(|layer| (layer.width, layer.height) != (layers[0].width, layers[0].height)) {
+            return Err(format!("{EXTENSION}: {what} of differing sizes"));
+        }
+        Ok(layers)
+    };
+    let looks = Looks {
+        index: image(&encoded.index).map_err(|error| format!("{EXTENSION}: look index: {error}"))?,
+        decals: layers(&encoded.decals, "decal layers")?,
+        matcaps: layers(&encoded.matcaps, "matcaps")?,
+        matcap_masks: encoded.matcap_masks.as_deref().map(image).transpose().map_err(|error| format!("{EXTENSION}: matcap masks: {error}"))?,
+        emission: encoded.emission.as_deref().map(image).transpose().map_err(|error| format!("{EXTENSION}: emission: {error}"))?,
+        materials: encoded.materials,
+    };
+    let textures = looks.matcaps.len() as u32;
+    if looks.decals.len() > 4 || looks.index.rgba.chunks_exact(4).any(|texel| texel[0] as usize > looks.materials.len()) || looks.materials.iter().flat_map(|look| look.matcaps.iter().flatten()).any(|matcap| matcap.texture.is_some_and(|texture| texture >= textures)) {
+        return Err(format!("{EXTENSION}: a look names a decal slot, material or matcap it does not have"));
+    }
+    Ok(looks)
 }
 
 fn icon(encoded: &str) -> Result<Image, String> {
@@ -372,10 +504,7 @@ impl Expressions {
         expressions.encoded_icons.clear();
         expressions.hue_mask = expressions.encoded_hue_mask.take().map(|encoded| image(&encoded)).transpose().map_err(|error| format!("{EXTENSION}: hue mask: {error}"))?;
         expressions.color_atlas = expressions.encoded_color_atlas.take().map(|encoded| image(&encoded)).transpose().map_err(|error| format!("{EXTENSION}: color atlas: {error}"))?;
-        expressions.decals = std::mem::take(&mut expressions.encoded_decals).iter().map(|encoded| image(encoded)).collect::<Result<_, _>>().map_err(|error| format!("{EXTENSION}: a decal layer: {error}"))?;
-        if expressions.decals.len() > super::DECALS || expressions.decals.iter().any(|layer| (layer.width, layer.height) != (expressions.decals[0].width, expressions.decals[0].height)) {
-            return Err(format!("{EXTENSION}: more than {} decal layers, or layers of differing sizes", super::DECALS));
-        }
+        expressions.looks = expressions.encoded_looks.take().map(looks).transpose()?;
         fn icons_valid(controls: &[Control], icons: usize) -> bool {
             controls.iter().all(|control| control.icon.is_none_or(|icon| icon < icons) && icons_valid(&control.controls, icons))
         }
@@ -409,7 +538,7 @@ impl Expressions {
             Effect::Hue(regions) => regions.iter().all(|region| region.node < nodes && region.rect.iter().all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
             Effect::Color(regions) => regions.iter().all(|region| region.node < nodes && region.channel < 3 && region.color.iter().chain(&region.rect).all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
             Effect::Tone(regions) => regions.iter().all(|region| region.node < nodes && region.channel < 3 && region.rect.iter().all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
-            Effect::Decal(regions) => regions.iter().all(|region| region.node < nodes && region.slot < self.decals.len() && region.rect.iter().all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
+            Effect::Look(regions) => regions.iter().all(|region| region.node < nodes && region.slot < 4 && region.rect.iter().all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
             Effect::Morph(binds) => binds.iter().all(|&[mesh, morph]| meshes.get(mesh).is_some_and(|mesh| morph < mesh.weights.len())),
             Effect::Scale { node, axis } => *node < nodes && *axis < 3,
             Effect::Rotation(rotation) => rotation.node < nodes && matches!(rotation.rest.len(), 3 | 4) && rotation.axis < rotation.rest.len() && rotation.rest.iter().all(|v| v.is_finite())
@@ -456,7 +585,7 @@ impl Expressions {
                 Effect::Scale { node, axis } => pose.scales[*node][*axis] *= value,
                 Effect::Rotation(rotation) => turned.entry(rotation.node).or_insert_with(|| (rotation, rotation.rest.clone())).1[rotation.axis] = value,
                 Effect::Translation { node, direction } => pose.translations[*node] += value * Vec3::from(*direction),
-                Effect::Material { .. } | Effect::Hue(_) | Effect::Color(_) | Effect::Tone(_) | Effect::Decal(_) | Effect::Spring(_) => {}
+                Effect::Material { .. } | Effect::Hue(_) | Effect::Color(_) | Effect::Tone(_) | Effect::Look(_) | Effect::Spring(_) => {}
             }
         }
         for (node, (rotation, components)) in turned {

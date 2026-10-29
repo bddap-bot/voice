@@ -1,5 +1,5 @@
 use ash::vk;
-use glam::{Mat4, Vec3};
+use glam::{Mat3, Mat4, Vec3};
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -27,10 +27,97 @@ const FRAGMENT_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fragmen
 #[derive(Clone, Copy)]
 struct Push {
     view_projection: [f32; 16],
+    camera: [f32; 3],
     material: u32,
     outline: u32,
     outline_scale: f32,
     focal: f32,
+    pad: f32,
+}
+
+/// Where the eye whose view and projection make `view_projection` sits: the point every clip coordinate but depth
+/// leaves at zero.
+fn camera(view_projection: Mat4) -> Vec3 {
+    let rows = view_projection.transpose();
+    let solve = Mat3::from_cols(rows.x_axis.truncate(), rows.y_axis.truncate(), rows.w_axis.truncate()).transpose();
+    solve.inverse() * -Vec3::new(rows.x_axis.w, rows.y_axis.w, rows.w_axis.w)
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct MatcapData {
+    color: [f32; 4],
+    hue: [f32; 4],
+    texture: i32,
+    reflection: u32,
+    on: u32,
+    circled: u32,
+    border: f32,
+    intensity: f32,
+    base_mix: f32,
+    light_mask: f32,
+    replace: f32,
+    multiply: f32,
+    add: f32,
+    screen: f32,
+    mixed: f32,
+    light_add: f32,
+    emission: f32,
+    circle_border: f32,
+    circle_blur: f32,
+    pad: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct LookData {
+    decal: [f32; 4],
+    intensity: [f32; 4],
+    multiply: [f32; 4],
+    emission_color: [f32; 3],
+    emission_strength: f32,
+    emission_hue: f32,
+    shifts_hue: f32,
+    pad: [f32; 2],
+    matcaps: [MatcapData; 4],
+}
+
+fn look_data(look: &crate::vrm::expressions::Look) -> LookData {
+    use crate::vrm::expressions::Mapping;
+    let decal = |value: fn(&crate::vrm::expressions::Decal) -> f32| look.decals.each_ref().map(|decal| decal.as_ref().map_or(0.0, value));
+    let emission = look.emission.as_ref();
+    LookData {
+        decal: decal(|decal| decal.alpha),
+        intensity: decal(|decal| decal.intensity),
+        multiply: decal(|decal| decal.multiply as u32 as f32),
+        emission_color: emission.map_or([0.0; 3], |emission| emission.color),
+        emission_strength: emission.map_or(0.0, |emission| emission.strength),
+        emission_hue: emission.map_or(0.0, |emission| emission.hue),
+        shifts_hue: emission.is_some_and(|emission| emission.shifts_hue) as u32 as f32,
+        pad: [0.0; 2],
+        matcaps: look.matcaps.each_ref().map(|matcap| matcap.as_ref().map_or_else(MatcapData::default, |m| MatcapData {
+            color: m.color,
+            hue: m.hue.as_ref().map_or([0.0; 4], |hue| [hue.shift, hue.space, hue.select, 1.0]),
+            texture: m.texture.map_or(-1, |texture| texture as i32),
+            reflection: (m.mode == Mapping::Reflection) as u32,
+            on: 1,
+            circled: m.circle.is_some() as u32,
+            border: m.border,
+            intensity: m.intensity,
+            base_mix: m.base_mix,
+            light_mask: m.light_mask,
+            replace: m.replace,
+            multiply: m.multiply,
+            add: m.add,
+            screen: m.screen,
+            mixed: m.mixed,
+            light_add: m.light_add,
+            emission: m.emission,
+            circle_border: m.circle.as_ref().map_or(0.0, |circle| circle.border),
+            circle_blur: m.circle.as_ref().map_or(0.0, |circle| circle.blur),
+            pad: [0.0; 3],
+        })),
+    }
 }
 
 #[repr(C)]
@@ -136,6 +223,7 @@ pub struct Appearance {
     joints: usize,
     materials: Buffer,
     surfaces: Buffer,
+    looks: Buffer,
     drawn: Vec<DrawCall>,
     pub hidden: std::collections::HashSet<usize>,
 }
@@ -192,6 +280,11 @@ impl Renderer {
             vk::DescriptorSetLayoutBinding::default().binding(7).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(8).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(9).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default().binding(10).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default().binding(11).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default().binding(12).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default().binding(13).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default().binding(14).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
         ];
         let set_layout = unsafe { device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None) }.map_err(vk_error("vkCreateDescriptorSetLayout"))?;
         let set_layouts = [set_layout];
@@ -248,9 +341,9 @@ impl Renderer {
         let device = &gpu.device;
         let set_count = model.materials.len() as u32;
         let sizes = [
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: 6 * set_count },
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: 10 * set_count },
             vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLER, descriptor_count: set_count },
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 3 * set_count },
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 4 * set_count },
         ];
         let descriptors = unsafe { device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(set_count).pool_sizes(&sizes), None) }.map_err(vk_error("vkCreateDescriptorPool"))?;
         let upload = |bytes: &[u8], usage| -> Result<Buffer, String> {
@@ -260,6 +353,8 @@ impl Renderer {
         };
         let joints = skinned.joints();
         let material_data: Vec<MaterialData> = model.materials.iter().map(material_data).collect();
+        let looks = model.menu.as_ref().and_then(|menu| menu.looks.as_ref());
+        let look_data: Vec<LookData> = std::iter::once(LookData::default()).chain(looks.into_iter().flat_map(|looks| looks.materials.iter().map(look_data))).collect();
         let mut appearance = Appearance {
             gpu: gpu.clone(),
             descriptors,
@@ -270,6 +365,7 @@ impl Renderer {
             joints,
             materials: upload(bytes_of(&material_data), vk::BufferUsageFlags::STORAGE_BUFFER)?,
             surfaces: upload(bytes_of(&skinned.surfaces), vk::BufferUsageFlags::STORAGE_BUFFER)?,
+            looks: upload(bytes_of(&look_data), vk::BufferUsageFlags::STORAGE_BUFFER)?,
             drawn: Vec::new(),
             hidden: Default::default(),
         };
@@ -286,13 +382,27 @@ impl Renderer {
             appearance.textures.push(texture(gpu, atlas.width, atlas.height, &atlas.rgba, FORMAT)?);
             Some(index)
         } else { None };
-        let decals = appearance.textures.len();
-        match model.menu.as_ref().map(|menu| &menu.decals[..]).unwrap_or_default() {
-            [] => appearance.textures.push(layered(gpu, 1, 1, 1, &[0; 4], FORMAT, vk::ImageViewType::TYPE_2D_ARRAY)?),
-            layers => appearance.textures.push(layered(gpu, layers[0].width, layers[0].height, layers.len() as u32, &layers.iter().flat_map(|layer| layer.rgba.iter().copied()).collect::<Vec<_>>(), FORMAT, vk::ImageViewType::TYPE_2D_ARRAY)?),
-        }
+        let mut array = |layers: &[crate::vrm::Image], empty: [u8; 4]| -> Result<usize, String> {
+            appearance.textures.push(match layers {
+                [] => layered(gpu, 1, 1, 1, &empty, FORMAT, vk::ImageViewType::TYPE_2D_ARRAY)?,
+                layers => layered(gpu, layers[0].width, layers[0].height, layers.len() as u32, &layers.iter().flat_map(|layer| layer.rgba.iter().copied()).collect::<Vec<_>>(), FORMAT, vk::ImageViewType::TYPE_2D_ARRAY)?,
+            });
+            Ok(appearance.textures.len() - 1)
+        };
+        let decals = array(looks.map(|looks| &looks.decals[..]).unwrap_or_default(), [0; 4])?;
+        let matcaps = array(looks.map(|looks| &looks.matcaps[..]).unwrap_or_default(), [255; 4])?;
+        let mut single = |image: Option<&crate::vrm::Image>, format: vk::Format| -> Result<Option<usize>, String> {
+            let Some(image) = image else { return Ok(None) };
+            appearance.textures.push(texture(gpu, image.width, image.height, &image.rgba, format)?);
+            Ok(Some(appearance.textures.len() - 1))
+        };
+        let look_index = single(looks.map(|looks| crate::vrm::Image { width: looks.index.width, height: looks.index.height, rgba: looks.index.rgba.iter().step_by(4).copied().collect() }).as_ref(), vk::Format::R8_UNORM)?;
+        let matcap_masks = single(looks.and_then(|looks| looks.matcap_masks.as_ref()), vk::Format::R8G8B8A8_UNORM)?;
+        let emission = single(looks.and_then(|looks| looks.emission.as_ref()), FORMAT)?;
         let white = appearance.textures.len();
         appearance.textures.push(texture(gpu, 1, 1, &[255; 4], FORMAT)?);
+        let black = appearance.textures.len();
+        appearance.textures.push(texture(gpu, 1, 1, &[0, 0, 0, 255], vk::Format::R8G8B8A8_UNORM)?);
         let layouts = vec![self.set_layout; model.materials.len()];
         let sets = unsafe { device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(descriptors).set_layouts(&layouts)) }.map_err(vk_error("vkAllocateDescriptorSets"))?;
         for (material, &set) in model.materials.iter().zip(&sets) {
@@ -301,7 +411,9 @@ impl Renderer {
             let mask = image(hue_mask);
             let color = image(color_atlas);
             let decal = image(Some(decals));
+            let (index, matcap, masks, glow) = (image(Some(look_index.unwrap_or(black))), image(Some(matcaps)), image(matcap_masks), image(Some(emission.unwrap_or(black))));
             let surfaces = [vk::DescriptorBufferInfo::default().buffer(appearance.surfaces.0).range(vk::WHOLE_SIZE)];
+            let looks = [vk::DescriptorBufferInfo::default().buffer(appearance.looks.0).range(vk::WHOLE_SIZE)];
             let sampler = [vk::DescriptorImageInfo::default().sampler(self.sampler)];
             let palette = [vk::DescriptorBufferInfo::default().buffer(appearance.palette.0).range(vk::WHOLE_SIZE)];
             let materials = [vk::DescriptorBufferInfo::default().buffer(appearance.materials.0).range(vk::WHOLE_SIZE)];
@@ -316,6 +428,11 @@ impl Renderer {
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(7).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&surfaces),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(8).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&color),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(9).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&decal),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(10).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&index),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(11).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&looks),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(12).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&matcap),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(13).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&masks),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(14).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&glow),
             ];
             unsafe { device.update_descriptor_sets(&writes, &[]) };
         }
@@ -465,7 +582,7 @@ impl Renderer {
                     device.cmd_set_viewport(target.commands, 0, &[vk::Viewport { x, y: 0.0, width: texels as f32, height: texels as f32, min_depth: 0.0, max_depth: 1.0 }]);
                     device.cmd_set_scissor(target.commands, 0, &[vk::Rect2D { offset: vk::Offset2D { x: x as i32, y: 0 }, extent: vk::Extent2D { width: texels, height: texels } }]);
                     for drawn in appearance.drawn.iter().filter(|drawn| drawn.switched.is_none_or(|node| !appearance.hidden.contains(&node))) {
-                        let push = Push { view_projection: view_projection.to_cols_array(), material: drawn.material, outline: drawn.outline as u32, outline_scale: self.outline_scale, focal: projection.y_axis.y };
+                        let push = Push { view_projection: view_projection.to_cols_array(), camera: camera(view_projection).to_array(), material: drawn.material, outline: drawn.outline as u32, outline_scale: self.outline_scale, focal: projection.y_axis.y, pad: 0.0 };
                         let bytes = std::slice::from_raw_parts(&push as *const Push as *const u8, std::mem::size_of::<Push>());
                         device.cmd_bind_pipeline(target.commands, vk::PipelineBindPoint::GRAPHICS, drawn.pipeline);
                         device.cmd_bind_descriptor_sets(target.commands, vk::PipelineBindPoint::GRAPHICS, self.layout, 0, &[drawn.set], &[]);
@@ -546,7 +663,7 @@ impl Drop for Appearance {
         let device = &self.gpu.device;
         unsafe {
             let _ = device.device_wait_idle();
-            for buffer in [self.vertices, self.indices, self.palette, self.materials, self.surfaces] {
+            for buffer in [self.vertices, self.indices, self.palette, self.materials, self.surfaces, self.looks] {
                 self.gpu.free_buffer(buffer);
             }
             for texture in &self.textures {
@@ -742,7 +859,7 @@ mod tests {
             let effect = if space == 3.0 {
                 serde_json::json!({"color": [{"node": 0, "rect": rect, "channel": 1, "color": [0.0, 0.0, 0.0]}]})
             } else if space >= 7.0 {
-                serde_json::json!({"decal": [{"node": 0, "rect": rect, "slot": 1, "multiply": space == 8.0}]})
+                serde_json::json!({"look": [{"node": 0, "rect": rect, "field": "decal", "slot": 1}]})
             } else if space >= 4.0 {
                 serde_json::json!({"tone": [{"node": 0, "rect": rect, "channel": (space - 4.0) as usize}]})
             } else {
@@ -760,7 +877,9 @@ mod tests {
             }
             menu.hue_mask = Some(crate::vrm::Image { width: 2, height: 1, rgba: mask });
             menu.color_atlas = Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![255; 4] });
-            menu.decals = vec![crate::vrm::Image { width: 2, height: 1, rgba: vec![255; 8] }, crate::vrm::Image { width: 2, height: 1, rgba: vec![0, 255, 0, 255, 0, 0, 0, 0] }];
+            let mut look = looks_test::look();
+            look.decals[1] = Some(crate::vrm::expressions::Decal { alpha: 0.0, intensity: 1.0, multiply: space == 8.0 });
+            menu.looks = Some(crate::vrm::expressions::Looks { index: crate::vrm::Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }, materials: vec![look], decals: vec![crate::vrm::Image { width: 2, height: 1, rgba: vec![255; 8] }, crate::vrm::Image { width: 2, height: 1, rgba: vec![0, 255, 0, 255, 0, 0, 0, 0] }], matcaps: Vec::new(), matcap_masks: None, emission: None });
             model.menu = Some(menu);
             let mut skinned = model.skinned().unwrap();
             let original_vertices = bytes_of(&skinned.vertices).to_vec();
@@ -792,6 +911,101 @@ mod tests {
             let again = capture(&skinned);
             assert!(before.iter().zip(again).all(|(&a, b)| a.abs_diff(b) <= 1));
         }
+    }
+
+    mod looks_test {
+        use crate::vrm::expressions::{Look, Mapping, Matcap, MatcapHue};
+
+        pub fn look() -> Look {
+            Look { decals: [None, None, None, None], matcaps: [None, None, None, None], emission: None }
+        }
+
+        pub fn matcap() -> Matcap {
+            Matcap { texture: Some(0), mode: Mapping::Normal, border: 0.5, color: [1.0; 4], intensity: 1.0, base_mix: 0.0, replace: 1.0, multiply: 0.0, add: 0.0, screen: 0.0, mixed: 0.0, light_add: 0.0, emission: 0.0, light_mask: 0.0, hue: Some(MatcapHue { shift: 0.0, space: 0.0, select: 1.0 }), circle: None }
+        }
+    }
+
+    /// Two quads over the left and right texels of a 2x1 atlas of `rgba`, the left one's material carrying `look`, drawn
+    /// before and after its one target `effect` moves from `rest` to `value`: the left quad's pixel each time, and whether
+    /// the right one stayed as it was.
+    fn look_drawn(rgba: [u8; 4], look: crate::vrm::expressions::Look, effect: Option<serde_json::Value>, rest: f32, value: f32, matcaps: Vec<crate::vrm::Image>) -> ([u8; 4], [u8; 4], bool) {
+        let mut builder = crate::vrm::tests::Builder::new(serde_json::json!({"VRMC_vrm": {"humanoid": {"humanBones": {}}}}));
+        let position = builder.accessor("VEC3", &[-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0]);
+        let normal = builder.accessor("VEC3", &[0.0, 0.0, 1.0].repeat(8));
+        let uv = builder.accessor("VEC2", &[[0.25, 0.25].repeat(4), [0.75, 0.25].repeat(4)].concat());
+        let indices = builder.indices(&[0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]);
+        builder.set("nodes", serde_json::json!([{"mesh": 0}]));
+        builder.set("meshes", serde_json::json!([{"primitives": [{"attributes": {"POSITION": position, "NORMAL": normal, "TEXCOORD_0": uv}, "indices": indices, "material": 0}]}]));
+        builder.set("materials", serde_json::json!([{"pbrMetallicRoughness": {"baseColorFactor": [1.0, 1.0, 1.0, 1.0]}}]));
+        let mut model = Model::parse(&builder.glb()).unwrap();
+        model.images.push(crate::vrm::Image { width: 1, height: 1, rgba: rgba.to_vec() });
+        model.materials[0].base_image = Some(0);
+        model.materials[0].shade_image = Some(0);
+        let targets: Vec<serde_json::Value> = effect.into_iter().map(|effect| serde_json::json!({"effect": effect, "default": rest})).collect();
+        let mut menu = crate::vrm::expressions::Expressions::parse(&serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": targets})).unwrap();
+        menu.looks = Some(crate::vrm::expressions::Looks {
+            index: crate::vrm::Image { width: 2, height: 1, rgba: vec![1, 0, 0, 255, 0, 0, 0, 255] },
+            materials: vec![look],
+            decals: vec![crate::vrm::Image { width: 2, height: 1, rgba: vec![0; 8] }, crate::vrm::Image { width: 2, height: 1, rgba: vec![0, 255, 0, 255, 0, 255, 0, 255] }],
+            matcaps,
+            matcap_masks: None,
+            emission: Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![255; 4] }),
+        });
+        model.menu = Some(menu);
+        let mut skinned = model.skinned().unwrap();
+        let worlds = model.worlds(&model.rest());
+        let fit = crate::vrm::Fit::new(&model, &skinned, crate::HEIGHT);
+        let palette = skinned.palette(&worlds, fit.placement(&model, &worlds, crate::FLOOR));
+        let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [32, 32], crate::HEIGHT / PAGE_HEIGHT).unwrap();
+        let mut appearance = renderer.appearance(&model, &skinned).unwrap();
+        let eyes = [eye_projection(Vec3::new(0.0, 0.0, 0.4), 0.2, 0.2), None];
+        let mut capture = |skinned: &Skinned| {
+            appearance.update(&palette, skinned, &[]);
+            renderer.render(&appearance, eyes, Mat4::IDENTITY, 32).unwrap();
+            renderer.read().unwrap()
+        };
+        let before = capture(&skinned);
+        let targets = model.menu.as_ref().unwrap().targets.len();
+        skinned.surface_values(model.menu.as_ref().unwrap(), &vec![value; targets]);
+        let after = capture(&skinned);
+        (pixel(&before, 64, 8, 16), pixel(&after, 64, 8, 16), pixel(&before, 64, 24, 16) == pixel(&after, 64, 24, 16))
+    }
+
+    #[test]
+    fn a_decal_no_clip_animates_draws_at_its_saved_alpha() {
+        let mut look = looks_test::look();
+        look.decals[1] = Some(crate::vrm::expressions::Decal { alpha: 1.0, intensity: 1.0, multiply: false });
+        let (shown, _, _) = look_drawn([255, 0, 0, 255], look.clone(), None, 0.0, 0.0, Vec::new());
+        assert!(shown[1] > shown[0], "the texel's material lays its decal on with no surface value: {shown:?}");
+        let (hidden, _, _) = look_drawn([255, 0, 0, 255], looks_test::look(), None, 0.0, 0.0, Vec::new());
+        assert!(hidden[0] > hidden[1], "a slot without a decal draws none: {hidden:?}");
+        let effect = serde_json::json!({"look": [{"node": 0, "rect": [0.0, 0.0, 1.0, 1.0], "field": "decal", "slot": 1}]});
+        let (kept, cleared, right) = look_drawn([255, 0, 0, 255], look, Some(effect), 0.5, 0.0, Vec::new());
+        assert!(kept[1] > kept[0], "a target at rest leaves the material its own alpha: {kept:?}");
+        assert!(cleared[0] > cleared[1] && right, "an animated alpha overrides the saved one wherever the renderer shows: {cleared:?}");
+    }
+
+    #[test]
+    fn emission_glows_unlit_and_turns_by_its_hue() {
+        let mut look = looks_test::look();
+        look.emission = Some(crate::vrm::expressions::Emission { color: [1.0, 0.0, 0.0], strength: 1.0, hue: 0.0, shifts_hue: true });
+        let effect = serde_json::json!({"look": [{"node": 0, "rect": [0.0, 0.0, 1.0, 1.0], "field": "emissionHue", "slot": 0}]});
+        let (red, green, right) = look_drawn([0, 0, 0, 255], look, Some(effect), 0.0, std::f32::consts::TAU / 3.0, Vec::new());
+        assert!(red[0] > 200 && red[1] < 40, "a black albedo glows its emission colour: {red:?}");
+        assert!(green[1] > 200 && green[0] < 40, "a third of a turn takes red to green: {green:?}");
+        assert!(right, "a texel of a material without emission stays dark");
+    }
+
+    #[test]
+    fn a_matcap_replaces_the_albedo_and_turns_by_its_hue() {
+        let mut look = looks_test::look();
+        look.matcaps[2] = Some(looks_test::matcap());
+        let effect = serde_json::json!({"look": [{"node": 0, "rect": [0.0, 0.0, 1.0, 1.0], "field": "matcapHueShift", "slot": 2}]});
+        let green = vec![crate::vrm::Image { width: 1, height: 1, rgba: vec![0, 255, 0, 255] }];
+        let (before, after, right) = look_drawn([255, 0, 0, 255], look, Some(effect), 0.0, 0.5, green);
+        assert!(before[1] > before[0], "the matcap replaces red with green: {before:?}");
+        assert!(after[0] > after[1], "half a turn of hue takes green toward magenta: {after:?}");
+        assert!(right, "the matcap stays on its material's texels");
     }
 
     #[test]

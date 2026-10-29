@@ -28,9 +28,12 @@ struct Surface {
     hue: vec4<f32>,
     color: vec4<f32>,
     tone: vec4<f32>,
+    decal: vec4<f32>,
+    multiply: vec4<f32>,
 }
 @group(0) @binding(7) var<storage, read> surfaces: array<Surface>;
 @group(0) @binding(8) var color_texture: texture_2d<f32>;
+@group(0) @binding(9) var decal_layers: texture_2d_array<f32>;
 
 @group(0) @binding(2) var texture_sampler: sampler;
 @group(0) @binding(3) var outline_width_texture: texture_2d<f32>;
@@ -137,6 +140,17 @@ fn adjust(color: vec3<f32>, surface: Surface, mask: vec4<f32>) -> vec3<f32> {
     return result;
 }
 
+// Poiyomi lays its decals over the adjusted albedo in slot order; the shade takes them through its own tint.
+fn decals(color: vec3<f32>, tint: vec3<f32>, surface: Surface, uv: vec2<f32>) -> vec3<f32> {
+    var result = color;
+    for (var slot = 0u; slot < min(textureNumLayers(decal_layers), 4u); slot++) {
+        let layer = textureSample(decal_layers, texture_sampler, uv, slot);
+        let laid = mix(layer.rgb * tint, result * layer.rgb, surface.multiply[slot]);
+        result = mix(result, laid, layer.a * surface.decal[slot]);
+    }
+    return result;
+}
+
 @fragment
 fn fragment(input: Varying, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let material = materials[draw.material];
@@ -144,11 +158,11 @@ fn fragment(input: Varying, @builtin(front_facing) front: bool) -> @location(0) 
     let raw = textureSample(color_texture, texture_sampler, input.uv).rgb * surface.color.rgb;
     let sampled = textureSample(base_texture, texture_sampler, input.uv) * material.base;
     let mask = textureSample(hue_mask, texture_sampler, input.uv);
-    let base = vec4<f32>(adjust(mix(sampled.rgb, raw * material.base.rgb, surface.color.a), surface, mask), sampled.a);
+    let base = vec4<f32>(decals(adjust(mix(sampled.rgb, raw * material.base.rgb, surface.color.a), surface, mask), vec3<f32>(1.0), surface, input.uv), sampled.a);
     if base.a < material.cutoff {
         discard;
     }
-    let shade = adjust(mix(textureSample(shade_texture, texture_sampler, input.uv).rgb, raw, surface.color.a) * material.shade, surface, mask);
+    let shade = decals(adjust(mix(textureSample(shade_texture, texture_sampler, input.uv).rgb, raw, surface.color.a) * material.shade, surface, mask), material.shade, surface, input.uv);
     var normal = normalize(input.normal);
     if !front {
         normal = -normal;

@@ -237,10 +237,14 @@ pub struct Surface {
     pub hue: [f32; 4],
     pub color: [f32; 4],
     pub tone: [f32; 4],
+    pub decal: [f32; DECALS],
+    pub multiply: [f32; DECALS],
 }
 
+pub const DECALS: usize = 4;
+
 impl Default for Surface {
-    fn default() -> Self { Self { hue: [0.0; 4], color: [1.0, 1.0, 1.0, 0.0], tone: [1.0, 0.0, 0.0, 0.0] } }
+    fn default() -> Self { Self { hue: [0.0; 4], color: [1.0, 1.0, 1.0, 0.0], tone: [1.0, 0.0, 0.0, 0.0], decal: [0.0; DECALS], multiply: [0.0; DECALS] } }
 }
 
 pub struct Skinned {
@@ -1220,7 +1224,8 @@ impl Model {
             let hues = menu.targets.iter().filter_map(|target| match &target.effect { expressions::Effect::Hue(regions) => Some(regions), _ => None }).flatten().map(|region| (region.node, region.rect));
             let colors = menu.targets.iter().filter_map(|target| match &target.effect { expressions::Effect::Color(regions) => Some(regions), _ => None }).flatten().map(|region| (region.node, region.rect));
             let tones = menu.targets.iter().filter_map(|target| match &target.effect { expressions::Effect::Tone(regions) => Some(regions), _ => None }).flatten().map(|region| (region.node, region.rect));
-            for (node, rect) in hues.chain(colors).chain(tones) {
+            let decals = menu.targets.iter().filter_map(|target| match &target.effect { expressions::Effect::Decal(regions) => Some(regions), _ => None }).flatten().map(|region| (region.node, region.rect));
+            for (node, rect) in hues.chain(colors).chain(tones).chain(decals) {
                 let key = (node, rect.map(f32::to_bits));
                 if skinned.regions.contains_key(&key) { continue; }
                 let surface = skinned.surfaces.len();
@@ -1257,6 +1262,11 @@ impl Skinned {
                     let color = &mut self.surfaces[at].color;
                     if color[3] == 0.0 { *color = [region.color[0], region.color[1], region.color[2], 1.0]; }
                     color[region.channel] = value;
+                },
+                expressions::Effect::Decal(regions) => for region in regions {
+                    let at = self.regions[&(region.node, region.rect.map(f32::to_bits))];
+                    self.surfaces[at].decal[region.slot] = value.clamp(0.0, 1.0);
+                    self.surfaces[at].multiply[region.slot] = if region.multiply { 1.0 } else { 0.0 };
                 },
                 _ => {}
             }

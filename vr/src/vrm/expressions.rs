@@ -220,12 +220,21 @@ pub struct Tone {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Decal {
+    pub node: usize,
+    pub rect: [f32; 4],
+    pub slot: usize,
+    pub multiply: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum Effect {
     Switch,
     Hue(Vec<Hue>),
     Color(Vec<Color>),
     Tone(Vec<Tone>),
+    Decal(Vec<Decal>),
     Morph(Vec<[usize; 2]>),
     Scale { node: usize, axis: usize },
     Material { node: usize, choices: Vec<[f32; 4]> },
@@ -267,6 +276,10 @@ pub struct Expressions {
     encoded_color_atlas: Option<String>,
     #[serde(skip)]
     pub color_atlas: Option<Image>,
+    #[serde(default, rename = "decals")]
+    encoded_decals: Vec<String>,
+    #[serde(skip)]
+    pub decals: Vec<Image>,
 }
 
 fn image(encoded: &str) -> Result<Image, String> {
@@ -294,6 +307,10 @@ impl Expressions {
         expressions.encoded_icons.clear();
         expressions.hue_mask = expressions.encoded_hue_mask.take().map(|encoded| image(&encoded)).transpose().map_err(|error| format!("{EXTENSION}: hue mask: {error}"))?;
         expressions.color_atlas = expressions.encoded_color_atlas.take().map(|encoded| image(&encoded)).transpose().map_err(|error| format!("{EXTENSION}: color atlas: {error}"))?;
+        expressions.decals = std::mem::take(&mut expressions.encoded_decals).iter().map(|encoded| image(encoded)).collect::<Result<_, _>>().map_err(|error| format!("{EXTENSION}: a decal layer: {error}"))?;
+        if expressions.decals.len() > super::DECALS || expressions.decals.iter().any(|layer| (layer.width, layer.height) != (expressions.decals[0].width, expressions.decals[0].height)) {
+            return Err(format!("{EXTENSION}: more than {} decal layers, or layers of differing sizes", super::DECALS));
+        }
         fn icons_valid(controls: &[Control], icons: usize) -> bool {
             controls.iter().all(|control| control.icon.is_none_or(|icon| icon < icons) && icons_valid(&control.controls, icons))
         }
@@ -327,6 +344,7 @@ impl Expressions {
             Effect::Hue(regions) => regions.iter().all(|region| region.node < nodes && region.rect.iter().all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
             Effect::Color(regions) => regions.iter().all(|region| region.node < nodes && region.channel < 3 && region.color.iter().chain(&region.rect).all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
             Effect::Tone(regions) => regions.iter().all(|region| region.node < nodes && region.channel < 3 && region.rect.iter().all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
+            Effect::Decal(regions) => regions.iter().all(|region| region.node < nodes && region.slot < self.decals.len() && region.rect.iter().all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
             Effect::Morph(binds) => binds.iter().all(|&[mesh, morph]| meshes.get(mesh).is_some_and(|mesh| morph < mesh.weights.len())),
             Effect::Scale { node, axis } => *node < nodes && *axis < 3,
             Effect::Material { node, choices } => *node < nodes && !choices.is_empty(),
@@ -358,7 +376,7 @@ impl Expressions {
                     }
                 }
                 Effect::Scale { node, axis } => pose.scales[*node][*axis] *= value,
-                Effect::Material { .. } | Effect::Hue(_) | Effect::Color(_) | Effect::Tone(_) => {}
+                Effect::Material { .. } | Effect::Hue(_) | Effect::Color(_) | Effect::Tone(_) | Effect::Decal(_) => {}
             }
         }
         self.shown.iter().filter(|shown| shown.when.iter().any(|&(target, value)| (values[target] - value).abs() >= 0.5)).map(|shown| shown.node).collect()

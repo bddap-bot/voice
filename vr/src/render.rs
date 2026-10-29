@@ -140,7 +140,7 @@ pub struct Appearance {
 }
 
 fn color_range(levels: u32) -> vk::ImageSubresourceRange {
-    vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::COLOR).level_count(levels).layer_count(1)
+    vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::COLOR).level_count(levels).layer_count(vk::REMAINING_ARRAY_LAYERS)
 }
 
 fn barrier(image: vk::Image, range: vk::ImageSubresourceRange, from: vk::ImageLayout, to: vk::ImageLayout, src: vk::AccessFlags, dst: vk::AccessFlags) -> vk::ImageMemoryBarrier<'static> {
@@ -190,6 +190,7 @@ impl Renderer {
             vk::DescriptorSetLayoutBinding::default().binding(6).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(7).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(8).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default().binding(9).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
         ];
         let set_layout = unsafe { device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None) }.map_err(vk_error("vkCreateDescriptorSetLayout"))?;
         let set_layouts = [set_layout];
@@ -246,7 +247,7 @@ impl Renderer {
         let device = &gpu.device;
         let set_count = model.materials.len() as u32;
         let sizes = [
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: 5 * set_count },
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: 6 * set_count },
             vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLER, descriptor_count: set_count },
             vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 3 * set_count },
         ];
@@ -284,6 +285,11 @@ impl Renderer {
             appearance.textures.push(texture(gpu, atlas.width, atlas.height, &atlas.rgba, FORMAT)?);
             Some(index)
         } else { None };
+        let decals = appearance.textures.len();
+        match model.menu.as_ref().map(|menu| &menu.decals[..]).unwrap_or_default() {
+            [] => appearance.textures.push(layered(gpu, 1, 1, 1, &[0; 4], FORMAT, vk::ImageViewType::TYPE_2D_ARRAY)?),
+            layers => appearance.textures.push(layered(gpu, layers[0].width, layers[0].height, layers.len() as u32, &layers.iter().flat_map(|layer| layer.rgba.iter().copied()).collect::<Vec<_>>(), FORMAT, vk::ImageViewType::TYPE_2D_ARRAY)?),
+        }
         let white = appearance.textures.len();
         appearance.textures.push(texture(gpu, 1, 1, &[255; 4], FORMAT)?);
         let layouts = vec![self.set_layout; model.materials.len()];
@@ -293,6 +299,7 @@ impl Renderer {
             let (base, shade, width) = (image(material.base_image), image(material.shade_image), image(material.outline.as_ref().and_then(|outline| outline.width_image)));
             let mask = image(hue_mask);
             let color = image(color_atlas);
+            let decal = image(Some(decals));
             let surfaces = [vk::DescriptorBufferInfo::default().buffer(appearance.surfaces.0).range(vk::WHOLE_SIZE)];
             let sampler = [vk::DescriptorImageInfo::default().sampler(self.sampler)];
             let palette = [vk::DescriptorBufferInfo::default().buffer(appearance.palette.0).range(vk::WHOLE_SIZE)];
@@ -307,6 +314,7 @@ impl Renderer {
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(6).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&mask),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(7).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&surfaces),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(8).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&color),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(9).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&decal),
             ];
             unsafe { device.update_descriptor_sets(&writes, &[]) };
         }
@@ -572,6 +580,10 @@ impl Drop for Renderer {
 }
 
 fn texture(gpu: &Gpu, width: u32, height: u32, rgba: &[u8], format: vk::Format) -> Result<Texture, String> {
+    layered(gpu, width, height, 1, rgba, format, vk::ImageViewType::TYPE_2D)
+}
+
+fn layered(gpu: &Gpu, width: u32, height: u32, layers: u32, rgba: &[u8], format: vk::Format, view: vk::ImageViewType) -> Result<Texture, String> {
     let device = &gpu.device;
     let levels = 32 - width.max(height).leading_zeros();
     let (image, memory) = gpu.image(
@@ -580,7 +592,7 @@ fn texture(gpu: &Gpu, width: u32, height: u32, rgba: &[u8], format: vk::Format) 
             .format(format)
             .extent(vk::Extent3D { width, height, depth: 1 })
             .mip_levels(levels)
-            .array_layers(1)
+            .array_layers(layers)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
             .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::SAMPLED)
@@ -591,13 +603,13 @@ fn texture(gpu: &Gpu, width: u32, height: u32, rgba: &[u8], format: vk::Format) 
     gpu.once(|commands| unsafe {
         let all = color_range(levels);
         device.cmd_pipeline_barrier(commands, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[barrier(image, all, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::AccessFlags::empty(), vk::AccessFlags::TRANSFER_WRITE)]);
-        let region = vk::BufferImageCopy::default().image_subresource(vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1)).image_extent(vk::Extent3D { width, height, depth: 1 });
+        let region = vk::BufferImageCopy::default().image_subresource(vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(layers)).image_extent(vk::Extent3D { width, height, depth: 1 });
         device.cmd_copy_buffer_to_image(commands, staging.0, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[region]);
         let (mut w, mut h) = (width as i32, height as i32);
         for level in 1..levels {
             let source = vk::ImageSubresourceRange { base_mip_level: level - 1, level_count: 1, ..color_range(1) };
             device.cmd_pipeline_barrier(commands, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[barrier(image, source, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::TRANSFER_READ)]);
-            let layers = |mip_level| vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level, base_array_layer: 0, layer_count: 1 };
+            let layers = |mip_level| vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level, base_array_layer: 0, layer_count: layers };
             let (next_w, next_h) = ((w / 2).max(1), (h / 2).max(1));
             let blit = vk::ImageBlit::default()
                 .src_subresource(layers(level - 1))
@@ -612,7 +624,7 @@ fn texture(gpu: &Gpu, width: u32, height: u32, rgba: &[u8], format: vk::Format) 
         device.cmd_pipeline_barrier(commands, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::DependencyFlags::empty(), &[], &[], &[barrier(image, last, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::SHADER_READ)]);
     })?;
     gpu.free_buffer(staging);
-    let view = unsafe { device.create_image_view(&vk::ImageViewCreateInfo::default().image(image).view_type(vk::ImageViewType::TYPE_2D).format(format).subresource_range(color_range(levels)), None) }.map_err(vk_error("vkCreateImageView"))?;
+    let view = unsafe { device.create_image_view(&vk::ImageViewCreateInfo::default().image(image).view_type(view).format(format).subresource_range(color_range(levels)), None) }.map_err(vk_error("vkCreateImageView"))?;
     Ok(Texture { image, memory, view })
 }
 
@@ -719,14 +731,16 @@ mod tests {
         builder.set("meshes", serde_json::json!([{"primitives": [{"attributes": {"POSITION": position, "NORMAL": normal, "TEXCOORD_0": uv}, "indices": indices, "material": 0}]}]));
         builder.set("materials", serde_json::json!([{"pbrMetallicRoughness": {"baseColorFactor": [1.0, 1.0, 1.0, 1.0]}}]));
         let data = builder.glb();
-        for (space, value) in [(1.0, 1.0 / 3.0), (0.0, 0.5), (2.0, std::f32::consts::TAU / 3.0), (3.0, 1.0), (4.0, 2.0), (5.0, -1.0), (6.0, 1.0)] {
+        for (space, value) in [(1.0, 1.0 / 3.0), (0.0, 0.5), (2.0, std::f32::consts::TAU / 3.0), (3.0, 1.0), (4.0, 2.0), (5.0, -1.0), (6.0, 1.0), (7.0, 1.0), (8.0, 1.0)] {
             let mut model = Model::parse(&data).unwrap();
-            model.images.push(crate::vrm::Image { width: 1, height: 1, rgba: if space >= 4.0 { vec![128, 64, 32, 255] } else { vec![255, 0, 0, 255] } });
+            model.images.push(crate::vrm::Image { width: 1, height: 1, rgba: if (4.0..7.0).contains(&space) { vec![128, 64, 32, 255] } else { vec![255, 0, 0, 255] } });
             model.materials[0].base_image = Some(0);
             model.materials[0].shade_image = Some(0);
             let rect = [0.0, 0.0, if space == 2.0 || space >= 4.0 { 1.0 } else { 0.5 }, 1.0];
             let effect = if space == 3.0 {
                 serde_json::json!({"color": [{"node": 0, "rect": rect, "channel": 1, "color": [0.0, 0.0, 0.0]}]})
+            } else if space >= 7.0 {
+                serde_json::json!({"decal": [{"node": 0, "rect": rect, "slot": 1, "multiply": space == 8.0}]})
             } else if space >= 4.0 {
                 serde_json::json!({"tone": [{"node": 0, "rect": rect, "channel": (space - 4.0) as usize}]})
             } else {
@@ -735,7 +749,7 @@ mod tests {
             let rest = if space == 4.0 { 1.0 } else { 0.0 };
             let mut menu = crate::vrm::expressions::Expressions::parse(&serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": [{"effect": effect, "default": rest}]})).unwrap();
             let mut mask = vec![255, 255, 255, 255, 0, 0, 0, 255];
-            if space >= 4.0 {
+            if (4.0..7.0).contains(&space) {
                 let channel = [3, 2, 1][(space - 4.0) as usize];
                 mask[..4].fill(0);
                 mask[4..].fill(255);
@@ -744,6 +758,7 @@ mod tests {
             }
             menu.hue_mask = Some(crate::vrm::Image { width: 2, height: 1, rgba: mask });
             menu.color_atlas = Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![255; 4] });
+            menu.decals = vec![crate::vrm::Image { width: 2, height: 1, rgba: vec![255; 8] }, crate::vrm::Image { width: 2, height: 1, rgba: vec![0, 255, 0, 255, 0, 0, 0, 0] }];
             model.menu = Some(menu);
             let mut skinned = model.skinned().unwrap();
             let original_vertices = bytes_of(&skinned.vertices).to_vec();
@@ -769,6 +784,7 @@ mod tests {
             if space == 4.0 { assert!(center[0] < initial[0], "gamma darkens the midtone"); }
             else if space == 5.0 { assert!(center[0] < initial[0] && center[1] > initial[1], "desaturation moves red toward luminance"); }
             else if space == 6.0 { assert!(center[0] > initial[0], "brightness raises the midtone"); }
+            else if space == 8.0 { assert!(center[0] < initial[0] / 4 && center[1] < 8, "multiplying red by green leaves black: {center:?}"); }
             else { assert!(center[1] > center[0], "material control {space} produces green: {center:?}"); }
             skinned.surface_values(model.menu.as_ref().unwrap(), &[rest]);
             let again = capture(&skinned);

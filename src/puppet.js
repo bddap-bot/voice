@@ -106,14 +106,38 @@ function feetOf(vrm) {
   return ['leftFoot', 'rightFoot'].map((name) => vrm.humanoid.getRawBoneNode(name).getWorldPosition(new THREE.Vector3()));
 }
 
+function hideHiddenNodes(scene) {
+  scene.traverse((object) => {
+    if (object.userData.gltfExtensions?.KHR_node_visibility?.visible === false) object.visible = false;
+  });
+}
+
+function visibleBox(root) {
+  root.updateWorldMatrix(true, true);
+  const box = new THREE.Box3();
+  const part = new THREE.Box3();
+  root.traverseVisible((object) => {
+    if (!object.isMesh) return;
+    if (object.isSkinnedMesh) {
+      object.computeBoundingBox();
+      part.copy(object.boundingBox);
+    } else {
+      if (!object.geometry.boundingBox) object.geometry.computeBoundingBox();
+      part.copy(object.geometry.boundingBox);
+    }
+    box.union(part.applyMatrix4(object.matrixWorld));
+  });
+  return box;
+}
+
 function fitScene(vrm) {
   VRMUtils.removeUnnecessaryVertices(vrm.scene);
   VRMUtils.combineSkeletons(vrm.scene);
-  const box = new THREE.Box3().setFromObject(vrm.scene);
-  const size = box.getSize(new THREE.Vector3());
+  hideHiddenNodes(vrm.scene);
+  const size = visibleBox(vrm.scene).getSize(new THREE.Vector3());
   const scale = size.y ? 2.7 / size.y : 1;
   vrm.scene.scale.setScalar(scale);
-  const ground = new THREE.Box3().setFromObject(vrm.scene).min.y;
+  const ground = visibleBox(vrm.scene).min.y;
   const ankleHeight = Math.min(...feetOf(vrm).map((foot) => foot.y)) - ground;
   vrm.scene.traverse((object) => { object.frustumCulled = false; });
   vrm.humanoid.setNormalizedPose(standingPose(vrm));

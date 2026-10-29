@@ -45,27 +45,70 @@ for (const version of ['0', '1']) test(`loading an idle keeps authored arm and l
   }
 });
 
-test('an avatar loads and renders Standing before any clip exists', async () => {
-  const names = ['hips', 'spine', 'head', 'leftUpperLeg', 'leftLowerLeg', 'leftFoot', 'rightUpperLeg', 'rightLowerLeg', 'rightFoot', 'leftUpperArm', 'leftLowerArm', 'leftHand', 'rightUpperArm', 'rightLowerArm', 'rightHand'];
+const names = ['hips', 'spine', 'head', 'leftUpperLeg', 'leftLowerLeg', 'leftFoot', 'rightUpperLeg', 'rightLowerLeg', 'rightFoot', 'leftUpperArm', 'leftLowerArm', 'leftHand', 'rightUpperArm', 'rightLowerArm', 'rightHand'];
+
+function puppetFile({ meshes = [] } = {}) {
   const children = { hips: ['spine', 'leftUpperLeg', 'rightUpperLeg'], spine: ['head', 'leftUpperArm', 'rightUpperArm'], leftUpperLeg: ['leftLowerLeg'], leftLowerLeg: ['leftFoot'], rightUpperLeg: ['rightLowerLeg'], rightLowerLeg: ['rightFoot'], leftUpperArm: ['leftLowerArm'], leftLowerArm: ['leftHand'], rightUpperArm: ['rightLowerArm'], rightLowerArm: ['rightHand'] };
+  const positions = new Float32Array(meshes.flatMap(({ height }) => [0, 0, 0, 0.1, 0, 0, 0, height, 0]));
   const gltf = {
-    asset: { version: '2.0' }, scene: 0, scenes: [{ nodes: [0] }],
-    nodes: names.map(name => ({ name, translation: [0, name === 'hips' ? 1 : 0.1, 0], children: (children[name] ?? []).map(child => names.indexOf(child)) })),
-    extensionsUsed: ['VRMC_vrm'],
+    asset: { version: '2.0' }, scene: 0, scenes: [{ nodes: [0, ...meshes.map((_, index) => names.length + index)] }],
+    nodes: [
+      ...names.map(name => ({ name, translation: [0, name === 'hips' ? 1 : 0.1, 0], children: (children[name] ?? []).map(child => names.indexOf(child)) })),
+      ...meshes.map(({ name, visible }, index) => ({ name, mesh: index, ...visible === undefined ? {} : { extensions: { KHR_node_visibility: { visible } } } })),
+    ],
+    meshes: meshes.map((_, index) => ({ primitives: [{ attributes: { POSITION: index } }] })),
+    accessors: meshes.map(({ height }, index) => ({ bufferView: 0, byteOffset: index * 36, componentType: 5126, count: 3, type: 'VEC3', min: [0, 0, 0], max: [0.1, height, 0] })),
+    bufferViews: meshes.length ? [{ buffer: 0, byteLength: positions.byteLength }] : [],
+    buffers: meshes.length ? [{ byteLength: positions.byteLength }] : [],
+    extensionsUsed: ['VRMC_vrm', ...meshes.some(({ visible }) => visible !== undefined) ? ['KHR_node_visibility'] : []],
     extensions: { VRMC_vrm: { specVersion: '1.0', meta: { name: 'rig', authors: ['fixture'], licenseUrl: 'https://vrm.dev/licenses/1.0/' }, humanoid: { humanBones: Object.fromEntries(names.map((name, node) => [name, { node }])) } } },
   };
+  if (!meshes.length) { delete gltf.meshes; delete gltf.accessors; delete gltf.bufferViews; delete gltf.buffers; }
   const encoded = new TextEncoder().encode(JSON.stringify(gltf));
-  const bytes = new Uint8Array(20 + Math.ceil(encoded.length / 4) * 4).fill(32);
+  const json = Math.ceil(encoded.length / 4) * 4;
+  const bin = positions.byteLength ? 8 + positions.byteLength : 0;
+  const bytes = new Uint8Array(20 + json + bin).fill(32);
   const header = new DataView(bytes.buffer);
-  [0x46546c67, 2, bytes.length, bytes.length - 20, 0x4e4f534a].forEach((value, index) => header.setUint32(index * 4, value, true));
+  [0x46546c67, 2, bytes.length, json, 0x4e4f534a].forEach((value, index) => header.setUint32(index * 4, value, true));
   bytes.set(encoded, 20);
+  if (bin) {
+    header.setUint32(20 + json, positions.byteLength, true);
+    header.setUint32(24 + json, 0x004e4942, true);
+    bytes.set(new Uint8Array(positions.buffer), 28 + json);
+  }
+  return bytes.buffer;
+}
+
+function loadingRuntime() {
+  const idleRoot = new THREE.Group();
+  return Object.assign(Object.create(PuppetRuntime.prototype), {
+    poseName: 'sit', clips: new Map(), idleRoot, mixer: new THREE.AnimationMixer(idleRoot), gazeTarget: new THREE.Object3D(),
+    renderer: { render() {}, getContext: () => ({ finish() {} }) },
+  });
+}
+
+async function withProgressEvent(work) {
   const progress = globalThis.ProgressEvent;
   globalThis.ProgressEvent ??= class { constructor(type, values) { Object.assign(this, { type }, values); } };
+  try { return await work(); } finally { globalThis.ProgressEvent = progress; }
+}
+
+test('a node the file hides by default stays hidden, and the figure fits to what is drawn', () => withProgressEvent(async () => {
+  const runtime = loadingRuntime();
+  try {
+    assert.equal(await runtime.load(puppetFile({ meshes: [{ name: 'figure', height: 1.8 }, { name: 'prop', height: 20, visible: false }, { name: 'shown', height: 1, visible: true }] })), true);
+    const byName = (name) => runtime.vrm.scene.getObjectByName(name);
+    assert.equal(byName('prop').visible, false);
+    assert.equal(byName('figure').visible, true);
+    assert.equal(byName('shown').visible, true);
+    assert.ok(Math.abs(runtime.vrm.scene.scale.y - 2.7 / 1.8) < 1e-6, `scale ${runtime.vrm.scene.scale.y}`);
+  } finally { runtime.clear(); }
+}));
+
+test('an avatar loads and renders Standing before any clip exists', () => withProgressEvent(async () => {
   let renders = 0;
   let finishes = 0;
-  const idleRoot = new THREE.Group();
-  const runtime = Object.assign(Object.create(PuppetRuntime.prototype), {
-    poseName: 'sit', clips: new Map(), idleRoot, mixer: new THREE.AnimationMixer(idleRoot), gazeTarget: new THREE.Object3D(),
+  const runtime = Object.assign(loadingRuntime(), {
     renderer: { render: () => renders++, getContext: () => ({ finish: () => finishes++ }) },
   });
   const stages = [];
@@ -76,7 +119,7 @@ test('an avatar loads and renders Standing before any clip exists', async () => 
     return result;
   };
   try {
-    assert.equal(await runtime.load(bytes.buffer, undefined, undefined, stage), true);
+    assert.equal(await runtime.load(puppetFile(), undefined, undefined, stage), true);
     assert.deepEqual(stages, [['parse', 0], ['select', 0], ['fit', 0], ['render', 2]]);
     assert.equal(runtime.clips.size, 0);
     assert.equal(runtime.clipAction, null);
@@ -93,7 +136,6 @@ test('an avatar loads and renders Standing before any clip exists', async () => 
     runtime.animate(0);
     assert.equal(renders, 1);
   } finally {
-    globalThis.ProgressEvent = progress;
     runtime.clear();
   }
-});
+}));

@@ -204,6 +204,10 @@ impl Puppet {
 const BUTTON_HOLD: Duration = Duration::from_millis(400);
 
 impl Puppet {
+    fn defaults(&mut self) {
+        self.controller = self.model.menu.as_ref().map(|menu| Controller::new(menu, &vrm::expressions::Configuration::default()));
+    }
+
     fn menu(&self) -> Option<(Vec<vrm::expressions::Control>, Vec<vrm::Image>)> {
         self.model.menu.as_ref().map(|menu| (menu.menu.clone(), menu.icons.clone()))
     }
@@ -541,6 +545,12 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             }
             Some(Press::Menu) => board.toggle_menu(),
             Some(Press::Back) => board.back(),
+            Some(Press::Defaults) => {
+                puppet.defaults();
+                if let Err(error) = settings.forget(&catalog.avatars[board.active].id) {
+                    tracing::warn!("menu settings not forgotten: {error}");
+                }
+            }
             Some(Press::Control(index)) => {
                 let at = touch.crossing.map(|crossing| board.place_on(index, crossing)).unwrap_or([0.5; 2]);
                 if let (Some(control), Some(controller)) = (board.control(index), puppet.controller.as_mut()) {

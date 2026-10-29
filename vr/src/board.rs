@@ -67,6 +67,7 @@ pub enum Press {
     Appearance(usize),
     Menu,
     Back,
+    Defaults,
     Control(usize),
 }
 
@@ -264,6 +265,9 @@ impl Board {
         if let Some(last) = pending {
             row(ROW, &[(Press::Control(last), left, left + half)], &mut out);
         }
+        if menu.path.is_empty() {
+            row(ROW, &[(Press::Defaults, left, right)], &mut out);
+        }
         out
     }
 
@@ -271,7 +275,7 @@ impl Board {
         let Some(menu) = self.menu_open() else { return 0.0 };
         let pad = PAD_ROWS as f32 * ROW + (PAD_ROWS - 1) as f32 * GAP;
         let paired = menu.page().iter().filter(|control| !matches!(control.kind, Kind::Radial | Kind::TwoAxis | Kind::FourAxis)).count();
-        let heights = (!menu.path.is_empty()) as usize as f32 * (ROW + GAP)
+        let heights = ROW + GAP
             + menu.page().iter().map(|control| match control.kind {
                 Kind::Radial => ROW + GAP,
                 Kind::TwoAxis | Kind::FourAxis => pad + GAP,
@@ -435,6 +439,7 @@ impl Board {
                     Anchor::Stuck(_) | Anchor::Grounded(_) => (ACTIVE, "Pick up".to_owned()),
                 },
                 Press::Menu => (if self.menu_open().is_some() { ACTIVE } else { BUTTON }, "Menu".to_owned()),
+                Press::Defaults => (BUTTON, "Defaults".to_owned()),
                 Press::Back => {
                     image.fill(area, BUTTON);
                     image.small_label(area, "<");
@@ -1223,9 +1228,11 @@ mod tests {
         let mut board = Board::new(1, 0);
         board.wear(Some((menu(), Vec::new())), HashMap::new());
         board.toggle_menu();
+        assert!(board.buttons().iter().any(|button| button.press == Press::Defaults), "the first page offers the creator's defaults");
         assert_eq!(board.control(2).map(|control| control.name), Some("Outfits".to_owned()));
         assert_eq!(board.control(0).map(|control| control.name), Some("Coat".to_owned()));
         assert!(board.buttons().iter().any(|button| button.press == Press::Back));
+        assert!(board.buttons().iter().all(|button| button.press != Press::Defaults));
         board.back();
         assert_eq!(board.control(0).map(|control| control.name), Some("Hat".to_owned()));
     }

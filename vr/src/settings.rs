@@ -27,6 +27,15 @@ impl Settings {
 
     pub fn keep(&mut self, avatar: &str, controls: &[Control], controller: &Controller) -> Result<(), String> {
         self.avatars.insert(avatar.to_owned(), controller.configuration(shown(controls, controller)));
+        self.write()
+    }
+
+    pub fn forget(&mut self, avatar: &str) -> Result<(), String> {
+        self.avatars.remove(avatar);
+        self.write()
+    }
+
+    fn write(&self) -> Result<(), String> {
         let bytes = serde_json::to_vec_pretty(&self.avatars).map_err(|error| error.to_string())?;
         let pending = self.file.with_extension("json.new");
         std::fs::write(&pending, bytes).and_then(|()| std::fs::rename(&pending, &self.file)).map_err(|error| format!("{}: {error}", self.file.display()))
@@ -74,5 +83,10 @@ mod tests {
         assert_eq!(again.of("a").parameters, HashMap::from([("Hat".to_owned(), 1.0)]));
         assert!(again.of("b").parameters.is_empty());
         assert_eq!(Controller::new(&expressions, &again.of("a")).get("Hat"), 1.0);
+        settings.keep("b", &expressions.menu, &controller).unwrap();
+        settings.forget("a").unwrap();
+        let reset = Settings::read(&directory);
+        assert!(reset.of("a").parameters.is_empty(), "defaults clear what was kept");
+        assert_eq!(reset.of("b").parameters, HashMap::from([("Hat".to_owned(), 1.0)]), "and only for that avatar");
     }
 }

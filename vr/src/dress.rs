@@ -87,6 +87,17 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
                 pair(&after, &worn, &pictures.join(format!("rewear-{number:03}.png")))?;
             }
         }
+        let mut kept = load(&mut relay, avatar, &mut renderer, &Settings::read(&pictures).of(&avatar.id))?;
+        let before = still(&mut kept, &mut renderer, &mut figure, runtime, head)?;
+        kept.defaults();
+        settings.forget(&avatar.id)?;
+        let after = still(&mut kept, &mut renderer, &mut figure, runtime, head)?;
+        let worn = still(&mut load(&mut relay, avatar, &mut renderer, &Settings::read(&pictures).of(&avatar.id))?, &mut renderer, &mut figure, runtime, head)?;
+        let picture = pictures.join("defaults.png");
+        pair(&before, &after, &picture)?;
+        let line = serde_json::json!({"avatar": avatar.id, "defaults": picture, "changed": changed(&before, &after), "rewearDiffers": changed(&after, &worn)});
+        println!("{line}");
+        lines.push(line.to_string());
     }
     let file = out.join("menu.jsonl");
     std::fs::write(&file, lines.join("\n") + "\n").map_err(|error| format!("{}: {error}", file.display()))

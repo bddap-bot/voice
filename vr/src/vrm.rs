@@ -238,13 +238,14 @@ pub struct Surface {
     pub color: [f32; 4],
     pub tone: [f32; 4],
     pub decal: [f32; DECALS],
+    pub intensity: [f32; DECALS],
     pub multiply: [f32; DECALS],
 }
 
 pub const DECALS: usize = 4;
 
 impl Default for Surface {
-    fn default() -> Self { Self { hue: [0.0; 4], color: [1.0, 1.0, 1.0, 0.0], tone: [1.0, 0.0, 0.0, 0.0], decal: [0.0; DECALS], multiply: [0.0; DECALS] } }
+    fn default() -> Self { Self { hue: [0.0; 4], color: [1.0, 1.0, 1.0, 0.0], tone: [1.0, 0.0, 0.0, 0.0], decal: [0.0; DECALS], intensity: [1.0; DECALS], multiply: [0.0; DECALS] } }
 }
 
 pub struct Skinned {
@@ -1265,7 +1266,7 @@ impl Skinned {
                 },
                 expressions::Effect::Decal(regions) => for region in regions {
                     let at = self.regions[&(region.node, region.rect.map(f32::to_bits))];
-                    self.surfaces[at].decal[region.slot] = value.clamp(0.0, 1.0);
+                    if region.intensity { self.surfaces[at].intensity[region.slot] = value; } else { self.surfaces[at].decal[region.slot] = value.clamp(0.0, 1.0); }
                     self.surfaces[at].multiply[region.slot] = if region.multiply { 1.0 } else { 0.0 };
                 },
                 _ => {}

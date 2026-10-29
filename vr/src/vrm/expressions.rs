@@ -225,6 +225,8 @@ pub struct Decal {
     pub rect: [f32; 4],
     pub slot: usize,
     pub multiply: bool,
+    #[serde(default)]
+    pub intensity: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]

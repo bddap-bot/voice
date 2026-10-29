@@ -29,6 +29,7 @@ struct Surface {
     color: vec4<f32>,
     tone: vec4<f32>,
     decal: vec4<f32>,
+    intensity: vec4<f32>,
     multiply: vec4<f32>,
 }
 @group(0) @binding(7) var<storage, read> surfaces: array<Surface>;
@@ -146,7 +147,7 @@ fn decals(color: vec3<f32>, tint: vec3<f32>, surface: Surface, uv: vec2<f32>) ->
     for (var slot = 0u; slot < min(textureNumLayers(decal_layers), 4u); slot++) {
         let layer = textureSample(decal_layers, texture_sampler, uv, slot);
         let laid = mix(layer.rgb * tint, result * layer.rgb, surface.multiply[slot]);
-        result = mix(result, laid, layer.a * surface.decal[slot]);
+        result = mix(result, laid, clamp(layer.a * surface.decal[slot] * surface.intensity[slot], 0.0, 1.0));
     }
     return result;
 }

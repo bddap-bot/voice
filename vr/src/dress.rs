@@ -2,11 +2,12 @@ use std::path::{Path, PathBuf};
 
 use crate::board::Board;
 use crate::placement::{facing, Pose};
+use crate::openvr::{Overlay, Runtime};
 use crate::relay::{Relay, Token};
 use crate::render::{eye_projection, eye_texels, Renderer, NEAREST, PAGE_HEIGHT};
 use crate::settings::Settings;
 use crate::vrm::expressions::{Control, Controller, Kind};
-use crate::vulkan::Gpu;
+use crate::vulkan::{Flat, Gpu};
 use crate::{load, operate, Puppet, FLOOR, HEIGHT, QUAD};
 
 const SETTLE: usize = 90;
@@ -22,8 +23,15 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
     let cache = state.join("assets");
     let mut relay = Relay::connect(token, &cache)?;
     let catalog = relay.catalog()?;
-    let gpu = std::rc::Rc::new(Gpu::new(None)?);
-    let mut renderer = Renderer::new(gpu, [eye_texels(QUAD, NEAREST); 2], HEIGHT / PAGE_HEIGHT)?;
+    let gpu = std::rc::Rc::new(Gpu::new(Some(Runtime::init()?))?);
+    let runtime = gpu.vr.as_ref().unwrap();
+    let mut figure = runtime.create_overlay("voice.menu-check.figure", "Avatar menu check", QUAD, true)?;
+    let mut board = runtime.create_overlay("voice.menu-check.board", "Avatar menu", crate::board::WIDTH, false)?;
+    for (overlay, x) in [(&figure, 0.0), (&board, -0.25)] {
+        overlay.place_on(0, &Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [x, 0.0, -0.5]));
+    }
+    let mut board_image = Flat::new(gpu.clone());
+    let mut renderer = Renderer::new(gpu.clone(), [eye_texels(QUAD, NEAREST); 2], HEIGHT / PAGE_HEIGHT)?;
     let mut lines = Vec::new();
     for avatar in catalog.avatars.iter().filter(|avatar| ids.is_empty() || ids.contains(&avatar.id)) {
         let pictures = out.join(&avatar.id);
@@ -35,7 +43,7 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
             println!("{}: no menu", avatar.id);
             continue;
         };
-        board_pages(&menu.menu, &mut Vec::new(), &puppet, &pictures)?;
+        board_pages(&menu.menu, &mut Vec::new(), &puppet, &pictures, &mut board, &mut board_image)?;
         let mut controls = Vec::new();
         flatten(&menu.menu, "", &mut controls);
         let mut kept = None;
@@ -50,9 +58,9 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
             if matches!(control.kind, Kind::Radial | Kind::TwoAxis | Kind::FourAxis) {
                 operate(controller, control, if control.kind == Kind::Radial { [0.0, 0.0] } else { [0.5, 0.5] });
             }
-            let before = still(&mut puppet, &mut renderer)?;
+            let before = still(&mut puppet, &mut renderer, &mut figure, runtime)?;
             operate(puppet.controller.as_mut().unwrap(), control, if control.kind == Kind::Radial { [0.5, 0.5] } else { [1.0, 1.0] });
-            let after = still(&mut puppet, &mut renderer)?;
+            let after = still(&mut puppet, &mut renderer, &mut figure, runtime)?;
             let changed = changed(&before, &after);
             let picture = pictures.join(format!("{number:03}.png"));
             pair(&before, &after, &picture)?;
@@ -67,7 +75,7 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
         }
         if let Some((path, seen)) = kept {
             let mut again = load(&mut relay, avatar, &mut renderer, &Settings::read(&pictures).of(&avatar.id))?;
-            let worn = still(&mut again, &mut renderer)?;
+            let worn = still(&mut again, &mut renderer, &mut figure, runtime)?;
             let differs = changed(&seen, &worn);
             let line = serde_json::json!({"avatar": avatar.id, "rewear": path, "differs": differs});
             println!("{line}");
@@ -90,7 +98,7 @@ fn flatten<'a>(controls: &'a [Control], prefix: &str, out: &mut Vec<(String, &'a
     }
 }
 
-fn board_pages(controls: &[Control], path: &mut Vec<usize>, puppet: &Puppet, out: &Path) -> Result<(), String> {
+fn board_pages(controls: &[Control], path: &mut Vec<usize>, puppet: &Puppet, out: &Path, overlay: &mut Overlay, texture: &mut Flat) -> Result<(), String> {
     let mut board = Board::new(1, 0);
     board.wear(puppet.menu(), puppet.settings());
     board.toggle_menu();
@@ -98,18 +106,20 @@ fn board_pages(controls: &[Control], path: &mut Vec<usize>, puppet: &Puppet, out
         board.control(at);
     }
     let canvas = board.take_image().ok_or("the board drew nothing")?;
+    overlay.texture(&mut texture.upload(&canvas)?)?;
+    overlay.show();
     let name = if path.is_empty() { "board.png".to_owned() } else { format!("board-{}.png", path.iter().map(usize::to_string).collect::<Vec<_>>().join("-")) };
     let image = image::RgbaImage::from_raw(canvas.width, canvas.height, canvas.pixels).ok_or("the board's pixels do not fit its size")?;
     image.save(out.join(&name)).map_err(|error| format!("{name}: {error}"))?;
     for (index, control) in controls.iter().enumerate().filter(|(_, control)| control.kind == Kind::Submenu) {
         path.push(index);
-        board_pages(&control.controls, path, puppet, out)?;
+        board_pages(&control.controls, path, puppet, out, overlay, texture)?;
         path.pop();
     }
     Ok(())
 }
 
-fn still(puppet: &mut Puppet, renderer: &mut Renderer) -> Result<Vec<u8>, String> {
+fn still(puppet: &mut Puppet, renderer: &mut Renderer, overlay: &mut Overlay, runtime: &Runtime) -> Result<Vec<u8>, String> {
     let stand = Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0; 3]);
     let (menu, controller) = (puppet.model.menu.as_ref().unwrap(), puppet.controller.as_mut().unwrap());
     let mut pose = puppet.model.pose(&puppet.standing);
@@ -130,7 +140,9 @@ fn still(puppet: &mut Puppet, renderer: &mut Renderer) -> Result<Vec<u8>, String
     let local = quad.inverse();
     puppet.draw(&worlds, local.mat4() * body);
     let eyes = [-0.032, 0.032].map(|x| eye_projection(local.apply([HEAD[0] + x, HEAD[1], HEAD[2]]).into(), QUAD / 2.0, QUAD / 2.0));
-    renderer.render(&puppet.drawn, eyes, renderer.eye[0])?;
+    overlay.texture(&mut renderer.render(&puppet.drawn, eyes, renderer.eye[0])?)?;
+    overlay.show();
+    runtime.wait_frame();
     let stereo = renderer.read()?;
     let eye = renderer.eye[0];
     Ok((0..eye).flat_map(|y| (0..eye).map(move |x| ((y * 2 * eye + x) * 4) as usize)).flat_map(|at| stereo[at..at + 4].to_vec()).collect())

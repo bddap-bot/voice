@@ -122,6 +122,10 @@ enum Blend {
 #[derive(Clone, Debug, Deserialize)]
 struct Child {
     motion: Motion,
+    #[serde(default = "one")]
+    speed: f32,
+    #[serde(default)]
+    offset: f32,
     #[serde(default)]
     threshold: f32,
     #[serde(default)]
@@ -456,8 +460,8 @@ impl Controller {
             let clip = &expressions.clips[clip];
             let at = match &motion.time {
                 Some(parameter) => self.get(parameter).clamp(0.0, 1.0) * clip.length,
-                None if clip.looped && clip.length > 0.0 => time % clip.length,
-                None => time.min(clip.length),
+                None if clip.looped && clip.length > 0.0 => time.rem_euclid(clip.length),
+                None => time.clamp(0.0, clip.length),
             };
             for curve in &clip.curves {
                 *into.entry(curve.target).or_insert(0.0) += weight * curve.sample(at);
@@ -481,7 +485,9 @@ impl Controller {
             .iter()
             .map(|child| {
                 let mut part = HashMap::new();
-                self.sample(expressions, &child.motion, time, 1.0, &mut part);
+                let length = clip_length(expressions, &child.motion);
+                let at = time * child.speed + length * (child.offset + if child.speed < 0.0 { 1.0 } else { 0.0 });
+                self.sample(expressions, &child.motion, at, 1.0, &mut part);
                 part
             })
             .collect();
@@ -606,6 +612,28 @@ mod tests {
         assert_eq!(two_d(&[[0.0, 0.0], [1.0, 0.0]], [1.0, 0.0]), vec![0.0, 1.0]);
         let halfway = two_d(&[[-1.0, 0.0], [1.0, 0.0]], [0.0, 0.0]);
         assert!((halfway[0] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn blend_children_play_backwards_or_from_an_offset() {
+        let mut expressions = Expressions::parse(&serde_json::json!({
+            "menu": [], "parameters": [{"name": "Choice", "type": "float"}],
+            "layers": [{"states": [{"motion": {"blend": "1d", "parameters": ["Choice"], "children": [
+                {"motion": {"clip": 0}, "threshold": 0, "speed": -1},
+                {"motion": {"clip": 0}, "threshold": 1}
+            ]}}]}],
+            "clips": [{"length": 1, "curves": [{"target": 0, "keys": [[0, 0], [1, 1]]}]}],
+            "targets": [{"effect": "switch"}]
+        })).unwrap();
+        let mut controller = Controller::new(&expressions, &HashMap::new());
+        assert_eq!(controller.step(&expressions, 0.25), vec![0.75]);
+        assert_eq!(controller.step(&expressions, 1.0), vec![0.0]);
+        controller.set("Choice", 1.0);
+        assert_eq!(controller.step(&expressions, 0.0), vec![1.0]);
+        let child = &mut expressions.layers[0].states[0].motion.children[1];
+        child.speed = 0.0;
+        child.offset = 0.25;
+        assert_eq!(controller.step(&expressions, 0.0), vec![0.25]);
     }
 
     #[test]

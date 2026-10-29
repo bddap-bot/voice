@@ -1149,9 +1149,7 @@ impl Model {
                 draws.push(Draw { first: indices.len() as u32, count: primitive.indices.len() as u32, material: primitive.material.unwrap_or(self.materials.len() - 1), switched: switched.contains(&node).then_some(node) });
                 indices.extend(primitive.indices.iter().map(|&vertex| vertex + base));
             }
-            if switched.contains(&node) {
-                spans.insert(node, start..vertices.len());
-            }
+            spans.insert(node, start..vertices.len());
         }
         // Blended draws keep node order; the rest are order-independent, so each material's index ranges are laid end to end and draw in one call.
         let key = |at: usize, draw: &Draw| {
@@ -1686,6 +1684,32 @@ pub mod tests {
             let facing = placement.transform_vector3(Vec3::from(skinned.vertices[0].normal));
             assert!(facing.z > 0.0, "a VRM 0 figure faces -Z and is turned toward the viewer ({version:?})");
         }
+    }
+
+    #[test]
+    fn a_material_swap_updates_a_part_that_is_always_visible() {
+        let mut builder = Builder::new(serde_json::json!({
+            "VRMC_vrm": {"humanoid": {"humanBones": {}}},
+            "VRCHAT_expressions": {
+                "menu": [], "parameters": [], "layers": [], "clips": [],
+                "targets": [{"effect": {"material": {"node": 0, "choices": [[1, 1, 0, 0], [0.5, 1, 0.5, 0]]}}}]
+            }
+        }));
+        let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        let uv = builder.accessor("VEC2", &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0]);
+        builder.set("nodes", serde_json::json!([{"mesh": 0}]));
+        builder.set("meshes", serde_json::json!([{"primitives": [{"attributes": {"POSITION": position, "TEXCOORD_0": uv}}]}]));
+        let model = Model::parse(&builder.glb()).unwrap();
+        let mut skinned = model.skinned().unwrap();
+        let menu = model.menu.as_ref().unwrap();
+        let original: Vec<_> = skinned.vertices.iter().map(|vertex| vertex.uv).collect();
+        let (node, moved) = menu.materials(&[1.0]).next().unwrap();
+        assert_eq!(skinned.retexture(node, moved), vec![0, 1, 2]);
+        assert_eq!(skinned.vertices[0].uv, [0.5, 0.0]);
+        assert!(skinned.retexture(node, moved).is_empty());
+        let (node, moved) = menu.materials(&[0.0]).next().unwrap();
+        skinned.retexture(node, moved);
+        assert_eq!(skinned.vertices.iter().map(|vertex| vertex.uv).collect::<Vec<_>>(), original);
     }
 
     #[test]

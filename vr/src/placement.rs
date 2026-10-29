@@ -76,12 +76,6 @@ impl Pose {
         let [x, y, z] = [0, 1, 2].map(|column| self.axis(column));
         glam::Mat4::from_cols_array_2d(&[[x[0], x[1], x[2], 0.0], [y[0], y[1], y[2], 0.0], [z[0], z[1], z[2], 0.0], [self.t[0], self.t[1], self.t[2], 1.0]])
     }
-
-    fn yaw(&self, angle: f32) -> Pose {
-        let (s, c) = angle.sin_cos();
-        let turn = Pose { r: [[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]], t: [0.0; 3] };
-        Pose { t: self.t, ..turn.then(self) }
-    }
 }
 
 /// Where the avatar's feet stand on the controller: its top, in the controller's frame (x right, y up, z toward the elbow).
@@ -153,119 +147,23 @@ impl Anchor {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PlayArea {
-    frame: Pose,
-    size: [f32; 2],
-}
-
-impl PlayArea {
-    pub fn new(corners: [Vec3; 4]) -> Option<Self> {
-        if !corners.iter().flatten().all(|v| v.is_finite()) { return None; }
-        let x = sub(corners[1], corners[0]);
-        let z = sub(corners[3], corners[0]);
-        let size = [length(x), length(z)];
-        if size.iter().any(|&v| v < 0.01) { return None; }
-        Some(Self { frame: Pose::from_axes(scale(x, 1.0 / size[0]), [0.0, 1.0, 0.0], scale(z, 1.0 / size[1]), corners[0]), size })
-    }
-
-    pub fn center(&self) -> Vec3 {
-        self.frame.apply([self.size[0] / 2.0, 0.0, self.size[1] / 2.0])
-    }
-
-    pub fn contains(&self, point: Vec3, margin: f32) -> bool {
-        let local = self.frame.inverse().apply(point);
-        [local[0], local[2]].iter().zip(self.size).all(|(&at, size)| at >= margin - 1e-6 && at <= size - margin + 1e-6)
-    }
-
-    pub fn clamp(&self, point: Vec3, margin: f32) -> Vec3 {
-        let local = self.frame.inverse().apply(point);
-        let [x, z] = [local[0], local[2]];
-        let [x, z] = [(x, self.size[0]), (z, self.size[1])].map(|(v, size)| v.clamp(margin.min(size / 2.0), size - margin.min(size / 2.0)));
-        self.frame.apply([x, 0.0, z])
-    }
-
-    fn turn(&self, planted: Vec3, swing: Vec3) -> Option<f32> {
-        if self.contains(swing, 0.0) { return Some(0.0); }
-        let local = self.frame.inverse();
-        let at = local.apply(planted);
-        let from = sub(swing, planted);
-        let radius2 = from[0] * from[0] + from[2] * from[2];
-        let mut best: Option<f32> = None;
-        for (axis, other, size) in [(0, 2, self.size[0]), (2, 0, self.size[1])] {
-            for edge in [0.0, size] {
-                let across = radius2 - (edge - at[axis]).powi(2);
-                if across < 0.0 { continue; }
-                for sign in [-1.0, 1.0] {
-                    let mut point = at;
-                    point[axis] = edge;
-                    point[other] += sign * across.sqrt();
-                    let world = self.frame.apply(point);
-                    if !self.contains(world, 0.0) { continue; }
-                    let to = sub(world, planted);
-                    let angle = cross(from, to)[1].atan2(from[0] * to[0] + from[2] * to[2]);
-                    if best.is_none_or(|known| angle.abs() < known.abs()) { best = Some(angle); }
-                }
-            }
-        }
-        best
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Floor {
     pub pose: Pose,
     feet: Option<[Vec3; 2]>,
-    toward: Option<Vec3>,
-    area: Option<PlayArea>,
 }
 
 impl Floor {
     pub fn new(pose: Pose) -> Self {
-        Self { pose, feet: None, toward: None, area: None }
+        Self { pose, feet: None }
     }
 
-    pub fn step(&mut self, feet: Option<[Vec3; 2]>, area: Option<&PlayArea>, walking: bool, delta: f32) -> Pose {
-        if self.area.as_ref() != area {
-            self.feet = None;
-            self.toward = None;
-            self.area = area.copied();
-        }
+    pub fn step(&mut self, feet: Option<[Vec3; 2]>, walking: bool) -> Pose {
         let previous = self.feet;
-        self.feet = feet.filter(|_| area.is_some() && walking);
-        let (Some(feet), Some(area)) = (self.feet, area) else {
-            self.toward = None;
-            return self.pose;
-        };
-        let reach = feet.iter().map(|foot| length([foot[0], 0.0, foot[2]])).fold(0.0, f32::max);
-        let Some(previous) = previous else {
-            self.pose.t = area.clamp(self.pose.t, reach);
-            if let Some(angle) = area.turn(self.pose.t, self.pose.apply(feet[0])) {
-                self.pose = self.pose.yaw(angle);
-            }
-            return self.pose;
-        };
-        let support = usize::from(previous[1][1] + feet[1][1] < previous[0][1] + feet[0][1]);
-        let planted = self.pose.apply(previous[support]);
-        let forward = self.pose.axis(2);
-        if !area.contains(add(self.pose.t, scale(forward, reach * 2.0)), reach) && self.toward.is_none() {
-            let inward = sub(area.center(), self.pose.t);
-            if length(inward) > 1e-4 { self.toward = Some(normalize(inward)); }
-        }
-        let angle = self.toward.map_or(0.0, |toward| {
-            let angle = cross(forward, toward)[1].atan2(dot(forward, toward));
-            let step = std::f32::consts::PI * delta;
-            if angle.abs() <= step { self.toward = None; }
-            angle.clamp(-step, step)
-        });
-        let pivot = |angle: f32| {
-            let mut next = self.pose.yaw(angle);
-            next.t = sub(planted, next.rotate(feet[support]));
-            next.t[1] = 0.0;
-            next
-        };
-        let desired = pivot(angle);
-        if let Some(correction) = area.turn(planted, desired.apply(feet[1 - support])) {
-            self.pose = pivot(angle + correction);
+        self.feet = feet.filter(|_| walking);
+        if let (Some(previous), Some(feet)) = (previous, self.feet) {
+            let support = usize::from(previous[1][2] - feet[1][2] > previous[0][2] - feet[0][2]);
+            self.pose.t = add(self.pose.t, self.pose.rotate(sub(previous[support], feet[support])));
+            self.pose.t[1] = 0.0;
         }
         self.pose
     }
@@ -483,24 +381,18 @@ mod tests {
         feet
     }
 
-    fn area(size: f32, angle: f32) -> PlayArea {
-        let frame = turned(angle, [0.0; 3]);
-        PlayArea::new([[-size, 0.0, -size], [size, 0.0, -size], [size, 0.0, size], [-size, 0.0, size]].map(|p| frame.apply(p))).unwrap()
-    }
-
     #[test]
     fn walking_cancels_the_authored_support_foot_travel_at_any_scale_or_frame_rate() {
         for rate in [30, 90, 144] {
             for size in [0.6, 1.0, 1.5] {
                 let mut floor = Floor::new(turned(0.0, [0.0; 3]));
                 let mut previous = walking_feet(0.0).map(|f| scale(f, size));
-                let field = area(10.0, 0.0);
-                floor.step(Some(previous), Some(&field), true, 0.0);
+                floor.step(Some(previous), true);
                 for frame in 1..=rate {
                     let feet = walking_feet(frame as f32 / rate as f32).map(|f| scale(f, size));
-                    let support = usize::from(previous[1][1] + feet[1][1] < previous[0][1] + feet[0][1]);
+                    let support = usize::from(previous[1][2] - feet[1][2] > previous[0][2] - feet[0][2]);
                     let planted = floor.pose.apply(previous[support]);
-                    let next = floor.step(Some(feet), Some(&field), true, 1.0 / rate as f32);
+                    let next = floor.step(Some(feet), true);
                     let moved = sub(next.apply(feet[support]), planted);
                     assert!(length([moved[0], 0.0, moved[2]]) < 1e-5);
                     previous = feet;
@@ -511,93 +403,42 @@ mod tests {
     }
 
     #[test]
-    fn a_walking_puppet_turns_inside_the_rotated_play_area_without_sliding_its_support() {
-        for angle in [0.0, 0.7, 1.7] {
-            let field = area(0.5, angle);
-            let mut floor = Floor::new(turned(0.2, [0.0; 3]));
-            let mut previous = walking_feet(0.0);
-            floor.step(Some(previous), Some(&field), true, 0.0);
-            let mut turns = 0.0;
-            for frame in 1..=5400 {
-                let feet = walking_feet(frame as f32 / 90.0);
-                let support = usize::from(previous[1][1] + feet[1][1] < previous[0][1] + feet[0][1]);
-                let planted = floor.pose.apply(previous[support]);
-                let before = floor.pose.axis(2);
-                let next = floor.step(Some(feet), Some(&field), true, 1.0 / 90.0);
-                assert!(feet.iter().all(|&foot| field.contains(next.apply(foot), 0.0)), "frame {frame} at {angle}: {:?}", feet.map(|foot| next.apply(foot)));
-                let moved = sub(next.apply(feet[support]), planted);
-                assert!(length([moved[0], 0.0, moved[2]]) < 1e-5, "the planted foot skated at {frame}: {moved:?}");
-                turns += dot(before, next.axis(2)).clamp(-1.0, 1.0).acos();
-                previous = feet;
+    fn placement_and_resuming_a_step_preserve_any_chosen_position() {
+        for position in [[0.0; 3], [3.0, 0.0, -4.0]] {
+            let initial = turned(0.7, position);
+            let mut floor = Floor::new(initial);
+            for frame in 0..900 {
+                assert_eq!(floor.step(Some(walking_feet(frame as f32 / 90.0)), false), initial);
             }
-            assert!(turns > std::f32::consts::TAU);
+            assert_eq!(floor.step(Some(walking_feet(0.7)), true), initial);
+            for frame in 1..=900 {
+                let pose = floor.step(Some(walking_feet(0.7 + frame as f32 / 90.0)), true);
+                assert_eq!(pose.r, initial.r);
+            }
+            assert!(length(sub(floor.pose.t, initial.t)) > 9.0);
+            let stopped = floor.step(None, false);
+            assert_eq!(floor.step(Some(walking_feet(0.2)), true), stopped);
         }
     }
 
     #[test]
-    fn missing_bounds_and_nonwalking_clips_do_not_move_the_floor_pose() {
-        for bounds in [None, Some(area(0.5, 0.0))] {
-            let mut floor = Floor::new(turned(0.2, [0.0; 3]));
-            let initial = floor.pose;
-            for frame in 0..100 {
-                let feet = walking_feet(frame as f32 / 90.0);
-                assert_eq!(floor.step(Some(feet), bounds.as_ref(), false, 1.0 / 90.0), initial);
+    fn the_bundled_stride_moves_the_hips_forward_across_support_changes_and_cycle_seams() {
+        use crate::{motion::Clip, vrm::{Model, Fit}};
+        let model = Model::parse(include_bytes!("../golden/figure.vrm")).unwrap();
+        let fit = Fit::new(&model, &model.skinned().unwrap(), 1.67);
+        let clip = Clip::parse(include_bytes!("../motions/walk.json"), model.version, model.rest_hips()).unwrap();
+        for rate in [30, 90, 144] {
+            let mut floor = Floor::new(turned(0.0, [0.0; 3]));
+            let mut previous = None;
+            for frame in 0..rate * 10 {
+                let worlds = model.worlds(&model.pose(&clip.sample((frame as f32 / rate as f32) % clip.duration())));
+                let fitted = fit.placement(&model, &worlds, 0.0);
+                let feet = model.feet(&worlds).unwrap().map(|foot| fitted.transform_point3(foot).to_array());
+                let stand = floor.step(Some(feet), true);
+                let hips = (stand.mat4() * fitted * worlds[1]).w_axis.z;
+                if let Some(before) = previous { assert!(hips >= before - 1e-6, "rate {rate} frame {frame}: {before} -> {hips}"); }
+                previous = Some(hips);
             }
-        }
-    }
-
-    #[test]
-    fn a_resumed_walk_does_not_plant_a_foot_from_the_gesture() {
-        let bounds = area(0.5, 0.0);
-        let mut floor = Floor::new(turned(0.0, [0.0, 0.0, 0.4]));
-        let paused = [[-0.1, 0.0, 0.2], [0.1, 0.1, -0.2]];
-        floor.step(Some(paused), Some(&bounds), false, 0.01);
-        floor.pose.t[2] = 0.4;
-        floor.step(Some(paused), Some(&bounds), false, 0.01);
-        let resumed = [[-0.1, 0.0, 0.19], [0.1, 0.1, -0.19]];
-        let pose = floor.step(Some(resumed), Some(&bounds), true, 0.01);
-        assert!(resumed.iter().all(|&foot| bounds.contains(pose.apply(foot), 0.0)));
-    }
-
-    #[test]
-    fn initial_placement_turns_the_feet_to_fit_a_narrow_area() {
-        let bounds = PlayArea::new([[0.,0.,0.], [0.4,0.,0.], [0.4,0.,1.], [0.,0.,1.]]).unwrap();
-        let mut floor = Floor::new(turned(0.0, [0.2, 0.0, 0.5]));
-        let feet = [[-0.3, 0.0, 0.0], [0.3, 0.0, 0.0]];
-        let pose = floor.step(Some(feet), Some(&bounds), true, 0.01);
-        assert!(feet.iter().all(|&foot| bounds.contains(pose.apply(foot), 0.0)));
-    }
-
-    #[test]
-    fn a_changed_play_area_replants_the_feet_inside_its_new_bounds() {
-        let mut floor = Floor::new(turned(0.0, [3.0, 0.0, 4.0]));
-        for offset in [[0.0; 3], [5.0, 0.0, -3.0]] {
-            let mut bounds = area(0.5, 0.5);
-            bounds.frame.t = add(bounds.frame.t, offset);
-            for frame in 0..90 {
-                let feet = walking_feet(frame as f32 / 90.0);
-                let pose = floor.step(Some(feet), Some(&bounds), true, 1.0 / 90.0);
-                assert!(feet.iter().all(|&foot| bounds.contains(pose.apply(foot), 0.0)));
-            }
-        }
-    }
-
-    #[test]
-    fn an_edge_turn_finds_a_narrow_legal_heading_exactly() {
-        let area = area(0.5, 0.0);
-        let planted = [0.0657, 0.0, 0.0657];
-        let direction = (-134.0_f32).to_radians();
-        let swing = add(planted, [0.8 * direction.cos(), 0.0, 0.8 * direction.sin()]);
-        assert!(!area.contains(swing, 0.0));
-        let correction = area.turn(planted, swing).unwrap();
-        assert!((correction.abs().to_degrees() - 1.0).abs() < 0.01);
-        for heading in 0..360 {
-            let angle = (heading as f32).to_radians();
-            let swing = add(planted, [0.8 * angle.cos(), 0.0, 0.8 * angle.sin()]);
-            let correction = area.turn(planted, swing).unwrap();
-            let (s, c) = correction.sin_cos();
-            let from = sub(swing, planted);
-            assert!(area.contains(add(planted, [c * from[0] + s * from[2], 0.0, -s * from[0] + c * from[2]]), 0.0));
         }
     }
 

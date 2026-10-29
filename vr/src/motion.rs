@@ -165,7 +165,7 @@ pub struct Animator {
     clips: HashMap<String, Clip>,
     actions: Vec<Action>,
     loop_clip: Option<String>,
-    walking: bool,
+    grounded: bool,
     gesture: Option<String>,
     next_loop: f32,
     next_blink: f32,
@@ -181,7 +181,7 @@ pub struct Animator {
 
 impl Animator {
     pub fn new(clips: HashMap<String, Clip>, own: Vec<String>, random: Random) -> Animator {
-        let mut animator = Animator { clips, actions: Vec::new(), loop_clip: None, walking: false, gesture: None, next_loop: f32::INFINITY, next_blink: 1.2, blink_start: None, now: 0.0, random, own, mood: None, shown: None, faces: HashMap::new() };
+        let mut animator = Animator { clips, actions: Vec::new(), loop_clip: None, grounded: false, gesture: None, next_loop: f32::INFINITY, next_blink: 1.2, blink_start: None, now: 0.0, random, own, mood: None, shown: None, faces: HashMap::new() };
         animator.play_loop();
         animator
     }
@@ -197,11 +197,14 @@ impl Animator {
     }
 
     fn play_loop(&mut self) {
-        let available = self.variants(if self.walking { WALK } else { IDLE });
+        let step = self.grounded && self.clips.keys().any(|name| family(name) == WALK) && self.now >= self.next_loop && self.loop_clip.as_deref().is_none_or(|name| family(name) != WALK);
+        let available = self.variants(if step { WALK } else { IDLE });
         let choices: Vec<String> = available.iter().filter(|name| Some(name.as_str()) != self.loop_clip.as_deref()).cloned().collect();
         let name = self.pick(&choices).or(available.first().cloned());
-        self.next_loop = if available.len() > 1 { self.now + 7.0 + self.random.next() * 7.0 } else { f32::INFINITY };
-        self.play(name.as_deref(), IDLE_FADE, false);
+        self.next_loop = if self.grounded { self.now + 12.0 + self.random.next() * 12.0 } else if available.len() > 1 { self.now + 7.0 + self.random.next() * 7.0 } else { f32::INFINITY };
+        if name != self.loop_clip || self.gesture.is_some() {
+            self.play(name.as_deref(), IDLE_FADE, step);
+        }
         self.loop_clip = name;
         self.gesture = None;
         if self.random.next() < acting().own.chance {
@@ -210,10 +213,9 @@ impl Animator {
         }
     }
 
-    pub fn walk(&mut self, walking: bool) {
-        let walking = walking && self.clips.keys().any(|name| family(name) == WALK);
-        if self.walking == walking { return; }
-        self.walking = walking;
+    pub fn ground(&mut self, grounded: bool) {
+        if self.grounded == grounded { return; }
+        self.grounded = grounded;
         if self.gesture.is_none() { self.play_loop(); }
     }
 
@@ -270,7 +272,7 @@ impl Animator {
             }
         }
         self.actions.retain(|action| action.weight > 0.0 || action.fade.is_some());
-        let finished = self.gesture.is_some() && self.actions.last().is_some_and(|action| action.once && action.time >= self.clips[&action.clip].duration);
+        let finished = self.actions.last().is_some_and(|action| action.once && action.time >= self.clips[&action.clip].duration);
         let switched = finished || (self.gesture.is_none() && self.now >= self.next_loop);
         if switched {
             self.play_loop();
@@ -469,60 +471,45 @@ mod tests {
     }
 
     #[test]
-    fn walking_loops_and_fades_back_to_idle() {
-        let mut animator = animator(&["idle", "walk-2"]);
-        animator.walk(true);
-        animator.update(IDLE_FADE);
-        assert!(animator.walking());
-        assert_eq!(animator.loop_clip.as_deref(), Some("walk-2"));
-        for _ in 0..1000 { animator.update(0.05); }
-        assert_eq!(animator.actions.len(), 1);
-        assert!(animator.actions[0].time < 20.0);
-        animator.walk(false);
-        assert!(animator.walking(), "the outgoing walk still contributes to the feet");
-        animator.update(IDLE_FADE + 0.01);
+    fn ground_steps_once_between_long_standing_intervals() {
+        let clip = Clip::parse(include_bytes!("../motions/walk.json"), Version::One, Some(Vec3::Y)).unwrap();
+        let mut animator = animator(&["idle", "wave"]);
+        animator.clips.insert(WALK.to_owned(), clip);
+        animator.ground(true);
         assert!(!animator.walking());
-        assert_eq!(animator.loop_clip.as_deref(), Some("idle"));
+        assert!((12.0..=24.0).contains(&animator.next_loop));
+        let mut walking_frames = 0;
+        let mut starts = Vec::new();
+        let mut was_walking = false;
+        for frame in 0..9000 {
+            animator.update(1.0 / 90.0);
+            let walking = animator.walking();
+            if walking { walking_frames += 1; }
+            if walking && !was_walking { starts.push(frame as f32 / 90.0); }
+            was_walking = walking;
+        }
+        assert!((3..=8).contains(&starts.len()), "{starts:?}");
+        assert!(walking_frames < 9000 / 5, "mostly standing: {walking_frames}/9000");
+        assert!(starts.windows(2).all(|pair| pair[1] - pair[0] >= 12.0));
+        animator.ground(false);
+        animator.update(IDLE_FADE + 0.01);
+        for _ in 0..1000 { animator.update(0.05); assert!(!animator.walking()); }
     }
 
     #[test]
-    fn a_gesture_interrupts_walking_then_resumes_the_requested_loop() {
+    fn gestures_interrupt_a_step_and_return_to_standing() {
         let mut animator = animator(&["idle", "walk", "wave"]);
-        animator.walk(true);
+        animator.ground(true);
+        animator.update(25.0);
         animator.update(IDLE_FADE);
-        assert!(animator.gesture("wave"));
+        assert!(animator.walking());
+        animator.gesture("wave");
         animator.update(GESTURE_FADE);
         assert!(!animator.walking());
         animator.update(20.0);
         animator.update(IDLE_FADE);
-        assert!(animator.walking());
-        assert!(animator.gesture("wave"));
-        animator.walk(false);
-        animator.update(20.0);
-        animator.update(IDLE_FADE);
         assert!(!animator.walking());
         assert_eq!(animator.loop_clip.as_deref(), Some("idle"));
-    }
-
-    #[test]
-    fn without_a_walk_clip_the_idle_keeps_playing() {
-        let mut animator = animator(&["idle"]);
-        animator.walk(true);
-        animator.update(IDLE_FADE);
-        assert!(!animator.walking());
-        assert_eq!(animator.loop_clip.as_deref(), Some("idle"));
-    }
-
-    #[test]
-    fn stopping_without_an_idle_clip_returns_to_standing() {
-        let mut animator = animator(&["walk"]);
-        animator.walk(true);
-        animator.update(IDLE_FADE);
-        assert!(animator.walking());
-        animator.walk(false);
-        animator.update(IDLE_FADE);
-        assert!(!animator.walking());
-        assert!(animator.humanoid(&Humanoid::default(), None).rotations.is_empty());
     }
 
     #[test]

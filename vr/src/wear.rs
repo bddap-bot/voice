@@ -60,6 +60,8 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
         let mut played = Vec::new();
         let gpu_before = gpu_time();
         let mut clipped = 0;
+        let mut motion = Motion::default();
+        let mut constraints = Motion::default();
         let mut frame = |puppet: &mut crate::Puppet, pointing: &mut Pointing, stand: Pose, mouth: f32, picture: Option<&Path>| -> Result<(), String> {
             let started = Instant::now();
             let (posed, body, _) = puppet.step(FRAME.as_secs_f32(), |_, _| stand, 1.0, HEAD, mouth, pointing, started, |_| Some(TARGET));
@@ -70,6 +72,15 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
             renderer.render(&puppet.drawn, eyes, renderer.eye[0])?;
             work.push(started.elapsed());
             let kept = (work.len() % CLIP_EVERY == 1).then(|| clip.join(format!("{clipped:05}.png")));
+            if kept.is_some() {
+                for (node, name, rotation, position) in puppet.model.spring_motion(&posed) {
+                    let position = body.transform_point3(position);
+                    record_motion(&mut motion, node, name, rotation, position);
+                }
+                for (node, name, rotation, position) in puppet.model.constraint_motion(&posed, body) {
+                    record_motion(&mut constraints, node, name, rotation, position);
+                }
+            }
             if picture.is_some() || kept.is_some() {
                 let stereo = renderer.read()?;
                 for path in picture.into_iter().chain(kept.as_deref()) {
@@ -102,6 +113,8 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
         for at in 0..frames(POINT) {
             frame(&mut puppet, &mut pointing, HELD, speaking(at), (at == frames(POINT_PICTURE)).then(|| pictures.join("point.png")).as_deref())?;
         }
+        write_motion(motion, clipped, &pictures.join("spring-motion.json"))?;
+        write_motion(constraints, clipped, &pictures.join("constraint-motion.json"))?;
         let pointed = pointing.hand().map_or("no reach".to_owned(), |hand| format!("{hand:?} hand"));
         let gpu = gpu_before.zip(gpu_time()).map_or("not counted".to_owned(), |(before, after)| format!("{:.2} ms", (after - before) as f64 / 1e6 / work.len() as f64));
         let measured: Vec<f64> = work.iter().skip(45).map(|time| time.as_secs_f64() * 1e3).collect();
@@ -176,4 +189,19 @@ fn gpu_time() -> Option<u64> {
         clients.insert(client.trim().to_owned(), engines);
     }
     (!clients.is_empty()).then(|| clients.values().sum())
+}
+
+
+type Motion = std::collections::BTreeMap<usize, (String, glam::Quat, f32, glam::Vec3, glam::Vec3)>;
+
+fn record_motion(motion: &mut Motion, node: usize, name: String, rotation: glam::Quat, position: glam::Vec3) {
+    let entry = motion.entry(node).or_insert((name, rotation, 0.0, position, position));
+    entry.2 = entry.2.max(entry.1.angle_between(rotation));
+    entry.3 = entry.3.min(position);
+    entry.4 = entry.4.max(position);
+}
+
+fn write_motion(motion: Motion, samples: usize, path: &Path) -> Result<(), String> {
+    let rows: Vec<_> = motion.into_iter().map(|(node, (name, _, turn, min, max))| serde_json::json!({"node": node, "name": name, "maxTurnRad": turn, "worldMin": min.to_array(), "worldMax": max.to_array(), "samples": samples})).collect();
+    std::fs::write(path, serde_json::to_vec_pretty(&rows).map_err(|error| error.to_string())?).map_err(|error| error.to_string())
 }

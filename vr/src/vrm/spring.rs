@@ -149,6 +149,15 @@ impl Rig {
 }
 
 impl Model {
+    pub fn spring_motion(&self, worlds: &[Mat4]) -> Vec<(usize, String, Quat, Vec3)> {
+        self.rig.joints.iter().map(|joint| {
+            let node = &self.nodes[joint.node];
+            let parent = node.parent.map_or(Mat4::IDENTITY, |parent| worlds[parent]);
+            let local = parent.inverse() * worlds[joint.node];
+            (joint.node, node.name.clone().unwrap_or_default(), local.to_scale_rotation_translation().1, worlds[joint.node].w_axis.truncate())
+        }).collect()
+    }
+
     pub fn spring_joints(&self) -> usize {
         self.rig.joints.len()
     }
@@ -156,6 +165,7 @@ impl Model {
 
 #[derive(Clone, Copy)]
 struct Tail {
+    rotation: Quat,
     now: Vec3,
     before: Vec3,
 }
@@ -175,6 +185,14 @@ impl Springs {
         self.tails.clear();
     }
 
+    pub fn restore(&self, model: &Model, pose: &mut Pose) {
+        if !model.constraints.is_empty() {
+            for (joint, tail) in model.rig.joints.iter().zip(&self.tails) {
+                pose.rotations[joint.node] = tail.rotation;
+            }
+        }
+    }
+
     pub fn step(&mut self, model: &Model, pose: &mut Pose, model_to_world: Mat4, delta: f32) {
         let rig = &model.rig;
         if rig.joints.is_empty() {
@@ -191,7 +209,7 @@ impl Springs {
             .collect();
         let fresh = self.tails.len() != rig.joints.len();
         if fresh {
-            self.tails = vec![Tail { now: Vec3::ZERO, before: Vec3::ZERO }; rig.joints.len()];
+            self.tails = vec![Tail { now: Vec3::ZERO, before: Vec3::ZERO, rotation: Quat::IDENTITY }; rig.joints.len()];
         }
         for (joint, tail) in rig.joints.iter().zip(&mut self.tails) {
             let node = &model.nodes[joint.node];
@@ -200,7 +218,7 @@ impl Springs {
             let origin = initial.w_axis.truncate();
             let rest = initial.transform_point3(joint.tail);
             if fresh {
-                *tail = Tail { now: rest, before: rest };
+                *tail = Tail { now: rest, before: rest, rotation: node.rotation };
             } else if delta > 0.0 {
                 let Settings { stiffness, drag, gravity, radius } = joint.settings;
                 let length = (rest - origin).length();
@@ -223,10 +241,11 @@ impl Springs {
                         next = origin + (next - origin).normalize_or(axis) * length;
                     }
                 }
-                *tail = Tail { now: next, before: tail.now };
+                *tail = Tail { now: next, before: tail.now, rotation: tail.rotation };
             }
             let toward = initial.inverse().transform_point3(tail.now).normalize_or(joint.tail.normalize());
             pose.rotations[joint.node] = (node.rotation * Quat::from_rotation_arc(joint.tail.normalize(), toward)).normalize();
+            tail.rotation = pose.rotations[joint.node];
             worlds[joint.node] = parent * model.local(pose, joint.node);
             for &below in &joint.below {
                 worlds[below] = worlds[model.nodes[below].parent.expect("a node below a joint has a parent")] * model.local(pose, below);

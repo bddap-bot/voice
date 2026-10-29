@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use glam::{Mat4, Quat, Vec2, Vec3};
 use serde_json::Value;
 
+pub mod constraint;
 pub mod expressions;
 pub mod spring;
 
@@ -183,6 +184,7 @@ pub struct Model {
     look_at: LookAt,
     rest_turns: Vec<Quat>,
     rig: Rig,
+    constraints: Vec<constraint::Constraint>,
     pub program: Option<ObjectProgram>,
     /// Whether the object's parts spread apart when the pointer pushes deep into it.
     pub spreads: bool,
@@ -880,6 +882,7 @@ impl Model {
             humanoid.contains_key("leftEye") || humanoid.contains_key("rightEye")
         };
         let rig = Rig::parse(version, extensions, &nodes, &children);
+        let constraints = constraint::parse(extensions.get(constraint::EXTENSION), nodes.len())?;
         let program = match &extensions[PROGRAM] {
             Value::Null => None,
             program if object => {
@@ -896,7 +899,7 @@ impl Model {
         if let Some(menu) = &menu {
             menu.check(nodes.len(), &meshes)?;
         }
-        let mut model = Model { version, nodes, meshes, skins, materials, images, humanoid, expressions, own, look_at, rest_turns: Vec::new(), rig, program, spreads, menu };
+        let mut model = Model { version, nodes, meshes, skins, materials, images, humanoid, expressions, own, look_at, rest_turns: Vec::new(), rig, constraints, program, spreads, menu };
         for (side, direction) in [("left", Vec3::X), ("right", Vec3::NEG_X)] {
             let outward = model.facing() * direction;
             for (bone, child) in [("UpperArm", "LowerArm"), ("LowerArm", "Hand")] {

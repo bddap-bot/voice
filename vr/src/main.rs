@@ -117,6 +117,7 @@ struct Puppet {
     animator: Animator,
     gaze: Gaze,
     springs: Springs,
+    constraints: vrm::constraint::Constraints,
     drawn: Appearance,
     /// The vertices the last step's morph moved.
     changed: Vec<u32>,
@@ -149,7 +150,7 @@ fn load(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer, remembered:
     tracing::info!("appearance {} stands {height:.2} m full size", avatar.id);
     let drawn = renderer.appearance(&model, &skinned)?;
     let controller = model.menu.as_ref().map(|menu| Controller::new(menu, remembered));
-    Ok(Puppet { model, skinned, fit, full: height / HEIGHT, standing, animator: Animator::new(clips, own, Random::seeded()), gaze: Gaze::default(), springs: Springs::default(), drawn, changed: Vec::new(), controller })
+    Ok(Puppet { model, skinned, fit, full: height / HEIGHT, standing, animator: Animator::new(clips, own, Random::seeded()), gaze: Gaze::default(), springs: Springs::default(), constraints: vrm::constraint::Constraints::default(), drawn, changed: Vec::new(), controller })
 }
 
 impl Puppet {
@@ -184,6 +185,8 @@ impl Puppet {
         }
         self.model.express(&mut pose, "blink", self.animator.blink());
         self.model.express(&mut pose, "aa", mouth);
+        self.springs.restore(&self.model, &mut pose);
+        self.constraints.step(&self.model, &mut pose, body);
         self.springs.step(&self.model, &mut pose, body, delta);
         self.changed = self.skinned.morph(&pose.weights);
         self.changed.extend(retextured);
@@ -397,6 +400,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             board.reset();
             reveal.reset();
             puppet.springs.reset();
+            puppet.constraints.reset();
             std::thread::sleep(DORMANT_POLL);
             continue;
         };

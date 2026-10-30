@@ -2,7 +2,7 @@
 
 usage: publish-avatar.py NEW.vrm CATALOG.vrm [--drop PREFIX ...]
 
-Every node, morph target, material, spring joint, VRM expression and avatar expression part (parameter, layer, menu
+Every node, image, morph target, material, spring joint, VRM expression and avatar expression part (parameter, layer, menu
 control, material target, curve, shown node, mask) the catalog file carries must survive into the new one, or match a
 --drop prefix naming it as an intended removal. The replaced file stays beside the catalog in .previous/."""
 import argparse
@@ -28,6 +28,7 @@ def inventory(doc):
     out.update('extension:' + e for e in doc.get('extensionsUsed', []))
     out.update('node:' + n.get('name', '') for n in nodes)
     out.update('material:' + m.get('name', '') for m in doc.get('materials', []))
+    out['image'] += len(doc.get('images', []))
     for n in nodes:
         if 'mesh' not in n:
             continue

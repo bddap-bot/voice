@@ -594,7 +594,7 @@ mod tests {
     #[test]
     fn a_floor_puppet_walks_back_into_the_band_in_view_and_settles_facing_the_headset() {
         for yaw in [0.0, 2.0, -2.6] {
-            let head = headset(yaw, -0.3, [0.4, 1.6, -0.2]);
+            let head = headset(yaw, 0.3, [0.4, 1.6, -0.2]);
             for (start, facing) in [([0.4, 0.0, -4.0], 0.0), ([0.4, 0.0, 3.5], 0.0), ([3.0, 0.0, 2.5], 1.0), ([-5.0, 0.0, -0.2], 3.0), ([0.5, 0.0, -0.1], 2.0)] {
                 let mut floor = Floor::new(turned(facing, start), Random(7));
                 let poses = walk_for(&mut floor, |_| head, 40.0);

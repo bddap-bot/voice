@@ -71,6 +71,7 @@ struct Node {
     mesh: Option<usize>,
     skin: Option<usize>,
     name: Option<String>,
+    hidden: bool,
 }
 
 struct Skin {
@@ -701,7 +702,7 @@ impl Model {
                     Some(matrix) => Mat4::from_cols_array(&floats(matrix, Mat4::IDENTITY.to_cols_array())).to_scale_rotation_translation(),
                     None => (Vec3::from(floats(&node["scale"], [1.0; 3])), Quat::from_array(floats(&node["rotation"], [0.0, 0.0, 0.0, 1.0])), Vec3::from(floats(&node["translation"], [0.0; 3]))),
                 };
-                Node { parent: None, translation, rotation, scale, mesh: index(&node["mesh"]), skin: index(&node["skin"]), name: node["name"].as_str().map(str::to_owned) }
+                Node { parent: None, translation, rotation, scale, mesh: index(&node["mesh"]), skin: index(&node["skin"]), name: node["name"].as_str().map(str::to_owned), hidden: node["extensions"]["KHR_node_visibility"]["visible"] == false }
             })
             .collect();
         let mut children = vec![Vec::new(); nodes.len()];
@@ -1136,8 +1137,21 @@ impl Model {
         let switched: std::collections::HashSet<usize> = self.menu.iter().flat_map(Expressions::switched).collect();
         let mut spans = HashMap::new();
         let mut skinned_at = HashMap::new();
+        // The menu decides what it switches; the file's default visibility decides the rest, inherited from ancestors.
+        let hidden = |mut node: usize| loop {
+            if self.nodes[node].hidden {
+                break true;
+            }
+            match self.nodes[node].parent {
+                Some(parent) => node = parent,
+                None => break false,
+            }
+        };
         for (node, entry) in self.nodes.iter().enumerate() {
             let Some(mesh_index) = entry.mesh else { continue };
+            if !switched.contains(&node) && hidden(node) {
+                continue;
+            }
             let mesh = &self.meshes[mesh_index];
             let start = vertices.len();
             let own = palette_index(joints.len())?;
@@ -1807,6 +1821,36 @@ pub mod tests {
         assert_eq!(bounds(&skinned.positions(&palette, &hidden)).1.y, 1.0);
         let shown = menu.apply(&[1.0], &mut pose);
         assert_eq!(bounds(&skinned.positions(&palette, &shown)).1.y, 200.0);
+    }
+
+    #[test]
+    fn nodes_the_file_hides_are_not_drawn_unless_the_menu_switches_them() {
+        let mut builder = Builder::new(serde_json::json!({
+            "VRMC_vrm": {"humanoid": {"humanBones": {}}},
+            "VRCHAT_expressions": {
+                "menu": [], "parameters": [], "layers": [], "clips": [],
+                "targets": [{"effect": "switch", "default": 0}],
+                "shown": [{"node": 3, "when": [[0, 1]]}]
+            }
+        }));
+        let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        let hidden = serde_json::json!({"KHR_node_visibility": {"visible": false}});
+        builder.set("nodes", serde_json::json!([
+            {"mesh": 0, "extensions": {"KHR_node_visibility": {"visible": true}}},
+            {"mesh": 0, "translation": [0, 10, 0], "extensions": hidden, "children": [2]},
+            {"mesh": 0, "translation": [0, 10, 0]},
+            {"mesh": 0, "translation": [0, 100, 0], "extensions": hidden}
+        ]));
+        builder.set("meshes", serde_json::json!([{"primitives": [{"attributes": {"POSITION": position}}]}]));
+        let model = Model::parse(&builder.glb()).unwrap();
+        let skinned = model.skinned().unwrap();
+        assert_eq!(skinned.spans.keys().copied().collect::<HashSet<_>>(), HashSet::from([0, 3]), "a hidden node and its child are not drawn");
+        assert_eq!(skinned.draws.iter().filter_map(|draw| draw.switched).collect::<Vec<_>>(), vec![3]);
+        let mut pose = model.rest();
+        let menu = model.menu.as_ref().unwrap();
+        let palette = skinned.palette(&model.worlds(&pose), Mat4::IDENTITY);
+        assert_eq!(bounds(&skinned.positions(&palette, &menu.apply(&[0.0], &mut pose))).1.y, 1.0);
+        assert_eq!(bounds(&skinned.positions(&palette, &menu.apply(&[1.0], &mut pose))).1.y, 101.0, "the menu still shows what the file hides");
     }
 
     #[test]

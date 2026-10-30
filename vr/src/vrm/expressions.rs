@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use super::Image;
@@ -264,6 +265,30 @@ pub struct Decal {
     pub intensity: bool,
 }
 
+/// One component of a node's Unity local rotation: of `rest` read as localEulerAngles in degrees when it has three, a quaternion when four.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Rotation {
+    pub node: usize,
+    pub axis: usize,
+    pub rest: Vec<f32>,
+}
+
+impl Rotation {
+    fn unity(&self, components: &[f32]) -> Quat {
+        match *components {
+            [x, y, z] => Quat::from_rotation_y(y.to_radians()) * Quat::from_rotation_x(x.to_radians()) * Quat::from_rotation_z(z.to_radians()),
+            [x, y, z, w] => Quat::from_xyzw(x, y, z, w).normalize(),
+            _ => Quat::IDENTITY,
+        }
+    }
+
+    /// The turn of the node's glTF local rotation that takes it from `rest` to `components`.
+    fn turn(&self, components: &[f32]) -> Quat {
+        let delta = self.unity(&self.rest).inverse() * self.unity(components);
+        Quat::from_xyzw(delta.x, -delta.y, -delta.z, delta.w).normalize()
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum Effect {
@@ -274,6 +299,9 @@ pub enum Effect {
     Decal(Vec<Decal>),
     Morph(Vec<[usize; 2]>),
     Scale { node: usize, axis: usize },
+    Rotation(Rotation),
+    Translation { node: usize, direction: [f32; 3] },
+    Spring(Vec<usize>),
     Material { node: usize, choices: Vec<[f32; 4]> },
 }
 
@@ -384,6 +412,10 @@ impl Expressions {
             Effect::Decal(regions) => regions.iter().all(|region| region.node < nodes && region.slot < self.decals.len() && region.rect.iter().all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
             Effect::Morph(binds) => binds.iter().all(|&[mesh, morph]| meshes.get(mesh).is_some_and(|mesh| morph < mesh.weights.len())),
             Effect::Scale { node, axis } => *node < nodes && *axis < 3,
+            Effect::Rotation(rotation) => rotation.node < nodes && matches!(rotation.rest.len(), 3 | 4) && rotation.axis < rotation.rest.len() && rotation.rest.iter().all(|v| v.is_finite())
+                && self.targets.iter().all(|other| !matches!(&other.effect, Effect::Rotation(other) if other.node == rotation.node && other.rest != rotation.rest)),
+            Effect::Translation { node, direction } => *node < nodes && direction.iter().all(|v| v.is_finite()),
+            Effect::Spring(joints) => joints.iter().all(|&joint| joint < nodes),
             Effect::Material { node, choices } => *node < nodes && !choices.is_empty(),
         });
         if !fits || self.shown.iter().any(|shown| shown.node >= nodes) {
@@ -403,7 +435,16 @@ impl Expressions {
         })
     }
 
+    /// The spring joints whose PhysBone the values disable: held at the pose's rotation rather than simulated.
+    pub fn stilled(&self, values: &[f32]) -> HashSet<usize> {
+        self.targets.iter().zip(values).filter_map(|(target, &value)| match &target.effect {
+            Effect::Spring(joints) if value < 0.5 => Some(joints),
+            _ => None,
+        }).flatten().copied().collect()
+    }
+
     pub fn apply(&self, values: &[f32], pose: &mut super::Pose) -> HashSet<usize> {
+        let mut turned: HashMap<usize, (&Rotation, Vec<f32>)> = HashMap::new();
         for (target, &value) in self.targets.iter().zip(values) {
             match &target.effect {
                 Effect::Switch => {}
@@ -413,8 +454,13 @@ impl Expressions {
                     }
                 }
                 Effect::Scale { node, axis } => pose.scales[*node][*axis] *= value,
-                Effect::Material { .. } | Effect::Hue(_) | Effect::Color(_) | Effect::Tone(_) | Effect::Decal(_) => {}
+                Effect::Rotation(rotation) => turned.entry(rotation.node).or_insert_with(|| (rotation, rotation.rest.clone())).1[rotation.axis] = value,
+                Effect::Translation { node, direction } => pose.translations[*node] += value * Vec3::from(*direction),
+                Effect::Material { .. } | Effect::Hue(_) | Effect::Color(_) | Effect::Tone(_) | Effect::Decal(_) | Effect::Spring(_) => {}
             }
+        }
+        for (node, (rotation, components)) in turned {
+            pose.rotations[node] = (pose.rotations[node] * rotation.turn(&components)).normalize();
         }
         self.shown.iter().filter(|shown| shown.when.iter().any(|&(target, value)| (values[target] - value).abs() >= 0.5)).map(|shown| shown.node).collect()
     }
@@ -878,4 +924,102 @@ mod tests {
         }
     }
 
+    fn effects(targets: serde_json::Value) -> Expressions {
+        Expressions::parse(&serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": targets})).unwrap()
+    }
+
+    fn unposed(nodes: usize) -> super::super::Pose {
+        super::super::Pose { rotations: vec![Quat::IDENTITY; nodes], translations: vec![Vec3::ZERO; nodes], scales: vec![Vec3::ONE; nodes], weights: Vec::new() }
+    }
+
+    fn euler(axes: &[usize]) -> Expressions {
+        effects(serde_json::Value::Array(axes.iter().map(|&axis| serde_json::json!({"effect": {"rotation": {"node": 0, "axis": axis, "rest": [0, 0, 0]}}})).collect()))
+    }
+
+    #[test]
+    fn rotation_translation_and_spring_effects_parse() {
+        let expressions = effects(serde_json::json!([
+            {"effect": {"rotation": {"node": 1, "axis": 2, "rest": [10, 20, 30]}}, "default": 30},
+            {"effect": {"rotation": {"node": 2, "axis": 3, "rest": [0, 0, 0, 1]}}, "default": 1},
+            {"effect": {"translation": {"node": 1, "direction": [0, 0, -0.01]}}},
+            {"effect": {"spring": [3, 4]}, "default": 1}
+        ]));
+        let effects: Vec<_> = expressions.targets.iter().map(|target| target.effect.clone()).collect();
+        assert_eq!(effects, [
+            Effect::Rotation(Rotation { node: 1, axis: 2, rest: vec![10.0, 20.0, 30.0] }),
+            Effect::Rotation(Rotation { node: 2, axis: 3, rest: vec![0.0, 0.0, 0.0, 1.0] }),
+            Effect::Translation { node: 1, direction: [0.0, 0.0, -0.01] },
+            Effect::Spring(vec![3, 4]),
+        ]);
+        let defaults: Vec<f32> = expressions.targets.iter().map(|target| target.default).collect();
+        assert_eq!(defaults, [30.0, 1.0, 0.0, 1.0]);
+        assert!(expressions.check(5, &[]).is_ok());
+        assert!(expressions.check(4, &[]).is_err(), "a spring joint past the nodes");
+    }
+
+    #[test]
+    fn a_rotation_naming_a_bad_axis_or_two_rests_for_one_node_is_refused() {
+        let refused = |targets: serde_json::Value| effects(targets).check(3, &[]).is_err();
+        assert!(refused(serde_json::json!([{"effect": {"rotation": {"node": 0, "axis": 3, "rest": [0, 0, 0]}}}])));
+        assert!(refused(serde_json::json!([{"effect": {"rotation": {"node": 0, "axis": 0, "rest": [0, 0]}}}])));
+        assert!(refused(serde_json::json!([{"effect": {"rotation": {"node": 0, "axis": 0, "rest": [0, 0, 0]}}}, {"effect": {"rotation": {"node": 0, "axis": 1, "rest": [0, 5, 0]}}}])));
+        assert!(!refused(serde_json::json!([{"effect": {"rotation": {"node": 0, "axis": 0, "rest": [0, 5, 0]}}}, {"effect": {"rotation": {"node": 0, "axis": 1, "rest": [0, 5, 0]}}}])));
+    }
+
+    #[test]
+    fn unity_euler_angles_turn_about_z_then_x_then_y_and_mirror_into_gltf() {
+        let turned = |axes: &[usize], values: &[f32]| {
+            let mut pose = unposed(1);
+            euler(axes).apply(values, &mut pose);
+            pose.rotations[0]
+        };
+        let quarter = std::f32::consts::FRAC_PI_2;
+        assert!(turned(&[0], &[90.0]).abs_diff_eq(Quat::from_rotation_x(quarter), 1e-6), "a turn about x keeps its sign");
+        assert!(turned(&[1], &[90.0]).abs_diff_eq(Quat::from_rotation_y(-quarter), 1e-6), "about y it flips");
+        assert!(turned(&[2], &[90.0]).abs_diff_eq(Quat::from_rotation_z(-quarter), 1e-6), "about z it flips");
+        let both = turned(&[0, 2], &[90.0, 90.0]);
+        assert!((both * Vec3::X).abs_diff_eq(Vec3::NEG_Z, 1e-6), "z first, then x: {}", both * Vec3::X);
+        let all = turned(&[0, 1, 2], &[30.0, 40.0, 50.0]);
+        let expected = Quat::from_rotation_y(-40f32.to_radians()) * Quat::from_rotation_x(30f32.to_radians()) * Quat::from_rotation_z(-50f32.to_radians());
+        assert!(all.abs_diff_eq(expected, 1e-6), "{all} vs {expected}");
+    }
+
+    #[test]
+    fn a_rotation_at_its_default_leaves_the_pose_and_a_turn_composes_after_it() {
+        let expressions = effects(serde_json::json!([
+            {"effect": {"rotation": {"node": 0, "axis": 0, "rest": [10, 20, 30]}}, "default": 10},
+            {"effect": {"rotation": {"node": 0, "axis": 1, "rest": [10, 20, 30]}}, "default": 20},
+            {"effect": {"rotation": {"node": 1, "axis": 0, "rest": [0.1, 0.2, 0.3, 0.9]}}, "default": 0.1},
+            {"effect": {"rotation": {"node": 2, "axis": 0, "rest": [0, 0, 0]}}}
+        ]));
+        let held = Quat::from_rotation_z(0.3);
+        let mut pose = unposed(3);
+        pose.rotations = vec![held; 3];
+        let defaults: Vec<f32> = expressions.targets.iter().map(|target| target.default).collect();
+        expressions.apply(&defaults, &mut pose);
+        assert!(pose.rotations.iter().all(|rotation| rotation.abs_diff_eq(held, 1e-6)), "{:?}", pose.rotations);
+        let mut pose = unposed(3);
+        pose.rotations = vec![held; 3];
+        expressions.apply(&[10.0, 20.0, 0.1, 90.0], &mut pose);
+        let turn = held.inverse() * pose.rotations[2];
+        assert!(turn.abs_diff_eq(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2), 1e-6), "the turn applies in the node's own frame, after its pose: {turn}");
+    }
+
+    #[test]
+    fn a_translation_moves_its_node_by_the_value_along_its_direction() {
+        let expressions = effects(serde_json::json!([{"effect": {"translation": {"node": 1, "direction": [0, 0.5, -0.01]}}}]));
+        let mut pose = unposed(2);
+        pose.translations[1] = Vec3::new(1.0, 2.0, 3.0);
+        expressions.apply(&[4.0], &mut pose);
+        assert!(pose.translations[1].abs_diff_eq(Vec3::new(1.0, 4.0, 2.96), 1e-6));
+        assert_eq!(pose.translations[0], Vec3::ZERO);
+    }
+
+    #[test]
+    fn a_spring_below_one_half_stills_its_joints() {
+        let expressions = effects(serde_json::json!([{"effect": {"spring": [3, 4]}, "default": 1}, {"effect": {"spring": [5]}, "default": 1}]));
+        assert_eq!(expressions.stilled(&[1.0, 1.0]), HashSet::new());
+        assert_eq!(expressions.stilled(&[0.0, 1.0]), HashSet::from([3, 4]));
+        assert_eq!(expressions.stilled(&[0.0, 0.4]), HashSet::from([3, 4, 5]));
+    }
 }

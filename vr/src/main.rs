@@ -208,9 +208,11 @@ impl Puppet {
         }
         let mut pose = self.model.pose(&self.animator.humanoid(&self.standing, self.model.rest_hips()));
         let mut retextured = Vec::new();
+        let mut stilled = HashSet::new();
         if let (Some(menu), Some(controller)) = (&self.model.menu, &mut self.controller) {
             let values = controller.step(menu, delta);
             self.drawn.hidden = menu.apply(&values, &mut pose);
+            stilled = menu.stilled(&values);
             self.skinned.surface_values(menu, &values);
             for (node, moved) in menu.materials(&values) {
                 retextured.extend(self.skinned.retexture(node, moved));
@@ -234,9 +236,9 @@ impl Puppet {
         }
         self.model.express(&mut pose, "blink", self.animator.blink());
         self.model.express(&mut pose, "aa", mouth);
-        self.springs.restore(&self.model, &mut pose);
+        self.springs.restore(&self.model, &mut pose, &stilled);
         self.constraints.step(&self.model, &mut pose, body);
-        self.springs.step(&self.model, &mut pose, body, hands, delta);
+        self.springs.step(&self.model, &mut pose, body, hands, delta, &stilled);
         self.changed = self.skinned.morph(&pose.weights);
         self.changed.extend(retextured);
         (self.model.worlds(&pose), body, stand)

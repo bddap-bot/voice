@@ -175,10 +175,11 @@ fn posed(puppet: &mut Puppet, head: [f32; 3], settle: usize) -> [Option<glam::Ma
     [-0.032, 0.032].map(|x| eye_projection([eye[0] + x, eye[1], eye[2]].into(), QUAD / 2.0, QUAD / 2.0))
 }
 
-/// Frames of a fingertip pressing each named radial near its start, sliding along it to its end and drawing back, off any
-/// headset: the avatar in a file as the overlay draws it on the left, the board with the tip's dot on the right.
+/// Frames of each named control worked off any headset: the avatar in a file as the overlay draws it on the left, the board with the
+/// tip's dot on the right. A fingertip presses a radial near its start, slides along it to its end and draws back; a toggle or button
+/// is off, then on, then off again in real time while the figure sways side to side, so what springs on it swings or holds still.
 pub fn sweep(args: &[String]) -> Result<(), String> {
-    let usage = "usage: voice-vr sweep <out-dir> <avatar.vrm> <radial name>...";
+    let usage = "usage: voice-vr sweep <out-dir> <avatar.vrm> <radial, toggle or button name>...";
     let [out, file, names @ ..] = args else { return Err(usage.into()) };
     if names.is_empty() { return Err(usage.into()); }
     let gpu = std::rc::Rc::new(Gpu::new(None)?);
@@ -189,7 +190,7 @@ pub fn sweep(args: &[String]) -> Result<(), String> {
     let menu = puppet.model.menu.clone().ok_or("the avatar has no menu")?;
     let head = [0.0, -FLOOR + 0.12, 0.5];
     for name in names {
-        let path = find(&menu.menu, name).ok_or(format!("no radial named {name}"))?;
+        let path = find(&menu.menu, name).ok_or(format!("no radial, toggle or button named {name}"))?;
         let frames = PathBuf::from(out).join(name.replace('/', "-"));
         std::fs::create_dir_all(&frames).map_err(|error| format!("{}: {error}", frames.display()))?;
         let mut board = Board::new(1, 0);
@@ -199,6 +200,12 @@ pub fn sweep(args: &[String]) -> Result<(), String> {
             board.control(at);
         }
         let index = *path.last().unwrap();
+        let control = board.control(index).ok_or("the control left the page")?;
+        if control.kind != Kind::Radial {
+            worked(&mut puppet, &control, &mut board, index, &mut renderer, head, &frames)?;
+            println!("{name}: {}", frames.display());
+            continue;
+        }
         let mut tips: Vec<(f32, f32)> = (0..10).map(|step| (0.05, 0.05 - 0.005 * step as f32)).collect();
         tips.extend((0..=SWEEP).map(|step| (0.05 + 0.9 * step as f32 / SWEEP as f32, -0.01)));
         tips.extend((0..10).map(|step| (0.95, -0.01 + 0.006 * step as f32)));
@@ -228,10 +235,43 @@ pub fn sweep(args: &[String]) -> Result<(), String> {
 }
 
 const SWEEP: usize = 120;
+const CLOCK: f32 = 1.0 / 30.0;
+/// Seconds off, on and off again.
+const WORKED: [f32; 3] = [1.5, 3.0, 1.5];
+const SWAY: f32 = 0.05;
+const SWAY_PERIOD: f32 = 1.2;
+
+/// Steps the puppet as the overlay does, a frame each `CLOCK`, through a toggle or button turned off, on and off again.
+fn worked(puppet: &mut Puppet, control: &Control, board: &mut Board, index: usize, renderer: &mut Renderer, head: [f32; 3], frames: &Path) -> Result<(), String> {
+    let [x, y] = board.spot(index, [0.5, 0.5]).ok_or("the control left the page")?;
+    let [off, on, _] = WORKED.map(|seconds| (seconds / CLOCK).round() as usize);
+    let mut pointing = crate::point::Pointing::default();
+    puppet.springs.reset();
+    for number in 0..(WORKED.iter().sum::<f32>() / CLOCK).round() as usize {
+        let controller = puppet.controller.as_mut().unwrap();
+        let pressed = number == off || number == off + on;
+        if pressed && (control.kind == Kind::Toggle || number == off) {
+            operate(controller, control, [0.5, 0.5]);
+        } else if pressed {
+            controller.set(&control.parameter, 0.0);
+        }
+        board.set_values(puppet.settings());
+        let sway = SWAY * (std::f32::consts::TAU * number as f32 * CLOCK / SWAY_PERIOD).sin();
+        let stand = Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [sway, 0.0, 0.0]);
+        let (worlds, body, _) = puppet.step(CLOCK, |_, _| stand, 1.0, head, &[], 0.0, &mut pointing, std::time::Instant::now(), |_| None);
+        let local = facing(stand.apply([0.0, -FLOOR, 0.0]), head).inverse();
+        puppet.draw(&worlds, local.mat4() * body);
+        let eye = local.apply(head);
+        let eyes = [-0.032, 0.032].map(|x| eye_projection([eye[0] + x, eye[1], eye[2]].into(), QUAD / 2.0, QUAD / 2.0));
+        renderer.render(&puppet.drawn, eyes, glam::Mat4::IDENTITY, renderer.eye[0])?;
+        frame(&left(renderer)?, &board.picture(), board.pixel_of([x, y]), pressed, &frames.join(format!("{number:04}.png")))?;
+    }
+    Ok(())
+}
 
 fn find(controls: &[Control], name: &str) -> Option<Vec<usize>> {
     controls.iter().enumerate().find_map(|(at, control)| match control.kind {
-        Kind::Radial if control.name == name => Some(vec![at]),
+        Kind::Radial | Kind::Toggle | Kind::Button if control.name == name => Some(vec![at]),
         Kind::Submenu => find(&control.controls, name).map(|mut path| { path.insert(0, at); path }),
         _ => None,
     })

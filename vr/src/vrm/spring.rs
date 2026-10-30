@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use glam::{Mat4, Quat, Vec3};
 use serde_json::Value;
 
@@ -306,15 +308,16 @@ impl Springs {
         self.tails.clear();
     }
 
-    pub fn restore(&self, model: &Model, pose: &mut Pose) {
+    pub fn restore(&self, model: &Model, pose: &mut Pose, stilled: &HashSet<usize>) {
         if !model.constraints.is_empty() {
-            for (joint, tail) in model.rig.joints.iter().zip(&self.tails) {
+            for (joint, tail) in model.rig.joints.iter().zip(&self.tails).filter(|(joint, _)| !stilled.contains(&joint.node)) {
                 pose.rotations[joint.node] = tail.rotation;
             }
         }
     }
 
-    pub fn step(&mut self, model: &Model, pose: &mut Pose, model_to_world: Mat4, hands: &[Hand], delta: f32) {
+    /// Swings each joint but the `stilled`, which keep the pose's rotation and carry their tails along so they set off from it.
+    pub fn step(&mut self, model: &Model, pose: &mut Pose, model_to_world: Mat4, hands: &[Hand], delta: f32, stilled: &HashSet<usize>) {
         let rig = &model.rig;
         if rig.joints.is_empty() {
             return;
@@ -343,9 +346,14 @@ impl Springs {
             let initial = parent * Mat4::from_scale_rotation_translation(node.scale, node.rotation, pose.translations[joint.node]);
             let origin = initial.w_axis.truncate();
             let rest = initial.transform_point3(joint.tail);
+            let still = stilled.contains(&joint.node);
             if fresh {
                 *tail = Tail { now: rest, before: rest, held: joint.tail, rotation: node.rotation };
-            } else if delta > 0.0 {
+            }
+            if still {
+                let now = (parent * model.local(pose, joint.node)).transform_point3(joint.tail);
+                *tail = Tail { now, before: tail.now, held: tail.held, rotation: pose.rotations[joint.node] };
+            } else if !fresh && delta > 0.0 {
                 let Settings { stiffness, drag, gravity, radius, limit } = joint.settings;
                 let length = (rest - origin).length();
                 let axis = initial.transform_vector3(joint.tail).normalize();
@@ -368,9 +376,11 @@ impl Springs {
                 *tail = Tail { now: next, before: tail.now, held: tail.held, rotation: tail.rotation };
             }
             tail.held = initial.inverse().transform_point3(tail.now);
-            let toward = tail.held.normalize_or(joint.tail.normalize());
-            pose.rotations[joint.node] = (node.rotation * Quat::from_rotation_arc(joint.tail.normalize(), toward)).normalize();
-            tail.rotation = pose.rotations[joint.node];
+            if !still {
+                let toward = tail.held.normalize_or(joint.tail.normalize());
+                pose.rotations[joint.node] = (node.rotation * Quat::from_rotation_arc(joint.tail.normalize(), toward)).normalize();
+                tail.rotation = pose.rotations[joint.node];
+            }
             worlds[joint.node] = parent * model.local(pose, joint.node);
             for &below in &joint.below {
                 worlds[below] = worlds[model.nodes[below].parent.expect("a node below a joint has a parent")] * model.local(pose, below);
@@ -417,7 +427,7 @@ mod tests {
         let mut time = from;
         while time < to {
             let mut pose = model.rest();
-            springs.step(model, &mut pose, anchor(time), &[], STEP);
+            springs.step(model, &mut pose, anchor(time), &[], STEP, &HashSet::new());
             trace.push((time, anchor(time).inverse().transform_point3(tip(model, &pose, anchor(time)))));
             time += STEP;
         }
@@ -515,6 +525,36 @@ mod tests {
     }
 
     #[test]
+    fn a_stilled_strand_holds_the_pose_while_swayed_and_sets_off_from_it_when_freed() {
+        let model = hair(1.0, 0.0);
+        let swaying = |time: f32| Mat4::from_translation(Vec3::new(0.1 * (6.0 * time).sin(), 0.0, 0.0)) * Mat4::from_scale(Vec3::splat(0.2));
+        let posed = || {
+            let mut pose = model.rest();
+            pose.rotations[2] = model.nodes[2].rotation * Quat::from_rotation_x(0.5);
+            pose
+        };
+        let held = model.worlds(&posed())[4].w_axis.truncate();
+        let rest = model.worlds(&model.rest())[4].w_axis.truncate();
+        let mut springs = Springs::default();
+        let mut tips = Vec::new();
+        for frame in 0..270 {
+            let stilled: HashSet<usize> = if (90..180).contains(&frame) { HashSet::from([2, 3, 4]) } else { HashSet::new() };
+            let mut pose = posed();
+            springs.step(&model, &mut pose, swaying(frame as f32 / 90.0), &[], 1.0 / 90.0, &stilled);
+            if !stilled.is_empty() {
+                assert_eq!(pose.rotations, posed().rotations, "frame {frame}");
+            }
+            tips.push(model.worlds(&pose)[4].w_axis.truncate());
+        }
+        let swing = tips[..90].iter().map(|tip| tip.distance(rest)).fold(0.0f32, f32::max);
+        assert!(swing > 0.01, "free, the strand swings as the figure sways: {swing}");
+        assert!(tips[90..180].iter().all(|tip| tip.abs_diff_eq(held, 1e-5)), "stilled, it holds the pose however the figure sways");
+        let jump = tips[180].distance(tips[179]);
+        assert!(jump < 0.005, "freed, it sets off from the held pose without a fling: {jump}");
+        assert!(tips[269].distance(rest) < tips[180].distance(rest), "and swings back toward rest");
+    }
+
+    #[test]
     fn a_reset_puts_the_hair_back_at_rest_wherever_the_anchor_jumped() {
         let model = hair(1.0, 0.0);
         let mut springs = Springs::default();
@@ -532,7 +572,7 @@ mod tests {
             let mut springs = Springs::default();
             run(&model, &mut springs, |_| Mat4::IDENTITY, 0.0, 3.0);
             let mut pose = model.rest();
-            springs.step(&model, &mut pose, Mat4::IDENTITY, &[], 1.0 / 90.0);
+            springs.step(&model, &mut pose, Mat4::IDENTITY, &[], 1.0 / 90.0, &HashSet::new());
             model.worlds(&pose)[3].w_axis.truncate()
         };
         let free = hanging(serde_json::json!([{ "node": 1, "colliders": [] }]));
@@ -560,7 +600,7 @@ mod tests {
         let mut springs = Springs::default();
         run(&model, &mut springs, |_| Mat4::IDENTITY, 0.0, 3.0);
         let mut pose = model.rest();
-        springs.step(&model, &mut pose, Mat4::IDENTITY, &[], 1.0 / 90.0);
+        springs.step(&model, &mut pose, Mat4::IDENTITY, &[], 1.0 / 90.0, &HashSet::new());
         let worlds = model.worlds(&pose);
         (3..6).map(|node| worlds[node].w_axis.truncate()).collect()
     }
@@ -647,7 +687,7 @@ mod tests {
         let mut springs = Springs::default();
         run(&model, &mut springs, |_| Mat4::IDENTITY, 0.0, 3.0);
         let mut pose = model.rest();
-        springs.step(&model, &mut pose, Mat4::IDENTITY, &[], 1.0 / 90.0);
+        springs.step(&model, &mut pose, Mat4::IDENTITY, &[], 1.0 / 90.0, &HashSet::new());
         let end = model.worlds(&pose)[5].w_axis.truncate();
         assert!(end.abs_diff_eq(Vec3::new(0.0, 0.6, 0.0), 2e-3), "{end}");
     }
@@ -663,7 +703,7 @@ mod tests {
         let mut springs = Springs::default();
         run(&model, &mut springs, |_| Mat4::IDENTITY, 0.0, 3.0);
         let mut pose = model.rest();
-        springs.step(&model, &mut pose, Mat4::IDENTITY, &[], 1.0 / 90.0);
+        springs.step(&model, &mut pose, Mat4::IDENTITY, &[], 1.0 / 90.0, &HashSet::new());
         let end = model.worlds(&pose)[3].w_axis.truncate();
         assert!(end.abs_diff_eq(Vec3::new(0.0, 0.9, 0.1), 2e-3), "{end}");
     }
@@ -680,7 +720,7 @@ mod tests {
         let mut pose = model.rest();
         for _ in 0..90 {
             pose = model.rest();
-            springs.step(&model, &mut pose, Mat4::IDENTITY, &hand, 1.0 / 90.0);
+            springs.step(&model, &mut pose, Mat4::IDENTITY, &hand, 1.0 / 90.0, &HashSet::new());
         }
         tip(&model, &pose, Mat4::IDENTITY)
     }
@@ -720,7 +760,7 @@ mod tests {
         for frame in 0..90 {
             let hand = [Hand { center: Vec3::new(0.0, 0.9 + 0.4 * frame as f32 / 90.0, 0.12), radius: 0.07 }];
             let mut pose = model.rest();
-            springs.step(&model, &mut pose, Mat4::IDENTITY, &hand, 1.0 / 90.0);
+            springs.step(&model, &mut pose, Mat4::IDENTITY, &hand, 1.0 / 90.0, &HashSet::new());
             let worlds = model.worlds(&pose);
             most = most.max((worlds[3].w_axis - worlds[2].w_axis).truncate().angle_between(Vec3::Z).to_degrees());
         }

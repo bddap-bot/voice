@@ -296,8 +296,9 @@ impl Link {
                             match event["type"].as_str().unwrap_or("") {
                                 "session.started" if !open => {
                                     open = true;
+                                    let mut channel = rtc.channel(channel).ok_or("the event channel closed")?;
+                                    channel.write(false, Tell::Session(hub::Channel::Developer, identity().closing.clone()).event().to_string().as_bytes()).map_err(|error| format!("event channel: {error}"))?;
                                     if !renewing {
-                                        let mut channel = rtc.channel(channel).ok_or("the event channel closed")?;
                                         channel.write(false, Tell::Session(hub::Channel::Commentary, identity().woken.clone()).event().to_string().as_bytes()).map_err(|error| format!("event channel: {error}"))?;
                                     }
                                     if previous.take().is_some() {

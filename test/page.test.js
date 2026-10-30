@@ -3,7 +3,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import test from 'node:test';
 import { gzipSync } from 'node:zlib';
-import { IDENTITY, INACTIVITY_MS, SIGN_OFF, WAKE_PHRASE, WOKEN } from '../docs/identity.js';
+import { CLOSING, IDENTITY, INACTIVITY_MS, SIGN_OFF, WAKE_PHRASE, WOKEN } from '../docs/identity.js';
 import { WIDTH, WINDOW } from '../docs/wake.js';
 import { MODEL } from '../docs/speaker.js';
 import { HANG_MS, launchChromium, openPage, renderDom } from '../scripts/chromium.mjs';
@@ -1471,7 +1471,7 @@ window.addEventListener('test-ready', async () => {
   assert.ok(result, stderr);
   assert.equal(result.before, 0);
   assert.equal(result.first, 0);
-  assert.deepEqual(result.renewed, [['session.context.append', 'The printer is idle.']]);
+  assert.deepEqual(result.renewed, [['session.context.append', CLOSING], ['session.context.append', 'The printer is idle.']]);
 });
 
 test('a delegation appends nothing until its hub reply, which reaches Live as speakable context alone, while a display-only push says nothing', async () => {
@@ -2075,7 +2075,7 @@ test('the wake phrase carries earlier turns and a completed-sleep marker into on
   assert.match(result.marker, /^The previous conversation ended and you went to sleep about \d+ seconds? ago\. You have just been woken for a new conversation\. Any earlier goodbye or request to sleep was already completed\./);
   assert.deepEqual(result.wakes, ['0.930']);
   assert.deepEqual(result.puppet, [['asleep', false], ['pose', 'stand'], ['pose', 'listen']]);
-  assert.deepEqual(result.live, [['session.context.append', 'commentary', null, WOKEN]]);
+  assert.deepEqual(result.live, [['session.context.append', 'developer', null, CLOSING], ['session.context.append', 'commentary', null, WOKEN]]);
 });
 
 for (const [label, endScript] of [['the sign-off', 'signOff()'], ['a tap', "document.querySelector('#puppet').click()"]]) test(`a tap as soon as ${label} seats the puppet opens a fresh session that hears the microphone`, async () => {
@@ -2244,7 +2244,7 @@ test('the model speaking the sign-off ends the session once speech goes quiet an
       rewoken: await (async () => { testSpotter.heard({ wake: 0.9 }); await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'true'); return true; })(),
     };
   `);
-  assert.deepEqual(result, { speaking: 'true', sleeps: ['sign-off'], delegates: 0, live: [['session.context.append', 'commentary', null, WOKEN]], puppet: ['asleep', true], microphone: { enabled: true, button: false }, rewoken: true });
+  assert.deepEqual(result, { speaking: 'true', sleeps: ['sign-off'], delegates: 0, live: [['session.context.append', 'developer', null, CLOSING], ['session.context.append', 'commentary', null, WOKEN]], puppet: ['asleep', true], microphone: { enabled: true, button: false }, rewoken: true });
 });
 
 test('a goodbye from the user or a partial sign-off keeps the session open', async () => {
@@ -2884,7 +2884,7 @@ test('a woken session receives only the fresh hub reply', async () => {
   `);
   assert.equal(result.sent, 'Check the test beacon.');
   assert.ok(result.context.some((turn) => turn.text.includes('amber')));
-  assert.deepEqual(result.appended, [['delegation.context.append', 'speakable', 'fresh', 'The test beacon is violet.']]);
+  assert.deepEqual(result.appended, [['session.context.append', 'developer', null, CLOSING], ['session.context.append', 'developer', null, CLOSING], ['delegation.context.append', 'speakable', 'fresh', 'The test beacon is violet.']]);
 });
 
 test('a first hub reply reaches the model as it arrives, even mid-utterance; each follow-up waits until the model has spoken the reply before it and shows its display only once the model starts speaking it, and barge-in drops the follow-ups still waiting with their displays', async () => {

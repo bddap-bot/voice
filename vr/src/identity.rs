@@ -9,6 +9,7 @@ pub struct Identity {
     pub hand_off_phrase: String,
     pub inactivity: Duration,
     pub instructions: String,
+    pub closing: String,
     pub woken: String,
     pub renewed: String,
     pub vr_wake_phrase: String,
@@ -51,6 +52,7 @@ pub fn identity() -> &'static Identity {
         let names = [("NAME", name.as_str()), ("SIGN_OFF", sign_off.as_str()), ("HAND_OFF_PHRASE", hand_off_phrase.as_str())];
         Identity {
             instructions: text("IDENTITY", &names),
+            closing: text("CLOSING", &names),
             woken: text("WOKEN", &names),
             renewed: text("RENEWED", &names),
             vr_wake_phrase: text("VR_WAKE_PHRASE", &names),
@@ -108,7 +110,7 @@ mod tests {
         let identity = identity();
         assert!(SOURCE.contains(&format!("export const SIGN_OFF = '{}';", identity.sign_off)));
         assert_eq!(identity.inactivity, Duration::from_secs(600));
-        assert!(identity.instructions.contains(&format!("\"{}\"", identity.sign_off)));
+        assert!(identity.closing.contains(&format!("\"{}\"", identity.sign_off)));
         assert!(identity.woken.starts_with("Context: ") && !identity.woken.contains("${"));
     }
 

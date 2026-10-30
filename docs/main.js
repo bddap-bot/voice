@@ -8,7 +8,7 @@ import { LivePlayback } from './live-playback.js';
 import { audioDiagnostics } from './audio-diagnostics.js';
 audioDiagnostics();
 import { PuppetRuntime } from './puppet.js';
-import { IDENTITY, INACTIVITY_MS, SIGN_OFF, WAKE_PHRASE, WOKEN } from './identity.js';
+import { CLOSING, IDENTITY, INACTIVITY_MS, SIGN_OFF, WAKE_PHRASE, WOKEN } from './identity.js';
 import { loadHead, startWakeSpotter } from './wake.js';
 import { MODEL, learnVoice, prepareSpeaker, startSpeakerGate } from './speaker.js';
 import { HandOffHold, judgeTurn, listenForTurns, prepareTurn } from './turn.js';
@@ -1295,6 +1295,7 @@ async function startConversation(redialed = false, renewing = null) {
     if (attempt.cancelled) return;
     trace.opened(offered.context?.length ?? 0);
     const transcript = new TranscriptBatcher(attempt.offerId, persistenceUploads, { onTurn: (side, at) => telemetry.add({ kind: 'transcript', session_id: attempt.offerId, name: side, at }) });
+    tell(attempt, 'developer', CLOSING);
     if (renewing) {
       const previous = renewing.audioOwner;
       recordSession('close', 'renewed', renewing.id);

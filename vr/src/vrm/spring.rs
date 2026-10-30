@@ -9,6 +9,69 @@ struct Settings {
     drag: f32,
     gravity: Vec3,
     radius: f32,
+    limit: Option<Limit>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Bound {
+    /// Within `x` of the axis every way round.
+    Angle,
+    /// Within `x` of the axis, in the plane across the limit's own X.
+    Hinge,
+    /// Within `x` toward the limit's Z and `z` toward its X, and an ellipse between.
+    Polar,
+}
+
+/// How far a joint may swing from its rest direction, as a VRChat PhysBone's limit: angles in radians about the axis `rotation` turns the rest direction and the joint's X to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Limit {
+    bound: Bound,
+    x: f32,
+    z: f32,
+    rotation: Quat,
+}
+
+impl Limit {
+    /// A joint's extras "limit": its "shape" (angle, hinge or polar), "x" and "z" in degrees, and its "rotation" quaternion in the joint's own axes.
+    fn read(extras: &Value) -> Option<Limit> {
+        let limit = &extras["limit"];
+        let bound = match limit["shape"].as_str()? {
+            "angle" => Bound::Angle,
+            "hinge" => Bound::Hinge,
+            "polar" => Bound::Polar,
+            _ => return None,
+        };
+        let [x, y, z, w] = floats(&limit["rotation"], [0.0, 0.0, 0.0, 1.0]);
+        let rotation = Quat::from_xyzw(x, y, z, w);
+        let rotation = if rotation.length_squared() > 0.0 { rotation.normalize() } else { Quat::IDENTITY };
+        Some(Limit { bound, x: number(&limit["x"], 180.0).to_radians(), z: number(&limit["z"], 180.0).to_radians(), rotation })
+    }
+
+    /// `toward`, a direction in the joint's rest axes, brought back inside the limit about `rest`.
+    fn keep(&self, rest: Vec3, toward: Vec3) -> Vec3 {
+        let up = self.rotation * rest.normalize();
+        let side = (self.rotation * Vec3::X).reject_from(up).try_normalize().unwrap_or_else(|| up.any_orthonormal_vector());
+        let front = side.cross(up);
+        let (mut x, y, z) = (toward.dot(side), toward.dot(up), toward.dot(front));
+        if self.bound == Bound::Hinge {
+            x = 0.0;
+        }
+        let across = Vec3::new(x, 0.0, z);
+        let swing = across.length().atan2(y);
+        let reach = match self.bound {
+            Bound::Angle | Bound::Hinge => self.x,
+            Bound::Polar => {
+                let (sin, cos) = (z.atan2(x).sin(), z.atan2(x).cos());
+                1.0 / ((cos / self.z.max(1e-4)).powi(2) + (sin / self.x.max(1e-4)).powi(2)).sqrt()
+            }
+        };
+        if swing <= reach && self.bound != Bound::Hinge {
+            return toward;
+        }
+        let swing = swing.min(reach);
+        let across = across.try_normalize().unwrap_or(Vec3::ZERO);
+        up * swing.cos() + (side * across.x + front * across.z) * swing.sin()
+    }
 }
 
 struct Joint {
@@ -137,6 +200,7 @@ impl Rig {
                             drag: number(&joint["dragForce"], 0.4),
                             gravity: Vec3::from(floats(&joint["gravityDir"], [0.0, -1.0, 0.0])) * number(&joint["gravityPower"], 0.0),
                             radius: number(&joint["hitRadius"], 0.0),
+                            limit: Limit::read(&joint["extras"]),
                         };
                         bones.push(Bone { node: at, child: Some(child), settings, groups: groups.clone(), others });
                     }
@@ -162,6 +226,7 @@ impl Rig {
                         drag: number(&group["dragForce"], 0.4),
                         gravity: object(&group["gravityDir"]).unwrap_or(Vec3::NEG_Y) * number(&group["gravityPower"], 0.0),
                         radius: number(&group["hitRadius"], 0.0),
+                        limit: None,
                     };
                     for root in list(&group["bones"]).iter().filter_map(node) {
                         let mut stack = vec![root];
@@ -281,7 +346,7 @@ impl Springs {
             if fresh {
                 *tail = Tail { now: rest, before: rest, held: joint.tail, rotation: node.rotation };
             } else if delta > 0.0 {
-                let Settings { stiffness, drag, gravity, radius } = joint.settings;
+                let Settings { stiffness, drag, gravity, radius, limit } = joint.settings;
                 let length = (rest - origin).length();
                 let axis = initial.transform_vector3(joint.tail).normalize();
                 let scale = scale_of(&initial);
@@ -295,6 +360,10 @@ impl Springs {
                     if pushed != next {
                         next = origin + (pushed - origin).normalize_or(axis) * length;
                     }
+                }
+                if let Some(limit) = limit {
+                    let rest = initial.inverse();
+                    next = origin + initial.transform_vector3(limit.keep(joint.tail, rest.transform_vector3(next - origin).normalize_or(joint.tail.normalize()))).normalize_or(axis) * length;
                 }
                 *tail = Tail { now: next, before: tail.now, held: tail.held, rotation: tail.rotation };
             }
@@ -627,6 +696,56 @@ mod tests {
             let at = touched(Some(refused.clone()));
             assert!(at.abs_diff_eq(rest, 1e-4), "a hand passes through a strand whose collide is {refused}: {at}");
         }
+    }
+
+    /// How far, in degrees, a hand rising up through a three-segment strand reaching forward swings its first segment at most, each joint's extras `limit` as given.
+    fn swung(limit: Option<Value>) -> f32 {
+        let joint = |node: usize| {
+            let mut joint = serde_json::json!({ "node": node, "stiffness": 1.0, "dragForce": 0.4 });
+            if let Some(limit) = &limit {
+                joint["extras"] = serde_json::json!({ "limit": limit });
+            }
+            joint
+        };
+        let mut builder = Builder::new(serde_json::json!({
+            "VRMC_vrm": { "humanoid": { "humanBones": { "hips": { "node": 1 } } } },
+            "VRMC_springBone": { "springs": [{ "joints": [joint(2), joint(3), joint(4), { "node": 5 }] }] }
+        }));
+        let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        builder.set("nodes", serde_json::json!([{ "children": [1], "mesh": 0 }, { "children": [2] }, { "translation": [0.0, 1.0, 0.0], "children": [3] }, { "translation": [0.0, 0.0, 0.1], "children": [4] }, { "translation": [0.0, 0.0, 0.1], "children": [5] }, { "translation": [0.0, 0.0, 0.1] }]));
+        builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position } }] }]));
+        let model = Model::parse(&builder.glb()).unwrap();
+        let mut springs = Springs::default();
+        let mut most = 0.0f32;
+        for frame in 0..90 {
+            let hand = [Hand { center: Vec3::new(0.0, 0.9 + 0.4 * frame as f32 / 90.0, 0.12), radius: 0.07 }];
+            let mut pose = model.rest();
+            springs.step(&model, &mut pose, Mat4::IDENTITY, &hand, 1.0 / 90.0);
+            let worlds = model.worlds(&pose);
+            most = most.max((worlds[3].w_axis - worlds[2].w_axis).truncate().angle_between(Vec3::Z).to_degrees());
+        }
+        most
+    }
+
+    #[test]
+    fn a_hand_swings_a_limited_joint_no_further_than_its_limit() {
+        let free = swung(None);
+        assert!(free > 40.0, "unlimited, the hand lifts the strand's first segment well past 20 degrees: {free}");
+        for shape in ["angle", "hinge", "polar"] {
+            let held = swung(Some(serde_json::json!({ "shape": shape, "x": 20.0, "z": 20.0 })));
+            assert!(held <= 20.0 + 0.1 && held > 15.0, "a {shape} limit of 20 degrees holds the pushed segment at it: {held}");
+        }
+        let tilted = swung(Some(serde_json::json!({ "shape": "angle", "x": 20.0, "rotation": [-(7.5f32.to_radians().sin()), 0.0, 0.0, 7.5f32.to_radians().cos()] })));
+        assert!(tilted > 25.0 && tilted <= 35.0 + 0.1, "the limit's rotation tilts the cone it keeps the joint in: {tilted}");
+    }
+
+    #[test]
+    fn a_polar_limit_lets_a_joint_swing_its_own_way_further_each_way() {
+        let wide = Limit { bound: Bound::Polar, x: 10f32.to_radians(), z: 40f32.to_radians(), rotation: Quat::IDENTITY };
+        let far = |toward: Vec3| wide.keep(Vec3::Y, (Vec3::Y + toward).normalize()).angle_between(Vec3::Y).to_degrees();
+        assert!((far(Vec3::Z * 5.0) - 10.0).abs() < 0.1, "toward Z it stops at x: {}", far(Vec3::Z * 5.0));
+        assert!((far(Vec3::X * 5.0) - 40.0).abs() < 0.1, "toward X at z: {}", far(Vec3::X * 5.0));
+        assert!(far(Vec3::X * 0.3) < 40.0 && (far(Vec3::X * 0.3) - 0.3f32.atan().to_degrees()).abs() < 0.01, "and inside it is left alone");
     }
 
     #[test]

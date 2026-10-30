@@ -2,9 +2,10 @@
 
 usage: publish-avatar.py NEW.vrm CATALOG.vrm [--drop PREFIX ...]
 
-Every node, image, morph target, material, spring joint, VRM expression and avatar expression part (parameter, layer, menu
-control, material target, curve, shown node, mask) the catalog file carries must survive into the new one, or match a
---drop prefix naming it as an intended removal. The replaced file stays beside the catalog in .previous/."""
+Every node, image, morph target, material, spring joint, collider a spring collides with, VRM expression and avatar
+expression part (parameter, layer, menu control, material target, curve, shown node, mask) the catalog file carries
+must survive into the new one, or match a --drop prefix naming it as an intended removal. The replaced file stays
+beside the catalog in .previous/."""
 import argparse
 from collections import Counter
 import hashlib
@@ -38,7 +39,12 @@ def inventory(doc):
     extensions = doc.get('extensions', {})
     springs = extensions.get('VRMC_springBone', {})
     out.update('spring-joint:' + name(j['node']) for s in springs.get('springs', []) for j in s['joints'])
-    out.update('collider:' + name(c['node']) for c in springs.get('colliders', []))
+    colliders = springs.get('colliders', [])
+    groups = springs.get('colliderGroups', [])
+    out.update('collider:' + name(c['node']) for c in colliders)
+    out.update(f"spring-collider:{name(s['joints'][0]['node'])}:{name(colliders[c]['node'])}"
+               for s in springs.get('springs', []) if s.get('joints')
+               for g in s.get('colliderGroups', []) for c in groups[g].get('colliders', []))
     for group, entries in extensions.get('VRMC_vrm', {}).get('expressions', {}).items():
         out.update(f'vrm-expression:{group}:{e}' for e in entries)
     x = extensions.get('VRCHAT_expressions')

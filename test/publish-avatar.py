@@ -20,10 +20,14 @@ def glb(doc):
 AVATAR = {
     'asset': {'version': '2.0'},
     'extensionsUsed': ['VRCHAT_expressions'],
-    'nodes': [{'name': 'Root', 'children': [1]}, {'name': 'Body', 'mesh': 0}],
+    'nodes': [{'name': 'Root', 'children': [1, 2, 3]}, {'name': 'Body', 'mesh': 0}, {'name': 'Hair'}, {'name': 'Head'}],
     'images': [{'name': 'atlas', 'mimeType': 'image/webp', 'bufferView': 0}],
     'meshes': [{'primitives': [{'attributes': {}, 'targets': [{}, {}]}], 'extras': {'targetNames': ['smile', 'blink']}}],
-    'extensions': {'VRCHAT_expressions': {
+    'extensions': {'VRMC_springBone': {
+        'colliders': [{'node': 3, 'shape': {'sphere': {'radius': 0.1}}}],
+        'colliderGroups': [{'colliders': [0]}],
+        'springs': [{'joints': [{'node': 2}], 'colliderGroups': [0]}],
+    }, 'VRCHAT_expressions': {
         'parameters': [{'name': 'Hue', 'type': 'float', 'default': 0, 'saved': True}],
         'layers': [{'states': [{'name': 'Hue'}]}],
         'menu': [{'name': 'Hue', 'type': 'radial', 'parameter': 'Hue', 'controls': []}],
@@ -65,12 +69,14 @@ class Publishing(unittest.TestCase):
             self.assertIn(part, str(refused.exception))
         self.assertEqual(self.catalog.read_bytes(), before)
 
-    def test_a_lost_parameter_menu_control_morph_or_image_is_refused(self):
+    def test_a_lost_parameter_menu_control_morph_image_or_collider_is_refused(self):
         for change, part in [
             (lambda doc: doc['extensions']['VRCHAT_expressions'].update(parameters=[]), 'parameter:Hue:float'),
             (lambda doc: doc['extensions']['VRCHAT_expressions'].update(menu=[]), 'menu:/Hue:radial:Hue'),
             (lambda doc: doc['meshes'][0]['extras'].update(targetNames=['smile']), 'morph:Body:blink'),
             (lambda doc: doc.update(images=[]), 'image'),
+            (lambda doc: doc['extensions']['VRMC_springBone'].update(colliders=[], colliderGroups=[{'colliders': []}]), 'collider:Head'),
+            (lambda doc: doc['extensions']['VRMC_springBone']['springs'][0].update(colliderGroups=[]), 'spring-collider:Hair:Head'),
         ]:
             with self.assertRaises(SystemExit) as refused:
                 publisher.publish(self.candidate(change), self.catalog)

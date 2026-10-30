@@ -3,12 +3,12 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::board::Board;
-use crate::placement::{facing, Pose, Vec3};
+use crate::placement::{facing, Hand, HandPose, Pose, Vec3, TIP};
 use crate::point::Pointing;
 use crate::relay::{Relay, Token};
 use crate::render::{eye_projection, eye_texels, Renderer, NEAREST, PAGE_HEIGHT};
 use crate::vulkan::Gpu;
-use crate::{action, load, preview, FLOOR, HEIGHT, QUAD};
+use crate::{action, load, preview, touching, FLOOR, HEIGHT, QUAD};
 
 const FRAME: Duration = Duration::from_micros(11_111);
 /// The wearer's head in the hand-held puppet's frame, its feet at the origin: a little above and in front, as the controller is held.
@@ -25,12 +25,16 @@ const CARRIED: Duration = Duration::from_millis(2000);
 const SETTLE: Duration = Duration::from_millis(1500);
 const SWING: f32 = 0.15;
 const TWIST: f32 = 0.6;
+/// The right controller sweeping its hand side to side through the back of the hand-held puppet's head and back, at the height of `REACHED`, then drawn away while what it pushed settles.
+const TOUCHED: Duration = Duration::from_millis(3000);
+const REACHED: Vec3 = [0.0, 0.26, -0.04];
+const SWEEP: f32 = 0.1;
 /// Every how many frames the clip keeps one: 30 a second.
 const CLIP_EVERY: usize = 3;
 /// What the puppet points at: where the overlay's first object stands beside a hand-held puppet.
 const TARGET: Vec3 = [0.22, 0.12, 0.0];
 
-/// Wears each named appearance of the catalog, or all of it, as the host does off any headset: its idle, carried by a controller swinging and twisting it and then held still, each gesture the page can reach while speaking, and a point at a spot beside it, each frame posed, skinned and drawn for both eyes through the host's own path.
+/// Wears each named appearance of the catalog, or all of it, as the host does off any headset: its idle, carried by a controller swinging and twisting it and then held still, touched by the other controller's hand sweeping through the back of its head, each gesture the page can reach while speaking, and a point at a spot beside it, each frame posed, skinned and drawn for both eyes through the host's own path.
 /// Writes the revealed appearance library, a picture of each phase and a 30 frames a second clip of the whole run per appearance under the out directory, and reports each appearance's per-frame work and, where the kernel counts it, its GPU time.
 pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
     let usage = "usage: voice-vr wear <out-dir> [<catalog id>...]";
@@ -62,9 +66,10 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
         let mut clipped = 0;
         let mut motion = Motion::default();
         let mut constraints = Motion::default();
-        let mut frame = |puppet: &mut crate::Puppet, pointing: &mut Pointing, stand: Pose, mouth: f32, picture: Option<&Path>| -> Result<(), String> {
+        let mut frame = |puppet: &mut crate::Puppet, pointing: &mut Pointing, stand: Pose, hand: Option<Pose>, mouth: f32, picture: Option<&Path>| -> Result<(), String> {
             let started = Instant::now();
-            let (posed, body, _) = puppet.step(FRAME.as_secs_f32(), |_, _| stand, 1.0, HEAD, mouth, pointing, started, |_| Some(TARGET));
+            let hands: Vec<HandPose> = hand.into_iter().map(|pose| HandPose { hand: Hand::Right, pose }).collect();
+            let (posed, body, _) = puppet.step(FRAME.as_secs_f32(), |_, _| stand, 1.0, HEAD, &touching(&hands, TIP), mouth, pointing, started, |_| Some(TARGET));
             let quad = facing(stand.apply([0.0, -FLOOR, 0.0]), HEAD);
             let local = quad.inverse();
             puppet.draw(&posed, local.mat4() * body);
@@ -95,10 +100,14 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
         };
         let frames = |span: Duration| (span.as_secs_f64() / FRAME.as_secs_f64()) as usize;
         for at in 0..frames(IDLE) {
-            frame(&mut puppet, &mut pointing, HELD, 0.0, (at + 1 == frames(IDLE)).then(|| pictures.join("idle.png")).as_deref())?;
+            frame(&mut puppet, &mut pointing, HELD, None, 0.0, (at + 1 == frames(IDLE)).then(|| pictures.join("idle.png")).as_deref())?;
         }
         for at in 0..frames(CARRIED + SETTLE) {
-            frame(&mut puppet, &mut pointing, carried(at as f32 / frames(CARRIED) as f32), 0.0, None)?;
+            frame(&mut puppet, &mut pointing, carried(at as f32 / frames(CARRIED) as f32), None, 0.0, None)?;
+        }
+        for at in 0..frames(TOUCHED + SETTLE) {
+            let progress = at as f32 / frames(TOUCHED) as f32;
+            frame(&mut puppet, &mut pointing, HELD, (progress < 1.0).then(|| sweeping(progress)), 0.0, (at == frames(TOUCHED) / 4).then(|| pictures.join("touched.png")).as_deref())?;
         }
         for gesture in action::gestures() {
             if !puppet.animator.gesture(gesture) {
@@ -106,12 +115,12 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
             }
             played.push(gesture);
             for at in 0..frames(GESTURE) {
-                frame(&mut puppet, &mut pointing, HELD, speaking(at), (at == frames(GESTURE_PICTURE)).then(|| pictures.join(format!("gesture-{gesture}.png"))).as_deref())?;
+                frame(&mut puppet, &mut pointing, HELD, None, speaking(at), (at == frames(GESTURE_PICTURE)).then(|| pictures.join(format!("gesture-{gesture}.png"))).as_deref())?;
             }
         }
         pointing.start("target".into(), Instant::now());
         for at in 0..frames(POINT) {
-            frame(&mut puppet, &mut pointing, HELD, speaking(at), (at == frames(POINT_PICTURE)).then(|| pictures.join("point.png")).as_deref())?;
+            frame(&mut puppet, &mut pointing, HELD, None, speaking(at), (at == frames(POINT_PICTURE)).then(|| pictures.join("point.png")).as_deref())?;
         }
         write_motion(motion, clipped, &pictures.join("spring-motion.json"))?;
         write_motion(constraints, clipped, &pictures.join("constraint-motion.json"))?;
@@ -144,6 +153,12 @@ fn carried(progress: f32) -> Pose {
     let phase = std::f32::consts::TAU * 2.0 * progress.min(1.0);
     let (sin, cos) = (TWIST * phase.sin()).sin_cos();
     Pose::from_axes([cos, 0.0, -sin], [0.0, 1.0, 0.0], [sin, 0.0, cos], [SWING * phase.sin(), 0.0, 0.0])
+}
+
+/// The right controller `progress` of the way through its sweep: from beside the head across behind it and back, upright and pointing at the puppet.
+fn sweeping(progress: f32) -> Pose {
+    let x = -SWEEP * (std::f32::consts::TAU * progress).cos();
+    Pose { t: [REACHED[0] + x, REACHED[1], REACHED[2] - TIP[2]], ..HELD }
 }
 
 /// A mouth opening and closing as speech does.

@@ -16,6 +16,8 @@ struct Joint {
     tail: Vec3,
     settings: Settings,
     groups: Vec<usize>,
+    /// Whether another's hand pushes it.
+    others: bool,
     below: Vec<usize>,
 }
 
@@ -74,6 +76,19 @@ struct Bone {
     child: Option<usize>,
     settings: Settings,
     groups: Vec<usize>,
+    others: bool,
+}
+
+/// A hand that is not the avatar's own, as a sphere in world space.
+#[derive(Clone, Copy, Debug)]
+pub struct Hand {
+    pub center: Vec3,
+    pub radius: f32,
+}
+
+/// Whether a spring's (or VRM 0 bone group's) extras let others' hands push it: its "collide" lists "wearer" and "others", as a VRChat PhysBone's allowCollision does, and a spring without the list is everyone's to touch.
+fn pushed_by_others(source: &Value) -> bool {
+    source["extras"]["collide"].as_array().is_none_or(|who| who.iter().any(|hand| hand == "others"))
 }
 
 fn object(value: &Value) -> Option<Vec3> {
@@ -113,6 +128,7 @@ impl Rig {
                 }
                 for spring in list(&extension["springs"]) {
                     let groups: Vec<usize> = list(&spring["colliderGroups"]).iter().filter_map(index).filter(|&group| group < rig.groups.len()).collect();
+                    let others = pushed_by_others(&spring);
                     for pair in list(&spring["joints"]).windows(2) {
                         let joint = &pair[0];
                         let (Some(at), Some(child)) = (node(&joint["node"]), node(&pair[1]["node"])) else { continue };
@@ -122,7 +138,7 @@ impl Rig {
                             gravity: Vec3::from(floats(&joint["gravityDir"], [0.0, -1.0, 0.0])) * number(&joint["gravityPower"], 0.0),
                             radius: number(&joint["hitRadius"], 0.0),
                         };
-                        bones.push(Bone { node: at, child: Some(child), settings, groups: groups.clone() });
+                        bones.push(Bone { node: at, child: Some(child), settings, groups: groups.clone(), others });
                     }
                 }
             }
@@ -140,6 +156,7 @@ impl Rig {
                 }
                 for group in list(&extension["boneGroups"]) {
                     let groups: Vec<usize> = list(&group["colliderGroups"]).iter().filter_map(index).filter(|&group| group < rig.groups.len()).collect();
+                    let others = pushed_by_others(&group);
                     let settings = Settings {
                         stiffness: number(&group["stiffiness"], 1.0),
                         drag: number(&group["dragForce"], 0.4),
@@ -149,7 +166,7 @@ impl Rig {
                     for root in list(&group["bones"]).iter().filter_map(node) {
                         let mut stack = vec![root];
                         while let Some(at) = stack.pop() {
-                            bones.push(Bone { node: at, child: children[at].first().copied(), settings, groups: groups.clone() });
+                            bones.push(Bone { node: at, child: children[at].first().copied(), settings, groups: groups.clone(), others });
                             stack.extend(children[at].iter().rev());
                         }
                     }
@@ -164,7 +181,7 @@ impl Rig {
             }
             depth
         };
-        for Bone { node, child, settings, groups } in bones {
+        for Bone { node, child, settings, groups, others } in bones {
             let tail = match child {
                 Some(child) => nodes[child].translation,
                 None => nodes[node].translation.normalize_or_zero() * 0.07,
@@ -178,7 +195,7 @@ impl Rig {
                 below.extend(&frontier);
                 frontier = frontier.iter().flat_map(|&node| children[node].iter().copied()).collect();
             }
-            rig.joints.push(Joint { node, tail, settings, groups, below });
+            rig.joints.push(Joint { node, tail, settings, groups, others, below });
         }
         rig.joints.sort_by_key(|joint| depth(joint.node));
         rig
@@ -232,7 +249,7 @@ impl Springs {
         }
     }
 
-    pub fn step(&mut self, model: &Model, pose: &mut Pose, model_to_world: Mat4, delta: f32) {
+    pub fn step(&mut self, model: &Model, pose: &mut Pose, model_to_world: Mat4, hands: &[Hand], delta: f32) {
         let rig = &model.rig;
         if rig.joints.is_empty() {
             return;
@@ -250,6 +267,7 @@ impl Springs {
                 }
             })
             .collect();
+        let hands: Vec<Placed> = hands.iter().map(|hand| Placed::Round { center: hand.center, end: None, reach: hand.radius, inside: false }).collect();
         let fresh = self.tails.len() != rig.joints.len();
         if fresh {
             self.tails = vec![Tail { now: Vec3::ZERO, before: Vec3::ZERO, held: Vec3::ZERO, rotation: Quat::IDENTITY }; rig.joints.len()];
@@ -271,7 +289,8 @@ impl Springs {
                 let carried = initial.transform_point3(tail.held);
                 let moved = carried + (tail.now - tail.before - (carried - tail.now)) * (1.0 - drag) + (axis * stiffness + gravity) * (delta * scale);
                 let mut next = origin + (moved - origin).normalize_or(axis) * length;
-                for placed in joint.groups.iter().flat_map(|&group| &rig.groups[group]).map(|&collider| &colliders[collider]) {
+                let touching = if joint.others { &hands[..] } else { &[] };
+                for placed in joint.groups.iter().flat_map(|&group| &rig.groups[group]).map(|&collider| &colliders[collider]).chain(touching) {
                     let pushed = placed.push(next, radius * scale);
                     if pushed != next {
                         next = origin + (pushed - origin).normalize_or(axis) * length;
@@ -329,7 +348,7 @@ mod tests {
         let mut time = from;
         while time < to {
             let mut pose = model.rest();
-            springs.step(model, &mut pose, anchor(time), STEP);
+            springs.step(model, &mut pose, anchor(time), &[], STEP);
             trace.push((time, anchor(time).inverse().transform_point3(tip(model, &pose, anchor(time)))));
             time += STEP;
         }
@@ -444,7 +463,7 @@ mod tests {
             let mut springs = Springs::default();
             run(&model, &mut springs, |_| Mat4::IDENTITY, 0.0, 3.0);
             let mut pose = model.rest();
-            springs.step(&model, &mut pose, Mat4::IDENTITY, 1.0 / 90.0);
+            springs.step(&model, &mut pose, Mat4::IDENTITY, &[], 1.0 / 90.0);
             model.worlds(&pose)[3].w_axis.truncate()
         };
         let free = hanging(serde_json::json!([{ "node": 1, "colliders": [] }]));
@@ -472,7 +491,7 @@ mod tests {
         let mut springs = Springs::default();
         run(&model, &mut springs, |_| Mat4::IDENTITY, 0.0, 3.0);
         let mut pose = model.rest();
-        springs.step(&model, &mut pose, Mat4::IDENTITY, 1.0 / 90.0);
+        springs.step(&model, &mut pose, Mat4::IDENTITY, &[], 1.0 / 90.0);
         let worlds = model.worlds(&pose);
         (3..6).map(|node| worlds[node].w_axis.truncate()).collect()
     }
@@ -559,7 +578,7 @@ mod tests {
         let mut springs = Springs::default();
         run(&model, &mut springs, |_| Mat4::IDENTITY, 0.0, 3.0);
         let mut pose = model.rest();
-        springs.step(&model, &mut pose, Mat4::IDENTITY, 1.0 / 90.0);
+        springs.step(&model, &mut pose, Mat4::IDENTITY, &[], 1.0 / 90.0);
         let end = model.worlds(&pose)[5].w_axis.truncate();
         assert!(end.abs_diff_eq(Vec3::new(0.0, 0.6, 0.0), 2e-3), "{end}");
     }
@@ -575,8 +594,55 @@ mod tests {
         let mut springs = Springs::default();
         run(&model, &mut springs, |_| Mat4::IDENTITY, 0.0, 3.0);
         let mut pose = model.rest();
-        springs.step(&model, &mut pose, Mat4::IDENTITY, 1.0 / 90.0);
+        springs.step(&model, &mut pose, Mat4::IDENTITY, &[], 1.0 / 90.0);
         let end = model.worlds(&pose)[3].w_axis.truncate();
         assert!(end.abs_diff_eq(Vec3::new(0.0, 0.9, 0.1), 2e-3), "{end}");
+    }
+
+    /// Where the strand's tip comes to rest with another's hand held just under it, when its bone group's extras list `collide`, or list none.
+    fn touched(collide: Option<Value>) -> Vec3 {
+        let mut group = serde_json::json!({ "bones": [2], "stiffiness": 1.0, "dragForce": 0.1, "gravityPower": 0.0, "hitRadius": 0.0 });
+        if let Some(collide) = collide {
+            group["extras"] = serde_json::json!({ "collide": collide });
+        }
+        let model = strand(group, serde_json::json!([]));
+        let mut springs = Springs::default();
+        let hand = [Hand { center: Vec3::new(0.0, 0.97, 0.3), radius: 0.05 }];
+        let mut pose = model.rest();
+        for _ in 0..90 {
+            pose = model.rest();
+            springs.step(&model, &mut pose, Mat4::IDENTITY, &hand, 1.0 / 90.0);
+        }
+        tip(&model, &pose, Mat4::IDENTITY)
+    }
+
+    #[test]
+    fn another_hand_pushes_a_chain_whose_file_lets_others_collide_and_passes_through_one_it_does_not() {
+        let rest = Vec3::new(0.0, 1.0, 0.3);
+        for allowed in [Some(serde_json::json!(["wearer", "others"])), Some(serde_json::json!(["others"])), None] {
+            let at = touched(allowed.clone());
+            assert!(at.y > rest.y + 0.01, "a hand under a strand whose collide is {allowed:?} lifts its tip: {at}");
+        }
+        for refused in [serde_json::json!(["wearer"]), serde_json::json!([])] {
+            let at = touched(Some(refused.clone()));
+            assert!(at.abs_diff_eq(rest, 1e-4), "a hand passes through a strand whose collide is {refused}: {at}");
+        }
+    }
+
+    #[test]
+    fn a_vrm_1_springs_extras_say_whether_others_push_it() {
+        let mut builder = Builder::new(serde_json::json!({
+            "VRMC_vrm": { "humanoid": { "humanBones": { "hips": { "node": 1 } } } },
+            "VRMC_springBone": { "springs": [
+                { "joints": [{ "node": 2 }, { "node": 3 }], "extras": { "collide": ["wearer"] } },
+                { "joints": [{ "node": 3 }, { "node": 4 }] }
+            ] }
+        }));
+        let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        builder.set("nodes", serde_json::json!([{ "children": [1], "mesh": 0 }, { "children": [2] }, { "translation": [0.0, 1.0, 0.0], "children": [3] }, { "translation": [0.0, 0.0, 0.1], "children": [4] }, { "translation": [0.0, 0.0, 0.2] }]));
+        builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position } }] }]));
+        let model = Model::parse(&builder.glb()).unwrap();
+        let others: Vec<(usize, bool)> = model.rig.joints.iter().map(|joint| (joint.node, joint.others)).collect();
+        assert_eq!(others, [(2, false), (3, true)]);
     }
 }

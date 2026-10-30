@@ -36,7 +36,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         let worlds = model.worlds(&pose);
         gaze.look(&model, &mut pose, &worlds, Vec3::new(0.0, 1.5, 3.0), 1.0/30.0);
         stages.push(("gaze", pose.clone()));
-        springs.step(&model, &mut pose, Mat4::IDENTITY, 1.0/30.0);
+        springs.step(&model, &mut pose, Mat4::IDENTITY, &[], 1.0/30.0);
         stages.push(("physics", pose));
         let mut measurements = BTreeMap::new();
         for (label, pose) in &stages {

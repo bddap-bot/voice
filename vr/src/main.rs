@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 
 use openvr::{Runtime, Signal};
 use board::{Board, Press};
-use placement::{beside, facing, local_tip, marker, under_controller, window, Anchor, Glide, Hand, Pose, Vec3, TIP};
+use placement::{beside, facing, local_tip, marker, under_controller, window, Anchor, Glide, Hand, HandPose, Pose, Vec3, TIP};
 use gaze::Gaze;
 use motion::{Animator, Clip, Random, IDLE};
 use gesture::{Recognizer, Templates};
@@ -50,13 +50,16 @@ use reveal::Reveal;
 use voice::Voice;
 use render::{eye_projection, eye_texels, Appearance, Renderer};
 use vrm::expressions::{Controller, Kind};
-use vrm::spring::Springs;
+use vrm::spring::{self, Springs};
 use vrm::{Fit, Humanoid, Model, Skinned};
 
 const QUAD: f32 = 0.4;
 const HEIGHT: f32 = 0.3;
 const MARGIN: f32 = 0.03;
 const FLOOR: f32 = -QUAD / 2.0 + MARGIN;
+/// The spheres a controller is to the puppet's springs, as another player's hand is to an avatar's: the hand around its origin and a fingertip at its tip.
+const HAND_RADIUS: f32 = 0.04;
+const FINGER_RADIUS: f32 = 0.01;
 /// The tallest and shortest a model may stand set down full size, against a model whose units are not metres.
 const FULL_HEIGHT: [f32; 2] = [0.5, 2.5];
 const DORMANT_POLL: Duration = Duration::from_micros(11_111);
@@ -162,7 +165,7 @@ fn dressed(model: Model, mut clips: HashMap<String, Clip>, id: &str, renderer: &
 }
 
 impl Puppet {
-    fn step(&mut self, delta: f32, place: impl FnOnce(Option<[Vec3; 2]>, bool) -> Pose, size: f32, head: Vec3, mouth: f32, pointing: &mut point::Pointing, now: Instant, locate: impl FnOnce(&str) -> Option<Vec3>) -> (Vec<glam::Mat4>, glam::Mat4, Pose) {
+    fn step(&mut self, delta: f32, place: impl FnOnce(Option<[Vec3; 2]>, bool) -> Pose, size: f32, head: Vec3, hands: &[spring::Hand], mouth: f32, pointing: &mut point::Pointing, now: Instant, locate: impl FnOnce(&str) -> Option<Vec3>) -> (Vec<glam::Mat4>, glam::Mat4, Pose) {
         if let Some(clip) = self.animator.update(delta) {
             tracing::info!("loop {clip}");
         }
@@ -196,7 +199,7 @@ impl Puppet {
         self.model.express(&mut pose, "aa", mouth);
         self.springs.restore(&self.model, &mut pose);
         self.constraints.step(&self.model, &mut pose, body);
-        self.springs.step(&self.model, &mut pose, body, delta);
+        self.springs.step(&self.model, &mut pose, body, hands, delta);
         self.changed = self.skinned.morph(&pose.weights);
         self.changed.extend(retextured);
         (self.model.worlds(&pose), body, stand)
@@ -228,6 +231,15 @@ impl Puppet {
             _ => HashMap::new(),
         }
     }
+}
+
+/// Each tracked controller as the hand spheres it pushes the puppet's springs with, the right one's fingertip at its calibrated `tip`.
+fn touching(hands: &[HandPose], tip: Vec3) -> Vec<spring::Hand> {
+    hands
+        .iter()
+        .flat_map(|hand| [(hand.pose.t, HAND_RADIUS), (hand.pose.apply(if hand.hand == Hand::Right { tip } else { TIP }), FINGER_RADIUS)])
+        .map(|(center, radius)| spring::Hand { center: center.into(), radius })
+        .collect()
 }
 
 fn operate(controller: &mut Controller, control: &vrm::expressions::Control, [x, y]: [f32; 2]) -> Option<String> {
@@ -618,7 +630,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
                 }
                 _ => stand,
             }
-        }, size, head.t, voice.mouth(), &mut pointing, started, |name| objects.locate(name));
+        }, size, head.t, &touching(&hands, tip), voice.mouth(), &mut pointing, started, |name| objects.locate(name));
         objects.step(started, &object::View { stand, size, head, eyes: eye_offsets, tip: right.map(|(right, _)| right.apply(tip)) });
         let eye_points = eye_offsets.map(|eye: Pose| head.then(&eye).t);
         let (quad, half) = if size > 1.0 { grown_window(&puppet.skinned, &puppet.drawn.hidden, &posed, body, &head, &eye_points, view) } else { (figure, QUAD / 2.0) };

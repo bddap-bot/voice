@@ -400,6 +400,7 @@ struct Playing {
     time: f32,
 }
 
+#[derive(Clone)]
 pub struct Controller {
     pub values: Vec<f32>,
     index: HashMap<String, usize>,

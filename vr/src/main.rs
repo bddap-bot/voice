@@ -124,9 +124,11 @@ struct Puppet {
     controller: Option<Controller>,
 }
 
+/// Colours across a radial's bar, enough that each authored step of a stepped one shows.
+const SWATCHES: usize = 48;
+
 fn load(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer, remembered: &vrm::expressions::Configuration) -> Result<Puppet, String> {
     let model = Model::parse(&relay.puppet(avatar)?).map_err(|error| format!("{}: {error}", avatar.id))?;
-    let standing = model.standing();
     let mut clips = HashMap::new();
     for entry in relay.clips()?.iter().filter(|entry| played(&entry.action)) {
         if !["fbx", "motion"].contains(&entry.format.as_str()) {
@@ -140,14 +142,20 @@ fn load(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer, remembered:
             Err(error) => tracing::warn!("{}: {error}", entry.name),
         }
     }
+    dressed(model, clips, &avatar.id, renderer, remembered)
+}
+
+/// A puppet of `model` with its played `clips`, as `id`.
+fn dressed(model: Model, mut clips: HashMap<String, Clip>, id: &str, renderer: &mut Renderer, remembered: &vrm::expressions::Configuration) -> Result<Puppet, String> {
+    let standing = model.standing();
     clips.insert(motion::WALK.to_owned(), Clip::parse(include_bytes!("../motions/walk.json"), model.version, model.rest_hips())?);
     let idles = clips.keys().filter(|name| motion::family(name) == IDLE).count();
     let own = model.own_expressions();
-    tracing::info!("appearance {} with {idles} standing idle clips, other clips {:?}, own expressions {own:?}, {} spring joints", avatar.id, clips.keys().filter(|name| motion::family(name) != IDLE).collect::<Vec<_>>(), model.spring_joints());
+    tracing::info!("appearance {} with {idles} standing idle clips, other clips {:?}, own expressions {own:?}, {} spring joints", id, clips.keys().filter(|name| motion::family(name) != IDLE).collect::<Vec<_>>(), model.spring_joints());
     let skinned = model.skinned()?;
     let fit = Fit::new(&model, &skinned, HEIGHT);
     let height = (HEIGHT / fit.scale).clamp(FULL_HEIGHT[0], FULL_HEIGHT[1]);
-    tracing::info!("appearance {} stands {height:.2} m full size", avatar.id);
+    tracing::info!("appearance {} stands {height:.2} m full size", id);
     let drawn = renderer.appearance(&model, &skinned)?;
     let controller = model.menu.as_ref().map(|menu| Controller::new(menu, remembered));
     Ok(Puppet { model, skinned, fit, full: height / HEIGHT, standing, animator: Animator::new(clips, own, Random::seeded()), gaze: Gaze::default(), springs: Springs::default(), constraints: vrm::constraint::Constraints::default(), drawn, changed: Vec::new(), controller })
@@ -208,8 +216,10 @@ impl Puppet {
         self.controller = self.model.menu.as_ref().map(|menu| Controller::new(menu, &vrm::expressions::Configuration::default()));
     }
 
-    fn menu(&self) -> Option<(Vec<vrm::expressions::Control>, Vec<vrm::Image>)> {
-        self.model.menu.as_ref().map(|menu| (menu.menu.clone(), menu.icons.clone()))
+    fn menu(&self) -> Option<board::Worn> {
+        let menu = self.model.menu.as_ref()?;
+        let strips = self.controller.as_ref().map(|controller| self.skinned.swatches(&self.model, menu, controller, SWATCHES)).unwrap_or_default();
+        Some((menu.menu.clone(), menu.icons.clone(), strips))
     }
 
     fn settings(&self) -> HashMap<String, f32> {
@@ -774,6 +784,9 @@ fn run() -> Result<(), String> {
     let config = directory("XDG_CONFIG_HOME", ".config");
     let state = directory("XDG_STATE_HOME", ".local/state");
     std::fs::create_dir_all(&state).map_err(|error| format!("{}: {error}", state.display()))?;
+    if args.get(1).is_some_and(|mode| mode == "sweep") {
+        return dress::sweep(&args[2..]);
+    }
     if let [_, mode, recording] = &args[..] {
         if mode == "replay" {
             return replay(&state, recording);

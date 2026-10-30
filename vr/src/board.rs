@@ -130,9 +130,14 @@ pub fn marker_at([width, height]: [f32; 2], tip: Option<Vec3>) -> Option<Vec3> {
     tip.filter(|&[x, y, z]| x.abs() <= width / 2.0 && y.abs() <= height / 2.0 && z <= NEAR).map(|[x, y, z]| [x, y, z.max(0.0)])
 }
 
+/// A worn avatar's menu as the board offers it: its controls, their icons, and along each radial's bar what each value of
+/// its parameter shows, by parameter.
+pub type Worn = (Vec<Control>, Vec<Image>, HashMap<String, Vec<[u8; 4]>>);
+
 struct Menu {
     controls: Vec<Control>,
     icons: Vec<Image>,
+    strips: HashMap<String, Vec<[u8; 4]>>,
     path: Vec<usize>,
     open: bool,
     values: HashMap<String, f32>,
@@ -189,8 +194,8 @@ impl Board {
         self.dirty = true;
     }
 
-    pub fn wear(&mut self, menu: Option<(Vec<Control>, Vec<Image>)>, values: HashMap<String, f32>) {
-        self.menu = menu.filter(|(controls, _)| !controls.is_empty()).map(|(controls, icons)| Menu { controls, icons, path: Vec::new(), open: false, values });
+    pub fn wear(&mut self, menu: Option<Worn>, values: HashMap<String, f32>) {
+        self.menu = menu.filter(|(controls, _, _)| !controls.is_empty()).map(|(controls, icons, strips)| Menu { controls, icons, strips, path: Vec::new(), open: false, values });
         self.held = None;
         self.dirty = true;
     }
@@ -224,6 +229,23 @@ impl Board {
     pub fn place_on(&self, index: usize, [x, y]: [f32; 2]) -> [f32; 2] {
         let [left, bottom, right, top] = self.menu_rects().into_iter().find(|&(press, _)| press == Press::Control(index)).map_or([0.0, 0.0, 1.0, 1.0], |(_, rect)| rect);
         [((x - left) / (right - left)).clamp(0.0, 1.0), ((y - bottom) / (top - bottom)).clamp(0.0, 1.0)]
+    }
+
+    /// Where on the board, in metres from its centre, a point `[share across, share up]` a control of the open page lies.
+    pub fn spot(&self, index: usize, [x, y]: [f32; 2]) -> Option<[f32; 2]> {
+        let [left, bottom, right, top] = self.menu_rects().into_iter().find(|&(press, _)| press == Press::Control(index))?.1;
+        Some([left + x * (right - left), bottom + y * (top - bottom)])
+    }
+
+    /// The board's picture now, whether or not it changed.
+    pub fn picture(&self) -> Canvas {
+        self.image()
+    }
+
+    /// The picture's pixel at a point in metres from the board's centre.
+    pub fn pixel_of(&self, [x, y]: [f32; 2]) -> [u32; 2] {
+        let [column, line, _, _] = self.area([x, y, x, y]);
+        [column, line]
     }
 
     pub fn set_values(&mut self, values: HashMap<String, f32>) {
@@ -471,7 +493,7 @@ impl Board {
                     let [left, top, right, bottom] = area;
                     let icon = control.icon.map(|icon| &menu.icons[icon]).filter(|icon| icon.height <= ROW_PIXELS && 2 * icon.width <= right - left);
                     let inset = icon.map_or(0, |icon| icon.width + (ROW_PIXELS - icon.height) / 2);
-                    self.draw_control(&mut image, area, inset, control, &menu.values);
+                    self.draw_control(&mut image, area, inset, control, &menu.values, &menu.strips);
                     if let Some(icon) = icon {
                         let margin = (ROW_PIXELS - icon.height) / 2;
                         image.over([left + margin, top + margin.min(bottom - top - icon.height)], [icon.width, icon.height], &icon.rgba);
@@ -512,7 +534,7 @@ impl Board {
         image
     }
 
-    fn draw_control(&self, image: &mut Canvas, area: [u32; 4], inset: u32, control: &Control, values: &HashMap<String, f32>) {
+    fn draw_control(&self, image: &mut Canvas, area: [u32; 4], inset: u32, control: &Control, values: &HashMap<String, f32>, strips: &HashMap<String, Vec<[u8; 4]>>) {
         let value = |name: &str| values.get(name).copied().unwrap_or(0.0);
         let [left, top, right, bottom] = area;
         let labelled = [left + inset, top, right, bottom];
@@ -528,9 +550,25 @@ impl Board {
             }
             Kind::Radial => {
                 image.fill(area, BUTTON);
-                let fill = value(control.axes.first().map_or("", String::as_str)).clamp(0.0, 1.0);
-                image.fill([left, top, left + ((right - left) as f32 * fill).round() as u32, bottom], ACTIVE);
-                image.small_label(labelled, &control.name);
+                let parameter = control.axes.first().map_or("", String::as_str);
+                let fill = value(parameter).clamp(0.0, 1.0);
+                match strips.get(parameter).filter(|strip| !strip.is_empty()) {
+                    Some(strip) => {
+                        let band = top + (bottom - top) * 3 / 5;
+                        for x in left..right {
+                            let share = (x - left) as f32 / (right - left) as f32;
+                            image.fill([x, band, x + 1, bottom], strip[((share * strip.len() as f32) as usize).min(strip.len() - 1)]);
+                        }
+                        let at = (left + ((right - left) as f32 * fill).round() as u32).clamp(left + 1, right - 2);
+                        image.fill([at - 1, top, at + 2, bottom], BACKGROUND);
+                        image.fill([at, top, at + 1, bottom], INK);
+                        image.small_label([labelled[0], top, right, band], &control.name);
+                    }
+                    None => {
+                        image.fill([left, top, left + ((right - left) as f32 * fill).round() as u32, bottom], ACTIVE);
+                        image.small_label(labelled, &control.name);
+                    }
+                }
             }
             Kind::TwoAxis | Kind::FourAxis => {
                 image.fill(area, BUTTON);
@@ -1232,7 +1270,7 @@ mod tests {
         let mut board = Board::new(3, 0);
         let plain = board.height();
         assert!(board.buttons().iter().all(|button| button.press != Press::Menu));
-        board.wear(Some((menu(), Vec::new())), HashMap::from([("Hat".to_owned(), 1.0)]));
+        board.wear(Some((menu(), Vec::new(), HashMap::new())), HashMap::from([("Hat".to_owned(), 1.0)]));
         assert_eq!(poke_on(&mut board, Press::Menu, 0.01), [Press::Menu]);
         board.toggle_menu();
         assert!(board.height() > plain + 3.0 * ROW, "the menu's page grows the board");
@@ -1246,7 +1284,7 @@ mod tests {
     #[test]
     fn a_submenu_opens_in_place_and_back_returns() {
         let mut board = Board::new(1, 0);
-        board.wear(Some((menu(), Vec::new())), HashMap::new());
+        board.wear(Some((menu(), Vec::new(), HashMap::new())), HashMap::new());
         board.toggle_menu();
         assert!(board.buttons().iter().any(|button| button.press == Press::Defaults), "the first page offers the creator's defaults");
         assert_eq!(board.control(2).map(|control| control.name), Some("Outfits".to_owned()));
@@ -1260,7 +1298,7 @@ mod tests {
     #[test]
     fn a_radial_reads_where_along_it_the_tip_crossed() {
         let mut board = Board::new(1, 0);
-        board.wear(Some((menu(), Vec::new())), HashMap::new());
+        board.wear(Some((menu(), Vec::new(), HashMap::new())), HashMap::new());
         board.toggle_menu();
         let [left, bottom, right, top] = rect_of(&board, Press::Control(1));
         let [x, _] = board.place_on(1, [left + 0.25 * (right - left), (bottom + top) / 2.0]);
@@ -1272,7 +1310,7 @@ mod tests {
     #[test]
     fn a_held_slider_follows_the_tip_until_it_draws_back() {
         let mut board = Board::new(1, 0);
-        board.wear(Some((menu(), Vec::new())), HashMap::new());
+        board.wear(Some((menu(), Vec::new(), HashMap::new())), HashMap::new());
         board.toggle_menu();
         let [left, bottom, right, top] = rect_of(&board, Press::Control(1));
         let along = |share: f32| left + share * (right - left);
@@ -1297,7 +1335,7 @@ mod tests {
     #[test]
     fn a_toggle_is_never_held() {
         let mut board = Board::new(1, 0);
-        board.wear(Some((menu(), Vec::new())), HashMap::new());
+        board.wear(Some((menu(), Vec::new(), HashMap::new())), HashMap::new());
         board.toggle_menu();
         let [x, y] = centre(&board, Press::Control(0));
         board.touch(Some([x, y, 0.05]));

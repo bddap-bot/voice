@@ -136,11 +136,26 @@ fn board_pages(controls: &[Control], path: &mut Vec<usize>, puppet: &Puppet, out
 }
 
 fn still(puppet: &mut Puppet, renderer: &mut Renderer, overlay: &mut Overlay, runtime: &Runtime, head: [f32; 3]) -> Result<Vec<u8>, String> {
+    let eyes = posed(puppet, head, SETTLE);
+    overlay.texture(&mut renderer.render(&puppet.drawn, eyes, renderer.eye[0])?)?;
+    overlay.show();
+    runtime.wait_frame();
+    left(renderer)
+}
+
+fn left(renderer: &Renderer) -> Result<Vec<u8>, String> {
+    let stereo = renderer.read()?;
+    let eye = renderer.eye[0];
+    Ok((0..eye).flat_map(|y| (0..eye).map(move |x| ((y * 2 * eye + x) * 4) as usize)).flat_map(|at| stereo[at..at + 4].to_vec()).collect())
+}
+
+/// Steps the puppet's menu `settle` frames and draws it standing, seen from `head`; the eyes to render it for.
+fn posed(puppet: &mut Puppet, head: [f32; 3], settle: usize) -> [Option<glam::Mat4>; 2] {
     let stand = Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0; 3]);
     let (menu, controller) = (puppet.model.menu.as_ref().unwrap(), puppet.controller.as_mut().unwrap());
     let mut pose = puppet.model.pose(&puppet.standing);
     let mut values = Vec::new();
-    for _ in 0..SETTLE {
+    for _ in 0..settle {
         values = controller.step(menu, DELTA);
     }
     puppet.drawn.hidden = menu.apply(&values, &mut pose);
@@ -157,13 +172,91 @@ fn still(puppet: &mut Puppet, renderer: &mut Renderer, overlay: &mut Overlay, ru
     let local = quad.inverse();
     puppet.draw(&worlds, local.mat4() * body);
     let eye = local.apply(head);
-    let eyes = [-0.032, 0.032].map(|x| eye_projection([eye[0] + x, eye[1], eye[2]].into(), QUAD / 2.0, QUAD / 2.0));
-    overlay.texture(&mut renderer.render(&puppet.drawn, eyes, renderer.eye[0])?)?;
-    overlay.show();
-    runtime.wait_frame();
-    let stereo = renderer.read()?;
-    let eye = renderer.eye[0];
-    Ok((0..eye).flat_map(|y| (0..eye).map(move |x| ((y * 2 * eye + x) * 4) as usize)).flat_map(|at| stereo[at..at + 4].to_vec()).collect())
+    [-0.032, 0.032].map(|x| eye_projection([eye[0] + x, eye[1], eye[2]].into(), QUAD / 2.0, QUAD / 2.0))
+}
+
+/// Frames of a fingertip pressing each named radial near its start, sliding along it to its end and drawing back, off any
+/// headset: the avatar in a file as the overlay draws it on the left, the board with the tip's dot on the right.
+pub fn sweep(args: &[String]) -> Result<(), String> {
+    let usage = "usage: voice-vr sweep <out-dir> <avatar.vrm> <radial name>...";
+    let [out, file, names @ ..] = args else { return Err(usage.into()) };
+    if names.is_empty() { return Err(usage.into()); }
+    let gpu = std::rc::Rc::new(Gpu::new(None)?);
+    let mut renderer = Renderer::new(gpu, [eye_texels(QUAD, NEAREST); 2], HEIGHT / PAGE_HEIGHT)?;
+    let bytes = std::fs::read(file).map_err(|error| format!("{file}: {error}"))?;
+    let model = crate::vrm::Model::parse(&bytes)?;
+    let mut puppet = crate::dressed(model, Default::default(), file, &mut renderer, &Default::default())?;
+    let menu = puppet.model.menu.clone().ok_or("the avatar has no menu")?;
+    let head = [0.0, -FLOOR + 0.12, 0.5];
+    for name in names {
+        let path = find(&menu.menu, name).ok_or(format!("no radial named {name}"))?;
+        let frames = PathBuf::from(out).join(name.replace('/', "-"));
+        std::fs::create_dir_all(&frames).map_err(|error| format!("{}: {error}", frames.display()))?;
+        let mut board = Board::new(1, 0);
+        board.wear(puppet.menu(), puppet.settings());
+        board.toggle_menu();
+        for &at in &path[..path.len() - 1] {
+            board.control(at);
+        }
+        let index = *path.last().unwrap();
+        let mut tips: Vec<(f32, f32)> = (0..10).map(|step| (0.05, 0.05 - 0.005 * step as f32)).collect();
+        tips.extend((0..=SWEEP).map(|step| (0.05 + 0.9 * step as f32 / SWEEP as f32, -0.01)));
+        tips.extend((0..10).map(|step| (0.95, -0.01 + 0.006 * step as f32)));
+        for (number, (share, depth)) in tips.into_iter().enumerate() {
+            let [x, y] = board.spot(index, [share, 0.5]).ok_or("the radial left the page")?;
+            let touch = board.touch(Some([x, y, depth]));
+            let controller = puppet.controller.as_mut().unwrap();
+            if let (Some(crate::board::Press::Control(pressed)), Some(crossing)) = (touch.press, touch.crossing) {
+                if let Some(control) = board.control(pressed) {
+                    operate(controller, &control, board.place_on(pressed, crossing));
+                }
+            }
+            if let Some((control, at)) = &touch.slide {
+                operate(controller, control, *at);
+            }
+            board.set_values(puppet.settings());
+            let eyes = posed(&mut puppet, head, 2);
+            renderer.render(&puppet.drawn, eyes, renderer.eye[0])?;
+            let figure = left(&renderer)?;
+            let canvas = board.picture();
+            let tip = board.pixel_of([x, y]);
+            frame(&figure, &canvas, tip, depth <= 0.0, &frames.join(format!("{number:04}.png")))?;
+        }
+        println!("{name}: {}", frames.display());
+    }
+    Ok(())
+}
+
+const SWEEP: usize = 120;
+
+fn find(controls: &[Control], name: &str) -> Option<Vec<usize>> {
+    controls.iter().enumerate().find_map(|(at, control)| match control.kind {
+        Kind::Radial if control.name == name => Some(vec![at]),
+        Kind::Submenu => find(&control.controls, name).map(|mut path| { path.insert(0, at); path }),
+        _ => None,
+    })
+}
+
+fn frame(figure: &[u8], board: &crate::board::Canvas, tip: [u32; 2], through: bool, path: &Path) -> Result<(), String> {
+    let eye = ((figure.len() / 4) as f64).sqrt() as u32;
+    let scale = (eye / board.height).max(1);
+    let width = eye + board.width * scale;
+    let height = eye.max(board.height * scale);
+    let image = image::RgbImage::from_fn(width, height, |x, y| {
+        if x < eye {
+            if y >= eye { return image::Rgb([30, 30, 30]); }
+            let at = ((y * eye + x) * 4) as usize;
+            let alpha = figure[at + 3] as f32 / 255.0;
+            return image::Rgb([0, 1, 2].map(|channel| ((figure[at + channel] as f32 / 255.0 + 0.12 * (1.0 - alpha)).clamp(0.0, 1.0) * 255.0).round() as u8));
+        }
+        let (bx, by) = ((x - eye) / scale, y / scale);
+        if by >= board.height { return image::Rgb([30, 30, 30]); }
+        let near = bx.abs_diff(tip[0]).pow(2) + by.abs_diff(tip[1]).pow(2) <= 25;
+        if near { return if through { image::Rgb([255, 214, 90]) } else { image::Rgb([240, 240, 240]) }; }
+        let at = ((by * board.width + bx) * 4) as usize;
+        image::Rgb([0, 1, 2].map(|channel| board.pixels[at + channel].saturating_add(30 - (30 * board.pixels[at + 3] as u32 / 255) as u8)))
+    });
+    image.save(path).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 fn changed(before: &[u8], after: &[u8]) -> f64 {

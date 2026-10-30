@@ -1261,33 +1261,166 @@ impl Model {
 
 impl Skinned {
     pub fn surface_values(&mut self, menu: &expressions::Expressions, values: &[f32]) {
-        for (target, &value) in menu.targets.iter().zip(values) {
-            match &target.effect {
-                expressions::Effect::Hue(regions) => for region in regions {
-                    let at = self.regions[&(region.node, region.rect.map(f32::to_bits))];
-                    self.surfaces[at].hue = [value, region.space, region.shift, 1.0];
-                },
-                expressions::Effect::Tone(regions) => for region in regions {
-                    let at = self.regions[&(region.node, region.rect.map(f32::to_bits))];
-                    self.surfaces[at].tone[region.channel] = value;
-                    self.surfaces[at].tone[3] = 1.0;
-                },
-                expressions::Effect::Color(regions) => for region in regions {
-                    let at = self.regions[&(region.node, region.rect.map(f32::to_bits))];
-                    let color = &mut self.surfaces[at].color;
-                    if color[3] == 0.0 { *color = [region.color[0], region.color[1], region.color[2], 1.0]; }
-                    color[region.channel] = value;
-                },
-                expressions::Effect::Decal(regions) => for region in regions {
-                    let at = self.regions[&(region.node, region.rect.map(f32::to_bits))];
-                    if region.intensity { self.surfaces[at].intensity[region.slot] = value; } else { self.surfaces[at].decal[region.slot] = value.clamp(0.0, 1.0); }
-                    self.surfaces[at].multiply[region.slot] = if region.multiply { 1.0 } else { 0.0 };
-                },
-                _ => {}
-            }
-        }
+        set_surfaces(&self.regions, &mut self.surfaces, menu, values);
     }
 
+    /// Along each radial's bar, what its parameter makes of the part it recolours most: the mean colour of that part's
+    /// texels under the avatar's own clips at each of `samples` evenly spaced values, as the shader draws them unlit.
+    pub fn swatches(&self, model: &Model, menu: &expressions::Expressions, controller: &expressions::Controller, samples: usize) -> HashMap<String, Vec<[u8; 4]>> {
+        fn radials(controls: &[expressions::Control], out: &mut Vec<String>) {
+            for control in controls {
+                if control.kind == expressions::Kind::Radial {
+                    out.extend(control.axes.first().cloned());
+                }
+                radials(&control.controls, out);
+            }
+        }
+        let mut parameters = Vec::new();
+        radials(&menu.menu, &mut parameters);
+        parameters.sort();
+        parameters.dedup();
+        let mut out = HashMap::new();
+        for parameter in parameters {
+            let values: Vec<Vec<f32>> = (0..samples).map(|sample| {
+                let mut trial = controller.clone();
+                trial.set(&parameter, (sample as f32 + 0.5) / samples as f32);
+                trial.step(menu, 0.0)
+            }).collect();
+            let nodes = menu.targets.iter().enumerate().filter(|&(target, _)| values.iter().any(|at| at[target] != values[0][target])).flat_map(|(_, target)| match &target.effect {
+                expressions::Effect::Material { node, .. } => vec![*node],
+                expressions::Effect::Hue(regions) => regions.iter().map(|region| region.node).collect(),
+                expressions::Effect::Color(regions) => regions.iter().map(|region| region.node).collect(),
+                expressions::Effect::Tone(regions) => regions.iter().map(|region| region.node).collect(),
+                _ => Vec::new(),
+            });
+            let Some(node) = nodes.max_by_key(|node| self.spans.get(node).map_or(0, |span| span.len())) else { continue };
+            let Some(span) = self.spans.get(&node).cloned().filter(|span| !span.is_empty()) else { continue };
+            let mut material_of = HashMap::new();
+            for draw in &self.draws {
+                for &vertex in &self.indices[draw.first as usize..(draw.first + draw.count) as usize] {
+                    if span.contains(&(vertex as usize)) {
+                        material_of.insert(vertex as usize, draw.material);
+                    }
+                }
+            }
+            let mut drawn: Vec<usize> = material_of.keys().copied().collect();
+            drawn.sort_unstable();
+            let drawn: Vec<usize> = drawn.iter().copied().step_by((drawn.len() / 512).max(1)).collect();
+            let strip = values.iter().map(|at| {
+                let [sx, sy, ox, oy] = menu.materials(at).find(|&(moved, _)| moved == node).map_or([1.0, 1.0, 0.0, 0.0], |(_, choice)| choice);
+                let mut surfaces = self.surfaces.clone();
+                set_surfaces(&self.regions, &mut surfaces, menu, at);
+                let mut sum = [0.0f32; 3];
+                let mut weight = 0.0;
+                for &vertex in &drawn {
+                    let material = &model.materials[material_of[&vertex]];
+                    let [u, v] = self.uvs[vertex];
+                    let uv = [u * sx + ox, v * sy + oy];
+                    let surface = &surfaces[self.vertices[vertex].surface as usize];
+                    let sampled = material.base_image.map_or([1.0; 4], |image| texel(&model.images[image], uv));
+                    let raw = menu.color_atlas.as_ref().map_or([1.0; 4], |atlas| texel(atlas, uv));
+                    let mask = menu.hue_mask.as_ref().map_or(1.0, |mask| texel(mask, uv)[0]);
+                    let base: [f32; 3] = std::array::from_fn(|c| {
+                        let tinted = sampled[c] * material.base[c];
+                        tinted + (raw[c] * surface.color[c] * material.base[c] - tinted) * surface.color[3]
+                    });
+                    let shifted = hue(base, surface.hue);
+                    let alpha = sampled[3] * material.base[3];
+                    for c in 0..3 {
+                        sum[c] += (base[c] + (shifted[c] - base[c]) * mask) * alpha;
+                    }
+                    weight += alpha;
+                }
+                let [r, g, b] = sum.map(|channel| ((channel / weight.max(1e-6)).clamp(0.0, 1.0) * 255.0).round() as u8);
+                [r, g, b, 255]
+            }).collect::<Vec<_>>();
+            if strip.iter().any(|&colour| colour != strip[0]) {
+                out.insert(parameter, strip);
+            }
+        }
+        out
+    }
+}
+
+fn texel(image: &Image, [u, v]: [f32; 2]) -> [f32; 4] {
+    let x = ((u.rem_euclid(1.0) * image.width as f32) as u32).min(image.width - 1);
+    let y = ((v.rem_euclid(1.0) * image.height as f32) as u32).min(image.height - 1);
+    let at = ((y * image.width + x) * 4) as usize;
+    std::array::from_fn(|channel| image.rgba[at + channel] as f32 / 255.0)
+}
+
+/// The shader's `hue`, on one colour.
+fn hue(color: [f32; 3], [shift, space, select, on]: [f32; 4]) -> [f32; 3] {
+    if on == 0.0 {
+        return color;
+    }
+    let [r, g, b] = color;
+    if space > 1.5 {
+        let axis = 0.57735026919;
+        let (sine, cosine) = shift.sin_cos();
+        let cross = [axis * (b - g), axis * (r - b), axis * (g - r)];
+        let along = axis * (r + g + b) * axis * (1.0 - cosine);
+        return std::array::from_fn(|c| color[c] * cosine + cross[c] * sine + along);
+    }
+    if space > 0.5 {
+        let (high, low) = (r.max(g).max(b), r.min(g).min(b));
+        let delta = high - low;
+        if delta < 1e-7 {
+            return color;
+        }
+        let mut angle = (g - b) / delta;
+        if high == g {
+            angle = (b - r) / delta + 2.0;
+        } else if high == b {
+            angle = (r - g) / delta + 4.0;
+        }
+        let angle = (angle / 6.0 * select + shift).rem_euclid(1.0);
+        return [0.0, 2.0 / 3.0, 1.0 / 3.0].map(|offset: f32| low + (((angle + offset).rem_euclid(1.0) * 6.0 - 3.0).abs() - 1.0).clamp(0.0, 1.0) * delta);
+    }
+    let lms = [[0.4122214708, 0.5363325363, 0.0514459929], [0.2119034982, 0.6806995451, 0.1073969566], [0.0883024619, 0.2817188376, 0.6299787005]]
+        .map(|row: [f32; 3]| (row[0] * r + row[1] * g + row[2] * b).max(0.0).cbrt());
+    let dot = |row: [f32; 3]| row[0] * lms[0] + row[1] * lms[1] + row[2] * lms[2];
+    let light = dot([0.2104542553, 0.7936177850, -0.0040720468]);
+    let mut ab = [dot([1.9779984951, -2.4285922050, 0.4505937099]), dot([0.0259040371, 0.7827717662, -0.8086757660])];
+    if select < 0.5 {
+        ab = [ab[0].hypot(ab[1]), 0.0];
+    }
+    let (sine, cosine) = (shift * std::f32::consts::TAU).sin_cos();
+    let [a, b] = [cosine * ab[0] - sine * ab[1], sine * ab[0] + cosine * ab[1]];
+    let cubes = [light + 0.3963377774 * a + 0.2158037573 * b, light - 0.1055613458 * a - 0.0638541728 * b, light - 0.0894841775 * a - 1.2914855480 * b].map(|root| root * root * root);
+    [[4.0767416621, -3.3077115913, 0.2309699292], [-1.2684380046, 2.6097574011, -0.3413193965], [-0.0041960863, -0.7034186147, 1.7076147010]]
+        .map(|row: [f32; 3]| (row[0] * cubes[0] + row[1] * cubes[1] + row[2] * cubes[2]).max(0.0))
+}
+
+fn set_surfaces(surface_of: &HashMap<(usize, [u32; 4]), usize>, surfaces: &mut [Surface], menu: &expressions::Expressions, values: &[f32]) {
+    for (target, &value) in menu.targets.iter().zip(values) {
+        match &target.effect {
+            expressions::Effect::Hue(regions) => for region in regions {
+                let at = surface_of[&(region.node, region.rect.map(f32::to_bits))];
+                surfaces[at].hue = [value, region.space, region.shift, 1.0];
+            },
+            expressions::Effect::Tone(regions) => for region in regions {
+                let at = surface_of[&(region.node, region.rect.map(f32::to_bits))];
+                surfaces[at].tone[region.channel] = value;
+                surfaces[at].tone[3] = 1.0;
+            },
+            expressions::Effect::Color(regions) => for region in regions {
+                let at = surface_of[&(region.node, region.rect.map(f32::to_bits))];
+                let color = &mut surfaces[at].color;
+                if color[3] == 0.0 { *color = [region.color[0], region.color[1], region.color[2], 1.0]; }
+                color[region.channel] = value;
+            },
+            expressions::Effect::Decal(regions) => for region in regions {
+                let at = surface_of[&(region.node, region.rect.map(f32::to_bits))];
+                if region.intensity { surfaces[at].intensity[region.slot] = value; } else { surfaces[at].decal[region.slot] = value.clamp(0.0, 1.0); }
+                surfaces[at].multiply[region.slot] = if region.multiply { 1.0 } else { 0.0 };
+            },
+            _ => {}
+        }
+    }
+}
+
+impl Skinned {
     pub fn retexture(&mut self, node: usize, moved: [f32; 4]) -> Vec<u32> {
         let Some(span) = self.spans.get(&node).cloned() else { return Vec::new() };
         if self.moved.get(&node).map_or(moved == [1.0, 1.0, 0.0, 0.0], |&last| last == moved) {
@@ -1380,10 +1513,10 @@ impl Fit {
         let hidden = model.menu.as_ref().map_or_else(HashSet::new, |menu| menu.apply(&menu.targets.iter().map(|target| target.default).collect::<Vec<_>>(), &mut pose));
         let worlds = model.worlds(&pose);
         let points = skinned.positions(&skinned.palette(&worlds, Mat4::IDENTITY), &hidden);
-        let (low, high) = bounds(&points);
-        let size = high.y - low.y;
-        let feet = model.feet(&worlds).map_or(low.y, |feet| feet[0].y.min(feet[1].y));
-        Fit { scale: if size > 0.0 { height / size } else { 1.0 }, ground: low.y, ankle: feet - low.y }
+        let (_, high) = bounds(&points);
+        let feet = model.feet(&worlds).map_or(0.0, |feet| feet[0].y.min(feet[1].y));
+        // The model's origin is where it stands, as VRChat and VRM both put it; what hangs below, such as a heel or hoof, sinks into the floor.
+        Fit { scale: if high.y > 0.0 { height / high.y } else { 1.0 }, ground: 0.0, ankle: feet }
     }
 
     pub fn placement(&self, model: &Model, worlds: &[Mat4], floor: f32) -> Mat4 {
@@ -1795,6 +1928,61 @@ pub mod tests {
         let (node, moved) = menu.materials(&[0.0]).next().unwrap();
         skinned.retexture(node, moved);
         assert_eq!(skinned.vertices.iter().map(|vertex| vertex.uv).collect::<Vec<_>>(), original);
+    }
+
+    #[test]
+    fn the_origin_stands_on_the_floor_and_what_hangs_below_it_sinks() {
+        let mut builder = Builder::new(serde_json::json!({"VRMC_vrm": {"humanoid": {"humanBones": {}}}}));
+        let position = builder.accessor("VEC3", &[0.0, -0.1, 0.0, 1.0, 0.9, 0.0, 0.0, 1.5, 0.0]);
+        builder.set("nodes", serde_json::json!([{"mesh": 0}]));
+        builder.set("meshes", serde_json::json!([{"primitives": [{"attributes": {"POSITION": position}}]}]));
+        let model = Model::parse(&builder.glb()).unwrap();
+        let fit = Fit::new(&model, &model.skinned().unwrap(), 0.3);
+        assert!((fit.scale - 0.2).abs() < 1e-6, "sized from the floor to the top: {}", fit.scale);
+        let placement = fit.placement(&model, &model.worlds(&model.rest()), -0.17);
+        assert!((placement.transform_point3(Vec3::ZERO).y + 0.17).abs() < 1e-6, "the origin is on the floor");
+    }
+
+    #[test]
+    fn a_radial_strip_shows_each_step_of_a_swap_and_the_sweep_of_a_hue() {
+        let mut builder = Builder::new(serde_json::json!({
+            "VRMC_vrm": {"humanoid": {"humanBones": {}}},
+            "VRCHAT_expressions": {
+                "menu": [{"name": "Colour", "type": "radial", "axes": ["Swap"]}, {"name": "Hue", "type": "radial", "axes": ["Shift"]}, {"name": "Flat", "type": "radial", "axes": ["Unused"]}],
+                "parameters": [{"name": "Swap", "type": "float"}, {"name": "Shift", "type": "float"}, {"name": "Unused", "type": "float"}],
+                "layers": [
+                    {"states": [{"motion": {"clip": 0, "time": "Swap"}}]},
+                    {"states": [{"motion": {"clip": 1, "time": "Shift"}}]}
+                ],
+                "clips": [
+                    {"length": 1, "curves": [{"target": 0, "step": true, "keys": [[0, 0], [0.5, 1]]}]},
+                    {"length": 1, "curves": [{"target": 1, "keys": [[0, 0], [1, 6.2831855]]}]}
+                ],
+                "targets": [
+                    {"effect": {"material": {"node": 0, "choices": [[0.5, 1, 0, 0], [0.5, 1, 0.5, 0]]}}},
+                    {"effect": {"hue": [{"node": 0, "rect": [0, 0, 1, 1], "space": 2, "shift": 1}]}}
+                ]
+            }
+        }));
+        let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        let uv = builder.accessor("VEC2", &[0.1, 0.1, 0.9, 0.1, 0.1, 0.9]);
+        let image = builder.webp(2, 1, &[255, 0, 0, 255, 0, 0, 255, 255]);
+        builder.set("nodes", serde_json::json!([{"mesh": 0}]));
+        builder.set("meshes", serde_json::json!([{"primitives": [{"attributes": {"POSITION": position, "TEXCOORD_0": uv}, "material": 0}]}]));
+        builder.set("textures", serde_json::json!([{ "extensions": { "EXT_texture_webp": { "source": image } } }]));
+        builder.set("materials", serde_json::json!([{ "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } } }]));
+        let model = Model::parse(&builder.glb()).unwrap();
+        let skinned = model.skinned().unwrap();
+        let menu = model.menu.as_ref().unwrap();
+        let controller = expressions::Controller::new(menu, &Default::default());
+        let strips = skinned.swatches(&model, menu, &controller, 8);
+        let swap = &strips["Swap"];
+        assert_eq!(swap[..4].iter().collect::<HashSet<_>>().len(), 1, "one choice holds below the step: {swap:?}");
+        assert_eq!(swap[4..].iter().collect::<HashSet<_>>().len(), 1);
+        assert!(swap[0][0] > 200 && swap[0][2] < 50 && swap[7][2] > 200 && swap[7][0] < 50, "red, then blue: {swap:?}");
+        let shift = &strips["Shift"];
+        assert_eq!(shift.iter().collect::<HashSet<_>>().len(), 8, "a hue sweep differs at every sample: {shift:?}");
+        assert!(!strips.contains_key("Unused"), "a radial that changes no colour gets no strip");
     }
 
     #[test]

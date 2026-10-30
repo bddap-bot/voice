@@ -19,11 +19,47 @@ struct Joint {
     below: Vec<usize>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Shape {
+    /// A sphere, or with a tail a capsule, keeping joints outside it or, `inside`, within it.
+    Round { tail: Option<Vec3>, radius: f32, inside: bool },
+    /// Joints stay on the side its normal points to.
+    Plane { normal: Vec3 },
+}
+
 struct Collider {
     node: usize,
     offset: Vec3,
-    tail: Option<Vec3>,
-    radius: f32,
+    shape: Shape,
+}
+
+enum Placed {
+    Round { center: Vec3, end: Option<Vec3>, reach: f32, inside: bool },
+    Plane { point: Vec3, normal: Vec3 },
+}
+
+impl Placed {
+    fn push(&self, at: Vec3, radius: f32) -> Vec3 {
+        match *self {
+            Placed::Round { center, end, reach, inside } => {
+                let nearest = match end {
+                    Some(end) => {
+                        let span = end - center;
+                        center + span * ((at - center).dot(span) / span.length_squared().max(f32::MIN_POSITIVE)).clamp(0.0, 1.0)
+                    }
+                    None => center,
+                };
+                let away = at - nearest;
+                let distance = away.length();
+                let depth = if inside { distance + radius - reach } else { reach + radius - distance };
+                if depth <= 0.0 {
+                    return at;
+                }
+                at + away.normalize_or_zero() * if inside { -depth } else { depth }
+            }
+            Placed::Plane { point, normal } => at - normal * ((at - point).dot(normal) - radius).min(0.0),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -45,7 +81,7 @@ fn object(value: &Value) -> Option<Vec3> {
 }
 
 impl Rig {
-    /// Reads VRMC_springBone or VRM 0 secondaryAnimation as three-vrm reads them, skipping what it skips.
+    /// Reads VRMC_springBone, with VRMC_springBone_extended_collider's inside and plane colliders, or VRM 0 secondaryAnimation as three-vrm reads them, skipping what it skips.
     pub(super) fn parse(version: Version, extensions: &Value, nodes: &[Node], children: &[Vec<usize>]) -> Rig {
         let empty = Vec::new();
         let list = |value: &Value| value.as_array().unwrap_or(&empty).clone();
@@ -57,12 +93,16 @@ impl Rig {
                 let extension = &extensions["VRMC_springBone"];
                 let mut slots = Vec::new();
                 for collider in list(&extension["colliders"]) {
-                    let shape = &collider["shape"];
-                    let parsed = match (shape.get("sphere"), shape.get("capsule"), node(&collider["node"])) {
-                        (Some(sphere), _, Some(at)) => Some(Collider { node: at, offset: Vec3::from(floats(&sphere["offset"], [0.0; 3])), tail: None, radius: number(&sphere["radius"], 0.0) }),
-                        (None, Some(capsule), Some(at)) => Some(Collider { node: at, offset: Vec3::from(floats(&capsule["offset"], [0.0; 3])), tail: Some(Vec3::from(floats(&capsule["tail"], [0.0; 3]))), radius: number(&capsule["radius"], 0.0) }),
+                    let extended = &collider["extensions"]["VRMC_springBone_extended_collider"]["shape"];
+                    let shape = if extended.is_object() { extended } else { &collider["shape"] };
+                    let offset = |geometry: &Value| Vec3::from(floats(&geometry["offset"], [0.0; 3]));
+                    let round = |geometry: &Value, tail: Option<Vec3>| Shape::Round { tail, radius: number(&geometry["radius"], 0.0), inside: geometry["inside"].as_bool().unwrap_or(false) };
+                    let parsed = node(&collider["node"]).and_then(|at| match (shape.get("sphere"), shape.get("capsule"), shape.get("plane")) {
+                        (Some(sphere), _, _) => Some(Collider { node: at, offset: offset(sphere), shape: round(sphere, None) }),
+                        (None, Some(capsule), _) => Some(Collider { node: at, offset: offset(capsule), shape: round(capsule, Some(Vec3::from(floats(&capsule["tail"], [0.0; 3])))) }),
+                        (None, None, Some(plane)) => Some(Collider { node: at, offset: offset(plane), shape: Shape::Plane { normal: Vec3::from(floats(&plane["normal"], [0.0, 0.0, 1.0])).normalize_or(Vec3::Z) } }),
                         _ => None,
-                    };
+                    });
                     slots.push(parsed.map(|collider| {
                         rig.colliders.push(collider);
                         rig.colliders.len() - 1
@@ -93,7 +133,7 @@ impl Rig {
                     if let Some(at) = node(&group["node"]) {
                         for collider in list(&group["colliders"]) {
                             let offset = object(&collider["offset"]).unwrap_or(Vec3::ZERO) * Vec3::new(1.0, 1.0, -1.0);
-                            rig.colliders.push(Collider { node: at, offset, tail: None, radius: number(&collider["radius"], 0.0) });
+                            rig.colliders.push(Collider { node: at, offset, shape: Shape::Round { tail: None, radius: number(&collider["radius"], 0.0), inside: false } });
                         }
                     }
                     rig.groups.push((first..rig.colliders.len()).collect());
@@ -198,12 +238,16 @@ impl Springs {
             return;
         }
         let mut worlds: Vec<Mat4> = model.worlds(pose).into_iter().map(|world| model_to_world * world).collect();
-        let colliders: Vec<(Vec3, Option<Vec3>, f32)> = rig
+        let colliders: Vec<Placed> = rig
             .colliders
             .iter()
             .map(|collider| {
                 let world = worlds[collider.node];
-                (world.transform_point3(collider.offset), collider.tail.map(|tail| world.transform_point3(tail)), collider.radius * scale_of(&world))
+                let at = world.transform_point3(collider.offset);
+                match collider.shape {
+                    Shape::Round { tail, radius, inside } => Placed::Round { center: at, end: tail.map(|tail| world.transform_point3(tail)), reach: radius * scale_of(&world), inside },
+                    Shape::Plane { normal } => Placed::Plane { point: at, normal: world.transform_vector3(normal).normalize_or(Vec3::Y) },
+                }
             })
             .collect();
         let fresh = self.tails.len() != rig.joints.len();
@@ -227,19 +271,10 @@ impl Springs {
                 let carried = initial.transform_point3(tail.held);
                 let moved = carried + (tail.now - tail.before - (carried - tail.now)) * (1.0 - drag) + (axis * stiffness + gravity) * (delta * scale);
                 let mut next = origin + (moved - origin).normalize_or(axis) * length;
-                for &(center, end, reach) in joint.groups.iter().flat_map(|&group| &rig.groups[group]).map(|&collider| &colliders[collider]) {
-                    let nearest = match end {
-                        Some(end) => {
-                            let span = end - center;
-                            center + span * ((next - center).dot(span) / span.length_squared().max(f32::MIN_POSITIVE)).clamp(0.0, 1.0)
-                        }
-                        None => center,
-                    };
-                    let away = next - nearest;
-                    let overlap = radius * scale + reach - away.length();
-                    if overlap > 0.0 {
-                        next += away.normalize_or_zero() * overlap;
-                        next = origin + (next - origin).normalize_or(axis) * length;
+                for placed in joint.groups.iter().flat_map(|&group| &rig.groups[group]).map(|&collider| &colliders[collider]) {
+                    let pushed = placed.push(next, radius * scale);
+                    if pushed != next {
+                        next = origin + (pushed - origin).normalize_or(axis) * length;
                     }
                 }
                 *tail = Tail { now: next, before: tail.now, held: tail.held, rotation: tail.rotation };
@@ -315,7 +350,7 @@ mod tests {
         let model = strand(serde_json::json!({ "bones": [99, -1, 2], "colliderGroups": [1] }), colliders);
         assert_eq!(model.rig.joints.len(), 3);
         assert_eq!(model.rig.groups, [vec![], vec![0]], "a skipped collider group keeps its place, so the bone group's index still names its sphere");
-        assert_eq!(model.rig.colliders[0].radius, 0.04);
+        assert_eq!(model.rig.colliders[0].shape, Shape::Round { tail: None, radius: 0.04, inside: false });
     }
 
     #[test]
@@ -335,7 +370,7 @@ mod tests {
         let joints: Vec<(usize, Vec3, f32)> = model.rig.joints.iter().map(|joint| (joint.node, joint.tail, joint.settings.stiffness)).collect();
         assert_eq!(joints, [(2, Vec3::new(0.0, 0.0, 0.1), 0.5), (3, Vec3::new(0.0, 0.0, 0.2), 1.0)], "the last joint is only a tail");
         let capsule = &model.rig.colliders[0];
-        assert_eq!((capsule.offset, capsule.tail, capsule.radius), (Vec3::new(0.0, 0.1, 0.0), Some(Vec3::new(0.0, 0.3, 0.0)), 0.05));
+        assert_eq!((capsule.offset, capsule.shape), (Vec3::new(0.0, 0.1, 0.0), Shape::Round { tail: Some(Vec3::new(0.0, 0.3, 0.0)), radius: 0.05, inside: false }));
         assert_eq!(model.rig.joints[0].groups, [0]);
     }
 
@@ -418,6 +453,83 @@ mod tests {
         let sphere = Vec3::new(0.0, 0.9, 0.13);
         assert!((blocked - sphere).length() >= 0.04 - 1e-4, "with it, the strand's middle rests on the sphere, its offset's z turned into glTF's: {blocked}");
         assert!(blocked.y < 0.99, "having fallen onto it: {blocked}");
+    }
+
+    /// A strand of three 0.1 segments reaching forward from 1.0 up, falling under gravity onto the one collider given, in VRM 1 form.
+    fn fallen(collider: Value) -> Vec<Vec3> {
+        let mut builder = Builder::new(serde_json::json!({
+            "VRMC_vrm": { "humanoid": { "humanBones": { "hips": { "node": 1 } } } },
+            "VRMC_springBone": {
+                "colliders": [collider],
+                "colliderGroups": [{ "colliders": [0] }],
+                "springs": [{ "joints": [{ "node": 2, "stiffness": 0.0, "gravityPower": 1.0, "dragForce": 0.4 }, { "node": 3, "stiffness": 0.0, "gravityPower": 1.0, "dragForce": 0.4 }, { "node": 4, "stiffness": 0.0, "gravityPower": 1.0, "dragForce": 0.4 }, { "node": 5 }], "colliderGroups": [0] }]
+            }
+        }));
+        let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        builder.set("nodes", serde_json::json!([{ "children": [1], "mesh": 0 }, { "children": [2] }, { "translation": [0.0, 1.0, 0.0], "children": [3] }, { "translation": [0.0, 0.0, 0.1], "children": [4] }, { "translation": [0.0, 0.0, 0.1], "children": [5] }, { "translation": [0.0, 0.0, 0.1] }]));
+        builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position } }] }]));
+        let model = Model::parse(&builder.glb()).unwrap();
+        let mut springs = Springs::default();
+        run(&model, &mut springs, |_| Mat4::IDENTITY, 0.0, 3.0);
+        let mut pose = model.rest();
+        springs.step(&model, &mut pose, Mat4::IDENTITY, 1.0 / 90.0);
+        let worlds = model.worlds(&pose);
+        (3..6).map(|node| worlds[node].w_axis.truncate()).collect()
+    }
+
+    /// One push and the segment's length restored, as three-vrm does, leaves a joint up to this deep.
+    const SETTLED: f32 = 0.01;
+
+    fn nowhere() -> Value {
+        serde_json::json!({ "sphere": { "offset": [0.0, -10.0, 0.0], "radius": 0.0 } })
+    }
+
+    #[test]
+    fn a_chain_stays_outside_a_sphere_collider() {
+        let free = fallen(serde_json::json!({ "node": 1, "shape": nowhere() }));
+        assert!(free[2].abs_diff_eq(Vec3::new(0.0, 0.7, 0.0), 2e-3), "without it the strand hangs straight down: {free:?}");
+        let center = Vec3::new(0.0, 0.8, 0.02);
+        let held = fallen(serde_json::json!({ "node": 1, "shape": { "sphere": { "offset": center.to_array(), "radius": 0.04 } } }));
+        for joint in &held {
+            assert!((*joint - center).length() >= 0.04 - SETTLED, "every joint rests outside the sphere: {held:?}");
+        }
+        assert!(held[1].z > 0.03, "falling from in front, the strand comes to rest on the sphere's front instead of hanging through it: {held:?}");
+    }
+
+    #[test]
+    fn a_chain_stays_outside_a_capsule_collider() {
+        let (start, end) = (Vec3::new(-0.2, 0.8, 0.02), Vec3::new(0.1, 0.8, 0.02));
+        let held = fallen(serde_json::json!({ "node": 1, "shape": { "capsule": { "offset": start.to_array(), "tail": end.to_array(), "radius": 0.04 } } }));
+        for joint in &held {
+            let span = end - start;
+            let nearest = start + span * ((*joint - start).dot(span) / span.length_squared()).clamp(0.0, 1.0);
+            assert!((*joint - nearest).length() >= 0.04 - SETTLED, "every joint rests outside the capsule, measured from its axis between the ends: {held:?}");
+        }
+        assert!(held[1].z > 0.03, "falling from in front, the strand comes to rest on the bar's front, between its ends: {held:?}");
+    }
+
+    #[test]
+    fn an_inside_sphere_keeps_the_chain_within_it() {
+        let held = fallen(serde_json::json!({ "node": 1, "shape": nowhere(), "extensions": { "VRMC_springBone_extended_collider": { "specVersion": "1.0", "shape": { "sphere": { "offset": [0.0, 1.0, 0.0], "radius": 0.25, "inside": true } } } } }));
+        for joint in &held {
+            assert!((*joint - Vec3::new(0.0, 1.0, 0.0)).length() <= 0.25 + SETTLED, "every joint stays within the sphere: {held:?}");
+        }
+    }
+
+    #[test]
+    fn an_inside_capsule_keeps_the_chain_within_it() {
+        let held = fallen(serde_json::json!({ "node": 1, "shape": nowhere(), "extensions": { "VRMC_springBone_extended_collider": { "specVersion": "1.0", "shape": { "capsule": { "offset": [0.0, 1.0, 0.0], "tail": [0.0, 1.0, 0.3], "radius": 0.15, "inside": true } } } } }));
+        for joint in &held {
+            let nearest = Vec3::new(0.0, 1.0, joint.z.clamp(0.0, 0.3));
+            assert!((*joint - nearest).length() <= 0.15 + SETTLED, "every joint stays within the capsule: {held:?}");
+        }
+    }
+
+    #[test]
+    fn a_plane_keeps_the_chain_on_its_normals_side() {
+        let held = fallen(serde_json::json!({ "node": 1, "shape": nowhere(), "extensions": { "VRMC_springBone_extended_collider": { "specVersion": "1.0", "shape": { "plane": { "offset": [0.0, 0.85, 0.0], "normal": [0.0, 1.0, 0.0] } } } } }));
+        assert!(held.iter().all(|joint| joint.y >= 0.85 - SETTLED), "no joint sinks below the plane: {held:?}");
+        assert!(held[2].y < 0.9, "the strand still falls to it: {held:?}");
     }
 
     #[test]

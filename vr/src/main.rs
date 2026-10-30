@@ -542,7 +542,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
                     Ok(loaded) => {
                         puppet = loaded;
                         if let Anchor::Grounded(floor) = &mut anchor {
-                            *floor = placement::Floor::new(floor.pose, Random::seeded());
+                            *floor = placement::Floor::new(floor.pose);
                         }
                         board.active = index;
                         board.wear(puppet.menu(), puppet.settings());

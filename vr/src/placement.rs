@@ -1,7 +1,5 @@
 use std::time::{Duration, Instant};
 
-use crate::motion::Random;
-
 pub type Vec3 = [f32; 3];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -134,7 +132,7 @@ impl Anchor {
                 let pose = on_controller(hand);
                 if pose.t[1] < GROUND {
                     let floor = upright([pose.t[0], 0.0, pose.t[2]], viewer, pose.axis(2));
-                    *self = Anchor::Grounded(Floor::new(floor, Random::seeded()));
+                    *self = Anchor::Grounded(Floor::new(floor));
                     floor
                 } else {
                     if now >= until {
@@ -148,14 +146,14 @@ impl Anchor {
     }
 }
 
-/// The band a floor puppet keeps around the headset, measured across the floor: two to six feet.
+/// The band a floor puppet keeps around the headset, measured across the floor: two to five feet.
 pub const NEAREST: f32 = 0.61;
-pub const FARTHEST: f32 = 1.83;
-/// Half the cone ahead of the headset that counts as in view.
-pub const IN_VIEW: f32 = 0.75;
-/// Where it walks to: this far off the line of sight, so it stands in view without blocking it.
-const ASIDE: [f32; 2] = [0.2, 0.55];
-const KEEP: [f32; 2] = [0.9, 1.5];
+pub const FARTHEST: f32 = 1.52;
+/// Half the cone ahead of the headset that counts as in view, peripheral vision included.
+pub const IN_VIEW: f32 = std::f32::consts::FRAC_PI_3;
+/// Where it walks back to: this far off the line of sight and this far away, so it stands in view without blocking it.
+const ASIDE: f32 = 0.5;
+const KEEP: f32 = (NEAREST + FARTHEST) / 2.0;
 /// Close enough to its spot to stop walking.
 const ARRIVED: f32 = 0.2;
 /// The most it heads around the headset at once, so its path circles him instead of crossing him.
@@ -163,8 +161,6 @@ const ARC: f32 = 0.6;
 /// Radians per second it turns, and the most it may face away from where it is heading and still step.
 const TURN: f32 = 2.0;
 const STEER: f32 = 1.0;
-/// Seconds it stands between wanders inside the band.
-const REST: [f32; 2] = [12.0, 24.0];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Floor {
@@ -172,13 +168,11 @@ pub struct Floor {
     feet: Option<[Vec3; 2]>,
     goal: Option<Vec3>,
     heading: f32,
-    rest: f32,
-    random: Random,
 }
 
 impl Floor {
-    pub fn new(pose: Pose, mut random: Random) -> Self {
-        Self { pose, feet: None, goal: None, heading: 0.0, rest: within(REST, random.next()), random }
+    pub fn new(pose: Pose) -> Self {
+        Self { pose, feet: None, goal: None, heading: 0.0 }
     }
 
     /// Whether it wants to step: it has somewhere to go and faces near enough toward it.
@@ -199,15 +193,8 @@ impl Floor {
         if self.goal.is_some_and(|goal| !welcome(head, goal) || length(level(sub(goal, at))) < ARRIVED) {
             self.goal = None;
         }
-        if self.goal.is_none() {
-            self.rest -= delta;
-            if !welcome(head, at) {
-                self.goal = Some(spot(head, at, side(head, at), 0.5, 0.5));
-            } else if self.rest <= 0.0 {
-                self.rest = within(REST, self.random.next());
-                let side = if self.random.next() < 0.5 { -1.0 } else { 1.0 };
-                self.goal = Some(spot(head, at, side, self.random.next(), self.random.next()));
-            }
+        if self.goal.is_none() && !welcome(head, at) {
+            self.goal = Some(spot(head, at));
         }
         let toward = level(sub(self.goal.map_or(head.t, |goal| aim(head.t, at, goal)), at));
         if length(toward) > 1e-3 {
@@ -224,10 +211,6 @@ impl Floor {
 
 fn level(v: Vec3) -> Vec3 {
     [v[0], 0.0, v[2]]
-}
-
-fn within([low, high]: [f32; 2], t: f32) -> f32 {
-    low + (high - low) * t
 }
 
 fn yawed(v: Vec3, angle: f32) -> Vec3 {
@@ -248,16 +231,12 @@ pub fn welcome(head: &Pose, at: Vec3) -> bool {
     (NEAREST..=FARTHEST).contains(&distance) && ahead(head).is_none_or(|ahead| dot(ahead, offset) >= distance * IN_VIEW.cos())
 }
 
-/// The side of the line of sight `at` stands on, as the sign of a turn about the vertical.
-fn side(head: &Pose, at: Vec3) -> f32 {
+/// The spot in view `ASIDE` off the line of sight on the side `at` stands, `KEEP` away.
+fn spot(head: &Pose, at: Vec3) -> Vec3 {
     let offset = level(sub(at, head.t));
-    if ahead(head).is_some_and(|ahead| cross(ahead, offset)[1] < 0.0) { -1.0 } else { 1.0 }
-}
-
-/// A spot in view off the line of sight on `side`, `aside` and `keep` choosing how far off it and how far away within their ranges.
-fn spot(head: &Pose, at: Vec3, side: f32, aside: f32, keep: f32) -> Vec3 {
-    let ahead = ahead(head).unwrap_or_else(|| normalize(level(sub(at, head.t))));
-    let mut spot = add(head.t, scale(yawed(ahead, side * within(ASIDE, aside)), within(KEEP, keep)));
+    let ahead = ahead(head).unwrap_or_else(|| normalize(offset));
+    let side = if cross(ahead, offset)[1] < 0.0 { -1.0 } else { 1.0 };
+    let mut spot = add(head.t, scale(yawed(ahead, side * ASIDE), KEEP));
     spot[1] = 0.0;
     spot
 }
@@ -491,7 +470,7 @@ mod tests {
     fn walking_cancels_the_authored_support_foot_travel_at_any_scale_or_frame_rate() {
         for rate in [30, 90, 144] {
             for size in [0.6, 1.0, 1.5] {
-                let mut floor = Floor::new(turned(0.0, [0.0; 3]), Random(7));
+                let mut floor = Floor::new(turned(0.0, [0.0; 3]));
                 let mut previous = walking_feet(0.0).map(|f| scale(f, size));
                 floor.step(Some(previous), true, &STILL, 0.0);
                 for frame in 1..=rate {
@@ -512,7 +491,7 @@ mod tests {
     fn placement_and_resuming_a_step_preserve_any_chosen_position() {
         for position in [[0.0; 3], [3.0, 0.0, -4.0]] {
             let initial = turned(0.7, position);
-            let mut floor = Floor::new(initial, Random(7));
+            let mut floor = Floor::new(initial);
             for frame in 0..900 {
                 assert_eq!(floor.step(Some(walking_feet(frame as f32 / 90.0)), false, &STILL, 0.0), initial);
             }
@@ -535,7 +514,7 @@ mod tests {
         let fit = Fit::new(&model, &model.skinned().unwrap(), 1.67);
         let clip = Clip::parse(include_bytes!("../motions/walk.json"), model.version, model.rest_hips()).unwrap();
         for rate in [30, 90, 144] {
-            let mut floor = Floor::new(turned(0.0, [0.0; 3]), Random(7));
+            let mut floor = Floor::new(turned(0.0, [0.0; 3]));
             let mut previous = None;
             for frame in 0..rate * 10 {
                 let worlds = model.worlds(&model.pose(&clip.sample((frame as f32 / rate as f32) % clip.duration())));
@@ -551,7 +530,7 @@ mod tests {
 
     #[test]
     fn an_idle_to_stride_transition_keeps_the_support_foot_planted() {
-        let mut floor = Floor::new(turned(0.0, [2.0, 0.0, 3.0]), Random(7));
+        let mut floor = Floor::new(turned(0.0, [2.0, 0.0, 3.0]));
         let standing = [[-0.2, 0.08, 0.018], [0.2, 0.078, -0.018]];
         let stepping = [[-0.197, 0.081, 0.023], [0.197, 0.078, -0.023]];
         floor.step(Some(standing), false, &STILL, 0.0);
@@ -596,7 +575,7 @@ mod tests {
         for yaw in [0.0, 2.0, -2.6] {
             let head = headset(yaw, 0.3, [0.4, 1.6, -0.2]);
             for (start, facing) in [([0.4, 0.0, -4.0], 0.0), ([0.4, 0.0, 3.5], 0.0), ([3.0, 0.0, 2.5], 1.0), ([-5.0, 0.0, -0.2], 3.0), ([0.5, 0.0, -0.1], 2.0)] {
-                let mut floor = Floor::new(turned(facing, start), Random(7));
+                let mut floor = Floor::new(turned(facing, start));
                 let poses = walk_for(&mut floor, |_| head, 40.0);
                 let end = poses.last().unwrap();
                 let distance = across(&head, end.t);
@@ -604,7 +583,7 @@ mod tests {
                 let label = format!("headset yaw {yaw}, start {start:?}: ended {distance:.2} m off, facing {away:.2} rad away, {aside:.2} rad off the line of sight");
                 assert!((NEAREST..=FARTHEST).contains(&distance), "{label}");
                 assert!(away < 0.05, "settles facing the headset: {label}");
-                assert!((0.1..IN_VIEW).contains(&aside), "in view, not dead centre: {label}");
+                assert!((0.25..std::f32::consts::FRAC_PI_4).contains(&aside), "in view, off centre within 45 degrees: {label}");
                 assert!(!floor.going(), "settled: {label}");
                 let entered = poses.iter().position(|pose| (NEAREST..=FARTHEST).contains(&across(&head, pose.t))).unwrap();
                 assert!(poses[entered..].iter().all(|pose| across(&head, pose.t) >= NEAREST * 0.9), "once in the band it circles him rather than crossing him: {label}");
@@ -614,16 +593,23 @@ mod tests {
     }
 
     #[test]
-    fn a_settled_puppet_wanders_only_within_the_band_and_follows_the_view_round() {
-        let head = |time: f32| headset(if time < 120.0 { 0.0 } else { std::f32::consts::PI }, 0.0, [0.0, 1.6, 0.0]);
-        let mut floor = Floor::new(turned(0.0, [0.3, 0.0, -1.2]), Random(7));
-        let poses = walk_for(&mut floor, head, 180.0);
-        let wandered = poses[..120 * 90].iter().map(|pose| length(sub(pose.t, poses[0].t))).fold(0.0, f32::max);
-        assert!(wandered > 0.3, "it wanders: {wandered}");
-        assert!(poses[..120 * 90].iter().all(|pose| welcome(&head(0.0), pose.t)), "every wander stays in the band and in view");
-        assert!(poses[120 * 90..].iter().all(|pose| across(&head(150.0), pose.t) >= NEAREST * 0.9), "it walks round him, not through him");
-        assert!(poses[150 * 90..].iter().all(|pose| welcome(&head(180.0), pose.t)), "in view again within half a minute of his turning round");
-        assert!(poses[150 * 90..].iter().any(|pose| angles(&head(180.0), pose).0 < 0.05), "and stands facing him");
+    fn a_puppet_inside_its_bounds_stays_put_while_the_headset_is_still_and_follows_the_view_round() {
+        let still = headset(0.0, 0.0, [0.0, 1.6, 0.0]);
+        for (bearing, distance) in [(0.0, 1.0), (1.0, 0.7), (-1.0, 1.45), (0.3, 0.65), (-0.6, 1.5)] {
+            let start = [-distance * f32::sin(bearing), 0.0, -distance * f32::cos(bearing)];
+            assert!(welcome(&still, start), "{bearing} rad, {distance} m is inside its bounds");
+            let mut floor = Floor::new(turned(0.4, start));
+            let poses = walk_for(&mut floor, |_| still, 60.0);
+            assert!(poses.iter().all(|pose| pose.t == start), "it never steps at {bearing} rad, {distance} m");
+            assert!(angles(&still, poses.last().unwrap()).0 < 0.05, "it turns in place to face him");
+        }
+        let head = |time: f32| headset(if time < 10.0 { 0.0 } else { std::f32::consts::PI }, 0.0, [0.0, 1.6, 0.0]);
+        let mut floor = Floor::new(turned(0.0, [0.3, 0.0, -1.2]));
+        let poses = walk_for(&mut floor, head, 60.0);
+        assert!(poses[..10 * 90].iter().all(|pose| pose.t == poses[0].t), "still while he is");
+        assert!(poses[10 * 90..].iter().all(|pose| across(&head(30.0), pose.t) >= NEAREST * 0.9), "it walks round him, not through him");
+        assert!(poses[40 * 90..].iter().all(|pose| welcome(&head(60.0), pose.t)), "in view again within half a minute of his turning round");
+        assert!(angles(&head(60.0), poses.last().unwrap()).0 < 0.05, "and stands facing him");
     }
 
     #[test]

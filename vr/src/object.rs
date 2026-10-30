@@ -985,7 +985,7 @@ pub mod tests {
         let hand = |angle: f32, at: Vec3| Pose::from_axes([angle.cos(), 0.0, -angle.sin()], [0.0, 1.0, 0.0], [angle.sin(), 0.0, angle.cos()], at);
         let held = on_controller(&hand(0.7, [0.3, 1.0, -0.6]));
         let floor = hand(-1.2, [0.5, 0.0, -1.1]);
-        for (set_down, size) in [(Anchor::Stuck(held), 1.0), (Anchor::Grounded(crate::placement::Floor::new(floor, crate::motion::Random::seeded())), 5.0)] {
+        for (set_down, size) in [(Anchor::Stuck(held), 1.0), (Anchor::Grounded(crate::placement::Floor::new(floor)), 5.0)] {
             let mut anchor = set_down;
             let pose = anchor.stand(born, &hand(0.0, [0.0; 3]), [0.0; 3]);
             let place = pose.apply(beside(size, 0));

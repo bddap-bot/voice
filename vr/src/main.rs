@@ -33,6 +33,7 @@ mod relay;
 mod reveal;
 mod wake;
 mod wear;
+mod measure;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -136,8 +137,16 @@ struct Puppet {
 /// Colours across a radial's bar, enough that each authored step of a stepped one shows.
 const SWATCHES: usize = 48;
 
-fn load(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer, remembered: &vrm::expressions::Configuration) -> Result<Puppet, String> {
-    let model = Model::parse(&relay.puppet(avatar)?).map_err(|error| format!("{}: {error}", avatar.id))?;
+/// An appearance as the server holds it now, with its played clips: everything a pick needs before the frame loop dresses it.
+struct Fetched {
+    model: Model,
+    clips: HashMap<String, Clip>,
+}
+
+/// Fetches appearance `id` from the catalog the server serves now: one read when the host started names the files of that moment, so a republish since would be refused or worn stale.
+fn fetch(relay: &mut Relay, id: &str) -> Result<Fetched, String> {
+    let avatar = relay.catalog()?.avatars.into_iter().find(|avatar| avatar.id == id).ok_or_else(|| format!("appearance {id} is not in the catalog"))?;
+    let model = Model::parse(&relay.puppet(&avatar)?).map_err(|error| format!("{id}: {error}"))?;
     let mut clips = HashMap::new();
     for entry in relay.clips()?.iter().filter(|entry| played(&entry.action)) {
         if !["fbx", "motion"].contains(&entry.format.as_str()) {
@@ -151,7 +160,29 @@ fn load(relay: &mut Relay, avatar: &Avatar, renderer: &mut Renderer, remembered:
             Err(error) => tracing::warn!("{}: {error}", entry.name),
         }
     }
-    dressed(model, clips, &avatar.id, renderer, remembered)
+    Ok(Fetched { model, clips })
+}
+
+/// A picked appearance on its way: its catalog index, when it was picked, and its fetch.
+struct Picking {
+    index: usize,
+    picked: Instant,
+    fetched: std::sync::mpsc::Receiver<Result<Fetched, String>>,
+}
+
+/// Fetches appearance `id` on a thread of its own, so the frame loop keeps drawing while it arrives.
+fn fetch_aside(connect: impl FnOnce() -> Result<Relay, String> + Send + 'static, id: &str) -> std::sync::mpsc::Receiver<Result<Fetched, String>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let id = id.to_owned();
+    std::thread::spawn(move || {
+        let _ = sender.send(connect().and_then(|mut relay| fetch(&mut relay, &id)));
+    });
+    receiver
+}
+
+fn load(relay: &mut Relay, id: &str, renderer: &mut Renderer, remembered: &vrm::expressions::Configuration) -> Result<Puppet, String> {
+    let fetched = fetch(relay, id)?;
+    dressed(fetched.model, fetched.clips, id, renderer, remembered)
 }
 
 /// A puppet of `model` with its played `clips`, as `id`.
@@ -310,11 +341,12 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
     let catalog = relay.catalog()?;
     let active = chosen::read(&cache, &catalog.avatars)?;
     let mut settings = settings::Settings::read(state);
-    let mut puppet = load(&mut relay, &catalog.avatars[active], &mut renderer, &settings.of(&catalog.avatars[active].id))?;
+    let mut puppet = load(&mut relay, &catalog.avatars[active].id, &mut renderer, &settings.of(&catalog.avatars[active].id))?;
     let mut previews = None;
     let mut board = Board::new(catalog.avatars.len(), active);
     board.wear(puppet.menu(), puppet.settings());
     let mut released: Option<(Instant, String)> = None;
+    let mut picking: Option<Picking> = None;
     let mut reveal = Reveal::new(HEIGHT);
     let mut board_image = vulkan::Flat::new(gpu.clone());
     let mut overlay = runtime.create_overlay("voice.puppet", "Puppet", QUAD, true)?;
@@ -355,8 +387,34 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             tracing::info!("SteamVR asked the overlay to quit");
             return Ok(());
         }
-        for (index, image) in previews.iter().flat_map(|previews: &std::sync::mpsc::Receiver<_>| previews.try_iter()) {
-            board.preview(index, image);
+        for (id, image) in previews.iter().flat_map(|previews: &std::sync::mpsc::Receiver<_>| previews.try_iter()) {
+            if let Some(index) = catalog.avatars.iter().position(|avatar| avatar.id == id) {
+                board.preview(index, image);
+            }
+        }
+        if let Some(Picking { index, picked, fetched }) = picking.take() {
+            match fetched.try_recv() {
+                Err(std::sync::mpsc::TryRecvError::Empty) => picking = Some(Picking { index, picked, fetched }),
+                arrived => {
+                    let id = &catalog.avatars[index].id;
+                    let dressing = Instant::now();
+                    match arrived.unwrap_or_else(|_| Err("its fetch ended without an answer".into())).and_then(|fetched| dressed(fetched.model, fetched.clips, id, &mut renderer, &settings.of(id))) {
+                        Ok(loaded) => {
+                            puppet = loaded;
+                            if let Anchor::Grounded(floor) = &mut anchor {
+                                *floor = placement::Floor::new(floor.pose);
+                            }
+                            board.active = index;
+                            board.wear(puppet.menu(), puppet.settings());
+                            released = None;
+                            tracing::info!("appearance {id} shown {:.2} s after its pick, the frame loop held {:.2} s", picked.elapsed().as_secs_f64(), dressing.elapsed().as_secs_f64());
+                        }
+                        Err(error) => tracing::warn!("appearance {id} not shown: {error}"),
+                    }
+                    board.pending = None;
+                    board.mark();
+                }
+            }
         }
         let started = Instant::now();
         let interval = started - last;
@@ -462,10 +520,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             tracing::info!("appearance library revealed by a tip held at {:.3?} m in the puppet's standing frame", in_puppet.unwrap_or_default());
             board.reveal(started);
             if previews.is_none() {
-                match Relay::connect(token, &cache) {
-                    Ok(relay) => previews = Some(preview::spawn(relay, catalog.avatars.clone())),
-                    Err(error) => tracing::warn!("previews: {error}"),
-                }
+                previews = Some(preview::spawn(token.clone(), cache.clone()));
             }
         }
         let mount = under_controller(board.height());
@@ -556,20 +611,8 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
                     board_overlay.texture(&mut board_image.upload(&image)?)?;
                     board_overlay.show();
                 }
-                match Relay::connect(token, &cache).and_then(|mut relay| load(&mut relay, avatar, &mut renderer, &settings.of(&avatar.id))) {
-                    Ok(loaded) => {
-                        puppet = loaded;
-                        if let Anchor::Grounded(floor) = &mut anchor {
-                            *floor = placement::Floor::new(floor.pose);
-                        }
-                        board.active = index;
-                        board.wear(puppet.menu(), puppet.settings());
-                        released = None;
-                    }
-                    Err(error) => tracing::warn!("appearance {} not shown: {error}", avatar.id),
-                }
-                board.pending = None;
-                board.mark();
+                let (token, cache) = (token.clone(), cache.clone());
+                picking = Some(Picking { index, picked: Instant::now(), fetched: fetch_aside(move || Relay::connect(&token, &cache), &avatar.id) });
             }
             Some(Press::Menu) => board.toggle_menu(),
             Some(Press::Back) => board.back(),
@@ -817,6 +860,9 @@ fn run() -> Result<(), String> {
     if args.get(1).is_some_and(|mode| mode == "wear") {
         return wear::run(&Token::decode(&token)?, &state, &args[2..]);
     }
+    if args.get(1).is_some_and(|mode| mode == "load") {
+        return measure::run(&Token::decode(&token)?, &state, &args[2..]);
+    }
     if args.get(1).is_some_and(|mode| mode == "menu") {
         return dress::run(&Token::decode(&token)?, &state, &args[2..]);
     }
@@ -993,5 +1039,45 @@ mod tests {
             assert!(lost < 0.04, "{name}: {:.1}% of the figure the eye sees is cut off", lost * 100.0);
             assert!(top[0].abs_diff(top[1]) <= 2 && bottom[0].abs_diff(bottom[1]) <= 2, "{name}: head and feet show where the eye sees them: top rows {top:?}, bottom rows {bottom:?}");
         }
+    }
+
+    /// A server whose catalog serves `figure.vrm` as appearance "a" now, with no clips.
+    fn republished(cache: &std::path::Path) -> (String, Relay) {
+        let (hash, frames) = relay::served("puppet", "a", include_bytes!("../golden/figure.vrm"));
+        let catalog = serde_json::json!({ "avatars": [{ "id": "a", "contentHash": hash }] });
+        (hash, relay::scripted(cache, move |verb, _| match verb {
+            "puppets" => vec![format!("puppets\n{catalog}").into_bytes()],
+            "clips" => vec![b"clips\n{\"clips\":[]}".to_vec()],
+            "puppet" => frames.clone(),
+            _ => Vec::new(),
+        }))
+    }
+
+    #[test]
+    fn a_pick_wears_the_file_served_now_not_the_copy_cached_under_the_hash_the_host_started_with() {
+        let cache = std::env::temp_dir().join(format!("voice-vr-pick-{}", std::process::id()));
+        let (_, mut relay) = republished(&cache);
+        std::fs::write(cache.join("0123abcd.vrm"), b"the copy published before").unwrap();
+        let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [64; 2], 1.0).unwrap();
+        let startup = Avatar { id: "a".into(), content_hash: "0123abcd".into() };
+        let worn = load(&mut relay, &startup.id, &mut renderer, &Default::default());
+        std::fs::remove_dir_all(&cache).unwrap();
+        assert!(worn.is_ok(), "{:?}", worn.err());
+    }
+
+    #[test]
+    fn a_pick_leaves_the_frame_loop_free_while_its_appearance_arrives() {
+        let cache = std::env::temp_dir().join(format!("voice-vr-aside-{}", std::process::id()));
+        let (_, relay) = republished(&cache);
+        let (open, gate) = std::sync::mpsc::channel::<()>();
+        let fetched = fetch_aside(move || {
+            gate.recv().unwrap();
+            Ok(relay)
+        }, "a");
+        assert!(matches!(fetched.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)), "returned before the server answered");
+        open.send(()).unwrap();
+        let arrived = fetched.recv().unwrap();
+        std::fs::remove_dir_all(&cache).unwrap();
+        assert!(arrived.is_ok(), "{:?}", arrived.err());
     }
 }

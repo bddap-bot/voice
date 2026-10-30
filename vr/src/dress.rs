@@ -46,7 +46,7 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
         std::fs::create_dir_all(&pictures).map_err(|error| format!("{}: {error}", pictures.display()))?;
         let mut settings = Settings::read(&pictures);
         let configuration = settings.of(&avatar.id);
-        let mut puppet = load(&mut relay, avatar, &mut renderer, &configuration)?;
+        let mut puppet = load(&mut relay, &avatar.id, &mut renderer, &configuration)?;
         let Some(menu) = puppet.model.menu.clone() else {
             println!("{}: no menu", avatar.id);
             continue;
@@ -77,7 +77,7 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
             if matches!(control.kind, Kind::Toggle | Kind::Radial | Kind::TwoAxis | Kind::FourAxis) {
                 settings.keep(&avatar.id, &menu.menu, puppet.controller.as_ref().unwrap())?;
                 let values = &puppet.controller.as_ref().unwrap().values;
-                let mut again = load(&mut relay, avatar, &mut renderer, &Settings::read(&pictures).of(&avatar.id))?;
+                let mut again = load(&mut relay, &avatar.id, &mut renderer, &Settings::read(&pictures).of(&avatar.id))?;
                 let worn = still(&mut again, &mut renderer, &mut figure, runtime, head)?;
                 let differs = changed(&after, &worn);
                 let parameters: Vec<_> = values.iter().zip(&again.controller.as_ref().unwrap().values).zip(&menu.parameters).filter(|((before, after), _)| before != after).map(|((before, after), parameter)| serde_json::json!({"name": parameter.name, "before": before, "after": after})).collect();
@@ -87,12 +87,12 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
                 pair(&after, &worn, &pictures.join(format!("rewear-{number:03}.png")))?;
             }
         }
-        let mut kept = load(&mut relay, avatar, &mut renderer, &Settings::read(&pictures).of(&avatar.id))?;
+        let mut kept = load(&mut relay, &avatar.id, &mut renderer, &Settings::read(&pictures).of(&avatar.id))?;
         let before = still(&mut kept, &mut renderer, &mut figure, runtime, head)?;
         kept.defaults();
         settings.forget(&avatar.id)?;
         let after = still(&mut kept, &mut renderer, &mut figure, runtime, head)?;
-        let worn = still(&mut load(&mut relay, avatar, &mut renderer, &Settings::read(&pictures).of(&avatar.id))?, &mut renderer, &mut figure, runtime, head)?;
+        let worn = still(&mut load(&mut relay, &avatar.id, &mut renderer, &Settings::read(&pictures).of(&avatar.id))?, &mut renderer, &mut figure, runtime, head)?;
         let picture = pictures.join("defaults.png");
         pair(&before, &after, &picture)?;
         let line = serde_json::json!({"avatar": avatar.id, "defaults": picture, "changed": changed(&before, &after), "rewearDiffers": changed(&after, &worn)});

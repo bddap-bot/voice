@@ -51,14 +51,14 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
     };
     // Made first, as the host does: were the preview thread's device the process's only one, the loader would unload the driver before that thread's exit runs the driver's thread-local destructors.
     let gpu = std::rc::Rc::new(Gpu::new(None)?);
-    library(&catalog.avatars, worn[0], Relay::connect(token, &cache)?, &out.join("library.png"))?;
+    library(&catalog.avatars, worn[0], token, &cache, &out.join("library.png"))?;
     let mut renderer = Renderer::new(gpu, [eye_texels(QUAD, NEAREST); 2], HEIGHT / PAGE_HEIGHT)?;
     for index in worn {
         let avatar = &catalog.avatars[index];
         let pictures = out.join(&avatar.id);
         let clip = pictures.join("clip");
         std::fs::create_dir_all(&clip).map_err(|error| format!("{}: {error}", clip.display()))?;
-        let mut puppet = load(&mut relay, avatar, &mut renderer, &Default::default())?;
+        let mut puppet = load(&mut relay, &avatar.id, &mut renderer, &Default::default())?;
         let mut pointing = Pointing::default();
         let mut work = Vec::new();
         let mut played = Vec::new();
@@ -167,11 +167,13 @@ fn speaking(frame: usize) -> f32 {
 }
 
 /// The board with its appearance library revealed and every preview drawn, `active` framed.
-fn library(avatars: &[crate::relay::Avatar], active: usize, relay: Relay, path: &Path) -> Result<(), String> {
+fn library(avatars: &[crate::relay::Avatar], active: usize, token: &Token, cache: &Path, path: &Path) -> Result<(), String> {
     let mut board = Board::new(avatars.len(), active);
     board.reveal(Instant::now());
-    for (index, image) in preview::spawn(relay, avatars.to_vec()) {
-        board.preview(index, image);
+    for (id, image) in preview::spawn(token.clone(), cache.to_owned()) {
+        if let Some(index) = avatars.iter().position(|avatar| avatar.id == id) {
+            board.preview(index, image);
+        }
     }
     let canvas = board.take_image().ok_or("the board drew nothing")?;
     let image = image::RgbaImage::from_raw(canvas.width, canvas.height, canvas.pixels).ok_or("the board's pixels do not fit its size")?;

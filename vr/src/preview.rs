@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Instant;
@@ -5,7 +6,7 @@ use std::time::Instant;
 use glam::{Mat4, Vec3};
 
 use crate::board::PREVIEW;
-use crate::relay::{Avatar, Relay};
+use crate::relay::{Relay, Token};
 use crate::render::{eye_projection, Renderer, PAGE_HEIGHT};
 use crate::vrm::{Fit, Model};
 use crate::vulkan::Gpu;
@@ -17,28 +18,34 @@ const WINDOW: f32 = 0.6;
 const CENTRE: f32 = 0.72;
 const EYE: Vec3 = Vec3::new(0.0, 0.0, 3.0);
 
-/// Renders every appearance once, in the catalog's order, on a device of its own so the frame loop never waits for it.
-pub fn spawn(relay: Relay, avatars: Vec<Avatar>) -> mpsc::Receiver<(usize, Vec<u8>)> {
+/// Renders every appearance of the catalog the server serves now once, in its order, on a device of its own so the frame loop never waits for it, each image sent with its appearance's id.
+pub fn spawn(token: Token, cache: PathBuf) -> mpsc::Receiver<(String, Vec<u8>)> {
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
-        if let Err(error) = render_all(relay, &avatars, &sender) {
+        if let Err(error) = render_all(|| Relay::connect(&token, &cache), &sender) {
             tracing::warn!("previews: {error}");
         }
     });
     receiver
 }
 
-fn render_all(mut relay: Relay, avatars: &[Avatar], sender: &mpsc::Sender<(usize, Vec<u8>)>) -> Result<(), String> {
+fn render_all(mut connect: impl FnMut() -> Result<Relay, String>, sender: &mpsc::Sender<(String, Vec<u8>)>) -> Result<(), String> {
     let started = Instant::now();
+    let mut relay = connect()?;
+    let avatars = relay.catalog()?.avatars;
     let mut renderer = renderer(Rc::new(Gpu::new(None)?))?;
-    for (index, avatar) in avatars.iter().enumerate() {
+    for avatar in &avatars {
         match relay.puppet(avatar).and_then(|bytes| Model::parse(&bytes)).and_then(|model| render(&mut renderer, &model)) {
             Ok(image) => {
-                if sender.send((index, image)).is_err() {
+                if sender.send((avatar.id.clone(), image)).is_err() {
                     return Ok(());
                 }
             }
-            Err(error) => tracing::warn!("preview {}: {error}", avatar.id),
+            Err(error) => {
+                tracing::warn!("preview {}: {error}", avatar.id);
+                // One failure can leave the stream mid-transfer; the next appearance gets a connection of its own.
+                relay = connect()?;
+            }
         }
     }
     tracing::info!("{} previews rendered in {:.1} s", avatars.len(), started.elapsed().as_secs_f64());
@@ -150,5 +157,36 @@ mod tests {
         let image = downsample(&pixels, row_length);
         assert_eq!(image.len(), (PREVIEW * PREVIEW * 4) as usize);
         assert!(image.chunks(4).all(|texel| texel == [100, 50, 0, 128]), "half covered, and the right eye ignored");
+    }
+
+    #[test]
+    fn one_appearance_failing_midway_leaves_the_rest_of_the_library_drawn() {
+        let cache = std::env::temp_dir().join(format!("voice-vr-previews-{}", std::process::id()));
+        let figure = include_bytes!("../golden/figure.vrm");
+        let (a, _) = crate::relay::served("puppet", "a", b"cut short");
+        let a_hash = a.clone();
+        let (b, frames) = crate::relay::served("puppet", "b", figure);
+        let catalog = serde_json::json!({ "avatars": [{ "id": "a", "contentHash": a_hash }, { "id": "b", "contentHash": b }] });
+        let connect = || {
+            let (catalog, frames, a) = (catalog.clone(), frames.clone(), a.clone());
+            let mut streaming = false;
+            Ok::<_, String>(crate::relay::scripted(&cache, move |verb, request| match (verb, request["id"].as_str()) {
+                ("puppets", _) => vec![format!("puppets\n{catalog}").into_bytes()],
+                (_, id) if streaming => vec![format!("puppet-error\n{}", serde_json::json!({ "id": id, "code": "busy", "message": "request rejected; current transfer continues" })).into_bytes()],
+                ("puppet", Some("a")) => {
+                    streaming = true;
+                    vec![format!("puppet-start\n{}", serde_json::json!({ "id": "a", "size": 1, "originalSize": 9, "contentHash": a, "encoding": "gzip" })).into_bytes(), b"puppet-chunk\na\n0123".to_vec()]
+                }
+                ("puppet", Some("b")) => frames.clone(),
+                _ => Vec::new(),
+            }))
+        };
+        let (sender, drawn) = mpsc::channel();
+        let ran = render_all(connect, &sender);
+        drop(sender);
+        let drawn: Vec<String> = drawn.iter().map(|(id, _)| id).collect();
+        std::fs::remove_dir_all(&cache).unwrap();
+        ran.unwrap();
+        assert_eq!(drawn, ["b"]);
     }
 }

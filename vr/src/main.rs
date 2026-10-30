@@ -565,6 +565,14 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             }
             _ => {}
         }
+        if let (Some((control, at)), Some(controller)) = (&touch.slide, puppet.controller.as_mut()) {
+            operate(controller, control, *at);
+        }
+        if let (Some(_), Some(controller)) = (&touch.let_go, puppet.controller.as_ref()) {
+            if let Err(error) = settings.keep(&catalog.avatars[board.active].id, puppet.model.menu.as_ref().map_or(&[][..], |menu| &menu.menu), controller) {
+                tracing::warn!("menu settings not kept: {error}");
+            }
+        }
         if let Some((_, parameter)) = released.take_if(|(at, _)| started >= *at) {
             if let Some(controller) = puppet.controller.as_mut() {
                 controller.set(&parameter, 0.0);

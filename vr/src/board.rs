@@ -90,6 +90,10 @@ pub struct Touch {
     pub crossing: Option<[f32; 2]>,
     pub press: Option<Press>,
     pub marker: Option<Vec3>,
+    /// A slider or pad pressed and still held through the face, at where along it the tip now is.
+    pub slide: Option<(Control, [f32; 2])>,
+    /// The control a held tip just drew back from.
+    pub let_go: Option<Control>,
 }
 
 /// A fingertip pressing a face: a press is the tip crossing the face from in front; it fires once, and the next needs the tip drawn back.
@@ -154,18 +158,20 @@ pub struct Board {
     pub anchor: Anchor,
     contact: Contact,
     hover: Option<Press>,
+    held: Option<(usize, Control)>,
     dirty: bool,
 }
 
 impl Board {
     pub fn new(appearances: usize, active: usize) -> Board {
-        Board { previews: vec![None; appearances], menu: None, library: None, shows_log: true, log: Vec::new(), active, pending: None, muted: false, voice: VoiceId::default(), anchor: Anchor::Riding, contact: Contact::default(), hover: None, dirty: true }
+        Board { previews: vec![None; appearances], menu: None, library: None, shows_log: true, log: Vec::new(), active, pending: None, muted: false, voice: VoiceId::default(), anchor: Anchor::Riding, contact: Contact::default(), hover: None, held: None, dirty: true }
     }
 
     /// As summoned: a hand already at the board must withdraw before it presses, and the appearance library is hidden.
     pub fn reset(&mut self) {
         self.contact.reset();
         self.hover = None;
+        self.held = None;
         self.library = None;
         if let Some(menu) = &mut self.menu {
             menu.open = false;
@@ -185,6 +191,7 @@ impl Board {
 
     pub fn wear(&mut self, menu: Option<(Vec<Control>, Vec<Image>)>, values: HashMap<String, f32>) {
         self.menu = menu.filter(|(controls, _)| !controls.is_empty()).map(|(controls, icons)| Menu { controls, icons, path: Vec::new(), open: false, values });
+        self.held = None;
         self.dirty = true;
     }
 
@@ -393,13 +400,26 @@ impl Board {
     pub fn touch(&mut self, tip: Option<Vec3>) -> Touch {
         let crossing = self.contact.crossing(tip);
         let press = crossing.and_then(|[x, y]| self.under(x, y));
+        let (mut slide, mut let_go) = (None, None);
+        match (self.held.take(), tip) {
+            (Some((index, control)), Some([x, y, z])) if z <= RELEASE && self.menu_open().is_some() => {
+                slide = Some((control.clone(), self.place_on(index, [x, y])));
+                self.held = Some((index, control));
+            }
+            (held, _) => let_go = held.map(|(_, control)| control),
+        }
+        if let Some(Press::Control(index)) = press {
+            if let Some(control) = self.menu_open().and_then(|menu| menu.page().get(index)).filter(|control| matches!(control.kind, Kind::Radial | Kind::TwoAxis | Kind::FourAxis)) {
+                self.held = Some((index, control.clone()));
+            }
+        }
         let marker = marker_at([WIDTH, self.height()], tip);
         let hover = marker.filter(|_| self.contact.armed).and_then(|[x, y, _]| self.under(x, y));
         if hover != self.hover {
             self.hover = hover;
             self.dirty = true;
         }
-        Touch { crossing, press, marker }
+        Touch { crossing, press, marker, slide, let_go }
     }
 
     fn under(&self, x: f32, y: f32) -> Option<Press> {
@@ -1247,5 +1267,42 @@ mod tests {
         assert!((x - 0.25).abs() < 1e-4, "{x}");
         let image = board.take_image().unwrap();
         assert_eq!(pixel(&board, &image.pixels, left + 0.001, (bottom + top) / 2.0), BUTTON, "an unset radial shows no fill");
+    }
+
+    #[test]
+    fn a_held_slider_follows_the_tip_until_it_draws_back() {
+        let mut board = Board::new(1, 0);
+        board.wear(Some((menu(), Vec::new())), HashMap::new());
+        board.toggle_menu();
+        let [left, bottom, right, top] = rect_of(&board, Press::Control(1));
+        let along = |share: f32| left + share * (right - left);
+        let y = (bottom + top) / 2.0;
+        assert!(board.touch(Some([along(0.25), y, 0.05])).slide.is_none());
+        let pressed = board.touch(Some([along(0.25), y, 0.0]));
+        assert_eq!(pressed.press, Some(Press::Control(1)));
+        for share in [0.3, 0.5, 0.75, 1.2] {
+            let held = board.touch(Some([along(share), y, -0.01]));
+            let (control, [x, _]) = held.slide.expect("the held slider follows the tip");
+            assert_eq!(control.name, "Colour");
+            assert!((x - share.min(1.0)).abs() < 1e-4, "{x} at {share}");
+            assert!(held.press.is_none() && held.let_go.is_none());
+        }
+        assert!(board.touch(Some([along(0.6), y + 0.05, 0.015])).slide.is_some(), "slipping off the bar while still through the face keeps the hold");
+        let back = board.touch(Some([along(0.6), y, 0.03]));
+        assert!(back.slide.is_none());
+        assert_eq!(back.let_go.map(|control| control.name), Some("Colour".to_owned()));
+        assert!(board.touch(Some([along(0.6), y, 0.0])).slide.is_none(), "after drawing back nothing is held");
+    }
+
+    #[test]
+    fn a_toggle_is_never_held() {
+        let mut board = Board::new(1, 0);
+        board.wear(Some((menu(), Vec::new())), HashMap::new());
+        board.toggle_menu();
+        let [x, y] = centre(&board, Press::Control(0));
+        board.touch(Some([x, y, 0.05]));
+        assert_eq!(board.touch(Some([x, y, 0.0])).press, Some(Press::Control(0)));
+        let after = board.touch(Some([x + 0.01, y, -0.01]));
+        assert!(after.slide.is_none() && after.let_go.is_none());
     }
 }

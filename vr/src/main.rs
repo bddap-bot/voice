@@ -77,6 +77,12 @@ fn grown_window(skinned: &Skinned, hidden: &HashSet<usize>, worlds: &[glam::Mat4
     window(&corners, head, eyes, view)
 }
 
+/// The skinning placement and the map from it into `window`: the shader's lights are fixed in the frame it skins into,
+/// so that frame is `figure`, square to the line from the head, and turning the head in place relights nothing.
+fn lit(window: &Pose, figure: &Pose, body: glam::Mat4) -> (glam::Mat4, glam::Mat4) {
+    (figure.inverse().mat4() * body, window.inverse().then(figure).mat4())
+}
+
 fn directory(variable: &str, fallback: &str) -> PathBuf {
     std::env::var_os(variable).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").expect("HOME")).join(fallback)).join("voice-vr")
 }
@@ -635,7 +641,8 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         let eye_points = eye_offsets.map(|eye: Pose| head.then(&eye).t);
         let (quad, half) = if size > 1.0 { grown_window(&puppet.skinned, &puppet.drawn.hidden, &posed, body, &head, &eye_points, view) } else { (figure, QUAD / 2.0) };
         let local = quad.inverse();
-        puppet.draw(&posed, local.mat4() * body);
+        let (skin, to_window) = lit(&quad, &figure, body);
+        puppet.draw(&posed, skin);
         let place = match anchor {
             Anchor::Stuck(_) | Anchor::Grounded(_) => Place::World(quad),
             _ => Place::On(device, left.inverse().then(&quad)),
@@ -643,7 +650,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         renderer.outline_scale = HEIGHT * size / render::PAGE_HEIGHT;
         let seen = eye_points.map(|eye| local.apply(eye));
         let texels = renderer.texels(2.0 * half, seen[0][2].min(seen[1][2]));
-        let mut texture = renderer.render(&puppet.drawn, seen.map(|eye| eye_projection(eye.into(), half, half)), texels)?;
+        let mut texture = renderer.render(&puppet.drawn, seen.map(|eye| eye_projection(eye.into(), half, half).map(|projection| projection * to_window)), texels)?;
         overlay.present(&mut texture, &place, 2.0 * half, texels as f32 / renderer.eye[0] as f32)?;
         meter.frame(interval, started.elapsed());
         runtime.wait_frame();
@@ -924,6 +931,33 @@ mod tests {
             }
         }
         image.save(std::path::Path::new(&directory).join(format!("{name}.png"))).unwrap();
+    }
+
+    #[test]
+    fn turning_the_head_in_place_does_not_relight_a_grown_puppet() {
+        let model = Model::parse(include_bytes!("../golden/figure.vrm")).unwrap();
+        let skinned = model.skinned().unwrap();
+        let fit = Fit::new(&model, &skinned, HEIGHT);
+        let worlds = model.worlds(&model.pose(&model.standing()));
+        let body = glam::Mat4::from_scale(glam::Vec3::splat(1.7 / HEIGHT)) * fit.placement(&model, &worlds, 0.0);
+        let at = [0.3, 1.6, 2.0];
+        let figure = facing([0.0, -FLOOR * 1.7 / HEIGHT, 0.0], at);
+        let drawn = |yaw: f32, pitch: f32| {
+            let (s, c) = yaw.sin_cos();
+            let head = Pose::from_axes([c, 0.0, -s], [0.0, 1.0, 0.0], [s, 0.0, c], at).then(&pitched([0.0; 3], pitch));
+            let eyes = [-0.032, 0.032].map(|x| head.apply([x, 0.0, 0.0]));
+            let (window, _) = grown_window(&skinned, &HashSet::new(), &worlds, body, &head, &eyes, FIELD);
+            let (skin, to_window) = lit(&window, &figure, body);
+            assert!((to_window * skin).abs_diff_eq(window.inverse().mat4() * body, 1e-4), "the window still shows the figure where it stands");
+            skin
+        };
+        let ahead = drawn(0.0, 0.0);
+        for (yaw, pitch) in [(0.35, 0.0), (-0.35, 0.0), (0.0, -0.4), (0.2, 0.3)] {
+            let turned = drawn(yaw, pitch);
+            let normal = |skin: glam::Mat4| skin.transform_vector3(glam::Vec3::Z).normalize();
+            let angle = normal(turned).angle_between(normal(ahead)).to_degrees();
+            assert!(angle < 0.01, "turning the head (yaw {yaw}, pitch {pitch}) in place turns the figure {angle:.1} degrees under the shader's lights");
+        }
     }
 
     #[test]

@@ -165,6 +165,8 @@ struct Tail {
     rotation: Quat,
     now: Vec3,
     before: Vec3,
+    /// `now` in the joint's rest frame, so a step can tell the tail's own motion from the motion its parent carries it through.
+    held: Vec3,
 }
 
 #[derive(Default)]
@@ -206,7 +208,7 @@ impl Springs {
             .collect();
         let fresh = self.tails.len() != rig.joints.len();
         if fresh {
-            self.tails = vec![Tail { now: Vec3::ZERO, before: Vec3::ZERO, rotation: Quat::IDENTITY }; rig.joints.len()];
+            self.tails = vec![Tail { now: Vec3::ZERO, before: Vec3::ZERO, held: Vec3::ZERO, rotation: Quat::IDENTITY }; rig.joints.len()];
         }
         for (joint, tail) in rig.joints.iter().zip(&mut self.tails) {
             let node = &model.nodes[joint.node];
@@ -215,13 +217,15 @@ impl Springs {
             let origin = initial.w_axis.truncate();
             let rest = initial.transform_point3(joint.tail);
             if fresh {
-                *tail = Tail { now: rest, before: rest, rotation: node.rotation };
+                *tail = Tail { now: rest, before: rest, held: joint.tail, rotation: node.rotation };
             } else if delta > 0.0 {
                 let Settings { stiffness, drag, gravity, radius } = joint.settings;
                 let length = (rest - origin).length();
                 let axis = initial.transform_vector3(joint.tail).normalize();
                 let scale = scale_of(&initial);
-                let moved = tail.now + (tail.now - tail.before) * (1.0 - drag) + (axis * stiffness + gravity) * (delta * scale);
+                // Drag slows the tail only relative to its carrying frame: steady motion of the figure leaves it at rest, and only acceleration swings it.
+                let carried = initial.transform_point3(tail.held);
+                let moved = carried + (tail.now - tail.before - (carried - tail.now)) * (1.0 - drag) + (axis * stiffness + gravity) * (delta * scale);
                 let mut next = origin + (moved - origin).normalize_or(axis) * length;
                 for &(center, end, reach) in joint.groups.iter().flat_map(|&group| &rig.groups[group]).map(|&collider| &colliders[collider]) {
                     let nearest = match end {
@@ -238,9 +242,10 @@ impl Springs {
                         next = origin + (next - origin).normalize_or(axis) * length;
                     }
                 }
-                *tail = Tail { now: next, before: tail.now, rotation: tail.rotation };
+                *tail = Tail { now: next, before: tail.now, held: tail.held, rotation: tail.rotation };
             }
-            let toward = initial.inverse().transform_point3(tail.now).normalize_or(joint.tail.normalize());
+            tail.held = initial.inverse().transform_point3(tail.now);
+            let toward = tail.held.normalize_or(joint.tail.normalize());
             pose.rotations[joint.node] = (node.rotation * Quat::from_rotation_arc(joint.tail.normalize(), toward)).normalize();
             tail.rotation = pose.rotations[joint.node];
             worlds[joint.node] = parent * model.local(pose, joint.node);
@@ -359,6 +364,18 @@ mod tests {
         assert!(after > 0.01, "when the hand stops, the tip swings on past rest: {after}");
         let settled = swing(&moving, 3.5, 4.0);
         assert!(settled.abs() < 0.005, "and settles back to rest: {settled}");
+    }
+
+    #[test]
+    fn gliding_steadily_leaves_the_hair_at_rest_and_only_a_change_of_speed_swings_it() {
+        let model = hair(1.0, 0.0);
+        let mut springs = Springs::default();
+        let gliding = |time: f32| Mat4::from_translation(Vec3::new(time.max(0.0), 0.0, 0.0)) * Mat4::from_scale(Vec3::splat(0.2));
+        let rest = run(&model, &mut springs, gliding, -1.0, 0.0).last().unwrap().1;
+        let moving = run(&model, &mut springs, gliding, 0.0, 3.0);
+        let trail = |from: f32, to: f32| moving.iter().filter(|(time, _)| (from..to).contains(time)).map(|(_, tip)| (tip.x - rest.x).abs()).fold(0.0f32, f32::max);
+        assert!(trail(0.0, 0.5) > 0.03, "setting off swings the tip back: {}", trail(0.0, 0.5));
+        assert!(trail(2.5, 3.0) < 0.002, "at a steady speed it hangs as at rest: {}", trail(2.5, 3.0));
     }
 
     #[test]

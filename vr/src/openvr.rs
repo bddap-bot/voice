@@ -188,6 +188,56 @@ fn split(buffer: &[std::os::raw::c_char]) -> Vec<CString> {
     unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_string_lossy().split_whitespace().map(|name| CString::new(name).unwrap()).collect()
 }
 
+pub enum Place {
+    World(Pose),
+    On(u32, Pose),
+}
+
+/// Where a rendered image is shown: a SteamVR overlay in the host, a fake in tests.
+pub trait Surface {
+    fn texture(&self, texture: &mut sys::VRVulkanTextureData_t) -> Result<(), String>;
+    fn place(&self, place: &Place);
+    fn resize(&mut self, _: f32) {}
+    fn part(&mut self, _: f32) {}
+    fn show(&mut self);
+    fn hide(&mut self);
+
+    /// SteamVR moves an overlay's quad the moment it is set but swaps its image only once the image is given,
+    /// so geometry set first spends the frames in between showing the last image on the new quad.
+    fn present(&mut self, texture: &mut sys::VRVulkanTextureData_t, place: &Place, width: f32, part: f32) -> Result<(), String> {
+        self.texture(texture)?;
+        self.place(place);
+        self.resize(width);
+        self.part(part);
+        self.show();
+        Ok(())
+    }
+}
+
+impl Surface for Overlay<'_> {
+    fn texture(&self, texture: &mut sys::VRVulkanTextureData_t) -> Result<(), String> {
+        Overlay::texture(self, texture)
+    }
+    fn place(&self, place: &Place) {
+        match place {
+            Place::World(pose) => self.place_in_world(pose),
+            Place::On(device, offset) => self.place_on(*device, offset),
+        }
+    }
+    fn resize(&mut self, width: f32) {
+        Overlay::resize(self, width)
+    }
+    fn part(&mut self, part: f32) {
+        Overlay::part(self, part)
+    }
+    fn show(&mut self) {
+        Overlay::show(self)
+    }
+    fn hide(&mut self) {
+        Overlay::hide(self)
+    }
+}
+
 pub struct Overlay<'a> {
     runtime: &'a Runtime,
     handle: sys::VROverlayHandle_t,
@@ -207,7 +257,7 @@ impl Overlay<'_> {
         call!(self.runtime.overlay, SetOverlayTransformAbsolute, self.handle, sys::ETrackingUniverseOrigin_TrackingUniverseStanding, &mut matrix);
     }
 
-    pub fn resize(&mut self, width: f32) {
+    fn resize(&mut self, width: f32) {
         if width != self.width {
             call!(self.runtime.overlay, SetOverlayWidthInMeters, self.handle, width);
             self.width = width;
@@ -215,7 +265,7 @@ impl Overlay<'_> {
     }
 
     /// Shows the top left `part` of each eye's texture across the whole overlay, the eyes packed side by side as `Renderer::render` packs them.
-    pub fn part(&mut self, part: f32) {
+    fn part(&mut self, part: f32) {
         if part != self.part {
             let mut bounds = sys::VRTextureBounds_t { uMin: 0.0, vMin: 0.0, uMax: part, vMax: part };
             call!(self.runtime.overlay, SetOverlayTextureBounds, self.handle, &mut bounds);
@@ -254,5 +304,41 @@ impl Overlay<'_> {
 impl Drop for Overlay<'_> {
     fn drop(&mut self) {
         call!(self.runtime.overlay, DestroyOverlay, self.handle);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct Recorded(std::cell::RefCell<Vec<&'static str>>);
+
+    impl Surface for Recorded {
+        fn texture(&self, _: &mut sys::VRVulkanTextureData_t) -> Result<(), String> {
+            self.0.borrow_mut().push("texture");
+            Ok(())
+        }
+        fn place(&self, _: &Place) {
+            self.0.borrow_mut().push("place");
+        }
+        fn resize(&mut self, _: f32) {
+            self.0.borrow_mut().push("resize");
+        }
+        fn part(&mut self, _: f32) {
+            self.0.borrow_mut().push("part");
+        }
+        fn show(&mut self) {
+            self.0.borrow_mut().push("show");
+        }
+        fn hide(&mut self) {}
+    }
+
+    #[test]
+    fn a_frame_gives_its_image_before_the_quad_it_belongs_to() {
+        let mut surface = Recorded::default();
+        let mut texture: sys::VRVulkanTextureData_t = unsafe { std::mem::zeroed() };
+        surface.present(&mut texture, &Place::World(Pose { r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], t: [0.0; 3] }), 1.0, 0.5).unwrap();
+        assert_eq!(surface.0.into_inner(), ["texture", "place", "resize", "part", "show"]);
     }
 }

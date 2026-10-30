@@ -39,7 +39,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use openvr::{Runtime, Signal};
+use openvr::{Place, Runtime, Signal, Surface};
 use board::{Board, Press};
 use placement::{beside, facing, local_tip, marker, under_controller, window, Anchor, Glide, Hand, HandPose, Pose, Vec3, TIP};
 use gaze::Gaze;
@@ -636,17 +636,15 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         let (quad, half) = if size > 1.0 { grown_window(&puppet.skinned, &puppet.drawn.hidden, &posed, body, &head, &eye_points, view) } else { (figure, QUAD / 2.0) };
         let local = quad.inverse();
         puppet.draw(&posed, local.mat4() * body);
-        match anchor {
-            Anchor::Stuck(_) | Anchor::Grounded(_) => overlay.place_in_world(&quad),
-            _ => overlay.place_on(device, &left.inverse().then(&quad)),
-        }
-        overlay.resize(2.0 * half);
+        let place = match anchor {
+            Anchor::Stuck(_) | Anchor::Grounded(_) => Place::World(quad),
+            _ => Place::On(device, left.inverse().then(&quad)),
+        };
         renderer.outline_scale = HEIGHT * size / render::PAGE_HEIGHT;
         let seen = eye_points.map(|eye| local.apply(eye));
         let texels = renderer.texels(2.0 * half, seen[0][2].min(seen[1][2]));
-        overlay.part(texels as f32 / renderer.eye[0] as f32);
-        overlay.texture(&mut renderer.render(&puppet.drawn, seen.map(|eye| eye_projection(eye.into(), half, half)), texels)?)?;
-        overlay.show();
+        let mut texture = renderer.render(&puppet.drawn, seen.map(|eye| eye_projection(eye.into(), half, half)), texels)?;
+        overlay.present(&mut texture, &place, 2.0 * half, texels as f32 / renderer.eye[0] as f32)?;
         meter.frame(interval, started.elapsed());
         runtime.wait_frame();
     }

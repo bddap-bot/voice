@@ -8,7 +8,7 @@ use glam::{Mat4, Quat, Vec3 as V3};
 
 use crate::device;
 use crate::hub::Hold;
-use crate::openvr::Overlay;
+use crate::openvr::{Place, Surface};
 use crate::placement::{facing, length, sub, Pose, Vec3};
 use crate::program::{self, Transform};
 use crate::render::{eye_projection, eye_texels, Appearance, Renderer};
@@ -45,33 +45,6 @@ const OPEN: f32 = 0.2;
 const EASE: f32 = 8.0;
 /// Below this horizontal distance from the axis the tip's bearing is noise, so it does not turn the object.
 const AXIS: f32 = 0.02;
-
-/// Where an object is drawn: a SteamVR overlay in the host, a counted fake in tests.
-pub trait Surface {
-    fn place_in_world(&self, pose: &Pose);
-    fn texture(&self, texture: &mut openvr_sys::VRVulkanTextureData_t) -> Result<(), String>;
-    fn part(&mut self, _: f32) {}
-    fn show(&mut self);
-    fn hide(&mut self);
-}
-
-impl Surface for Overlay<'_> {
-    fn place_in_world(&self, pose: &Pose) {
-        Overlay::place_in_world(self, pose)
-    }
-    fn texture(&self, texture: &mut openvr_sys::VRVulkanTextureData_t) -> Result<(), String> {
-        Overlay::texture(self, texture)
-    }
-    fn part(&mut self, part: f32) {
-        Overlay::part(self, part)
-    }
-    fn show(&mut self) {
-        Overlay::show(self)
-    }
-    fn hide(&mut self) {
-        Overlay::hide(self)
-    }
-}
 
 /// The interval between program ticks, about one display frame.
 const TICK: Duration = Duration::from_millis(11);
@@ -471,14 +444,14 @@ impl<S: Surface> Object<S> {
         drawn.appearance.update(&drawn.skinned.palette(&drawn.parts.spread(&drawn.worlds, self.handling.spread), local.mat4() * drawn.placed), &drawn.skinned, &[]);
         let seen = view.eyes.map(|eye| local.apply(view.head.then(&eye).t));
         let texels = self.renderer.texels(QUAD, seen[0][2].min(seen[1][2]));
-        self.surface.part(texels as f32 / self.renderer.eye[0] as f32);
+        let part = texels as f32 / self.renderer.eye[0] as f32;
         let started = Instant::now();
         let texture = self.renderer.render(&drawn.appearance, seen.map(|eye| eye_projection(eye.into(), QUAD / 2.0, QUAD / 2.0)), texels)?;
         let spent = started.elapsed();
         self.frames += 1;
         let measured = self.frames as f32 - WINDOW;
         if measured <= 0.0 {
-            return self.show(texture, &quad);
+            return self.show(texture, &quad, part);
         }
         self.cost += (spent.as_secs_f32() - self.cost) / measured.min(WINDOW);
         self.worst = self.worst.max(spent.as_secs_f32());
@@ -488,14 +461,11 @@ impl<S: Surface> Object<S> {
         if measured >= WINDOW && self.cost > self.budget.mean.as_secs_f32() {
             return Err(format!("{:.1} ms a frame, over its {} ms budget", self.cost * 1e3, self.budget.mean.as_millis()));
         }
-        self.show(texture, &quad)
+        self.show(texture, &quad, part)
     }
 
-    fn show(&mut self, mut texture: openvr_sys::VRVulkanTextureData_t, quad: &Pose) -> Result<(), String> {
-        self.surface.place_in_world(quad);
-        self.surface.texture(&mut texture)?;
-        self.surface.show();
-        Ok(())
+    fn show(&mut self, mut texture: openvr_sys::VRVulkanTextureData_t, quad: &Pose, part: f32) -> Result<(), String> {
+        self.surface.present(&mut texture, &Place::World(*quad), QUAD, part)
     }
 
     /// Its render cost as the budget sees it, for the log.
@@ -620,7 +590,7 @@ impl<S: Surface> Shelf<S> {
 pub struct Offscreen;
 
 impl Surface for Offscreen {
-    fn place_in_world(&self, _: &Pose) {}
+    fn place(&self, _: &Place) {}
     fn texture(&self, _: &mut openvr_sys::VRVulkanTextureData_t) -> Result<(), String> {
         Ok(())
     }
@@ -655,7 +625,7 @@ pub mod tests {
     }
 
     impl Surface for Counted {
-        fn place_in_world(&self, _: &Pose) {}
+        fn place(&self, _: &Place) {}
         fn texture(&self, _: &mut openvr_sys::VRVulkanTextureData_t) -> Result<(), String> {
             Ok(())
         }
@@ -1231,7 +1201,7 @@ pub mod tests {
     }
 
     impl Surface for Watched {
-        fn place_in_world(&self, _: &Pose) {}
+        fn place(&self, _: &Place) {}
         fn texture(&self, _: &mut openvr_sys::VRVulkanTextureData_t) -> Result<(), String> {
             Ok(())
         }

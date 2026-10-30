@@ -74,7 +74,7 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
             let local = quad.inverse();
             puppet.draw(&posed, local.mat4() * body);
             let eyes = [-EYES, EYES].map(|x| eye_projection(local.apply([HEAD[0] + x, HEAD[1], HEAD[2]]).into(), QUAD / 2.0, QUAD / 2.0));
-            renderer.render(&puppet.drawn, eyes, renderer.eye[0])?;
+            renderer.render(&puppet.drawn, eyes, glam::Mat4::IDENTITY, renderer.eye[0])?;
             work.push(started.elapsed());
             let kept = (work.len() % CLIP_EVERY == 1).then(|| clip.join(format!("{clipped:05}.png")));
             if kept.is_some() {

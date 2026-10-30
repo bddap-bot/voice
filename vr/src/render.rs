@@ -30,6 +30,7 @@ struct Push {
     material: u32,
     outline: u32,
     outline_scale: f32,
+    focal: f32,
 }
 
 #[repr(C)]
@@ -438,7 +439,7 @@ impl Renderer {
     }
 
     /// Draws each eye's image `texels` square, packed from the target's top left; the overlay shows that part through `Overlay::part`.
-    pub fn render(&mut self, appearance: &Appearance, eyes: [Option<Mat4>; 2], texels: u32) -> Result<openvr_sys::VRVulkanTextureData_t, String> {
+    pub fn render(&mut self, appearance: &Appearance, eyes: [Option<Mat4>; 2], space: Mat4, texels: u32) -> Result<openvr_sys::VRVulkanTextureData_t, String> {
         let device = &self.gpu.device;
         let target = &self.targets[self.next];
         unsafe { device.wait_for_fences(&[target.fence], true, u64::MAX) }.map_err(vk_error("vkWaitForFences"))?;
@@ -457,13 +458,14 @@ impl Renderer {
             {
                 device.cmd_bind_vertex_buffers(target.commands, 0, &[appearance.vertices.0], &[0]);
                 device.cmd_bind_index_buffer(target.commands, appearance.indices.0, 0, vk::IndexType::UINT32);
-                for (side, view_projection) in eyes.iter().enumerate() {
-                    let Some(view_projection) = view_projection else { continue };
+                for (side, projection) in eyes.iter().enumerate() {
+                    let Some(projection) = projection else { continue };
+                    let view_projection = *projection * space;
                     let x = (side as u32 * texels) as f32;
                     device.cmd_set_viewport(target.commands, 0, &[vk::Viewport { x, y: 0.0, width: texels as f32, height: texels as f32, min_depth: 0.0, max_depth: 1.0 }]);
                     device.cmd_set_scissor(target.commands, 0, &[vk::Rect2D { offset: vk::Offset2D { x: x as i32, y: 0 }, extent: vk::Extent2D { width: texels, height: texels } }]);
                     for drawn in appearance.drawn.iter().filter(|drawn| drawn.switched.is_none_or(|node| !appearance.hidden.contains(&node))) {
-                        let push = Push { view_projection: view_projection.to_cols_array(), material: drawn.material, outline: drawn.outline as u32, outline_scale: self.outline_scale };
+                        let push = Push { view_projection: view_projection.to_cols_array(), material: drawn.material, outline: drawn.outline as u32, outline_scale: self.outline_scale, focal: projection.y_axis.y };
                         let bytes = std::slice::from_raw_parts(&push as *const Push as *const u8, std::mem::size_of::<Push>());
                         device.cmd_bind_pipeline(target.commands, vk::PipelineBindPoint::GRAPHICS, drawn.pipeline);
                         device.cmd_bind_descriptor_sets(target.commands, vk::PipelineBindPoint::GRAPHICS, self.layout, 0, &[drawn.set], &[]);
@@ -663,7 +665,7 @@ mod tests {
         let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), eye, height / PAGE_HEIGHT).unwrap();
         let mut appearance = renderer.appearance(model, &skinned).unwrap();
         appearance.update(&palette, &skinned, &changed);
-        renderer.render(&appearance, eyes, eye[0]).unwrap();
+        renderer.render(&appearance, eyes, Mat4::IDENTITY, eye[0]).unwrap();
         renderer.read().unwrap()
     }
 
@@ -708,9 +710,9 @@ mod tests {
         let mut appearance = renderer.appearance(&model, &skinned).unwrap();
         appearance.update(&skinned.palette(&worlds, fit.placement(&model, &worlds, crate::FLOOR)), &skinned, &changed);
         let eyes = [-0.032, 0.032].map(|x| eye_projection(Vec3::new(x, 0.0, 0.4), 0.2, 0.2));
-        renderer.render(&appearance, eyes, 64).unwrap();
+        renderer.render(&appearance, eyes, Mat4::IDENTITY, 64).unwrap();
         let full = renderer.read().unwrap();
-        renderer.render(&appearance, eyes, 16).unwrap();
+        renderer.render(&appearance, eyes, Mat4::IDENTITY, 16).unwrap();
         let far = renderer.read().unwrap();
         assert_eq!(far.len(), 32 * 16 * 4, "the image holds the drawn part alone");
         for eye in 0..2 {
@@ -770,7 +772,7 @@ mod tests {
             let eyes = [eye_projection(Vec3::new(0.0, 0.0, 0.4), 0.2, 0.2), None];
             let mut capture = |skinned: &Skinned| {
                 appearance.update(&palette, skinned, &[]);
-                renderer.render(&appearance, eyes, 32).unwrap();
+                renderer.render(&appearance, eyes, Mat4::IDENTITY, 32).unwrap();
                 renderer.read().unwrap()
             };
             let before = capture(&skinned);
@@ -801,6 +803,38 @@ mod tests {
         assert!(lower_left[2] > lower_left[0] && lower_left[2] > lower_left[1], "the blue texel is at the figure's lower left: {lower_left:?}");
         assert!(lower_right[0] > lower_left[0] + 60 && lower_right[1] > lower_left[1] + 60, "the white texel is at its lower right: {lower_right:?}");
         assert_eq!(lower_right[3], 255, "a cutout texel above the cutoff is opaque, whatever its alpha");
+    }
+
+    #[test]
+    fn a_screen_outline_keeps_its_width_when_the_lit_frame_turns_from_the_window() {
+        let corners = [[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0]];
+        let outlined = |factor: f32, space: Mat4| {
+            let mut builder = crate::vrm::tests::Builder::new(serde_json::json!({ "VRMC_vrm": { "humanoid": { "humanBones": {} } } }));
+            let position = builder.accessor("VEC3", corners.as_flattened());
+            let normal = builder.accessor("VEC3", corners.as_flattened());
+            let indices = builder.indices(&[0, 2, 4, 2, 1, 4, 1, 3, 4, 3, 0, 4, 2, 0, 5, 1, 2, 5, 3, 1, 5, 0, 3, 5]);
+            builder.set("nodes", serde_json::json!([{ "mesh": 0 }]));
+            builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position, "NORMAL": normal }, "indices": indices, "material": 0 }] }]));
+            builder.set("materials", serde_json::json!([{ "doubleSided": true, "pbrMetallicRoughness": { "baseColorFactor": [1.0, 1.0, 1.0, 1.0] } }]));
+            let mut model = Model::parse(&builder.glb()).unwrap();
+            model.materials[0].outline = Some(crate::vrm::Outline { width: crate::vrm::OutlineWidth::Screen, factor, width_image: None, color: [0.0; 3], lighting_mix: 0.0 });
+            let skinned = model.skinned().unwrap();
+            let worlds = model.worlds(&model.rest());
+            let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [64, 64], crate::HEIGHT / PAGE_HEIGHT).unwrap();
+            let mut appearance = renderer.appearance(&model, &skinned).unwrap();
+            appearance.update(&skinned.palette(&worlds, space.inverse() * Mat4::from_scale(Vec3::splat(0.08))), &skinned, &[]);
+            renderer.render(&appearance, [eye_projection(Vec3::new(0.05, 0.15, 0.4), 0.2, 0.2), None], space, 64).unwrap();
+            renderer.read().unwrap().chunks_exact(4).map(|texel| texel[3] == 255).collect::<Vec<bool>>()
+        };
+        let covered = |mask: &[bool]| mask.iter().filter(|&&covered| covered).count();
+        let square = outlined(0.1, Mat4::IDENTITY);
+        let bare = covered(&outlined(0.0, Mat4::IDENTITY));
+        assert!(covered(&square) > bare + 100, "the outline widens the figure: {} texels over {bare}", covered(&square));
+        for turn in [Mat4::from_rotation_x(0.6), Mat4::from_rotation_x(-0.6), Mat4::from_rotation_z(0.5) * Mat4::from_rotation_x(0.4)] {
+            let turned = outlined(0.1, turn);
+            let changed = square.iter().zip(&turned).filter(|(a, b)| a != b).count();
+            assert!(changed <= 4, "skinning into a frame turned {turn} from the window changes {changed} of {} outlined texels", covered(&square));
+        }
     }
 
     #[test]
@@ -865,7 +899,7 @@ mod tests {
             let loaded = renderer.appearance(model, &skinned).unwrap();
             let shown = appearance.insert(loaded);
             shown.update(&skinned.palette(&worlds, fit.placement(model, &worlds, crate::FLOOR)), &skinned, &[]);
-            renderer.render(shown, eyes, 32).unwrap();
+            renderer.render(shown, eyes, Mat4::IDENTITY, 32).unwrap();
             pixel(&renderer.read().unwrap(), 64, 16, 16)
         };
         let mut shown = None;

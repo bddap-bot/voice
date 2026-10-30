@@ -51,7 +51,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             let changed = skinned.morph(&pose.weights);
             let worlds = model.worlds(pose);
             drawn.update(&skinned.palette(&worlds, local.mat4() * fit.placement(&model, &worlds, 0.0)), &skinned, &changed);
-            renderer.render(&drawn, [eye_projection(local.apply(head).into(), QUAD/2.0, QUAD/2.0), None], 560)?;
+            renderer.render(&drawn, [eye_projection(local.apply(head).into(), QUAD/2.0, QUAD/2.0), None], glam::Mat4::IDENTITY, 560)?;
             image::imageops::replace(&mut row, &crate::wear::eye(&renderer.read()?, 560), panel as i64 * 560, 0);
         }
         row.save(out.join(format!("{frame:04}.png"))).map_err(|e| e.to_string())?;

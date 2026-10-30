@@ -693,7 +693,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         renderer.outline_scale = HEIGHT * size / render::PAGE_HEIGHT;
         let seen = eye_points.map(|eye| local.apply(eye));
         let texels = renderer.texels(2.0 * half, seen[0][2].min(seen[1][2]));
-        let mut texture = renderer.render(&puppet.drawn, seen.map(|eye| eye_projection(eye.into(), half, half).map(|projection| projection * to_window)), texels)?;
+        let mut texture = renderer.render(&puppet.drawn, seen.map(|eye| eye_projection(eye.into(), half, half)), to_window, texels)?;
         overlay.present(&mut texture, &place, 2.0 * half, texels as f32 / renderer.eye[0] as f32)?;
         meter.frame(interval, started.elapsed());
         runtime.wait_frame();
@@ -921,7 +921,7 @@ mod tests {
             let mut drawn = renderer.appearance(&model, &skinned).unwrap();
             let local = window.inverse();
             drawn.update(&skinned.palette(&worlds, local.mat4() * body), &skinned, &changed);
-            renderer.render(&drawn, [eye_projection(local.apply(eye).into(), half, half), None], texels).unwrap();
+            renderer.render(&drawn, [eye_projection(local.apply(eye).into(), half, half), None], glam::Mat4::IDENTITY, texels).unwrap();
             left_eye(&renderer.read().unwrap(), texels)
         };
         let direct = draw(&field, FIELD, SEEN);

@@ -3,6 +3,7 @@ struct Draw {
     material: u32,
     outline: u32,
     outline_scale: f32,
+    focal: f32,
 }
 
 struct Material {
@@ -67,7 +68,7 @@ fn vertex(input: Vertex) -> Varying {
         let material = materials[draw.material];
         var width = material.outline_width * textureSampleLevel(outline_width_texture, texture_sampler, input.uv, 0.0).g;
         if material.outline_screen > 0.5 {
-            width *= (draw.view_projection * vec4<f32>(position, 1.0)).w / abs(draw.view_projection[1][1]);
+            width *= (draw.view_projection * vec4<f32>(position, 1.0)).w / abs(draw.focal);
         } else {
             width *= draw.outline_scale;
         }

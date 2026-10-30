@@ -106,6 +106,16 @@
     },
     {
       "paths": [
+        "scripts/publish-avatar.py",
+        "test/publish-avatar.py"
+      ],
+      "tests": [
+        "python3 test/publish-avatar.py"
+      ],
+      "why": "the catalog install refuses a file that carries less than the one it replaces, on synthetic files"
+    },
+    {
+      "paths": [
         "scripts/vr-action-golden.mjs",
         "test/action-evaluation.js"
       ],

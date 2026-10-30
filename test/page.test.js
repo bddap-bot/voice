@@ -2935,7 +2935,7 @@ test('a hub instruction reaches Live as its own silent developer append only aft
     const { LivePlayback } = await import('/live-playback.js');
     const quiet = [];
     LivePlayback.prototype.quiet = () => new Promise((resolve) => quiet.push(resolve));
-    const told = () => globalThis.told(({ channel }) => channel !== 'commentary');
+    const told = () => globalThis.told(({ channel, content }) => channel !== 'commentary' && content[0].text !== ${JSON.stringify(CLOSING)});
     const waiting = () => testPuppet.calls.filter(([name]) => name === 'waiting').map(([, value]) => value).at(-1);
     hear('Check the test beacon.');
     delegateTurn('styled');
@@ -2985,7 +2985,7 @@ window.addEventListener('test-ready', async () => {
   document.body.dataset.result = JSON.stringify({
     early,
     offers: offers.map(({ verb, wake }) => ({ verb, wake })),
-    left: (first.sent ?? []).filter(({ channel }) => channel !== 'commentary').map(({ channel, content }) => [channel, content[0].text]),
+    left: (first.sent ?? []).filter(({ channel, content }) => channel !== 'commentary' && content[0].text !== ${JSON.stringify(CLOSING)}).map(({ channel, content }) => [channel, content[0].text]),
     renewed: testChannel !== first,
   });
 });
@@ -3000,7 +3000,7 @@ window.addEventListener('test-ready', async () => {
 
 test('a restated hub direction is not appended again', async () => {
   const result = await runWakePage(`
-    const told = () => globalThis.told(({ channel }) => channel !== 'commentary').map(([, channel, , text]) => [channel, text]);
+    const told = () => globalThis.told(({ channel, content }) => channel !== 'commentary' && content[0].text !== ${JSON.stringify(CLOSING)}).map(([, channel, , text]) => [channel, text]);
     for (const id of ['a', 'b']) replyFromHub(id, id, [], 5, { instructions: ['Hum.'] });
     replyFromHub('c', 'c', [], 5, { instructions: ['Whistle.'] });
     await until(() => globalThis.hubAcks?.includes('c'));
@@ -3015,7 +3015,7 @@ test('pending hub instructions wait for every hub reply appended before them to 
     const { LivePlayback } = await import('/live-playback.js');
     const quiet = [];
     LivePlayback.prototype.quiet = () => new Promise((resolve) => quiet.push(resolve));
-    const told = () => globalThis.told(({ channel }) => channel !== 'commentary').map(([, channel, , text]) => [channel, text]);
+    const told = () => globalThis.told(({ channel, content }) => channel !== 'commentary' && content[0].text !== ${JSON.stringify(CLOSING)}).map(([, channel, , text]) => [channel, text]);
     const settle = async () => { await until(() => quiet.length); while (quiet.length) quiet.shift()(); await nextTask(); };
     replyFromHub('early', 'early', [], 5, { instructions: ['Old direction.'] });
     await until(() => told().length === 1);
@@ -3044,7 +3044,7 @@ test('hub instructions wait while their reply stays unspoken past the hub turn t
     const { LivePlayback } = await import('/live-playback.js');
     const quiet = [];
     LivePlayback.prototype.quiet = () => new Promise((resolve) => quiet.push(resolve));
-    const told = () => globalThis.told(({ channel }) => channel !== 'commentary').map(([, channel, , text]) => [channel, text]);
+    const told = () => globalThis.told(({ channel, content }) => channel !== 'commentary' && content[0].text !== ${JSON.stringify(CLOSING)}).map(([, channel, , text]) => [channel, text]);
     replyFromHub('late', 'late', ['Reply.'], 5, { instructions: ['Direction.'] });
     await until(() => told().length === 1);
     await new Promise((resolve) => setTimeout(resolve, 21000));

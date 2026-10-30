@@ -542,7 +542,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
                     Ok(loaded) => {
                         puppet = loaded;
                         if let Anchor::Grounded(floor) = &mut anchor {
-                            *floor = placement::Floor::new(floor.pose);
+                            *floor = placement::Floor::new(floor.pose, Random::seeded());
                         }
                         board.active = index;
                         board.wear(puppet.menu(), puppet.settings());
@@ -608,12 +608,12 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             board_overlay.show();
         }
         let delta = interval.as_secs_f32().min(0.05);
-        puppet.animator.ground(anchor.grounded() && size == puppet.full);
+        puppet.animator.walk(matches!(&anchor, Anchor::Grounded(floor) if floor.going()) && size == puppet.full);
         let full = puppet.full;
         let (posed, body, stand) = puppet.step(delta, |feet, walking| {
             match &mut anchor {
                 Anchor::Grounded(floor) => {
-                    let placed = floor.step(feet.map(|feet| feet.map(|foot| placement::scale(foot, full))), walking && size == full);
+                    let placed = floor.step(feet.map(|feet| feet.map(|foot| placement::scale(foot, full))), walking && size == full, &head, delta);
                     if size == full { placed } else { stand }
                 }
                 _ => stand,

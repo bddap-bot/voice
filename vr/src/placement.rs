@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+use crate::motion::Random;
+
 pub type Vec3 = [f32; 3];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -132,7 +134,7 @@ impl Anchor {
                 let pose = on_controller(hand);
                 if pose.t[1] < GROUND {
                     let floor = upright([pose.t[0], 0.0, pose.t[2]], viewer, pose.axis(2));
-                    *self = Anchor::Grounded(Floor::new(floor));
+                    *self = Anchor::Grounded(Floor::new(floor, Random::seeded()));
                     floor
                 } else {
                     if now >= until {
@@ -146,18 +148,46 @@ impl Anchor {
     }
 }
 
+/// The band a floor puppet keeps around the headset, measured across the floor: two to six feet.
+pub const NEAREST: f32 = 0.61;
+pub const FARTHEST: f32 = 1.83;
+/// Half the cone ahead of the headset that counts as in view.
+pub const IN_VIEW: f32 = 0.75;
+/// Where it walks to: this far off the line of sight, so it stands in view without blocking it.
+const ASIDE: [f32; 2] = [0.2, 0.55];
+const KEEP: [f32; 2] = [0.9, 1.5];
+/// Close enough to its spot to stop walking.
+const ARRIVED: f32 = 0.2;
+/// The most it heads around the headset at once, so its path circles him instead of crossing him.
+const ARC: f32 = 0.6;
+/// Radians per second it turns, and the most it may face away from where it is heading and still step.
+const TURN: f32 = 2.0;
+const STEER: f32 = 1.0;
+/// Seconds it stands between wanders inside the band.
+const REST: [f32; 2] = [12.0, 24.0];
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Floor {
     pub pose: Pose,
     feet: Option<[Vec3; 2]>,
+    goal: Option<Vec3>,
+    heading: f32,
+    rest: f32,
+    random: Random,
 }
 
 impl Floor {
-    pub fn new(pose: Pose) -> Self {
-        Self { pose, feet: None }
+    pub fn new(pose: Pose, mut random: Random) -> Self {
+        Self { pose, feet: None, goal: None, heading: 0.0, rest: within(REST, random.next()), random }
     }
 
-    pub fn step(&mut self, feet: Option<[Vec3; 2]>, walking: bool) -> Pose {
+    /// Whether it wants to step: it has somewhere to go and faces near enough toward it.
+    pub fn going(&self) -> bool {
+        self.goal.is_some() && self.heading.abs() < STEER
+    }
+
+    /// Moves it by the stride of `feet` while `walking`, then turns it toward where it is going, or toward `head` once there.
+    pub fn step(&mut self, feet: Option<[Vec3; 2]>, walking: bool, head: &Pose, delta: f32) -> Pose {
         let previous = self.feet;
         self.feet = feet;
         if let (true, Some(previous), Some(feet)) = (walking, previous, feet) {
@@ -165,13 +195,87 @@ impl Floor {
             self.pose.t = add(self.pose.t, self.pose.rotate(sub(previous[support], feet[support])));
             self.pose.t[1] = 0.0;
         }
+        let at = self.pose.t;
+        if self.goal.is_some_and(|goal| !welcome(head, goal) || length(level(sub(goal, at))) < ARRIVED) {
+            self.goal = None;
+        }
+        if self.goal.is_none() {
+            self.rest -= delta;
+            if !welcome(head, at) {
+                self.goal = Some(spot(head, at, side(head, at), 0.5, 0.5));
+            } else if self.rest <= 0.0 {
+                self.rest = within(REST, self.random.next());
+                let side = if self.random.next() < 0.5 { -1.0 } else { 1.0 };
+                self.goal = Some(spot(head, at, side, self.random.next(), self.random.next()));
+            }
+        }
+        let toward = level(sub(self.goal.map_or(head.t, |goal| aim(head.t, at, goal)), at));
+        if length(toward) > 1e-3 {
+            let forward = level(self.pose.axis(2));
+            self.heading = cross(forward, toward)[1].atan2(dot(forward, toward));
+            let turn = self.heading.clamp(-TURN * delta, TURN * delta);
+            if turn != 0.0 {
+                self.pose = upright(at, add(at, yawed(forward, turn)), forward);
+            }
+        }
         self.pose
     }
 }
 
+fn level(v: Vec3) -> Vec3 {
+    [v[0], 0.0, v[2]]
+}
+
+fn within([low, high]: [f32; 2], t: f32) -> f32 {
+    low + (high - low) * t
+}
+
+fn yawed(v: Vec3, angle: f32) -> Vec3 {
+    let (sin, cos) = angle.sin_cos();
+    [v[0] * cos + v[2] * sin, v[1], v[2] * cos - v[0] * sin]
+}
+
+/// Where the headset looks across the floor, if it looks anywhere but straight down or up.
+fn ahead(head: &Pose) -> Option<Vec3> {
+    let forward = level(scale(head.axis(2), -1.0));
+    (length(forward) > 1e-3).then(|| normalize(forward))
+}
+
+/// Across the floor from the headset, `at` is in the band and in view.
+pub fn welcome(head: &Pose, at: Vec3) -> bool {
+    let offset = level(sub(at, head.t));
+    let distance = length(offset);
+    (NEAREST..=FARTHEST).contains(&distance) && ahead(head).is_none_or(|ahead| dot(ahead, offset) >= distance * IN_VIEW.cos())
+}
+
+/// The side of the line of sight `at` stands on, as the sign of a turn about the vertical.
+fn side(head: &Pose, at: Vec3) -> f32 {
+    let offset = level(sub(at, head.t));
+    if ahead(head).is_some_and(|ahead| cross(ahead, offset)[1] < 0.0) { -1.0 } else { 1.0 }
+}
+
+/// A spot in view off the line of sight on `side`, `aside` and `keep` choosing how far off it and how far away within their ranges.
+fn spot(head: &Pose, at: Vec3, side: f32, aside: f32, keep: f32) -> Vec3 {
+    let ahead = ahead(head).unwrap_or_else(|| normalize(level(sub(at, head.t))));
+    let mut spot = add(head.t, scale(yawed(ahead, side * within(ASIDE, aside)), within(KEEP, keep)));
+    spot[1] = 0.0;
+    spot
+}
+
+/// The next place to head for on the way from `at` to `goal`: around the headset at the goal's distance, at most `ARC` at a time.
+fn aim(head: Vec3, at: Vec3, goal: Vec3) -> Vec3 {
+    let [from, to] = [at, goal].map(|point| level(sub(point, head)));
+    let bearing = |v: Vec3| v[0].atan2(v[2]);
+    let mut turn = bearing(to) - bearing(from);
+    turn -= std::f32::consts::TAU * (turn / std::f32::consts::TAU).round();
+    if turn.abs() <= ARC || length(from) < 1e-3 {
+        return goal;
+    }
+    add(level(head), scale(yawed(normalize(from), turn.clamp(-ARC, ARC)), length(to)))
+}
+
 /// Upright at `at`, facing `viewer` across the floor, or along `otherwise` when the viewer is straight overhead.
 fn upright(at: Vec3, viewer: Vec3, otherwise: Vec3) -> Pose {
-    let level = |v: Vec3| [v[0], 0.0, v[2]];
     let toward = level(sub(viewer, at));
     let z = if length(toward) > 1e-3 { normalize(toward) } else if length(level(otherwise)) > 1e-3 { normalize(level(otherwise)) } else { [0.0, 0.0, 1.0] };
     Pose::from_axes(cross([0.0, 1.0, 0.0], z), [0.0, 1.0, 0.0], z, at)
@@ -370,6 +474,8 @@ mod tests {
     }
 
     const VIEWER: Vec3 = [0.0, 1.6, 0.0];
+    /// With no time passing the floor turns nowhere, so these isolate the stride.
+    const STILL: Pose = Pose { r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], t: VIEWER };
 
     fn walking_feet(time: f32) -> [Vec3; 2] {
         let phase = time.rem_euclid(1.0);
@@ -385,14 +491,14 @@ mod tests {
     fn walking_cancels_the_authored_support_foot_travel_at_any_scale_or_frame_rate() {
         for rate in [30, 90, 144] {
             for size in [0.6, 1.0, 1.5] {
-                let mut floor = Floor::new(turned(0.0, [0.0; 3]));
+                let mut floor = Floor::new(turned(0.0, [0.0; 3]), Random(7));
                 let mut previous = walking_feet(0.0).map(|f| scale(f, size));
-                floor.step(Some(previous), true);
+                floor.step(Some(previous), true, &STILL, 0.0);
                 for frame in 1..=rate {
                     let feet = walking_feet(frame as f32 / rate as f32).map(|f| scale(f, size));
                     let support = usize::from(previous[1][2] - feet[1][2] > previous[0][2] - feet[0][2]);
                     let planted = floor.pose.apply(previous[support]);
-                    let next = floor.step(Some(feet), true);
+                    let next = floor.step(Some(feet), true, &STILL, 0.0);
                     let moved = sub(next.apply(feet[support]), planted);
                     assert!(length([moved[0], 0.0, moved[2]]) < 1e-5);
                     previous = feet;
@@ -406,19 +512,19 @@ mod tests {
     fn placement_and_resuming_a_step_preserve_any_chosen_position() {
         for position in [[0.0; 3], [3.0, 0.0, -4.0]] {
             let initial = turned(0.7, position);
-            let mut floor = Floor::new(initial);
+            let mut floor = Floor::new(initial, Random(7));
             for frame in 0..900 {
-                assert_eq!(floor.step(Some(walking_feet(frame as f32 / 90.0)), false), initial);
+                assert_eq!(floor.step(Some(walking_feet(frame as f32 / 90.0)), false, &STILL, 0.0), initial);
             }
-            floor.step(Some(walking_feet(0.7)), false);
-            assert_eq!(floor.step(Some(walking_feet(0.7)), true), initial);
+            floor.step(Some(walking_feet(0.7)), false, &STILL, 0.0);
+            assert_eq!(floor.step(Some(walking_feet(0.7)), true, &STILL, 0.0), initial);
             for frame in 1..=900 {
-                let pose = floor.step(Some(walking_feet(0.7 + frame as f32 / 90.0)), true);
+                let pose = floor.step(Some(walking_feet(0.7 + frame as f32 / 90.0)), true, &STILL, 0.0);
                 assert_eq!(pose.r, initial.r);
             }
             assert!(length(sub(floor.pose.t, initial.t)) > 9.0);
-            let stopped = floor.step(None, false);
-            assert_eq!(floor.step(Some(walking_feet(0.2)), true), stopped);
+            let stopped = floor.step(None, false, &STILL, 0.0);
+            assert_eq!(floor.step(Some(walking_feet(0.2)), true, &STILL, 0.0), stopped);
         }
     }
 
@@ -429,13 +535,13 @@ mod tests {
         let fit = Fit::new(&model, &model.skinned().unwrap(), 1.67);
         let clip = Clip::parse(include_bytes!("../motions/walk.json"), model.version, model.rest_hips()).unwrap();
         for rate in [30, 90, 144] {
-            let mut floor = Floor::new(turned(0.0, [0.0; 3]));
+            let mut floor = Floor::new(turned(0.0, [0.0; 3]), Random(7));
             let mut previous = None;
             for frame in 0..rate * 10 {
                 let worlds = model.worlds(&model.pose(&clip.sample((frame as f32 / rate as f32) % clip.duration())));
                 let fitted = fit.placement(&model, &worlds, 0.0);
                 let feet = model.feet(&worlds).unwrap().map(|foot| fitted.transform_point3(foot).to_array());
-                let stand = floor.step(Some(feet), true);
+                let stand = floor.step(Some(feet), true, &STILL, 0.0);
                 let hips = (stand.mat4() * fitted * worlds[1]).w_axis.z;
                 if let Some(before) = previous { assert!(hips >= before - 1e-6, "rate {rate} frame {frame}: {before} -> {hips}"); }
                 previous = Some(hips);
@@ -445,13 +551,79 @@ mod tests {
 
     #[test]
     fn an_idle_to_stride_transition_keeps_the_support_foot_planted() {
-        let mut floor = Floor::new(turned(0.0, [2.0, 0.0, 3.0]));
+        let mut floor = Floor::new(turned(0.0, [2.0, 0.0, 3.0]), Random(7));
         let standing = [[-0.2, 0.08, 0.018], [0.2, 0.078, -0.018]];
         let stepping = [[-0.197, 0.081, 0.023], [0.197, 0.078, -0.023]];
-        floor.step(Some(standing), false);
+        floor.step(Some(standing), false, &STILL, 0.0);
         let planted = floor.pose.apply(standing[1]);
-        let next = floor.step(Some(stepping), true);
+        let next = floor.step(Some(stepping), true, &STILL, 0.0);
         assert!(close(next.apply(stepping[1]), planted));
+    }
+
+    /// A headset at standing height turned `yaw` about the vertical, looking down `pitch`.
+    fn headset(yaw: f32, pitch: f32, at: Vec3) -> Pose {
+        let (sy, cy) = yaw.sin_cos();
+        let (sp, cp) = pitch.sin_cos();
+        let z = [sy * cp, sp, cy * cp];
+        let x = normalize(cross([0.0, 1.0, 0.0], z));
+        Pose::from_axes(x, cross(z, x), z, at)
+    }
+
+    /// Steps a floor puppet at 90 Hz, its feet striding whenever it asks to walk, returning every pose it stood in.
+    fn walk_for(floor: &mut Floor, head: impl Fn(f32) -> Pose, seconds: f32) -> Vec<Pose> {
+        let mut gait = 0.0;
+        (0..(seconds * 90.0) as usize).map(|frame| {
+            let going = floor.going();
+            if going { gait += 1.0 / 90.0; }
+            floor.step(Some(walking_feet(gait)), going, &head(frame as f32 / 90.0), 1.0 / 90.0)
+        }).collect()
+    }
+
+    fn across(head: &Pose, at: Vec3) -> f32 {
+        length([at[0] - head.t[0], 0.0, at[2] - head.t[2]])
+    }
+
+    /// How far it faces away from the headset, and how far off the line of sight it stands, across the floor.
+    fn angles(head: &Pose, pose: &Pose) -> (f32, f32) {
+        let toward = normalize([head.t[0] - pose.t[0], 0.0, head.t[2] - pose.t[2]]);
+        let facing = normalize([pose.axis(2)[0], 0.0, pose.axis(2)[2]]);
+        let ahead = normalize([-head.axis(2)[0], 0.0, -head.axis(2)[2]]);
+        (dot(facing, toward).clamp(-1.0, 1.0).acos(), dot(ahead, scale(toward, -1.0)).clamp(-1.0, 1.0).acos())
+    }
+
+    #[test]
+    fn a_floor_puppet_walks_back_into_the_band_in_view_and_settles_facing_the_headset() {
+        for yaw in [0.0, 2.0, -2.6] {
+            let head = headset(yaw, -0.3, [0.4, 1.6, -0.2]);
+            for (start, facing) in [([0.4, 0.0, -4.0], 0.0), ([0.4, 0.0, 3.5], 0.0), ([3.0, 0.0, 2.5], 1.0), ([-5.0, 0.0, -0.2], 3.0), ([0.5, 0.0, -0.1], 2.0)] {
+                let mut floor = Floor::new(turned(facing, start), Random(7));
+                let poses = walk_for(&mut floor, |_| head, 40.0);
+                let end = poses.last().unwrap();
+                let distance = across(&head, end.t);
+                let (away, aside) = angles(&head, end);
+                let label = format!("headset yaw {yaw}, start {start:?}: ended {distance:.2} m off, facing {away:.2} rad away, {aside:.2} rad off the line of sight");
+                assert!((NEAREST..=FARTHEST).contains(&distance), "{label}");
+                assert!(away < 0.05, "settles facing the headset: {label}");
+                assert!((0.1..IN_VIEW).contains(&aside), "in view, not dead centre: {label}");
+                assert!(!floor.going(), "settled: {label}");
+                let entered = poses.iter().position(|pose| (NEAREST..=FARTHEST).contains(&across(&head, pose.t))).unwrap();
+                assert!(poses[entered..].iter().all(|pose| across(&head, pose.t) >= NEAREST * 0.9), "once in the band it circles him rather than crossing him: {label}");
+                assert!(poses.iter().all(|pose| pose.t[1] == 0.0 && (pose.axis(1)[1] - 1.0).abs() < 1e-5), "upright on the floor: {label}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_settled_puppet_wanders_only_within_the_band_and_follows_the_view_round() {
+        let head = |time: f32| headset(if time < 120.0 { 0.0 } else { std::f32::consts::PI }, 0.0, [0.0, 1.6, 0.0]);
+        let mut floor = Floor::new(turned(0.0, [0.3, 0.0, -1.2]), Random(7));
+        let poses = walk_for(&mut floor, head, 180.0);
+        let wandered = poses[..120 * 90].iter().map(|pose| length(sub(pose.t, poses[0].t))).fold(0.0, f32::max);
+        assert!(wandered > 0.3, "it wanders: {wandered}");
+        assert!(poses[..120 * 90].iter().all(|pose| welcome(&head(0.0), pose.t)), "every wander stays in the band and in view");
+        assert!(poses[120 * 90..].iter().all(|pose| across(&head(150.0), pose.t) >= NEAREST * 0.9), "it walks round him, not through him");
+        assert!(poses[150 * 90..].iter().all(|pose| welcome(&head(180.0), pose.t)), "in view again within half a minute of his turning round");
+        assert!(poses[150 * 90..].iter().any(|pose| angles(&head(180.0), pose).0 < 0.05), "and stands facing him");
     }
 
     #[test]

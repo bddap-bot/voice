@@ -146,7 +146,8 @@ struct Action {
     once: bool,
 }
 
-pub struct Random(u64);
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Random(pub u64);
 
 impl Random {
     pub fn seeded() -> Random {
@@ -165,7 +166,7 @@ pub struct Animator {
     clips: HashMap<String, Clip>,
     actions: Vec<Action>,
     loop_clip: Option<String>,
-    grounded: bool,
+    walk: bool,
     gesture: Option<String>,
     next_loop: f32,
     next_blink: f32,
@@ -181,7 +182,7 @@ pub struct Animator {
 
 impl Animator {
     pub fn new(clips: HashMap<String, Clip>, own: Vec<String>, random: Random) -> Animator {
-        let mut animator = Animator { clips, actions: Vec::new(), loop_clip: None, grounded: false, gesture: None, next_loop: f32::INFINITY, next_blink: 1.2, blink_start: None, now: 0.0, random, own, mood: None, shown: None, faces: HashMap::new() };
+        let mut animator = Animator { clips, actions: Vec::new(), loop_clip: None, walk: false, gesture: None, next_loop: f32::INFINITY, next_blink: 1.2, blink_start: None, now: 0.0, random, own, mood: None, shown: None, faces: HashMap::new() };
         animator.play_loop();
         animator
     }
@@ -197,13 +198,13 @@ impl Animator {
     }
 
     fn play_loop(&mut self) {
-        let step = self.grounded && self.clips.keys().any(|name| family(name) == WALK) && self.now >= self.next_loop && self.loop_clip.as_deref().is_none_or(|name| family(name) != WALK);
+        let step = self.walk && self.clips.keys().any(|name| family(name) == WALK);
         let available = self.variants(if step { WALK } else { IDLE });
         let choices: Vec<String> = available.iter().filter(|name| Some(name.as_str()) != self.loop_clip.as_deref()).cloned().collect();
         let name = self.pick(&choices).or(available.first().cloned());
-        self.next_loop = if self.grounded { self.now + 12.0 + self.random.next() * 12.0 } else if available.len() > 1 { self.now + 7.0 + self.random.next() * 7.0 } else { f32::INFINITY };
+        self.next_loop = if !step && available.len() > 1 { self.now + 7.0 + self.random.next() * 7.0 } else { f32::INFINITY };
         if name != self.loop_clip || self.gesture.is_some() {
-            self.play(name.as_deref(), IDLE_FADE, step);
+            self.play(name.as_deref(), IDLE_FADE, false);
         }
         self.loop_clip = name;
         self.gesture = None;
@@ -213,9 +214,10 @@ impl Animator {
         }
     }
 
-    pub fn ground(&mut self, grounded: bool) {
-        if self.grounded == grounded { return; }
-        self.grounded = grounded;
+    /// Walks in place while `walk`, for the floor to carry it by its stride; stands otherwise.
+    pub fn walk(&mut self, walk: bool) {
+        if self.walk == walk { return; }
+        self.walk = walk;
         if self.gesture.is_none() { self.play_loop(); }
     }
 
@@ -471,36 +473,23 @@ mod tests {
     }
 
     #[test]
-    fn ground_steps_once_between_long_standing_intervals() {
+    fn it_walks_exactly_while_asked_then_stands() {
         let clip = Clip::parse(include_bytes!("../motions/walk.json"), Version::One, Some(Vec3::Y)).unwrap();
         let mut animator = animator(&["idle", "wave"]);
         animator.clips.insert(WALK.to_owned(), clip);
-        animator.ground(true);
-        assert!(!animator.walking());
-        assert!((12.0..=24.0).contains(&animator.next_loop));
-        let mut walking_frames = 0;
-        let mut starts = Vec::new();
-        let mut was_walking = false;
-        for frame in 0..9000 {
-            animator.update(1.0 / 90.0);
-            let walking = animator.walking();
-            if walking { walking_frames += 1; }
-            if walking && !was_walking { starts.push(frame as f32 / 90.0); }
-            was_walking = walking;
-        }
-        assert!((3..=8).contains(&starts.len()), "{starts:?}");
-        assert!(walking_frames < 9000 / 5, "mostly standing: {walking_frames}/9000");
-        assert!(starts.windows(2).all(|pair| pair[1] - pair[0] >= 12.0));
-        animator.ground(false);
+        for _ in 0..1000 { animator.update(0.05); assert!(!animator.walking(), "standing unless asked"); }
+        animator.walk(true);
+        animator.update(IDLE_FADE);
+        for _ in 0..1000 { animator.update(0.05); assert!(animator.walking(), "the stride loops while asked"); }
+        animator.walk(false);
         animator.update(IDLE_FADE + 0.01);
         for _ in 0..1000 { animator.update(0.05); assert!(!animator.walking()); }
     }
 
     #[test]
-    fn gestures_interrupt_a_step_and_return_to_standing() {
+    fn gestures_interrupt_a_walk_which_resumes_after() {
         let mut animator = animator(&["idle", "walk", "wave"]);
-        animator.ground(true);
-        animator.update(25.0);
+        animator.walk(true);
         animator.update(IDLE_FADE);
         assert!(animator.walking());
         animator.gesture("wave");
@@ -508,6 +497,9 @@ mod tests {
         assert!(!animator.walking());
         animator.update(20.0);
         animator.update(IDLE_FADE);
+        assert!(animator.walking());
+        animator.walk(false);
+        animator.update(IDLE_FADE + 0.01);
         assert!(!animator.walking());
         assert_eq!(animator.loop_clip.as_deref(), Some("idle"));
     }

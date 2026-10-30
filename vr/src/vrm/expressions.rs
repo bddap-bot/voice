@@ -182,10 +182,45 @@ struct Layer {
 #[derive(Clone, Debug, Deserialize)]
 struct Curve {
     target: usize,
-    keys: Vec<[f32; 2]>,
+    keys: Vec<Key>,
     #[serde(default)]
     step: bool,
 }
+
+/// A Unity keyframe: `[time, value]`, or `[time, value, inSlope, outSlope]` with an optional
+/// `inWeight, outWeight` pair; a null slope is Unity's infinite (constant) tangent.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(try_from = "Vec<Option<f32>>")]
+struct Key {
+    time: f32,
+    value: f32,
+    slopes: Option<[f32; 2]>,
+    weights: [f32; 2],
+}
+
+impl TryFrom<Vec<Option<f32>>> for Key {
+    type Error = String;
+
+    fn try_from(row: Vec<Option<f32>>) -> Result<Self, String> {
+        let slope = |at: usize| row[at].unwrap_or(f32::INFINITY);
+        let (Some(time), Some(value)) = (row.first().copied().flatten(), row.get(1).copied().flatten()) else {
+            return Err(format!("a key needs a time and a value, got {row:?}"));
+        };
+        let (slopes, weights) = match row.len() {
+            2 => (None, [THIRD; 2]),
+            4 => (Some([slope(2), slope(3)]), [THIRD; 2]),
+            6 => match (row[4], row[5]) {
+                (Some(into), Some(out)) => (Some([slope(2), slope(3)]), [into.clamp(0.0, 1.0), out.clamp(0.0, 1.0)]),
+                _ => return Err(format!("key weights must be numbers, got {row:?}")),
+            },
+            _ => return Err(format!("a key has 2, 4 or 6 numbers, got {row:?}")),
+        };
+        Ok(Key { time, value, slopes, weights })
+    }
+}
+
+/// Unity's tangent weight that makes a weighted segment its plain Hermite.
+const THIRD: f32 = 1.0 / 3.0;
 
 #[derive(Clone, Debug, Deserialize)]
 struct Clip {
@@ -600,17 +635,43 @@ fn clip_length(expressions: &Expressions, motion: &Motion) -> f32 {
 }
 
 impl Curve {
+    /// Unity's `AnimationCurve.Evaluate`: each key pair is a cubic Bezier through the keys' slopes
+    /// and weights (a plain Hermite at the default weights), held at the left key when either facing
+    /// slope is infinite, and clamped past the ends.
     fn sample(&self, at: f32) -> f32 {
         let Some(first) = self.keys.first() else { return 0.0 };
-        let after = self.keys.partition_point(|key| key[0] <= at);
+        let after = self.keys.partition_point(|key| key.time <= at);
         if after == 0 {
-            return first[1];
+            return first.value;
         }
-        let [t0, v0] = self.keys[after - 1];
-        match self.keys.get(after) {
-            Some(&[t1, v1]) if !self.step && t1 > t0 => v0 + (v1 - v0) * (at - t0) / (t1 - t0),
-            _ => v0,
+        let a = self.keys[after - 1];
+        let Some(&b) = self.keys.get(after) else { return a.value };
+        let span = b.time - a.time;
+        if self.step || span <= 0.0 {
+            return a.value;
         }
+        let p = (at - a.time) / span;
+        let (Some([_, out]), Some([into, _])) = (a.slopes, b.slopes) else {
+            return a.value + (b.value - a.value) * p;
+        };
+        if !out.is_finite() || !into.is_finite() {
+            return a.value;
+        }
+        let (wa, wb) = (a.weights[1], b.weights[0]);
+        let bezier = |s: f32, p0: f32, p1: f32, p2: f32, p3: f32| {
+            let r = 1.0 - s;
+            r * r * r * p0 + 3.0 * r * r * s * p1 + 3.0 * r * s * s * p2 + s * s * s * p3
+        };
+        let (mut low, mut high) = (0.0f32, 1.0f32);
+        for _ in 0..32 {
+            let mid = 0.5 * (low + high);
+            if bezier(mid, 0.0, wa, 1.0 - wb, 1.0) < p {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+        bezier(0.5 * (low + high), a.value, a.value + wa * span * out, b.value - wb * span * into, b.value)
     }
 }
 
@@ -800,4 +861,21 @@ mod tests {
         let bad = serde_json::json!({"menu": [], "parameters": [], "layers": [{"states": [{"motion": {"clip": 3}}]}], "clips": [], "targets": []});
         assert!(Expressions::parse(&bad).is_err());
     }
+
+    #[test]
+    fn curves_match_unity_on_flat_free_constant_and_weighted_tangents() {
+        let unity: serde_json::Value = serde_json::from_str(include_str!("../../golden/unity-curves.json")).unwrap();
+        for (name, curve) in unity.as_object().unwrap() {
+            let ours: Curve = serde_json::from_value(serde_json::json!({"target": 0, "keys": curve["keys"]})).unwrap();
+            let samples = curve["unity"].as_array().unwrap();
+            let range = samples.iter().map(|s| s[1].as_f64().unwrap()).fold(f64::NEG_INFINITY, f64::max) - samples.iter().map(|s| s[1].as_f64().unwrap()).fold(f64::INFINITY, f64::min);
+            assert_eq!(samples.len(), 20);
+            for sample in samples {
+                let (at, expected) = (sample[0].as_f64().unwrap() as f32, sample[1].as_f64().unwrap());
+                let got = ours.sample(at) as f64;
+                assert!((got - expected).abs() <= 0.01 * range, "{name} at {at}: ours {got}, Unity {expected}");
+            }
+        }
+    }
+
 }

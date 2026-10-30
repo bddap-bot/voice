@@ -1,4 +1,7 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+use glam::Vec3;
 
 use crate::board::Board;
 use crate::placement::{facing, Pose};
@@ -152,18 +155,8 @@ fn left(renderer: &Renderer) -> Result<Vec<u8>, String> {
 /// Steps the puppet's menu `settle` frames and draws it standing, seen from `head`; the eyes to render it for.
 fn posed(puppet: &mut Puppet, head: [f32; 3], settle: usize) -> [Option<glam::Mat4>; 2] {
     let stand = Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0; 3]);
-    let (menu, controller) = (puppet.model.menu.as_ref().unwrap(), puppet.controller.as_mut().unwrap());
     let mut pose = puppet.model.pose(&puppet.standing);
-    let mut values = Vec::new();
-    for _ in 0..settle {
-        values = controller.step(menu, DELTA);
-    }
-    puppet.drawn.hidden = menu.apply(&values, &mut pose);
-    let mut retextured = Vec::new();
-    puppet.skinned.surface_values(menu, &values);
-    for (node, moved) in menu.materials(&values) {
-        retextured.extend(puppet.skinned.retexture(node, moved));
-    }
+    let (retextured, _) = puppet.express(&mut pose, settle, DELTA);
     let worlds = puppet.model.worlds(&pose);
     let body = stand.mat4() * puppet.fit.placement(&puppet.model, &worlds, 0.0);
     puppet.changed = puppet.skinned.morph(&pose.weights);
@@ -320,4 +313,180 @@ fn pair(before: &[u8], after: &[u8], path: &Path) -> Result<(), String> {
         image::Rgb([0, 1, 2].map(|channel| ((picture[at + channel] as f32 / 255.0 + 0.12 * (1.0 - alpha)).clamp(0.0, 1.0) * 255.0).round() as u8))
     });
     image.save(path).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+const RECORDED_DELTA: f32 = 1.0 / 60.0;
+/// The tip VRChat adds past a chain's last bone, which a converted file carries as that bone's only child.
+const LEAF_TIP: &str = "VRCLeafTipBone";
+
+/// Replays a reference recording of an avatar against the overlay's own runtime, off any headset: the root's motion, each
+/// step's parameters at its start frame, the springs' tips and the recording's camera views.
+pub fn reference(args: &[String]) -> Result<(), String> {
+    let usage = "usage: voice-vr reference <recording-dir> <avatar.vrm> <out-dir>";
+    let [recording, file, out] = args else { return Err(usage.into()) };
+    let out = PathBuf::from(out);
+    std::fs::create_dir_all(out.join("render")).map_err(|error| format!("{}: {error}", out.display()))?;
+    let mut meta = serde_json::json!({"runtime": "voice-vr", "avatar": file, "matched": [], "unmatched": [], "notes": []});
+    let result = replay_reference(Path::new(recording), file, &out, &mut meta);
+    if let Err(error) = &result {
+        meta["error"] = error.as_str().into();
+    }
+    let path = out.join("meta.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&meta).unwrap() + "\n").map_err(|error| format!("{}: {error}", path.display()))?;
+    result
+}
+
+fn replay_reference(recording: &Path, file: &str, out: &Path, meta: &mut serde_json::Value) -> Result<(), String> {
+    let table = |name: &str| -> Result<Vec<Vec<String>>, String> {
+        let path = recording.join(name);
+        let text = std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        Ok(text.lines().filter(|line| !line.is_empty()).map(|line| line.split('\t').map(str::to_owned).collect()).collect())
+    };
+    let number = |field: &str| field.trim().parse::<f32>().map_err(|_| format!("not a number: {field}"));
+    let frame_of = |field: &str| field.trim().parse::<i64>().map_err(|_| format!("not a frame: {field}"));
+    let mut track = Vec::new();
+    for row in table("track.tsv")?.iter().skip(1) {
+        let values = row.get(1).ok_or("track.tsv: a row without a root")?.split(',').map(number).collect::<Result<Vec<_>, _>>()?;
+        let &[x, y, z, qx, qy, qz, qw] = &values[..] else { return Err(format!("track.tsv: root {values:?} is not a position and rotation")) };
+        track.push((frame_of(&row[0])?, from_unity(Vec3::new(x, y, z), glam::Quat::from_xyzw(qx, qy, qz, qw))));
+    }
+    let mut steps: HashMap<i64, Vec<(String, f32)>> = HashMap::new();
+    let mut window = (i64::MAX, i64::MIN);
+    for row in table("steps.tsv")? {
+        let [_, start, frames, _, label, rest @ ..] = &row[..] else { return Err(format!("steps.tsv: short row {row:?}")) };
+        let (start, frames) = (frame_of(start)?, frame_of(frames)?);
+        match label.as_str() {
+            "motion" => window.0 = start,
+            "settle" => window.1 = start + frames,
+            _ => {}
+        }
+        for assignment in rest.first().map_or("", String::as_str).split(',').filter(|assignment| !assignment.is_empty()) {
+            let (name, value) = assignment.rsplit_once('=').ok_or(format!("steps.tsv: assignment {assignment} has no value"))?;
+            steps.entry(start).or_default().push((name.to_owned(), number(value)?));
+        }
+    }
+    let mut renders: HashMap<i64, Vec<String>> = HashMap::new();
+    for row in table("renders.tsv")? {
+        let [name, frame, ..] = &row[..] else { return Err(format!("renders.tsv: short row {row:?}")) };
+        renders.entry(frame_of(frame)?).or_default().push(name.clone());
+    }
+    let camera: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(recording.join("camera.json")).map_err(|error| format!("camera.json: {error}"))?).map_err(|error| format!("camera.json: {error}"))?;
+    let floats = |key: &str| -> Result<Vec<f32>, String> { camera[key].as_array().ok_or(format!("camera.json: no {key}"))?.iter().map(|value| value.as_f64().map(|value| value as f32).ok_or(format!("camera.json: {key} is not numbers"))).collect() };
+    let (position, euler, background) = (floats("position")?, floats("rotation_euler")?, floats("background")?);
+    let (width, height) = (camera["width"].as_u64().ok_or("camera.json: no width")? as u32, camera["height"].as_u64().ok_or("camera.json: no height")? as u32);
+    let field = (camera["fov_vertical"].as_f64().ok_or("camera.json: no fov_vertical")? as f32).to_radians();
+    let [ex, ey, ez] = euler[..] else { return Err("camera.json: rotation_euler is not three angles".into()) };
+    let [px, py, pz] = position[..] else { return Err("camera.json: position is not three coordinates".into()) };
+    let viewer = from_unity(Vec3::new(px, py, pz), glam::Quat::from_euler(glam::EulerRot::YXZ, ey.to_radians(), ex.to_radians(), ez.to_radians()));
+    let (eye, ahead, up) = (viewer.transform_point3(Vec3::ZERO), viewer.transform_vector3(Vec3::Z), viewer.transform_vector3(Vec3::Y));
+    let half = (field / 2.0).tan();
+    let view = eye_projection(Vec3::Z, half, half).unwrap() * glam::Mat4::from_translation(Vec3::Z) * glam::Mat4::look_to_rh(eye, ahead, up);
+    meta["notes"].as_array_mut().unwrap().push(format!("the overlay's own lights (a warm key, a blue rim and a sky/ground hemisphere) instead of the recording's ambient {} and white light at Unity euler {}", camera["ambient"], camera["light_euler"]).into());
+    meta["notes"].as_array_mut().unwrap().push("no tracked head or hands: the figure holds the overlay's standing pose, moved by the recorded root".into());
+
+    let bytes = std::fs::read(file).map_err(|error| format!("{file}: {error}"))?;
+    let model = crate::vrm::Model::parse(&bytes)?;
+    let side = height.max(width);
+    let gpu = std::rc::Rc::new(Gpu::new(None)?);
+    let mut renderer = Renderer::new(gpu, [side; 2], 1.0)?;
+    let mut puppet = crate::dressed(model, Default::default(), file, &mut renderer, &Default::default())?;
+    let names: HashMap<String, usize> = (0..puppet.model.nodes()).rev().filter_map(|node| Some((normalized(puppet.model.name(node)?), node))).collect();
+    let mut tips = Vec::new();
+    for row in table("chains.tsv")?.iter().skip(1) {
+        let id = row[0].clone();
+        let mut path = id.rsplit(['|', '/']).map(unnumbered);
+        let (leaf, parent) = (path.next().unwrap_or_default(), path.next().unwrap_or_default());
+        let only_child = || {
+            let parent = *names.get(&normalized(parent))?;
+            let mut children = (0..puppet.model.nodes()).filter(|&node| puppet.model.parent(node) == Some(parent));
+            children.next().filter(|_| children.next().is_none())
+        };
+        let named = || names.get(&normalized(leaf)).copied();
+        let tip = if leaf == LEAF_TIP { only_child().or_else(named) } else { named() };
+        match tip.as_ref() {
+            Some(&node) => {
+                meta["matched"].as_array_mut().unwrap().push(id.as_str().into());
+                tips.push((id, node));
+            }
+            None => meta["unmatched"].as_array_mut().unwrap().push(id.into()),
+        }
+    }
+    let mut listing = String::new();
+    if let Some(menu) = &puppet.model.menu {
+        list(&menu.menu, "", &mut listing);
+    }
+    let path = out.join("menu.tsv");
+    std::fs::write(&path, listing).map_err(|error| format!("{}: {error}", path.display()))?;
+    match &puppet.model.menu {
+        Some(menu) => {
+            let mut unknown: Vec<&str> = steps.values().flatten().map(|(name, _)| name.as_str()).filter(|name| !menu.parameters.iter().any(|parameter| parameter.name == *name)).collect();
+            unknown.sort();
+            unknown.dedup();
+            if !unknown.is_empty() {
+                meta["notes"].as_array_mut().unwrap().push(format!("parameters the avatar's menu lacks, ignored: {}", unknown.join(", ")).into());
+            }
+        }
+        None => meta["notes"].as_array_mut().unwrap().push("no expression menu: assignments ignored".into()),
+    }
+
+    let to_root = glam::Mat4::from_quat(puppet.model.facing());
+    let mut written = String::new();
+    for (frame, root) in track {
+        if let Some(controller) = puppet.controller.as_mut() {
+            for (name, value) in steps.get(&frame).into_iter().flatten() {
+                controller.set(name, *value);
+            }
+        }
+        let mut pose = puppet.model.pose(&puppet.standing);
+        let (retextured, stilled) = puppet.express(&mut pose, 1, RECORDED_DELTA);
+        puppet.settle(&mut pose, root * to_root, &[], RECORDED_DELTA, &stilled);
+        let worlds = puppet.model.worlds(&pose);
+        if (window.0..window.1).contains(&frame) {
+            for (id, node) in &tips {
+                let at = to_root.transform_point3(worlds[*node].w_axis.truncate());
+                written.push_str(&format!("{frame}\t{id}\t{}\t{}\t{}\n", -at.x, at.y, at.z));
+            }
+        }
+        let Some(names) = renders.get(&frame) else { continue };
+        puppet.changed = puppet.skinned.morph(&pose.weights);
+        puppet.changed.extend(retextured);
+        puppet.draw(&worlds, to_root);
+        renderer.render(&puppet.drawn, [Some(view), None], glam::Mat4::IDENTITY, side)?;
+        let picture = left(&renderer)?;
+        let (left_edge, top) = ((side - width) / 2, (side - height) / 2);
+        let image = image::RgbImage::from_fn(width, height, |x, y| {
+            let at = (((y + top) * side + x + left_edge) * 4) as usize;
+            let cover = picture[at + 3] as f32 / 255.0;
+            image::Rgb([0, 1, 2].map(|channel| (picture[at + channel] as f32 + background[channel] * 255.0 * (1.0 - cover)).round().min(255.0) as u8))
+        });
+        for name in names {
+            let path = out.join(name);
+            image.save(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        }
+    }
+    let path = out.join("tips.tsv");
+    std::fs::write(&path, written).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+/// A transform in Unity's left-handed axes, as the same transform in the overlay's right-handed ones.
+fn from_unity(position: Vec3, rotation: glam::Quat) -> glam::Mat4 {
+    glam::Mat4::from_rotation_translation(glam::Quat::from_xyzw(rotation.x, -rotation.y, -rotation.z, rotation.w), Vec3::new(-position.x, position.y, position.z))
+}
+
+/// Each control's name path, its names joined by `/`, and kind, a submenu before what it holds.
+fn list(controls: &[Control], prefix: &str, out: &mut String) {
+    for control in controls {
+        let path = if prefix.is_empty() { control.name.clone() } else { format!("{prefix}/{}", control.name) };
+        out.push_str(&format!("{path}\t{:?}\n", control.kind));
+        list(&control.controls, &path, out);
+    }
+}
+
+/// A recorded path segment without the `#<n>` that tells a later sibling of the same name apart.
+fn unnumbered(segment: &str) -> &str {
+    segment.rsplit_once('#').filter(|(_, number)| !number.is_empty() && number.bytes().all(|digit| digit.is_ascii_digit())).map_or(segment, |(name, _)| name)
+}
+
+fn normalized(name: &str) -> String {
+    name.chars().filter(char::is_ascii_alphanumeric).map(|letter| letter.to_ascii_lowercase()).collect()
 }

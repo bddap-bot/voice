@@ -957,6 +957,10 @@ impl Model {
         self.nodes[node].parent
     }
 
+    pub fn name(&self, node: usize) -> Option<&str> {
+        self.nodes[node].name.as_deref()
+    }
+
     pub fn named(&self, name: &str) -> Option<usize> {
         self.nodes.iter().position(|node| node.name.as_deref() == Some(name))
     }

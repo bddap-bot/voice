@@ -207,17 +207,7 @@ impl Puppet {
             tracing::info!("loop {clip}");
         }
         let mut pose = self.model.pose(&self.animator.humanoid(&self.standing, self.model.rest_hips()));
-        let mut retextured = Vec::new();
-        let mut stilled = HashSet::new();
-        if let (Some(menu), Some(controller)) = (&self.model.menu, &mut self.controller) {
-            let values = controller.step(menu, delta);
-            self.drawn.hidden = menu.apply(&values, &mut pose);
-            stilled = menu.stilled(&values);
-            self.skinned.surface_values(menu, &values);
-            for (node, moved) in menu.materials(&values) {
-                retextured.extend(self.skinned.retexture(node, moved));
-            }
-        }
+        let (retextured, stilled) = self.express(&mut pose, 1, delta);
         let mut worlds = self.model.worlds(&pose);
         let fitted = self.fit.placement(&self.model, &worlds, 0.0);
         let feet = self.model.feet(&worlds).map(|feet| feet.map(|foot| fitted.transform_point3(foot).to_array()));
@@ -236,12 +226,30 @@ impl Puppet {
         }
         self.model.express(&mut pose, "blink", self.animator.blink());
         self.model.express(&mut pose, "aa", mouth);
-        self.springs.restore(&self.model, &mut pose, &stilled);
-        self.constraints.step(&self.model, &mut pose, body);
-        self.springs.step(&self.model, &mut pose, body, hands, delta, &stilled);
+        self.settle(&mut pose, body, hands, delta, &stilled);
         self.changed = self.skinned.morph(&pose.weights);
         self.changed.extend(retextured);
         (self.model.worlds(&pose), body, stand)
+    }
+
+    /// Runs the menu's controller `steps` times and applies its last values to `pose`; the vertices it retextured.
+    fn express(&mut self, pose: &mut vrm::Pose, steps: usize, delta: f32) -> (Vec<u32>, HashSet<usize>) {
+        let (Some(menu), Some(controller)) = (&self.model.menu, &mut self.controller) else { return (Vec::new(), HashSet::new()) };
+        let mut values = Vec::new();
+        for _ in 0..steps {
+            values = controller.step(menu, delta);
+        }
+        self.drawn.hidden = menu.apply(&values, pose);
+        self.skinned.surface_values(menu, &values);
+        let retextured = menu.materials(&values).flat_map(|(node, moved)| self.skinned.retexture(node, moved)).collect();
+        (retextured, menu.stilled(&values))
+    }
+
+    /// Moves the constrained and spring-driven nodes of `pose` for the figure placed by `body`.
+    fn settle(&mut self, pose: &mut vrm::Pose, body: glam::Mat4, hands: &[spring::Hand], delta: f32, stilled: &HashSet<usize>) {
+        self.springs.restore(&self.model, pose, stilled);
+        self.constraints.step(&self.model, pose, body);
+        self.springs.step(&self.model, pose, body, hands, delta, stilled);
     }
 
     fn draw(&mut self, posed: &[glam::Mat4], to_window: glam::Mat4) {
@@ -848,6 +856,9 @@ fn run() -> Result<(), String> {
     std::fs::create_dir_all(&state).map_err(|error| format!("{}: {error}", state.display()))?;
     if args.get(1).is_some_and(|mode| mode == "sweep") {
         return dress::sweep(&args[2..]);
+    }
+    if args.get(1).is_some_and(|mode| mode == "reference") {
+        return dress::reference(&args[2..]);
     }
     if let [_, mode, recording] = &args[..] {
         if mode == "replay" {

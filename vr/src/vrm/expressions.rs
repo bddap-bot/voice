@@ -634,8 +634,11 @@ impl Expressions {
 
     /// The spring joints and colliders the values switch off.
     pub fn idle(&self, values: &[f32]) -> Idle {
+        let (off_springs, on_springs): (Vec<_>, Vec<_>) = self.springs.iter().partition(|spring| off(&spring.when, values));
+        let bones = |springs: Vec<&SwitchedSpring>| springs.into_iter().map(|spring| spring.joints.iter().copied().collect()).collect();
         Idle {
-            joints: self.springs.iter().filter(|spring| off(&spring.when, values)).flat_map(|spring| spring.joints.iter().copied()).collect(),
+            off: bones(off_springs),
+            on: bones(on_springs),
             colliders: self.colliders.iter().filter(|collider| off(&collider.when, values)).map(|collider| collider.collider).collect(),
         }
     }
@@ -1081,6 +1084,15 @@ mod tests {
     }
 
     #[test]
+    fn two_physbones_taking_turns_on_a_bone_each_move_it_to_their_own_end() {
+        let expressions = switched(serde_json::json!([{"joints": [3, 4, 6], "when": [[0, 1]]}, {"joints": [3, 5], "when": [[1, 1]]}]), serde_json::json!([])).unwrap();
+        let first = expressions.idle(&[1.0, 0.0]);
+        assert!(!first.still(3, Some(4)) && first.still(3, Some(5)), "the running one swings the shared bone toward its end, the other's segment stays");
+        let second = expressions.idle(&[0.0, 1.0]);
+        assert!(second.still(3, Some(4)) && !second.still(3, Some(5)) && second.still(4, Some(6)));
+    }
+
+    #[test]
     fn a_direct_child_whose_chosen_motion_keys_nothing_leaves_a_sibling_s_value() {
         let expressions = Expressions::parse(&serde_json::json!({
             "menu": [], "parameters": [{"name": "Weight", "type": "float", "default": 1}, {"name": "Toggle", "type": "bool"}, {"name": "Loop", "type": "bool"}],
@@ -1275,9 +1287,12 @@ mod tests {
     #[test]
     fn a_spring_or_collider_is_idle_while_a_switch_it_waits_on_is_off() {
         let expressions = switched(serde_json::json!([{"joints": [3, 4], "when": [[0, 1]]}, {"joints": [5], "when": [[0, 1], [1, 1]]}]), serde_json::json!([{"collider": 2, "when": [[1, 1]]}])).unwrap();
-        assert_eq!(expressions.idle(&[1.0, 1.0]), Idle::default());
-        assert_eq!(expressions.idle(&[1.0, 0.0]), Idle { joints: HashSet::from([5]), colliders: HashSet::from([2]) });
-        assert_eq!(expressions.idle(&[0.4, 0.6]), Idle { joints: HashSet::from([3, 4, 5]), colliders: HashSet::new() });
+        let still = |values: &[f32]| (2..7).filter(|&node| expressions.idle(values).still(node, Some(node + 1))).collect::<Vec<_>>();
+        assert_eq!(still(&[1.0, 1.0]), Vec::<usize>::new());
+        assert_eq!(expressions.idle(&[1.0, 0.0]).colliders, HashSet::from([2]));
+        assert!(expressions.idle(&[1.0, 0.0]).still(5, None) && !expressions.idle(&[1.0, 0.0]).still(3, Some(4)));
+        assert_eq!(still(&[0.4, 0.6]), vec![3]);
+        assert!(expressions.idle(&[0.4, 0.6]).colliders.is_empty());
         assert!(expressions.check(6, &[]).is_ok());
         assert!(expressions.check(5, &[]).is_err(), "a switched joint past the nodes");
         assert!(switched(serde_json::json!([{"joints": [3], "when": [[2, 1]]}]), serde_json::json!([])).is_err(), "a spring waiting on a target the menu lacks");

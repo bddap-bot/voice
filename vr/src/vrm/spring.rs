@@ -168,11 +168,20 @@ struct Collider {
     shape: Shape,
 }
 
-/// What the avatar's menu leaves off: the joints of its switched-off springs, held at the pose's rotation, and the file indices of its switched-off colliders.
+/// What the avatar's menu leaves off: the bones of each switched-off and each running switched spring, and the file indices of its switched-off colliders.
 #[derive(Debug, Default, PartialEq)]
 pub struct Idle {
-    pub joints: HashSet<usize>,
+    pub off: Vec<HashSet<usize>>,
+    pub on: Vec<HashSet<usize>>,
     pub colliders: HashSet<usize>,
+}
+
+impl Idle {
+    /// Whether the segment from `node` to `child` keeps the pose: a switched-off spring moves it and no running switched one does. Two PhysBones may take turns on one bone, each reaching its own end.
+    pub fn still(&self, node: usize, child: Option<usize>) -> bool {
+        let moves = |bones: &HashSet<usize>| bones.contains(&node) && child.is_none_or(|child| bones.contains(&child));
+        self.off.iter().any(moves) && !self.on.iter().any(moves)
+    }
 }
 
 enum Placed {
@@ -489,7 +498,7 @@ impl Springs {
 
     pub fn restore(&self, model: &Model, pose: &mut Pose, idle: &Idle) {
         if !model.constraints.is_empty() {
-            for (joint, tail) in model.rig.joints.iter().zip(&self.tails).filter(|(joint, _)| !idle.joints.contains(&joint.node)) {
+            for (joint, tail) in model.rig.joints.iter().zip(&self.tails).filter(|(joint, _)| !idle.still(joint.node, joint.child)) {
                 pose.rotations[joint.node] = tail.rotation;
                 if let (Some(bone), Some(child)) = (joint.physbone, joint.child) {
                     if !bone.endpoint {
@@ -550,7 +559,7 @@ impl Springs {
             let initial = parent * Mat4::from_scale_rotation_translation(node.scale, node.rotation, pose.translations[joint.node]);
             let origin = initial.w_axis.truncate();
             let rest = initial.transform_point3(joint.tail);
-            let still = idle.joints.contains(&joint.node);
+            let still = idle.still(joint.node, joint.child);
             if fresh {
                 *tail = Tail { now: rest, before: rest, held: joint.tail, rotation: node.rotation, ..*tail };
             }
@@ -621,7 +630,7 @@ impl Springs {
                 let parent = if index == 0 { shift * parent } else { parent };
                 let local = |rotation: Quat| parent * Mat4::from_scale_rotation_translation(node.scale, rotation, pose.translations[joint.node]);
                 let along = joint.tail.normalize();
-                if fresh || idle.joints.contains(&joint.node) {
+                if fresh || idle.still(joint.node, joint.child) {
                     let rotation = if fresh { node.rotation } else { pose.rotations[joint.node] };
                     let world = local(rotation);
                     let end = world.transform_point3(joint.tail);
@@ -929,10 +938,10 @@ mod tests {
         let mut springs = Springs::default();
         let mut tips = Vec::new();
         for frame in 0..270 {
-            let idle = Idle { joints: if (90..180).contains(&frame) { HashSet::from([2, 3, 4]) } else { HashSet::new() }, colliders: HashSet::new() };
+            let idle = Idle { off: if (90..180).contains(&frame) { vec![HashSet::from([2, 3, 4, 5])] } else { Vec::new() }, ..Idle::default() };
             let mut pose = posed();
             springs.step(&model, &mut pose, swaying(frame as f32 / 90.0), &[], 1.0 / 90.0, &idle);
-            if !idle.joints.is_empty() {
+            if !idle.off.is_empty() {
                 assert_eq!(pose.rotations, posed().rotations, "frame {frame}");
             }
             tips.push(model.worlds(&pose)[4].w_axis.truncate());

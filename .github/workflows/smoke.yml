@@ -21,3 +21,4 @@ jobs:
         with:
           name: browser-smoke
           path: smoke-artifacts
+          retention-days: 7

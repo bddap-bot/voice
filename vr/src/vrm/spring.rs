@@ -20,7 +20,7 @@ enum Bound {
     Angle,
     /// Within `x` of the axis, in the plane across the limit's own X.
     Hinge,
-    /// Within `x` toward the limit's Z and `z` toward its X, and an ellipse between.
+    /// Within `x` round from the axis toward the limit's Z, and `z` over toward its X, each on its own as VRChat clamps them.
     Polar,
 }
 
@@ -58,32 +58,98 @@ impl Limit {
         if self.bound == Bound::Hinge {
             x = 0.0;
         }
+        if self.bound == Bound::Polar {
+            let toward = Vec3::new(x, y, z).normalize_or(Vec3::Y);
+            let around = toward.z.atan2(toward.y).clamp(-self.x, self.x);
+            let over = toward.x.clamp(-1.0, 1.0).asin().clamp(-self.z, self.z);
+            return up * over.cos() * around.cos() + side * over.sin() + front * over.cos() * around.sin();
+        }
         let across = Vec3::new(x, 0.0, z);
         let swing = across.length().atan2(y);
-        let reach = match self.bound {
-            Bound::Angle | Bound::Hinge => self.x,
-            Bound::Polar => {
-                let (sin, cos) = (z.atan2(x).sin(), z.atan2(x).cos());
-                1.0 / ((cos / self.z.max(1e-4)).powi(2) + (sin / self.x.max(1e-4)).powi(2)).sqrt()
-            }
-        };
-        if swing <= reach && self.bound != Bound::Hinge {
+        if swing <= self.x && self.bound != Bound::Hinge {
             return toward;
         }
-        let swing = swing.min(reach);
+        let swing = swing.min(self.x);
         let across = across.try_normalize().unwrap_or(Vec3::ZERO);
         up * swing.cos() + (side * across.x + front * across.z) * swing.sin()
+    }
+}
+
+/// A VRChat PhysBone's settings at one bone, as its joint's extras "physbone" carry them, so the joint swings by the PhysBone's own step.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PhysBone {
+    /// Version 1.0's step, which restores the bone's length by pull and gravity's push; 1.1 bends the target toward the ground instead.
+    first: bool,
+    advanced: bool,
+    pull: f32,
+    spring: f32,
+    stiffness: f32,
+    gravity: f32,
+    falloff: f32,
+    immobile: f32,
+    /// Immobile cancels only the avatar's travel, not every motion of the PhysBone root's parent.
+    travel: bool,
+    /// The shortest and longest the bone may grow, as fractions of its rest length.
+    squish: f32,
+    stretch: f32,
+    stretch_motion: f32,
+    /// At the bone's start and its end, in the model's units.
+    radius: [f32; 2],
+    /// How many transforms down from the PhysBone's root the bone is.
+    depth: usize,
+    /// Its tail is the PhysBone's endpoint, no transform in VRChat, so its squish and stretch never show.
+    endpoint: bool,
+}
+
+impl PhysBone {
+    fn read(extras: &Value) -> Option<PhysBone> {
+        let bone = &extras["physbone"];
+        let n = |key: &str, fallback: f32| number(&bone[key], fallback);
+        let [begin, end] = floats(&bone["radius"], [0.0; 2]);
+        bone.is_object().then(|| PhysBone {
+            first: bone["version"] == "1.0",
+            advanced: bone["integration"] == "advanced",
+            pull: n("pull", 0.2),
+            spring: n("spring", 0.2),
+            stiffness: n("stiffness", 0.2),
+            gravity: n("gravity", 0.0),
+            falloff: n("gravityFalloff", 0.0),
+            immobile: n("immobile", 0.0),
+            travel: bone["immobileType"] == "world",
+            squish: 1.0 - n("maxSquish", 0.0),
+            stretch: 1.0 + n("maxStretch", 0.0),
+            stretch_motion: n("stretchMotion", 0.0),
+            radius: [begin, end],
+            depth: index(&bone["depth"]).unwrap_or(0),
+            endpoint: bone["endpoint"].as_bool().unwrap_or(false),
+        })
     }
 }
 
 struct Joint {
     node: usize,
     tail: Vec3,
+    /// The node `tail` reaches, which a PhysBone moves in or out as the bone squishes and stretches.
+    child: Option<usize>,
     settings: Settings,
+    physbone: Option<PhysBone>,
+    spring: usize,
     groups: Vec<usize>,
     /// Whether another's hand pushes it.
     others: bool,
     below: Vec<usize>,
+}
+
+/// One PhysBone chain's joints, root first, and the node its PhysBone's root hangs from.
+struct Chain {
+    joints: Vec<usize>,
+    anchor: usize,
+}
+
+/// What a step swings in turn, parents before children.
+enum Unit {
+    Joint(usize),
+    Chain(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -134,12 +200,16 @@ pub struct Rig {
     joints: Vec<Joint>,
     colliders: Vec<Collider>,
     groups: Vec<Vec<usize>>,
+    chains: Vec<Chain>,
+    units: Vec<Unit>,
 }
 
 struct Bone {
     node: usize,
     child: Option<usize>,
     settings: Settings,
+    physbone: Option<PhysBone>,
+    spring: usize,
     groups: Vec<usize>,
     others: bool,
 }
@@ -191,9 +261,9 @@ impl Rig {
                 for group in list(&extension["colliderGroups"]) {
                     rig.groups.push(list(&group["colliders"]).iter().filter_map(|slot| *slots.get(index(slot)?)?).collect());
                 }
-                for spring in list(&extension["springs"]) {
-                    let groups: Vec<usize> = list(&spring["colliderGroups"]).iter().filter_map(index).filter(|&group| group < rig.groups.len()).collect();
-                    let others = pushed_by_others(&spring);
+                for (index, spring) in list(&extension["springs"]).iter().enumerate() {
+                    let groups: Vec<usize> = list(&spring["colliderGroups"]).iter().filter_map(super::index).filter(|&group| group < rig.groups.len()).collect();
+                    let others = pushed_by_others(spring);
                     for pair in list(&spring["joints"]).windows(2) {
                         let joint = &pair[0];
                         let (Some(at), Some(child)) = (node(&joint["node"]), node(&pair[1]["node"])) else { continue };
@@ -204,7 +274,7 @@ impl Rig {
                             radius: number(&joint["hitRadius"], 0.0),
                             limit: Limit::read(&joint["extras"]),
                         };
-                        bones.push(Bone { node: at, child: Some(child), settings, groups: groups.clone(), others });
+                        bones.push(Bone { node: at, child: Some(child), settings, physbone: PhysBone::read(&joint["extras"]), spring: index, groups: groups.clone(), others });
                     }
                 }
             }
@@ -233,7 +303,7 @@ impl Rig {
                     for root in list(&group["bones"]).iter().filter_map(node) {
                         let mut stack = vec![root];
                         while let Some(at) = stack.pop() {
-                            bones.push(Bone { node: at, child: children[at].first().copied(), settings, groups: groups.clone(), others });
+                            bones.push(Bone { node: at, child: children[at].first().copied(), settings, physbone: None, spring: 0, groups: groups.clone(), others });
                             stack.extend(children[at].iter().rev());
                         }
                     }
@@ -248,7 +318,7 @@ impl Rig {
             }
             depth
         };
-        for Bone { node, child, settings, groups, others } in bones {
+        for Bone { node, child, settings, physbone, spring, groups, others } in bones {
             let tail = match child {
                 Some(child) => nodes[child].translation,
                 None => nodes[node].translation.normalize_or_zero() * 0.07,
@@ -262,9 +332,26 @@ impl Rig {
                 below.extend(&frontier);
                 frontier = frontier.iter().flat_map(|&node| children[node].iter().copied()).collect();
             }
-            rig.joints.push(Joint { node, tail, settings, groups, others, below });
+            rig.joints.push(Joint { node, tail, child, settings, physbone, spring, groups, others, below });
         }
         rig.joints.sort_by_key(|joint| depth(joint.node));
+        for (at, joint) in rig.joints.iter().enumerate() {
+            let Some(physbone) = joint.physbone else {
+                rig.units.push(Unit::Joint(at));
+                continue;
+            };
+            if let Some(chain) = rig.chains.iter_mut().find(|chain| rig.joints[chain.joints[0]].spring == joint.spring) {
+                chain.joints.push(at);
+                continue;
+            }
+            let mut root = joint.node;
+            for _ in 0..physbone.depth {
+                root = nodes[root].parent.unwrap_or(root);
+            }
+            let Some(anchor) = nodes[root].parent else { continue };
+            rig.units.push(Unit::Chain(rig.chains.len()));
+            rig.chains.push(Chain { joints: vec![at], anchor });
+        }
         rig
     }
 }
@@ -284,22 +371,105 @@ impl Model {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct Tail {
     rotation: Quat,
     now: Vec3,
     before: Vec3,
     /// `now` in the joint's rest frame, so a step can tell the tail's own motion from the motion its parent carries it through.
     held: Vec3,
+    /// A PhysBone's direction and velocity at its last whole step, beside the motion of its carrying frame it felt then.
+    vector: Vec3,
+    velocity: Vec3,
+    felt: Vec3,
+    /// A PhysBone's tail in the immobile frame at its last whole step.
+    anchored: Vec3,
+    length: f32,
+    /// The world's down in the bone's rest axes, which gravity falloff weighs the bone's turn against.
+    down: Vec3,
 }
 
 #[derive(Default)]
 pub struct Springs {
     tails: Vec<Tail>,
+    /// Time not yet stepped: PhysBones step at 60 Hz whatever the frame rate.
+    owed: f32,
+    /// Each chain's anchor at its last whole step, and the figure's place then.
+    anchors: Vec<(Vec3, Quat)>,
+    place: Vec3,
 }
+
+const PHYSBONE_STEP: f32 = 1.0 / 60.0;
 
 fn scale_of(matrix: &Mat4) -> f32 {
     matrix.x_axis.truncate().length()
+}
+
+fn placement(matrix: &Mat4) -> (Vec3, Quat) {
+    let (_, rotation, translation) = matrix.to_scale_rotation_translation();
+    (translation, rotation)
+}
+
+/// `vector` lengthened or shortened into `shortest..=longest`, or `fallback` at the shortest if it has none.
+fn clamp_length(vector: Vec3, shortest: f32, longest: f32, fallback: Vec3) -> Vec3 {
+    let shortest = shortest.max(1e-5);
+    let length = vector.length();
+    if length <= f32::EPSILON {
+        return fallback.normalize_or_zero() * shortest;
+    }
+    vector * (length.clamp(shortest, longest.max(shortest)) / length)
+}
+
+/// A PhysBone bone being stepped: its start, its tail, its radius at each, and the lengths it may take.
+struct Pressed {
+    begin: Vec3,
+    end: Vec3,
+    radius: [f32; 2],
+    shortest: f32,
+    longest: f32,
+    fallback: Vec3,
+}
+
+impl Placed {
+    /// Moves the bone's tail out of the shape, or inside it, as VRChat does: a bone with a radius at its start is a tapered capsule from there.
+    fn press(&self, bone: &mut Pressed) -> bool {
+        let Pressed { begin, end, radius, .. } = *bone;
+        let moved = match *self {
+            Placed::Round { center, end: far, reach, inside } => {
+                let nearest = match far {
+                    Some(far) => {
+                        let span = far - center;
+                        center + span * ((end - center).dot(span) / span.length_squared().max(f32::MIN_POSITIVE)).clamp(0.0, 1.0)
+                    }
+                    None => center,
+                };
+                if inside {
+                    let depth = (end - nearest).length() + radius[1] - reach;
+                    (depth > 0.0).then(|| end + (nearest - end).normalize_or_zero() * depth)
+                } else if radius[1] > 0.0 {
+                    let (mut at, mut round) = (end, radius[1]);
+                    let span = end - begin;
+                    if radius[0] > 0.0 && span.length_squared() > 0.0 {
+                        let clear = 1.0 - ((span.length() - radius[0]) / span.length()).max(0.0);
+                        let along = ((nearest - begin).dot(span) / span.length_squared()).clamp(0.0, 1.0).max(clear);
+                        at = begin.lerp(end, along);
+                        round = radius[0] + (radius[1] - radius[0]) * along;
+                    }
+                    let gap = (at - nearest).length() - (round + reach);
+                    (gap < 0.0).then(|| end + (nearest - at).normalize_or_zero() * gap)
+                } else {
+                    None
+                }
+            }
+            Placed::Plane { point, normal } => {
+                let depth = normal.dot(point - end) + radius[1];
+                (depth > 0.0).then(|| end + normal * depth)
+            }
+        };
+        let Some(moved) = moved else { return false };
+        bone.end = begin + clamp_length(moved - begin, bone.shortest, bone.longest, bone.fallback);
+        true
+    }
 }
 
 impl Springs {
@@ -312,6 +482,11 @@ impl Springs {
         if !model.constraints.is_empty() {
             for (joint, tail) in model.rig.joints.iter().zip(&self.tails).filter(|(joint, _)| !stilled.contains(&joint.node)) {
                 pose.rotations[joint.node] = tail.rotation;
+                if let (Some(bone), Some(child)) = (joint.physbone, joint.child) {
+                    if !bone.endpoint {
+                        pose.translations[child] = joint.tail.normalize() * tail.length;
+                    }
+                }
             }
         }
     }
@@ -337,10 +512,30 @@ impl Springs {
             .collect();
         let hands: Vec<Placed> = hands.iter().map(|hand| Placed::Round { center: hand.center, end: None, reach: hand.radius, inside: false }).collect();
         let fresh = self.tails.len() != rig.joints.len();
+        let place = model_to_world.w_axis.truncate();
         if fresh {
-            self.tails = vec![Tail { now: Vec3::ZERO, before: Vec3::ZERO, held: Vec3::ZERO, rotation: Quat::IDENTITY }; rig.joints.len()];
+            let rest = model.worlds(&model.rest());
+            self.tails = rig.joints.iter().map(|joint| Tail { down: rest[joint.node].inverse().transform_vector3(Vec3::NEG_Y).normalize_or(Vec3::NEG_Y), length: joint.tail.length(), ..Tail::default() }).collect();
+            self.anchors = rig.chains.iter().map(|chain| placement(&worlds[chain.anchor])).collect();
+            self.place = place;
+            self.owed = 0.0;
         }
-        for (joint, tail) in rig.joints.iter().zip(&mut self.tails) {
+        self.owed += delta.max(0.0);
+        // Divided, not multiplied, as VRChat does: a frame of exactly 1/60 s must make exactly one step, not one and a sliver.
+        let executions = (self.owed / PHYSBONE_STEP).min(6.0);
+        if executions >= 1.0 {
+            self.owed = executions.fract() * PHYSBONE_STEP;
+        }
+        for unit in &rig.units {
+            let at = match *unit {
+                Unit::Joint(at) => at,
+                Unit::Chain(chain) => {
+                    self.chain(model, pose, &mut worlds, chain, (place, executions), [&colliders, &hands], stilled, fresh);
+                    continue;
+                }
+            };
+            let joint = &rig.joints[at];
+            let tail = &mut self.tails[at];
             let node = &model.nodes[joint.node];
             let parent = node.parent.map_or(model_to_world, |parent| worlds[parent]);
             let initial = parent * Mat4::from_scale_rotation_translation(node.scale, node.rotation, pose.translations[joint.node]);
@@ -348,11 +543,11 @@ impl Springs {
             let rest = initial.transform_point3(joint.tail);
             let still = stilled.contains(&joint.node);
             if fresh {
-                *tail = Tail { now: rest, before: rest, held: joint.tail, rotation: node.rotation };
+                *tail = Tail { now: rest, before: rest, held: joint.tail, rotation: node.rotation, ..*tail };
             }
             if still {
                 let now = (parent * model.local(pose, joint.node)).transform_point3(joint.tail);
-                *tail = Tail { now, before: tail.now, held: tail.held, rotation: pose.rotations[joint.node] };
+                *tail = Tail { now, before: tail.now, rotation: pose.rotations[joint.node], ..*tail };
             } else if !fresh && delta > 0.0 {
                 let Settings { stiffness, drag, gravity, radius, limit } = joint.settings;
                 let length = (rest - origin).length();
@@ -373,7 +568,7 @@ impl Springs {
                     let rest = initial.inverse();
                     next = origin + initial.transform_vector3(limit.keep(joint.tail, rest.transform_vector3(next - origin).normalize_or(joint.tail.normalize()))).normalize_or(axis) * length;
                 }
-                *tail = Tail { now: next, before: tail.now, held: tail.held, rotation: tail.rotation };
+                *tail = Tail { now: next, before: tail.now, ..*tail };
             }
             tail.held = initial.inverse().transform_point3(tail.now);
             if !still {
@@ -381,12 +576,198 @@ impl Springs {
                 pose.rotations[joint.node] = (node.rotation * Quat::from_rotation_arc(joint.tail.normalize(), toward)).normalize();
                 tail.rotation = pose.rotations[joint.node];
             }
-            worlds[joint.node] = parent * model.local(pose, joint.node);
-            for &below in &joint.below {
-                worlds[below] = worlds[model.nodes[below].parent.expect("a node below a joint has a parent")] * model.local(pose, below);
-            }
+            settle(model, pose, &mut worlds, joint, parent);
+        }
+        if executions >= 1.0 {
+            self.place = place;
         }
     }
+
+    /// Steps one PhysBone chain as VRChat does: whole 60 Hz steps with its anchor moved part way for each, and a part step for time left over that only shows.
+    #[allow(clippy::too_many_arguments)]
+    fn chain(&mut self, model: &Model, pose: &mut Pose, worlds: &mut [Mat4], at: usize, (place, executions): (Vec3, f32), [colliders, hands]: [&[Placed]; 2], stilled: &HashSet<usize>, fresh: bool) {
+        let rig = &model.rig;
+        let chain = &rig.chains[at];
+        let now = worlds[chain.anchor];
+        let (position, rotation) = placement(&now);
+        let shape = Mat4::from_rotation_translation(rotation, position).inverse() * now;
+        let (last, last_place) = (self.anchors[at], self.place);
+        let travel = chain.joints.first().and_then(|&joint| rig.joints[joint].physbone).is_some_and(|bone| bone.travel);
+        let steps = (executions.ceil() as usize).max(1);
+        let mut before = Mat4::from_rotation_translation(last.1, last.0) * shape;
+        for step in 0..steps {
+            let (through, ratio) = if steps == 1 { (1.0, executions) } else { ((step as f32 + 1.0).min(executions) / executions, (executions - step as f32).min(1.0)) };
+            let held = (last.0.lerp(position, through), last.1.slerp(rotation, through));
+            let anchor = Mat4::from_rotation_translation(held.1, held.0) * shape;
+            let immobile = if travel { Mat4::from_translation(last_place.lerp(place, through)) } else { anchor };
+            let carrier = anchor * before.inverse();
+            let shift = anchor * now.inverse();
+            let whole = ratio >= 1.0;
+            for (index, &at) in chain.joints.iter().enumerate() {
+                let joint = &rig.joints[at];
+                let tail = &mut self.tails[at];
+                let node = &model.nodes[joint.node];
+                let parent = node.parent.map_or(Mat4::IDENTITY, |parent| worlds[parent]);
+                let parent = if index == 0 { shift * parent } else { parent };
+                let local = |rotation: Quat| parent * Mat4::from_scale_rotation_translation(node.scale, rotation, pose.translations[joint.node]);
+                let along = joint.tail.normalize();
+                if fresh || stilled.contains(&joint.node) {
+                    let rotation = if fresh { node.rotation } else { pose.rotations[joint.node] };
+                    let world = local(rotation);
+                    let end = world.transform_point3(joint.tail);
+                    *tail = Tail { rotation, now: end, vector: end - world.w_axis.truncate(), velocity: Vec3::ZERO, felt: Vec3::ZERO, anchored: immobile.inverse().transform_point3(end), length: joint.tail.length(), ..*tail };
+                } else if let Some(bone) = joint.physbone {
+                    tail.rotation = swing(joint, bone, node.rotation, tail, &local, Frames { immobile, carrier }, (ratio, whole), joint.groups.iter().flat_map(|&group| &rig.groups[group]).map(|&collider| &colliders[collider]).chain(if joint.others { hands } else { &[] }));
+                }
+                pose.rotations[joint.node] = tail.rotation;
+                if let (Some(child), false) = (joint.child, joint.physbone.is_some_and(|bone| bone.endpoint)) {
+                    pose.translations[child] = along * tail.length;
+                }
+                settle(model, pose, worlds, joint, parent);
+            }
+            if whole {
+                self.anchors[at] = held;
+            }
+            before = anchor;
+        }
+    }
+}
+
+/// The shortest turn from one direction to another, however small: glam's `from_rotation_arc` rounds turns under about 7e-4 radians to none, which holds a bone that gravity or a slow pull moves in smaller steps at rest forever.
+fn turn(from: Vec3, to: Vec3) -> Quat {
+    let axis = from.cross(to);
+    let sine = axis.length();
+    if sine <= f32::EPSILON * from.dot(to).abs() {
+        return Quat::from_rotation_arc(from, to);
+    }
+    Quat::from_axis_angle(axis / sine, sine.atan2(from.dot(to)))
+}
+
+/// Puts the joint's node where `parent` and the pose now hold it, and everything below it after.
+fn settle(model: &Model, pose: &Pose, worlds: &mut [Mat4], joint: &Joint, parent: Mat4) {
+    worlds[joint.node] = parent * model.local(pose, joint.node);
+    for &below in &joint.below {
+        worlds[below] = worlds[model.nodes[below].parent.expect("a node below a joint has a parent")] * model.local(pose, below);
+    }
+}
+
+/// The frames a PhysBone step weighs a bone's motion against: the one immobile holds it in, and its chain's anchor's motion over the step.
+struct Frames {
+    immobile: Mat4,
+    carrier: Mat4,
+}
+
+/// One VRChat PhysBone step of a bone, its tail's state kept in `tail`, returning the bone's turn.
+fn swing<'a>(joint: &Joint, bone: PhysBone, resting: Quat, tail: &mut Tail, local: &impl Fn(Quat) -> Mat4, Frames { immobile, carrier }: Frames, (ratio, whole): (f32, bool), touching: impl Iterator<Item = &'a Placed>) -> Quat {
+    let along = joint.tail.normalize();
+    let current = local(tail.rotation);
+    let begin = current.w_axis.truncate();
+    let reach = current.transform_vector3(along * tail.length);
+    let mut length = reach.length();
+    if length < 8e-6 {
+        return tail.rotation;
+    }
+    let scale = current.x_axis.truncate().length().max(current.y_axis.truncate().length()).max(current.z_axis.truncate().length());
+    let original = local(resting);
+    let mut target = original.transform_point3(joint.tail);
+    let rest = (target - begin).length().max(8e-6);
+    let start = tail.now;
+    let held = (immobile.transform_point3(tail.anchored) - start) * bone.immobile;
+    // Steady motion of the chain's anchor carries the tail with it; only a change in that motion swings it, at the share immobile leaves felt.
+    let felt = carrier.transform_point3(start) - start - held;
+    let mut end = start + held + felt;
+    let from = end;
+    let velocity = tail.velocity + tail.felt - felt;
+    let vector = carrier.transform_vector3(tail.vector);
+    let down = Vec3::NEG_Y;
+    let weigh = |gravity: f32| {
+        if bone.falloff <= 0.0 {
+            return gravity;
+        }
+        let turned = (1.0 - current.transform_vector3(tail.down).normalize_or(down).dot(down)).min(1.0);
+        gravity * (1.0 - bone.falloff + bone.falloff * turned)
+    };
+    let momentum = (0.99 * bone.spring).min(1.0);
+    let mut step;
+    if bone.first {
+        let restore = (rest - length) * bone.pull * 0.5;
+        length += restore;
+        step = (end - begin).normalize_or_zero() * restore;
+        if bone.advanced {
+            step += velocity * bone.spring;
+            step += (target - (end + step)) * bone.pull;
+            if bone.gravity != 0.0 {
+                step += down * weigh(bone.gravity * length);
+            }
+            step += vector * bone.stiffness;
+        } else {
+            step += (target - end) * bone.pull;
+            if bone.gravity != 0.0 {
+                let toward = vector.normalize_or_zero();
+                let across = Quat::from_axis_angle(toward.cross(down).normalize_or_zero(), std::f32::consts::FRAC_PI_2) * toward;
+                step += across * weigh(bone.gravity * length) * across.dot(down);
+            }
+            step = step.lerp(velocity, momentum);
+            if whole {
+                tail.velocity = step;
+            }
+        }
+        step = begin + (end + step - begin).normalize_or_zero() * length - end;
+    } else {
+        if bone.gravity != 0.0 {
+            let pulled = down * bone.gravity.signum() * rest;
+            target = begin + (target - begin).lerp(pulled, weigh(bone.gravity.abs())).normalize_or_zero() * rest;
+        }
+        if bone.advanced {
+            step = velocity * bone.spring;
+            step += (target - (end + step)) * bone.pull;
+            if bone.stiffness > 0.0 {
+                step += (vector - (end + step - begin)) * bone.stiffness;
+            }
+        } else {
+            step = ((target - end) * bone.pull).lerp(velocity, momentum);
+            if whole {
+                tail.velocity = step;
+            }
+        }
+        if bone.stretch_motion < 1.0 {
+            let toward = end + step - begin;
+            let (reached, was) = (toward.length(), vector.length());
+            let kept = if was < rest { reached.clamp(was, rest) } else { reached.clamp(rest, was) };
+            step = begin + toward.normalize_or_zero() * (kept + (reached - kept) * bone.stretch_motion) - end;
+        }
+    }
+    end += step;
+    let mut pressed = Pressed { begin, end, radius: bone.radius.map(|radius| radius * scale), shortest: rest * bone.squish, longest: rest * bone.stretch, fallback: reach };
+    pressed.end = begin + clamp_length(end - begin, pressed.shortest, pressed.longest, reach);
+    // A collider may squish the bone but, as in VRChat, never stretch it past the length it reached this step.
+    pressed.fallback = pressed.end - begin;
+    pressed.longest = pressed.fallback.length();
+    let mut hit = false;
+    for placed in touching {
+        hit |= placed.press(&mut pressed);
+    }
+    if hit && !bone.advanced && whole {
+        tail.velocity *= 0.75;
+    }
+    let length = (pressed.end - begin).length();
+    let blend = if ratio > 0.0 { ratio / (1.0 + (ratio - 1.0) * bone.pull) } else { 0.0 };
+    let end = begin + (from.lerp(pressed.end, blend) - begin).normalize_or_zero() * length;
+    tail.length = joint.tail.length() * (length / rest);
+    let axis = original.inverse().transform_point3(end).normalize_or(along);
+    let axis = joint.settings.limit.map_or(axis, |limit| limit.keep(joint.tail, axis));
+    let rotation = (resting * turn(along, axis)).normalize();
+    let end = local(rotation).transform_point3(along * tail.length);
+    if whole {
+        tail.anchored = immobile.inverse().transform_point3(end);
+        tail.now = end;
+        tail.vector = end - begin;
+        tail.felt = felt;
+        if bone.advanced {
+            tail.velocity = end - from;
+        }
+    }
+    rotation
 }
 
 #[cfg(test)]
@@ -786,6 +1167,113 @@ mod tests {
         assert!((far(Vec3::Z * 5.0) - 10.0).abs() < 0.1, "toward Z it stops at x: {}", far(Vec3::Z * 5.0));
         assert!((far(Vec3::X * 5.0) - 40.0).abs() < 0.1, "toward X at z: {}", far(Vec3::X * 5.0));
         assert!(far(Vec3::X * 0.3) < 40.0 && (far(Vec3::X * 0.3) - 0.3f32.atan().to_degrees()).abs() < 0.01, "and inside it is left alone");
+    }
+
+    /// A Unity point, rotation or pose as glTF holds it: Unity's X mirrored.
+    fn from_unity(p: [f32; 3]) -> Vec3 {
+        Vec3::new(-p[0], p[1], p[2])
+    }
+
+    fn from_unity_turn(q: Quat) -> Quat {
+        Quat::from_xyzw(q.x, -q.y, -q.z, q.w)
+    }
+
+    fn from_unity_pose(p: [f32; 3], q: [f32; 4]) -> Mat4 {
+        Mat4::from_rotation_translation(from_unity_turn(Quat::from_array(q)), from_unity(p))
+    }
+
+    /// A chain of nodes hanging from the root, each given in Unity's axes below the last, every one but the last a joint with its extras "physbone" from `bones`, and `limit` if any.
+    fn physbones(nodes: &[([f32; 3], Quat)], bones: &[Value], limit: Option<Value>) -> Model {
+        let mut listed = vec![serde_json::json!({ "children": [1], "mesh": 0 })];
+        for (at, (position, turn)) in nodes.iter().enumerate() {
+            let (position, turn) = (from_unity(*position), from_unity_turn(*turn));
+            let mut node = serde_json::json!({ "translation": position.to_array(), "rotation": turn.to_array() });
+            if at + 1 < nodes.len() {
+                node["children"] = serde_json::json!([at + 2]);
+            }
+            listed.push(node);
+        }
+        let mut joints: Vec<Value> = bones.iter().enumerate().map(|(at, bone)| {
+            let mut extras = serde_json::json!({ "physbone": bone });
+            if let Some(limit) = &limit {
+                extras["limit"] = limit.clone();
+            }
+            serde_json::json!({ "node": at + 1, "extras": extras })
+        }).collect();
+        joints.push(serde_json::json!({ "node": bones.len() + 1 }));
+        let mut builder = Builder::new(serde_json::json!({ "VRMC_vrm": { "humanoid": { "humanBones": { "hips": { "node": 0 } } } }, "VRMC_springBone": { "springs": [{ "joints": joints }] } }));
+        let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        builder.set("nodes", Value::Array(listed));
+        builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position } }] }]));
+        Model::parse(&builder.glb()).unwrap()
+    }
+
+    /// A breast-like two-bone PhysBone on a chest, its last bone ending at an endpoint: version 1.1, advanced, immobile, a polar limit and squish.
+    fn breast() -> Model {
+        let bone = |gravity: f32, radius: [f32; 2], depth: usize, endpoint: bool| serde_json::json!({ "version": "1.1", "integration": "advanced", "pull": 0.066, "spring": 0.765, "stiffness": 0.064, "gravity": gravity, "immobile": 0.38, "immobileType": "allMotion", "maxSquish": 0.37, "radius": radius, "depth": depth, "endpoint": endpoint });
+        let tilted = Quat::from_euler(glam::EulerRot::YXZ, 10f32.to_radians(), 80f32.to_radians(), 0.0);
+        physbones(&[([-0.08, 0.0, 0.10], tilted), ([0.0, 0.05, 0.01], Quat::IDENTITY), ([0.0, 0.019, 0.0], Quat::IDENTITY)], &[bone(0.003, [0.0288, 0.0324], 0, false), bone(0.01, [0.0324, 0.036], 1, true)], Some(serde_json::json!({ "shape": "polar", "x": 14.0, "z": 16.0 })))
+    }
+
+    /// Where the PhysBone's last node sits in the anchor's frame after `frames` 60 Hz steps with the anchor held at `anchor` and the hand, if any, where given.
+    fn rested(model: &Model, springs: &mut Springs, anchor: Mat4, hand: Option<Vec3>, frames: usize) -> Vec3 {
+        let mut pose = model.rest();
+        for _ in 0..frames {
+            pose = model.rest();
+            let hands: Vec<Hand> = hand.map(|center| Hand { center, radius: 0.04 }).into_iter().collect();
+            springs.step(model, &mut pose, anchor, &hands, 1.0 / 60.0, &HashSet::new());
+        }
+        model.worlds(&pose)[model.nodes.len() - 1].w_axis.truncate()
+    }
+
+    #[test]
+    fn a_physbone_pushed_by_a_hand_comes_to_rest_where_vrchat_puts_it() {
+        // VRChat's own PhysBone in Unity (SDK 3.10.5), the same chain on a chest, a 4 cm sphere pushed 1 cm nearer every half second: the tip in the chest's frame at the end of each.
+        const UNITY: [[f32; 3]; 15] = [[0.06789, 0.00175, 0.16867], [0.06789, 0.00175, 0.16867], [0.06789, 0.00175, 0.16867], [0.06789, 0.00175, 0.16867], [0.06789, 0.00175, 0.16867], [0.06789, 0.00175, 0.16867], [0.06789, 0.00175, 0.16867], [0.06283, 0.00001, 0.16723], [0.06283, -0.00264, 0.16723], [0.05976, -0.00505, 0.16227], [0.05364, -0.00988, 0.15438], [0.05114, -0.01484, 0.14595], [0.05358, -0.01341, 0.14108], [0.04656, -0.01752, 0.15512], [0.04656, -0.01752, 0.15512]];
+        let model = breast();
+        let chest = from_unity_pose([0.000945, 1.190331, 0.003663], [0.003841, -0.005742, -0.000175, 0.999976]);
+        let mut springs = Springs::default();
+        rested(&model, &mut springs, chest, None, 600);
+        for (step, unity) in UNITY.iter().enumerate() {
+            let hand = from_unity([-0.10, 1.21, 0.30 - 0.01 * step as f32]);
+            let tip = rested(&model, &mut springs, chest, Some(hand), 30);
+            assert!(tip.distance(Vec3::from(*unity)) < 1e-4, "push {step}: the tip rests at {tip}, VRChat's at {unity:?}");
+        }
+    }
+
+    #[test]
+    fn physbones_hang_where_vrchat_hangs_them() {
+        let simplified = |depth: usize| serde_json::json!({ "version": "1.0", "integration": "simplified", "pull": 0.2, "spring": 0.4, "stiffness": 0.2, "gravity": 0.4, "gravityFalloff": 0.5, "stretchMotion": 1.0, "radius": [0.02, 0.02], "depth": depth });
+        let skirt = physbones(&[([0.08, 0.0, 0.10], Quat::IDENTITY), ([0.0, -0.03, 0.05], Quat::IDENTITY), ([0.0, -0.05, 0.02], Quat::IDENTITY), ([0.0, -0.05, 0.0], Quat::IDENTITY)], &(0..3).map(simplified).collect::<Vec<_>>(), None);
+        let advanced = |depth: usize| {
+            let along = depth as f32 / 3.0;
+            serde_json::json!({ "version": "1.1", "integration": "advanced", "pull": 0.15 * (1.0 - 0.4 * along), "spring": 0.6, "stiffness": 0.3 * (1.0 - 0.6 * along), "gravity": 0.3, "gravityFalloff": 0.5, "immobile": 0.2, "maxStretch": 0.2, "maxSquish": 0.2, "stretchMotion": 0.5, "radius": [0.02, 0.02], "depth": depth, "endpoint": depth == 3 })
+        };
+        let ear = physbones(&[([0.1, 0.05, 0.0], Quat::IDENTITY), ([0.02, -0.06, 0.0], Quat::IDENTITY), ([0.0, -0.06, 0.01], Quat::IDENTITY), ([0.0, -0.06, 0.0], Quat::IDENTITY), ([0.0, -0.03, 0.0], Quat::IDENTITY)], &(0..4).map(advanced).collect::<Vec<_>>(), Some(serde_json::json!({ "shape": "angle", "x": 50.0 })));
+        let chest = from_unity_pose([0.000945, 1.190331, 0.003663], [0.003841, -0.005742, -0.000175, 0.999976]);
+        let head = from_unity_pose([0.000895, 1.490226, 0.000747], [-0.030452, 0.004913, 0.000490, 0.999524]);
+        // VRChat's in Unity, the chains on a still chest and head: version 1.0 simplified with gravity falloff, and 1.1 advanced with curves, stretch and an angle limit.
+        for (model, anchor, unity) in [(&skirt, chest, Vec3::new(-0.08004, -0.15420, 0.11176)), (&ear, head, Vec3::new(-0.11168, -0.16106, 0.00289))] {
+            let tip = rested(model, &mut Springs::default(), anchor, None, 600);
+            assert!(tip.distance(unity) < 1e-4, "the tip hangs at {tip}, VRChat's at {unity}");
+        }
+    }
+
+    #[test]
+    fn gliding_steadily_leaves_a_physbone_at_rest_and_only_a_change_of_speed_swings_it() {
+        let model = breast();
+        let mut springs = Springs::default();
+        let rest = rested(&model, &mut springs, Mat4::IDENTITY, None, 600);
+        let mut pose = model.rest();
+        let mut trail = Vec::new();
+        for frame in 0..240 {
+            let anchor = Mat4::from_translation(Vec3::new(0.0, 0.0, frame as f32 / 60.0));
+            pose = model.rest();
+            springs.step(&model, &mut pose, anchor, &[], 1.0 / 60.0, &HashSet::new());
+            trail.push(model.worlds(&pose)[model.nodes.len() - 1].w_axis.truncate().distance(rest));
+        }
+        assert!(trail[..30].iter().copied().fold(0.0, f32::max) > 0.002, "setting off at 1 m/s swings the tip: {:?}", &trail[..30]);
+        assert!(trail[200..].iter().all(|off| *off < 1e-4), "gliding on at that speed it hangs as at rest, where VRChat's would trail: {:?}", &trail[200..]);
     }
 
     #[test]

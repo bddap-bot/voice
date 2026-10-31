@@ -69,6 +69,15 @@ class Publishing(unittest.TestCase):
             self.assertIn(part, str(refused.exception))
         self.assertEqual(self.catalog.read_bytes(), before)
 
+    def test_a_decal_effect_carried_as_a_look_is_kept(self):
+        def as_decal(doc):
+            doc['extensions']['VRCHAT_expressions']['targets'][0]['effect'] = {'decal': [{'node': 1, 'rect': [0, 0, 1, 1], 'slot': 0}]}
+        self.catalog.write_bytes(self.candidate(as_decal).read_bytes())
+
+        def as_look(doc):
+            doc['extensions']['VRCHAT_expressions']['targets'][0]['effect'] = {'look': [{'field': 'decal', 'node': 1, 'rect': [0, 0, 1, 1], 'slot': 0}]}
+        publisher.publish(self.candidate(as_look), self.catalog)
+
     def test_a_lost_parameter_menu_control_morph_image_or_collider_is_refused(self):
         for change, part in [
             (lambda doc: doc['extensions']['VRCHAT_expressions'].update(parameters=[]), 'parameter:Hue:float'),

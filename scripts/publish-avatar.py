@@ -65,6 +65,8 @@ def inventory(doc):
         if isinstance(effect, str):
             return effect
         kind, value = next(iter(effect.items()))
+        # The format carries a decal as a look of field "decal", which earlier files called a decal effect.
+        kind = 'look' if kind == 'decal' else kind
         parts = value if isinstance(value, list) else [value]
         return kind + ':' + ','.join(sorted({name(p['node']) for p in parts if isinstance(p, dict) and 'node' in p}))
     targets = [target(t) for t in x.get('targets', [])]

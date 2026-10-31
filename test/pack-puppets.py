@@ -26,6 +26,12 @@ class Packing(unittest.TestCase):
         source = glb({'asset': {'version': '2.0'}}, b'')
         self.assertEqual(packer.pack(source, Path('.')), source)
 
+    def test_a_skin_lists_each_joint_once(self):
+        nodes = [{'children': [1]}, {}]
+        packer.pack(glb({'asset': {'version': '2.0'}, 'nodes': nodes, 'skins': [{'joints': [0, 1]}]}, b''), Path('.'))
+        with self.assertRaisesRegex(ValueError, 'a skin lists a joint twice'):
+            packer.pack(glb({'asset': {'version': '2.0'}, 'nodes': nodes, 'skins': [{'joints': [0, 1, 1]}]}, b''), Path('.'))
+
     def test_arms_must_rest_in_t_pose(self):
         for lowered in (0.0, 0.8):
             for version in ('VRM', 'VRMC_vrm'):

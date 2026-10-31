@@ -51,6 +51,13 @@ def check_arm_rest(doc):
                 raise ValueError(f'{side}{bone} rests {math.degrees(off):.1f} degrees off the T-pose; the humanoid must rest in T-pose')
 
 
+def check_skins(doc):
+    for skin in doc.get('skins', []):
+        joints = skin.get('joints', [])
+        if len(set(joints)) != len(joints):
+            raise ValueError('a skin lists a joint twice, which glTF forbids; bind each joint once')
+
+
 def pack(data, scratch):
     magic, version, length = struct.unpack_from('<4sII', data)
     if (magic, version, length) != (b'glTF', 2, len(data)):
@@ -60,6 +67,7 @@ def pack(data, scratch):
         raise ValueError('missing JSON chunk')
     doc = json.loads(data[20:20 + size])
     check_arm_rest(doc)
+    check_skins(doc)
     if not doc.get('images'):
         return data
     binary_size, kind = struct.unpack_from('<I4s', data, 20 + size)
@@ -181,7 +189,7 @@ def pack(data, scratch):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Refuse a humanoid whose arms do not rest in T-pose, then pack embedded VRM textures as exact lossless WebP, shrink the metadata thumbnail, and sparsify morphs. Replaces each input atomically.')
+    parser = argparse.ArgumentParser(description='Refuse a humanoid whose arms do not rest in T-pose or a skin listing a joint twice, then pack embedded VRM textures as exact lossless WebP, shrink the metadata thumbnail, and sparsify morphs. Replaces each input atomically.')
     parser.add_argument('models', nargs='+', type=Path)
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix='.pack-puppets-', dir=Path.cwd()) as directory:

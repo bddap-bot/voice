@@ -139,3 +139,69 @@ test('an avatar loads and renders Standing before any clip exists', () => withPr
     runtime.clear();
   }
 }));
+
+function skinnedFile() {
+  const children = { hips: ['spine', 'leftUpperLeg', 'rightUpperLeg'], spine: ['head', 'leftUpperArm', 'rightUpperArm'], leftUpperLeg: ['leftLowerLeg'], leftLowerLeg: ['leftFoot'], rightUpperLeg: ['rightLowerLeg'], rightLowerLeg: ['rightFoot'], leftUpperArm: ['leftLowerArm'], leftLowerArm: ['leftHand'], rightUpperArm: ['rightLowerArm'], rightLowerArm: ['rightHand'] };
+  const forearm = names.indexOf('leftLowerArm');
+  const triangle = [[0.5, 1.3, 0], [0.6, 1.3, 0], [0.5, 1.4, 0]];
+  const positions = new Float32Array([...triangle, ...triangle.map(([x, y, z]) => [x, y + 0.05, z])].flat());
+  const joints = new Uint8Array(Array(6).fill([0, 0, 0, 0]).flat());
+  const weights = new Float32Array(Array(6).fill([1, 0, 0, 0]).flat());
+  const inverseBinds = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -1.3, 0, 1]);
+  const views = [positions, joints, weights, inverseBinds];
+  let offset = 0;
+  const bufferViews = views.map((view) => { const entry = { buffer: 0, byteOffset: offset, byteLength: view.byteLength }; offset += Math.ceil(view.byteLength / 4) * 4; return entry; });
+  const binary = new Uint8Array(offset);
+  views.forEach((view, index) => binary.set(new Uint8Array(view.buffer), bufferViews[index].byteOffset));
+  const bound = (axis, pick) => pick(...[...positions].filter((_, at) => at % 3 === axis));
+  const gltf = {
+    asset: { version: '2.0' }, scene: 0, scenes: [{ nodes: [0, names.length] }],
+    nodes: [
+      ...names.map(name => ({ name, translation: [0, name === 'hips' ? 1 : 0.1, 0], children: (children[name] ?? []).map(child => names.indexOf(child)) })),
+      { name: 'sleeves', mesh: 0, skin: 0 },
+    ],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0, JOINTS_0: 1, WEIGHTS_0: 2 } }] }],
+    skins: [{ joints: [forearm], inverseBindMatrices: 3 }],
+    accessors: [
+      { bufferView: 0, componentType: 5126, count: 6, type: 'VEC3', min: [0, 1, 2].map((axis) => bound(axis, Math.min)), max: [0, 1, 2].map((axis) => bound(axis, Math.max)) },
+      { bufferView: 1, componentType: 5121, count: 6, type: 'VEC4' },
+      { bufferView: 2, componentType: 5126, count: 6, type: 'VEC4' },
+      { bufferView: 3, componentType: 5126, count: 1, type: 'MAT4' },
+    ],
+    bufferViews, buffers: [{ byteLength: binary.byteLength }],
+    extensionsUsed: ['VRMC_vrm'],
+    extensions: { VRMC_vrm: { specVersion: '1.0', meta: { name: 'rig', authors: ['fixture'], licenseUrl: 'https://vrm.dev/licenses/1.0/' }, humanoid: { humanBones: Object.fromEntries(names.map((name, node) => [name, { node }])) } } },
+  };
+  const encoded = new TextEncoder().encode(JSON.stringify(gltf));
+  const json = Math.ceil(encoded.length / 4) * 4;
+  const bytes = new Uint8Array(20 + json + 8 + binary.byteLength).fill(32);
+  const header = new DataView(bytes.buffer);
+  [0x46546c67, 2, bytes.length, json, 0x4e4f534a].forEach((value, index) => header.setUint32(index * 4, value, true));
+  bytes.set(encoded, 20);
+  header.setUint32(20 + json, binary.byteLength, true);
+  header.setUint32(24 + json, 0x004e4942, true);
+  bytes.set(binary, 28 + json);
+  return bytes.buffer;
+}
+
+test('a mesh merged from several parts follows the arm its skin binds through a clip', () => withProgressEvent(async () => {
+  const runtime = Object.assign(loadingRuntime(), { poseName: 'stand', handovers: new Map() });
+  try {
+    assert.equal(await runtime.load(skinnedFile()), true);
+    const sleeves = runtime.vrm.scene.getObjectByName('sleeves');
+    const skinned = () => {
+      runtime.vrm.scene.updateMatrixWorld(true);
+      sleeves.skeleton.update();
+      const position = sleeves.geometry.getAttribute('position');
+      return [0, 3].map((vertex) => sleeves.applyBoneTransform(vertex, new THREE.Vector3().fromBufferAttribute(position, vertex)).applyMatrix4(sleeves.matrixWorld));
+    };
+    const rest = skinned();
+    const turn = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI / 2).toArray();
+    await runtime.loadClips([{ action: 'idle', format: 'motion', data: { name: 'idle', duration: 1, tracks: [{ name: 'leftUpperArm.quaternion', times: [0, 1], values: [...turn, ...turn] }] } }]);
+    runtime.mixer.update(0.5);
+    runtime.vrm.update(0);
+    const moved = skinned();
+    for (const part of [0, 1]) assert.ok(moved[part].distanceTo(rest[part]) > 0.3, `the arm moves part ${part}: ${rest[part].toArray()} → ${moved[part].toArray()}`);
+    assert.ok(Math.abs(moved[0].distanceTo(moved[1]) - rest[0].distanceTo(rest[1])) < 1e-4, `the parts move together: ${moved[0].toArray()} ${moved[1].toArray()}`);
+  } finally { runtime.clear(); }
+}));

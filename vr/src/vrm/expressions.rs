@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::OnceLock;
 
 use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize};
@@ -6,6 +7,8 @@ use sha2::{Digest, Sha256};
 use super::Image;
 
 pub const EXTENSION: &str = "VRCHAT_expressions";
+/// The effects and look fields the overlay reads; the catalog's publish guard refuses an avatar naming any other.
+const READ: &str = include_str!("effects.json");
 /// Instant transitions followed in one layer in one frame, so a cycle of them cannot hold the frame.
 const HOPS: usize = 8;
 
@@ -405,17 +408,55 @@ pub enum Effect {
     Hue(Vec<Hue>),
     Color(Vec<Color>),
     Tone(Vec<Tone>),
-    Look(Vec<LookRegion>),
+    Look(#[serde(deserialize_with = "read_regions")] Vec<LookRegion>),
     Morph(Vec<[usize; 2]>),
     Scale { node: usize, axis: usize },
     Rotation(Rotation),
     Translation { node: usize, direction: [f32; 3] },
     Spring(Vec<usize>),
     Material { node: usize, choices: Vec<[f32; 4]> },
+    /// An effect a newer converter writes: its target holds still rather than refusing the avatar.
+    #[serde(skip)]
+    Unread(String),
+}
+
+#[derive(Deserialize)]
+struct Read {
+    effects: Vec<String>,
+    looks: Vec<String>,
+}
+
+fn read() -> &'static Read {
+    static KNOWN: OnceLock<Read> = OnceLock::new();
+    KNOWN.get_or_init(|| serde_json::from_str(READ).unwrap())
+}
+
+fn read_effect<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Effect, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let name = match &value {
+        serde_json::Value::String(name) => name,
+        serde_json::Value::Object(map) if map.len() == 1 => map.keys().next().unwrap(),
+        _ => return Err(serde::de::Error::custom("an effect is a name or an object of one name")),
+    };
+    if !read().effects.contains(name) {
+        return Ok(Effect::Unread(name.clone()));
+    }
+    Effect::deserialize(value).map_err(serde::de::Error::custom)
+}
+
+/// A region of a look field a newer converter writes holds still, as an unread effect's target does.
+fn read_regions<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<LookRegion>, D::Error> {
+    let regions = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    let (known, unread): (Vec<_>, Vec<_>) = regions.into_iter().partition(|region| region["field"].as_str().is_some_and(|field| read().looks.iter().any(|known| known == field)));
+    if !unread.is_empty() {
+        tracing::warn!("{EXTENSION}: look regions of fields the overlay does not read hold still: {:?}", unread.iter().map(|region| region["field"].to_string()).collect::<BTreeSet<_>>());
+    }
+    known.into_iter().map(|region| LookRegion::deserialize(region).map_err(serde::de::Error::custom)).collect()
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Target {
+    #[serde(deserialize_with = "read_effect")]
     pub effect: Effect,
     #[serde(default)]
     pub default: f32,
@@ -505,6 +546,10 @@ impl Expressions {
         expressions.hue_mask = expressions.encoded_hue_mask.take().map(|encoded| image(&encoded)).transpose().map_err(|error| format!("{EXTENSION}: hue mask: {error}"))?;
         expressions.color_atlas = expressions.encoded_color_atlas.take().map(|encoded| image(&encoded)).transpose().map_err(|error| format!("{EXTENSION}: color atlas: {error}"))?;
         expressions.looks = expressions.encoded_looks.take().map(looks).transpose()?;
+        let unread: BTreeSet<&str> = expressions.targets.iter().filter_map(|target| match &target.effect { Effect::Unread(name) => Some(name.as_str()), _ => None }).collect();
+        if !unread.is_empty() {
+            tracing::warn!("{EXTENSION}: targets of effects the overlay does not read hold still: {unread:?}");
+        }
         fn icons_valid(controls: &[Control], icons: usize) -> bool {
             controls.iter().all(|control| control.icon.is_none_or(|icon| icon < icons) && icons_valid(&control.controls, icons))
         }
@@ -534,7 +579,7 @@ impl Expressions {
 
     pub(super) fn check(&self, nodes: usize, meshes: &[super::Mesh]) -> Result<(), String> {
         let fits = self.targets.iter().all(|target| match &target.effect {
-            Effect::Switch => true,
+            Effect::Switch | Effect::Unread(_) => true,
             Effect::Hue(regions) => regions.iter().all(|region| region.node < nodes && region.rect.iter().all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
             Effect::Color(regions) => regions.iter().all(|region| region.node < nodes && region.channel < 3 && region.color.iter().chain(&region.rect).all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
             Effect::Tone(regions) => regions.iter().all(|region| region.node < nodes && region.channel < 3 && region.rect.iter().all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
@@ -585,7 +630,7 @@ impl Expressions {
                 Effect::Scale { node, axis } => pose.scales[*node][*axis] *= value,
                 Effect::Rotation(rotation) => turned.entry(rotation.node).or_insert_with(|| (rotation, rotation.rest.clone())).1[rotation.axis] = value,
                 Effect::Translation { node, direction } => pose.translations[*node] += value * Vec3::from(*direction),
-                Effect::Material { .. } | Effect::Hue(_) | Effect::Color(_) | Effect::Tone(_) | Effect::Look(_) | Effect::Spring(_) => {}
+                Effect::Material { .. } | Effect::Hue(_) | Effect::Color(_) | Effect::Tone(_) | Effect::Look(_) | Effect::Spring(_) | Effect::Unread(_) => {}
             }
         }
         for (node, (rotation, components)) in turned {
@@ -1142,6 +1187,48 @@ mod tests {
         expressions.apply(&[4.0], &mut pose);
         assert!(pose.translations[1].abs_diff_eq(Vec3::new(1.0, 4.0, 2.96), 1e-6));
         assert_eq!(pose.translations[0], Vec3::ZERO);
+    }
+
+    #[test]
+    fn an_avatar_with_cairnfold_look_targets_loads() {
+        let look = |field: &str| serde_json::json!({"node": 0, "rect": [0, 0, 1, 1], "field": field, "slot": 1, "multiply": true, "alpha": 0.5, "intensity": 1});
+        let parsed = Expressions::parse(&serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": [
+            {"effect": {"look": [look("decal")]}, "default": 0.5}, {"effect": {"look": [look("matcapIntensity"), look("emissionHue")]}}
+        ]}));
+        assert!(parsed.as_ref().is_ok_and(|expressions| expressions.check(1, &[]).is_ok()), "{:?}", parsed.err());
+    }
+
+    #[test]
+    fn every_effect_and_look_field_the_publish_guard_admits_is_one_the_overlay_reads() {
+        for name in &read().effects {
+            if let Err(error) = Effect::deserialize(serde_json::json!({name: null})) {
+                assert!(!error.to_string().contains("unknown variant"), "{name}: {error}");
+            }
+        }
+        let fields: Vec<Field> = read().looks.iter().map(|field| serde_json::from_value(serde_json::json!(field)).unwrap()).collect();
+        assert_eq!(fields.iter().map(|&field| field as usize).collect::<BTreeSet<_>>(), (0..FIELDS).collect(), "each field once: {fields:?}");
+    }
+
+    #[test]
+    fn a_target_or_look_region_the_overlay_does_not_read_holds_still_and_the_rest_load() {
+        let expressions = effects(serde_json::json!([
+            {"effect": {"glow": [{"node": 0}]}, "default": 1},
+            {"effect": "shimmer"},
+            {"effect": {"scale": {"node": 0, "axis": 1}}, "default": 1},
+            {"effect": {"look": [{"node": 0, "rect": [0, 0, 1, 1], "field": "sparkle", "slot": 0}, {"node": 0, "rect": [0, 0, 1, 1], "field": "decal", "slot": 0}]}}
+        ]));
+        let effects: Vec<_> = expressions.targets.iter().map(|target| target.effect.clone()).collect();
+        assert_eq!(effects, [
+            Effect::Unread("glow".into()),
+            Effect::Unread("shimmer".into()),
+            Effect::Scale { node: 0, axis: 1 },
+            Effect::Look(vec![LookRegion { node: 0, rect: [0.0, 0.0, 1.0, 1.0], field: Field::Decal, slot: 0 }]),
+        ]);
+        assert!(expressions.check(1, &[]).is_ok());
+        let mut pose = unposed(1);
+        expressions.apply(&[5.0, 5.0, 2.0, 1.0], &mut pose);
+        assert_eq!(pose.scales[0], Vec3::new(1.0, 2.0, 1.0));
+        assert!(Expressions::parse(&serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": [{"effect": {"scale": {"node": 0}}}]})).is_err(), "a known effect stays strict");
     }
 
     #[test]

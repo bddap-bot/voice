@@ -4,8 +4,9 @@ usage: publish-avatar.py NEW.vrm CATALOG.vrm [--drop PREFIX ...]
 
 Every node, image, morph target, material, spring joint, collider a spring collides with, VRM expression and avatar
 expression part (parameter, layer, menu control, material target, curve, shown node, mask) the catalog file carries
-must survive into the new one, or match a --drop prefix naming it as an intended removal. The replaced file stays
-beside the catalog in .previous/."""
+must survive into the new one, or match a --drop prefix naming it as an intended removal. A target effect or look
+field the overlay's vr/src/vrm/effects.json does not list is refused: the overlay would leave it still. The replaced
+file stays beside the catalog in .previous/."""
 import argparse
 from collections import Counter
 import hashlib
@@ -78,6 +79,21 @@ def inventory(doc):
     return out
 
 
+READ = json.loads((Path(__file__).resolve().parents[1] / 'vr/src/vrm/effects.json').read_text())
+
+
+def unread(doc):
+    out = set()
+    for t in doc.get('extensions', {}).get('VRCHAT_expressions', {}).get('targets', []):
+        effect = t['effect']
+        kind = effect if isinstance(effect, str) else next(iter(effect))
+        if kind not in READ['effects']:
+            out.add('effect:' + kind)
+        elif kind == 'look':
+            out.update('look:' + r.get('field', '') for r in effect[kind] if r.get('field') not in READ['looks'])
+    return sorted(out)
+
+
 def lost(old, new, drops):
     missing = old - new
     return sorted(k for k in missing.elements() if not any(k.startswith(d) for d in drops))
@@ -85,6 +101,9 @@ def lost(old, new, drops):
 
 def publish(new_path, catalog_path, drops=()):
     data = Path(new_path).read_bytes()
+    unknown = unread(document(data))
+    if unknown:
+        raise SystemExit(f'{new_path} carries expression parts the overlay does not read; teach voice-vr them and list them in vr/src/vrm/effects.json:\n' + '\n'.join('  ' + k for k in unknown))
     catalog = Path(catalog_path)
     if catalog.exists():
         gone = lost(inventory(document(catalog.read_bytes())), inventory(document(data)), drops)

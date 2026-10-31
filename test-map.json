@@ -13,6 +13,16 @@
     },
     {
       "paths": [
+        "vr/src/vrm/effects.json"
+      ],
+      "tests": [
+        "python3 test/publish-avatar.py",
+        "nix-build vr/default.nix --no-out-link"
+      ],
+      "why": "the effect and look-field names the overlay's expression reader admits are the ones the catalog's publish guard admits: the reader's build checks each is a variant it reads, the guard's test that it refuses any other"
+    },
+    {
+      "paths": [
         "vr/**"
       ],
       "tests": [

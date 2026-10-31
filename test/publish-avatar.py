@@ -78,6 +78,20 @@ class Publishing(unittest.TestCase):
             doc['extensions']['VRCHAT_expressions']['targets'][0]['effect'] = {'look': [{'field': 'decal', 'node': 1, 'rect': [0, 0, 1, 1], 'slot': 0}]}
         publisher.publish(self.candidate(as_look), self.catalog)
 
+    def test_an_effect_or_look_field_the_overlay_does_not_read_is_refused(self):
+        look = lambda field: {'node': 1, 'rect': [0, 0, 1, 1], 'field': field, 'slot': 0}
+        for effect, part in [({'glow': [{'node': 1}]}, 'effect:glow'), ('blink', 'effect:blink'), ({'look': [look('decal'), look('sparkle')]}, 'look:sparkle')]:
+            before = self.catalog.read_bytes()
+            with self.assertRaises(SystemExit) as refused:
+                publisher.publish(self.candidate(lambda doc: doc['extensions']['VRCHAT_expressions']['targets'].append({'default': 0, 'effect': effect})), self.catalog)
+            self.assertIn(part, str(refused.exception))
+            self.assertEqual(self.catalog.read_bytes(), before)
+
+    def test_every_look_field_and_effect_the_overlay_lists_publishes(self):
+        targets = [{'effect': kind if kind == 'switch' else {kind: []}} for kind in publisher.READ['effects']]
+        targets.append({'effect': {'look': [{'node': 1, 'rect': [0, 0, 1, 1], 'field': field, 'slot': 0} for field in publisher.READ['looks']]}})
+        publisher.publish(self.candidate(lambda doc: doc['extensions']['VRCHAT_expressions']['targets'].extend(targets)), self.catalog)
+
     def test_a_lost_parameter_menu_control_morph_image_or_collider_is_refused(self):
         for change, part in [
             (lambda doc: doc['extensions']['VRCHAT_expressions'].update(parameters=[]), 'parameter:Hue:float'),

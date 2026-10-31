@@ -207,7 +207,7 @@ impl Puppet {
             tracing::info!("loop {clip}");
         }
         let mut pose = self.model.pose(&self.animator.humanoid(&self.standing, self.model.rest_hips()));
-        let (retextured, stilled) = self.express(&mut pose, 1, delta);
+        let (retextured, idle) = self.express(&mut pose, 1, delta);
         let mut worlds = self.model.worlds(&pose);
         let fitted = self.fit.placement(&self.model, &worlds, 0.0);
         let feet = self.model.feet(&worlds).map(|feet| feet.map(|foot| fitted.transform_point3(foot).to_array()));
@@ -226,15 +226,15 @@ impl Puppet {
         }
         self.model.express(&mut pose, "blink", self.animator.blink());
         self.model.express(&mut pose, "aa", mouth);
-        self.settle(&mut pose, body, hands, delta, &stilled);
+        self.settle(&mut pose, body, hands, delta, &idle);
         self.changed = self.skinned.morph(&pose.weights);
         self.changed.extend(retextured);
         (self.model.worlds(&pose), body, stand)
     }
 
     /// Runs the menu's controller `steps` times and applies its last values to `pose`; the vertices it retextured.
-    fn express(&mut self, pose: &mut vrm::Pose, steps: usize, delta: f32) -> (Vec<u32>, HashSet<usize>) {
-        let (Some(menu), Some(controller)) = (&self.model.menu, &mut self.controller) else { return (Vec::new(), HashSet::new()) };
+    fn express(&mut self, pose: &mut vrm::Pose, steps: usize, delta: f32) -> (Vec<u32>, spring::Idle) {
+        let (Some(menu), Some(controller)) = (&self.model.menu, &mut self.controller) else { return (Vec::new(), spring::Idle::default()) };
         let mut values = Vec::new();
         for _ in 0..steps {
             values = controller.step(menu, delta);
@@ -242,14 +242,14 @@ impl Puppet {
         self.drawn.hidden = menu.apply(&values, pose);
         self.skinned.surface_values(menu, &values);
         let retextured = menu.materials(&values).flat_map(|(node, moved)| self.skinned.retexture(node, moved)).collect();
-        (retextured, menu.stilled(&values))
+        (retextured, menu.idle(&values))
     }
 
     /// Moves the constrained and spring-driven nodes of `pose` for the figure placed by `body`.
-    fn settle(&mut self, pose: &mut vrm::Pose, body: glam::Mat4, hands: &[spring::Hand], delta: f32, stilled: &HashSet<usize>) {
-        self.springs.restore(&self.model, pose, stilled);
+    fn settle(&mut self, pose: &mut vrm::Pose, body: glam::Mat4, hands: &[spring::Hand], delta: f32, idle: &spring::Idle) {
+        self.springs.restore(&self.model, pose, idle);
         self.constraints.step(&self.model, pose, body);
-        self.springs.step(&self.model, pose, body, hands, delta, stilled);
+        self.springs.step(&self.model, pose, body, hands, delta, idle);
     }
 
     fn draw(&mut self, posed: &[glam::Mat4], to_window: glam::Mat4) {

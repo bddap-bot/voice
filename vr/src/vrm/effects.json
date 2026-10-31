@@ -1,4 +1,4 @@
 {
-  "effects": ["switch", "hue", "color", "tone", "look", "morph", "scale", "rotation", "translation", "spring", "material"],
+  "effects": ["switch", "hue", "color", "tone", "look", "morph", "scale", "rotation", "translation", "material"],
   "looks": ["decal", "decalIntensity", "matcapHueShift", "matcapIntensity", "matcapReplace", "matcapMultiply", "matcapAdd", "matcapMixed", "emission", "emissionHue"]
 }

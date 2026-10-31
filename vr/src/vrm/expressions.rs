@@ -5,6 +5,7 @@ use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use super::Image;
+use super::spring::Idle;
 
 pub const EXTENSION: &str = "VRCHAT_expressions";
 /// The effects and look fields the overlay reads; the catalog's publish guard refuses an avatar naming any other.
@@ -413,7 +414,6 @@ pub enum Effect {
     Scale { node: usize, axis: usize },
     Rotation(Rotation),
     Translation { node: usize, direction: [f32; 3] },
-    Spring(Vec<usize>),
     Material { node: usize, choices: Vec<[f32; 4]> },
     /// An effect a newer converter writes: its target holds still rather than refusing the avatar.
     #[serde(skip)]
@@ -468,6 +468,24 @@ pub struct Shown {
     pub when: Vec<(usize, f32)>,
 }
 
+/// A PhysBone the menu switches: its joints run only while every switch in `when` is at its value.
+#[derive(Clone, Debug, Deserialize)]
+pub struct SwitchedSpring {
+    pub joints: Vec<usize>,
+    pub when: Vec<(usize, f32)>,
+}
+
+/// A collider, by its place in VRMC_springBone's list, that presses only while every switch in `when` is at its value.
+#[derive(Clone, Debug, Deserialize)]
+pub struct SwitchedCollider {
+    pub collider: usize,
+    pub when: Vec<(usize, f32)>,
+}
+
+fn off(when: &[(usize, f32)], values: &[f32]) -> bool {
+    when.iter().any(|&(target, value)| (values[target] - value).abs() >= 0.5)
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct Expressions {
     #[serde(skip)]
@@ -479,6 +497,10 @@ pub struct Expressions {
     pub targets: Vec<Target>,
     #[serde(default)]
     pub shown: Vec<Shown>,
+    #[serde(default)]
+    springs: Vec<SwitchedSpring>,
+    #[serde(default)]
+    colliders: Vec<SwitchedCollider>,
     #[serde(default, rename = "icons")]
     encoded_icons: Vec<String>,
     #[serde(skip)]
@@ -571,8 +593,10 @@ impl Expressions {
                 return Err(format!("{EXTENSION}: a layer names a state or clip it does not have"));
             }
         }
-        if expressions.clips.iter().flat_map(|clip| &clip.curves).any(|curve| curve.target >= targets) || expressions.shown.iter().flat_map(|shown| &shown.when).any(|&(target, _)| target >= targets) {
-            return Err(format!("{EXTENSION}: a curve or shown node names a target it does not have"));
+        if expressions.clips.iter().flat_map(|clip| &clip.curves).any(|curve| curve.target >= targets) 
+            || expressions.shown.iter().flat_map(|shown| &shown.when).chain(expressions.springs.iter().flat_map(|spring| &spring.when)).chain(expressions.colliders.iter().flat_map(|collider| &collider.when)).any(|&(target, _)| target >= targets)
+        {
+            return Err(format!("{EXTENSION}: a curve or switched node, spring or collider names a target it does not have"));
         }
         Ok(expressions)
     }
@@ -589,11 +613,10 @@ impl Expressions {
             Effect::Rotation(rotation) => rotation.node < nodes && matches!(rotation.rest.len(), 3 | 4) && rotation.axis < rotation.rest.len() && rotation.rest.iter().all(|v| v.is_finite())
                 && self.targets.iter().all(|other| !matches!(&other.effect, Effect::Rotation(other) if other.node == rotation.node && other.rest != rotation.rest)),
             Effect::Translation { node, direction } => *node < nodes && direction.iter().all(|v| v.is_finite()),
-            Effect::Spring(joints) => joints.iter().all(|&joint| joint < nodes),
             Effect::Material { node, choices } => *node < nodes && !choices.is_empty(),
         });
-        if !fits || self.shown.iter().any(|shown| shown.node >= nodes) {
-            return Err(format!("{EXTENSION}: a target or shown node names a node, mesh or blend shape the model does not have"));
+        if !fits || self.shown.iter().any(|shown| shown.node >= nodes) || self.springs.iter().flat_map(|spring| &spring.joints).any(|&joint| joint >= nodes) {
+            return Err(format!("{EXTENSION}: a target, shown node or switched spring names a node, mesh or blend shape the model does not have"));
         }
         Ok(())
     }
@@ -609,12 +632,12 @@ impl Expressions {
         })
     }
 
-    /// The spring joints whose PhysBone the values disable: held at the pose's rotation rather than simulated.
-    pub fn stilled(&self, values: &[f32]) -> HashSet<usize> {
-        self.targets.iter().zip(values).filter_map(|(target, &value)| match &target.effect {
-            Effect::Spring(joints) if value < 0.5 => Some(joints),
-            _ => None,
-        }).flatten().copied().collect()
+    /// The spring joints and colliders the values switch off.
+    pub fn idle(&self, values: &[f32]) -> Idle {
+        Idle {
+            joints: self.springs.iter().filter(|spring| off(&spring.when, values)).flat_map(|spring| spring.joints.iter().copied()).collect(),
+            colliders: self.colliders.iter().filter(|collider| off(&collider.when, values)).map(|collider| collider.collider).collect(),
+        }
     }
 
     pub fn apply(&self, values: &[f32], pose: &mut super::Pose) -> HashSet<usize> {
@@ -630,13 +653,13 @@ impl Expressions {
                 Effect::Scale { node, axis } => pose.scales[*node][*axis] *= value,
                 Effect::Rotation(rotation) => turned.entry(rotation.node).or_insert_with(|| (rotation, rotation.rest.clone())).1[rotation.axis] = value,
                 Effect::Translation { node, direction } => pose.translations[*node] += value * Vec3::from(*direction),
-                Effect::Material { .. } | Effect::Hue(_) | Effect::Color(_) | Effect::Tone(_) | Effect::Look(_) | Effect::Spring(_) | Effect::Unread(_) => {}
+                Effect::Material { .. } | Effect::Hue(_) | Effect::Color(_) | Effect::Tone(_) | Effect::Look(_) | Effect::Unread(_) => {}
             }
         }
         for (node, (rotation, components)) in turned {
             pose.rotations[node] = (pose.rotations[node] * rotation.turn(&components)).normalize();
         }
-        self.shown.iter().filter(|shown| shown.when.iter().any(|&(target, value)| (values[target] - value).abs() >= 0.5)).map(|shown| shown.node).collect()
+        self.shown.iter().filter(|shown| off(&shown.when, values)).map(|shown| shown.node).collect()
     }
 }
 
@@ -1111,24 +1134,20 @@ mod tests {
     }
 
     #[test]
-    fn rotation_translation_and_spring_effects_parse() {
+    fn rotation_and_translation_effects_parse() {
         let expressions = effects(serde_json::json!([
             {"effect": {"rotation": {"node": 1, "axis": 2, "rest": [10, 20, 30]}}, "default": 30},
             {"effect": {"rotation": {"node": 2, "axis": 3, "rest": [0, 0, 0, 1]}}, "default": 1},
-            {"effect": {"translation": {"node": 1, "direction": [0, 0, -0.01]}}},
-            {"effect": {"spring": [3, 4]}, "default": 1}
+            {"effect": {"translation": {"node": 1, "direction": [0, 0, -0.01]}}}
         ]));
         let effects: Vec<_> = expressions.targets.iter().map(|target| target.effect.clone()).collect();
         assert_eq!(effects, [
             Effect::Rotation(Rotation { node: 1, axis: 2, rest: vec![10.0, 20.0, 30.0] }),
             Effect::Rotation(Rotation { node: 2, axis: 3, rest: vec![0.0, 0.0, 0.0, 1.0] }),
             Effect::Translation { node: 1, direction: [0.0, 0.0, -0.01] },
-            Effect::Spring(vec![3, 4]),
         ]);
         let defaults: Vec<f32> = expressions.targets.iter().map(|target| target.default).collect();
-        assert_eq!(defaults, [30.0, 1.0, 0.0, 1.0]);
-        assert!(expressions.check(5, &[]).is_ok());
-        assert!(expressions.check(4, &[]).is_err(), "a spring joint past the nodes");
+        assert_eq!(defaults, [30.0, 1.0, 0.0]);
     }
 
     #[test]
@@ -1189,6 +1208,10 @@ mod tests {
         assert_eq!(pose.translations[0], Vec3::ZERO);
     }
 
+    fn switched(springs: serde_json::Value, colliders: serde_json::Value) -> Result<Expressions, String> {
+        Expressions::parse(&serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": [{"effect": "switch", "default": 1}, {"effect": "switch"}], "springs": springs, "colliders": colliders}))
+    }
+
     #[test]
     fn an_avatar_with_cairnfold_look_targets_loads() {
         let look = |field: &str| serde_json::json!({"node": 0, "rect": [0, 0, 1, 1], "field": field, "slot": 1, "multiply": true, "alpha": 0.5, "intensity": 1});
@@ -1232,10 +1255,14 @@ mod tests {
     }
 
     #[test]
-    fn a_spring_below_one_half_stills_its_joints() {
-        let expressions = effects(serde_json::json!([{"effect": {"spring": [3, 4]}, "default": 1}, {"effect": {"spring": [5]}, "default": 1}]));
-        assert_eq!(expressions.stilled(&[1.0, 1.0]), HashSet::new());
-        assert_eq!(expressions.stilled(&[0.0, 1.0]), HashSet::from([3, 4]));
-        assert_eq!(expressions.stilled(&[0.0, 0.4]), HashSet::from([3, 4, 5]));
+    fn a_spring_or_collider_is_idle_while_a_switch_it_waits_on_is_off() {
+        let expressions = switched(serde_json::json!([{"joints": [3, 4], "when": [[0, 1]]}, {"joints": [5], "when": [[0, 1], [1, 1]]}]), serde_json::json!([{"collider": 2, "when": [[1, 1]]}])).unwrap();
+        assert_eq!(expressions.idle(&[1.0, 1.0]), Idle::default());
+        assert_eq!(expressions.idle(&[1.0, 0.0]), Idle { joints: HashSet::from([5]), colliders: HashSet::from([2]) });
+        assert_eq!(expressions.idle(&[0.4, 0.6]), Idle { joints: HashSet::from([3, 4, 5]), colliders: HashSet::new() });
+        assert!(expressions.check(6, &[]).is_ok());
+        assert!(expressions.check(5, &[]).is_err(), "a switched joint past the nodes");
+        assert!(switched(serde_json::json!([{"joints": [3], "when": [[2, 1]]}]), serde_json::json!([])).is_err(), "a spring waiting on a target the menu lacks");
+        assert!(switched(serde_json::json!([]), serde_json::json!([{"collider": 0, "when": [[2, 1]]}])).is_err(), "a collider waiting on a target the menu lacks");
     }
 }

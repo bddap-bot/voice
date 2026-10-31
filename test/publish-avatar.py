@@ -34,6 +34,8 @@ AVATAR = {
         'targets': [{'default': 0, 'effect': {'hue': [{'node': 1, 'rect': [0, 0, 1, 1]}]}}],
         'clips': [{'curves': [{'target': 0, 'keys': [[0, 0], [1, 1]]}]}],
         'hueMask': 'iVBOR',
+        'springs': [{'joints': [2], 'when': [[0, 1]]}],
+        'colliders': [{'collider': 0, 'when': [[0, 1]]}],
     }},
 }
 
@@ -100,6 +102,8 @@ class Publishing(unittest.TestCase):
             (lambda doc: doc.update(images=[]), 'image'),
             (lambda doc: doc['extensions']['VRMC_springBone'].update(colliders=[], colliderGroups=[{'colliders': []}]), 'collider:Head'),
             (lambda doc: doc['extensions']['VRMC_springBone']['springs'][0].update(colliderGroups=[]), 'spring-collider:Hair:Head'),
+            (lambda doc: doc['extensions']['VRCHAT_expressions'].update(springs=[]), 'switched-spring:Hair'),
+            (lambda doc: doc['extensions']['VRCHAT_expressions'].update(colliders=[]), 'switched-collider:Head'),
         ]:
             with self.assertRaises(SystemExit) as refused:
                 publisher.publish(self.candidate(change), self.catalog)

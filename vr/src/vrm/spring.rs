@@ -161,9 +161,18 @@ enum Shape {
 }
 
 struct Collider {
+    /// Its place in the file's list, which the expressions' switched colliders name.
+    source: usize,
     node: usize,
     offset: Vec3,
     shape: Shape,
+}
+
+/// What the avatar's menu leaves off: the joints of its switched-off springs, held at the pose's rotation, and the file indices of its switched-off colliders.
+#[derive(Debug, Default, PartialEq)]
+pub struct Idle {
+    pub joints: HashSet<usize>,
+    pub colliders: HashSet<usize>,
 }
 
 enum Placed {
@@ -242,15 +251,15 @@ impl Rig {
             Version::One => {
                 let extension = &extensions["VRMC_springBone"];
                 let mut slots = Vec::new();
-                for collider in list(&extension["colliders"]) {
+                for (source, collider) in list(&extension["colliders"]).iter().enumerate() {
                     let extended = &collider["extensions"]["VRMC_springBone_extended_collider"]["shape"];
                     let shape = if extended.is_object() { extended } else { &collider["shape"] };
                     let offset = |geometry: &Value| Vec3::from(floats(&geometry["offset"], [0.0; 3]));
                     let round = |geometry: &Value, tail: Option<Vec3>| Shape::Round { tail, radius: number(&geometry["radius"], 0.0), inside: geometry["inside"].as_bool().unwrap_or(false) };
                     let parsed = node(&collider["node"]).and_then(|at| match (shape.get("sphere"), shape.get("capsule"), shape.get("plane")) {
-                        (Some(sphere), _, _) => Some(Collider { node: at, offset: offset(sphere), shape: round(sphere, None) }),
-                        (None, Some(capsule), _) => Some(Collider { node: at, offset: offset(capsule), shape: round(capsule, Some(Vec3::from(floats(&capsule["tail"], [0.0; 3])))) }),
-                        (None, None, Some(plane)) => Some(Collider { node: at, offset: offset(plane), shape: Shape::Plane { normal: Vec3::from(floats(&plane["normal"], [0.0, 0.0, 1.0])).normalize_or(Vec3::Z) } }),
+                        (Some(sphere), _, _) => Some(Collider { source, node: at, offset: offset(sphere), shape: round(sphere, None) }),
+                        (None, Some(capsule), _) => Some(Collider { source, node: at, offset: offset(capsule), shape: round(capsule, Some(Vec3::from(floats(&capsule["tail"], [0.0; 3])))) }),
+                        (None, None, Some(plane)) => Some(Collider { source, node: at, offset: offset(plane), shape: Shape::Plane { normal: Vec3::from(floats(&plane["normal"], [0.0, 0.0, 1.0])).normalize_or(Vec3::Z) } }),
                         _ => None,
                     });
                     slots.push(parsed.map(|collider| {
@@ -285,7 +294,7 @@ impl Rig {
                     if let Some(at) = node(&group["node"]) {
                         for collider in list(&group["colliders"]) {
                             let offset = object(&collider["offset"]).unwrap_or(Vec3::ZERO) * Vec3::new(1.0, 1.0, -1.0);
-                            rig.colliders.push(Collider { node: at, offset, shape: Shape::Round { tail: None, radius: number(&collider["radius"], 0.0), inside: false } });
+                            rig.colliders.push(Collider { source: rig.colliders.len(), node: at, offset, shape: Shape::Round { tail: None, radius: number(&collider["radius"], 0.0), inside: false } });
                         }
                     }
                     rig.groups.push((first..rig.colliders.len()).collect());
@@ -478,9 +487,9 @@ impl Springs {
         self.tails.clear();
     }
 
-    pub fn restore(&self, model: &Model, pose: &mut Pose, stilled: &HashSet<usize>) {
+    pub fn restore(&self, model: &Model, pose: &mut Pose, idle: &Idle) {
         if !model.constraints.is_empty() {
-            for (joint, tail) in model.rig.joints.iter().zip(&self.tails).filter(|(joint, _)| !stilled.contains(&joint.node)) {
+            for (joint, tail) in model.rig.joints.iter().zip(&self.tails).filter(|(joint, _)| !idle.joints.contains(&joint.node)) {
                 pose.rotations[joint.node] = tail.rotation;
                 if let (Some(bone), Some(child)) = (joint.physbone, joint.child) {
                     if !bone.endpoint {
@@ -491,8 +500,8 @@ impl Springs {
         }
     }
 
-    /// Swings each joint but the `stilled`, which keep the pose's rotation and carry their tails along so they set off from it.
-    pub fn step(&mut self, model: &Model, pose: &mut Pose, model_to_world: Mat4, hands: &[Hand], delta: f32, stilled: &HashSet<usize>) {
+    /// Swings each joint but the `idle` ones, which keep the pose's rotation and carry their tails along so they set off from it, against every collider but the `idle` ones.
+    pub fn step(&mut self, model: &Model, pose: &mut Pose, model_to_world: Mat4, hands: &[Hand], delta: f32, idle: &Idle) {
         let rig = &model.rig;
         if rig.joints.is_empty() {
             return;
@@ -530,7 +539,7 @@ impl Springs {
             let at = match *unit {
                 Unit::Joint(at) => at,
                 Unit::Chain(chain) => {
-                    self.chain(model, pose, &mut worlds, chain, (place, executions), [&colliders, &hands], stilled, fresh);
+                    self.chain(model, pose, &mut worlds, chain, (place, executions), [&colliders, &hands], idle, fresh);
                     continue;
                 }
             };
@@ -541,7 +550,7 @@ impl Springs {
             let initial = parent * Mat4::from_scale_rotation_translation(node.scale, node.rotation, pose.translations[joint.node]);
             let origin = initial.w_axis.truncate();
             let rest = initial.transform_point3(joint.tail);
-            let still = stilled.contains(&joint.node);
+            let still = idle.joints.contains(&joint.node);
             if fresh {
                 *tail = Tail { now: rest, before: rest, held: joint.tail, rotation: node.rotation, ..*tail };
             }
@@ -558,7 +567,8 @@ impl Springs {
                 let moved = carried + (tail.now - tail.before - (carried - tail.now)) * (1.0 - drag) + (axis * stiffness + gravity) * (delta * scale);
                 let mut next = origin + (moved - origin).normalize_or(axis) * length;
                 let touching = if joint.others { &hands[..] } else { &[] };
-                for placed in joint.groups.iter().flat_map(|&group| &rig.groups[group]).map(|&collider| &colliders[collider]).chain(touching) {
+                let running = joint.groups.iter().flat_map(|&group| &rig.groups[group]).filter(|&&collider| !idle.colliders.contains(&rig.colliders[collider].source));
+                for placed in running.map(|&collider| &colliders[collider]).chain(touching) {
                     let pushed = placed.push(next, radius * scale);
                     if pushed != next {
                         next = origin + (pushed - origin).normalize_or(axis) * length;
@@ -585,7 +595,7 @@ impl Springs {
 
     /// Steps one PhysBone chain as VRChat does: whole 60 Hz steps with its anchor moved part way for each, and a part step for time left over that only shows.
     #[allow(clippy::too_many_arguments)]
-    fn chain(&mut self, model: &Model, pose: &mut Pose, worlds: &mut [Mat4], at: usize, (place, executions): (Vec3, f32), [colliders, hands]: [&[Placed]; 2], stilled: &HashSet<usize>, fresh: bool) {
+    fn chain(&mut self, model: &Model, pose: &mut Pose, worlds: &mut [Mat4], at: usize, (place, executions): (Vec3, f32), [colliders, hands]: [&[Placed]; 2], idle: &Idle, fresh: bool) {
         let rig = &model.rig;
         let chain = &rig.chains[at];
         let now = worlds[chain.anchor];
@@ -611,13 +621,13 @@ impl Springs {
                 let parent = if index == 0 { shift * parent } else { parent };
                 let local = |rotation: Quat| parent * Mat4::from_scale_rotation_translation(node.scale, rotation, pose.translations[joint.node]);
                 let along = joint.tail.normalize();
-                if fresh || stilled.contains(&joint.node) {
+                if fresh || idle.joints.contains(&joint.node) {
                     let rotation = if fresh { node.rotation } else { pose.rotations[joint.node] };
                     let world = local(rotation);
                     let end = world.transform_point3(joint.tail);
                     *tail = Tail { rotation, now: end, vector: end - world.w_axis.truncate(), velocity: Vec3::ZERO, felt: Vec3::ZERO, anchored: immobile.inverse().transform_point3(end), length: joint.tail.length(), ..*tail };
                 } else if let Some(bone) = joint.physbone {
-                    tail.rotation = swing(joint, bone, node.rotation, tail, &local, Frames { immobile, carrier }, (ratio, whole), joint.groups.iter().flat_map(|&group| &rig.groups[group]).map(|&collider| &colliders[collider]).chain(if joint.others { hands } else { &[] }));
+                    tail.rotation = swing(joint, bone, node.rotation, tail, &local, Frames { immobile, carrier }, (ratio, whole), joint.groups.iter().flat_map(|&group| &rig.groups[group]).filter(|&&collider| !idle.colliders.contains(&rig.colliders[collider].source)).map(|&collider| &colliders[collider]).chain(if joint.others { hands } else { &[] }));
                 }
                 pose.rotations[joint.node] = tail.rotation;
                 if let (Some(child), false) = (joint.child, joint.physbone.is_some_and(|bone| bone.endpoint)) {
@@ -808,7 +818,7 @@ mod tests {
         let mut time = from;
         while time < to {
             let mut pose = model.rest();
-            springs.step(model, &mut pose, anchor(time), &[], STEP, &HashSet::new());
+            springs.step(model, &mut pose, anchor(time), &[], STEP, &Idle::default());
             trace.push((time, anchor(time).inverse().transform_point3(tip(model, &pose, anchor(time)))));
             time += STEP;
         }
@@ -919,10 +929,10 @@ mod tests {
         let mut springs = Springs::default();
         let mut tips = Vec::new();
         for frame in 0..270 {
-            let stilled: HashSet<usize> = if (90..180).contains(&frame) { HashSet::from([2, 3, 4]) } else { HashSet::new() };
+            let idle = Idle { joints: if (90..180).contains(&frame) { HashSet::from([2, 3, 4]) } else { HashSet::new() }, colliders: HashSet::new() };
             let mut pose = posed();
-            springs.step(&model, &mut pose, swaying(frame as f32 / 90.0), &[], 1.0 / 90.0, &stilled);
-            if !stilled.is_empty() {
+            springs.step(&model, &mut pose, swaying(frame as f32 / 90.0), &[], 1.0 / 90.0, &idle);
+            if !idle.joints.is_empty() {
                 assert_eq!(pose.rotations, posed().rotations, "frame {frame}");
             }
             tips.push(model.worlds(&pose)[4].w_axis.truncate());
@@ -953,7 +963,7 @@ mod tests {
             let mut springs = Springs::default();
             run(&model, &mut springs, |_| Mat4::IDENTITY, 0.0, 3.0);
             let mut pose = model.rest();
-            springs.step(&model, &mut pose, Mat4::IDENTITY, &[], 1.0 / 90.0, &HashSet::new());
+            springs.step(&model, &mut pose, Mat4::IDENTITY, &[], 1.0 / 90.0, &Idle::default());
             model.worlds(&pose)[3].w_axis.truncate()
         };
         let free = hanging(serde_json::json!([{ "node": 1, "colliders": [] }]));
@@ -981,9 +991,54 @@ mod tests {
         let mut springs = Springs::default();
         run(&model, &mut springs, |_| Mat4::IDENTITY, 0.0, 3.0);
         let mut pose = model.rest();
-        springs.step(&model, &mut pose, Mat4::IDENTITY, &[], 1.0 / 90.0, &HashSet::new());
+        springs.step(&model, &mut pose, Mat4::IDENTITY, &[], 1.0 / 90.0, &Idle::default());
         let worlds = model.worlds(&pose);
         (3..6).map(|node| worlds[node].w_axis.truncate()).collect()
+    }
+
+    /// The `fallen` strand, its joints driven by one PhysBone and its sphere both waiting on the menu's one switch, stepped for three seconds at `value`.
+    fn switched(value: f32) -> (Vec<Vec3>, Vec<Vec3>) {
+        let center = Vec3::new(0.0, 0.8, 0.02);
+        let mut builder = Builder::new(serde_json::json!({
+            "VRMC_vrm": { "humanoid": { "humanBones": { "hips": { "node": 1 } } } },
+            "VRMC_springBone": {
+                "colliders": [{ "node": 1, "shape": nowhere() }, { "node": 1, "shape": { "sphere": { "offset": center.to_array(), "radius": 0.04 } } }],
+                "colliderGroups": [{ "colliders": [0, 1] }],
+                "springs": [{ "joints": [{ "node": 2, "stiffness": 0.0, "gravityPower": 1.0, "dragForce": 0.4 }, { "node": 3, "stiffness": 0.0, "gravityPower": 1.0, "dragForce": 0.4 }, { "node": 4, "stiffness": 0.0, "gravityPower": 1.0, "dragForce": 0.4 }, { "node": 5 }], "colliderGroups": [0] }]
+            },
+            "VRCHAT_expressions": { "menu": [], "parameters": [], "layers": [], "clips": [], "targets": [{ "effect": "switch" }, { "effect": "switch", "default": 1 }], "springs": [{ "joints": [2, 3, 4, 5], "when": [[1, 1]] }], "colliders": [{ "collider": 1, "when": [[0, 1]] }] }
+        }));
+        let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        builder.set("nodes", serde_json::json!([{ "children": [1], "mesh": 0 }, { "children": [2] }, { "translation": [0.0, 1.0, 0.0], "children": [3] }, { "translation": [0.0, 0.0, 0.1], "children": [4] }, { "translation": [0.0, 0.0, 0.1], "children": [5] }, { "translation": [0.0, 0.0, 0.1] }]));
+        builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position } }] }]));
+        let model = Model::parse(&builder.glb()).unwrap();
+        let menu = model.menu.as_ref().expect("the menu parses");
+        let settle = |values: &[f32]| {
+            let idle = menu.idle(values);
+            let mut springs = Springs::default();
+            let mut pose = model.rest();
+            for _ in 0..270 {
+                pose = model.rest();
+                springs.step(&model, &mut pose, Mat4::IDENTITY, &[], 1.0 / 90.0, &idle);
+            }
+            let worlds = model.worlds(&pose);
+            (3..6).map(|node| worlds[node].w_axis.truncate()).collect::<Vec<_>>()
+        };
+        (settle(&[value, 1.0]), settle(&[value, 0.0]))
+    }
+
+    #[test]
+    fn a_collider_and_a_physbone_the_menu_switches_follow_it() {
+        let center = Vec3::new(0.0, 0.8, 0.02);
+        let (off, _) = switched(0.0);
+        assert!(off[2].abs_diff_eq(Vec3::new(0.0, 0.7, 0.0), 2e-3), "its sphere switched off, the strand hangs straight through where it would be: {off:?}");
+        let (on, held) = switched(1.0);
+        for joint in &on {
+            assert!((*joint - center).length() >= 0.04 - SETTLED, "switched on, the sphere holds every joint out: {on:?}");
+        }
+        assert!(on[1].z > 0.03, "and the strand rests on its front: {on:?}");
+        let rest = [Vec3::new(0.0, 1.0, 0.1), Vec3::new(0.0, 1.0, 0.2), Vec3::new(0.0, 1.0, 0.3)];
+        assert!(held.iter().zip(rest).all(|(joint, rest)| joint.abs_diff_eq(rest, 1e-5)), "its PhysBone switched off, the strand keeps the pose instead of falling: {held:?}");
     }
 
     /// One push and the segment's length restored, as three-vrm does, leaves a joint up to this deep.
@@ -1068,7 +1123,7 @@ mod tests {
         let mut springs = Springs::default();
         run(&model, &mut springs, |_| Mat4::IDENTITY, 0.0, 3.0);
         let mut pose = model.rest();
-        springs.step(&model, &mut pose, Mat4::IDENTITY, &[], 1.0 / 90.0, &HashSet::new());
+        springs.step(&model, &mut pose, Mat4::IDENTITY, &[], 1.0 / 90.0, &Idle::default());
         let end = model.worlds(&pose)[5].w_axis.truncate();
         assert!(end.abs_diff_eq(Vec3::new(0.0, 0.6, 0.0), 2e-3), "{end}");
     }
@@ -1084,7 +1139,7 @@ mod tests {
         let mut springs = Springs::default();
         run(&model, &mut springs, |_| Mat4::IDENTITY, 0.0, 3.0);
         let mut pose = model.rest();
-        springs.step(&model, &mut pose, Mat4::IDENTITY, &[], 1.0 / 90.0, &HashSet::new());
+        springs.step(&model, &mut pose, Mat4::IDENTITY, &[], 1.0 / 90.0, &Idle::default());
         let end = model.worlds(&pose)[3].w_axis.truncate();
         assert!(end.abs_diff_eq(Vec3::new(0.0, 0.9, 0.1), 2e-3), "{end}");
     }
@@ -1101,7 +1156,7 @@ mod tests {
         let mut pose = model.rest();
         for _ in 0..90 {
             pose = model.rest();
-            springs.step(&model, &mut pose, Mat4::IDENTITY, &hand, 1.0 / 90.0, &HashSet::new());
+            springs.step(&model, &mut pose, Mat4::IDENTITY, &hand, 1.0 / 90.0, &Idle::default());
         }
         tip(&model, &pose, Mat4::IDENTITY)
     }
@@ -1141,7 +1196,7 @@ mod tests {
         for frame in 0..90 {
             let hand = [Hand { center: Vec3::new(0.0, 0.9 + 0.4 * frame as f32 / 90.0, 0.12), radius: 0.07 }];
             let mut pose = model.rest();
-            springs.step(&model, &mut pose, Mat4::IDENTITY, &hand, 1.0 / 90.0, &HashSet::new());
+            springs.step(&model, &mut pose, Mat4::IDENTITY, &hand, 1.0 / 90.0, &Idle::default());
             let worlds = model.worlds(&pose);
             most = most.max((worlds[3].w_axis - worlds[2].w_axis).truncate().angle_between(Vec3::Z).to_degrees());
         }
@@ -1221,7 +1276,7 @@ mod tests {
         for _ in 0..frames {
             pose = model.rest();
             let hands: Vec<Hand> = hand.map(|center| Hand { center, radius: 0.04 }).into_iter().collect();
-            springs.step(model, &mut pose, anchor, &hands, 1.0 / 60.0, &HashSet::new());
+            springs.step(model, &mut pose, anchor, &hands, 1.0 / 60.0, &Idle::default());
         }
         model.worlds(&pose)[model.nodes.len() - 1].w_axis.truncate()
     }
@@ -1269,7 +1324,7 @@ mod tests {
         for frame in 0..240 {
             let anchor = Mat4::from_translation(Vec3::new(0.0, 0.0, frame as f32 / 60.0));
             pose = model.rest();
-            springs.step(&model, &mut pose, anchor, &[], 1.0 / 60.0, &HashSet::new());
+            springs.step(&model, &mut pose, anchor, &[], 1.0 / 60.0, &Idle::default());
             trail.push(model.worlds(&pose)[model.nodes.len() - 1].w_axis.truncate().distance(rest));
         }
         assert!(trail[..30].iter().copied().fold(0.0, f32::max) > 0.002, "setting off at 1 m/s swings the tip: {:?}", &trail[..30]);

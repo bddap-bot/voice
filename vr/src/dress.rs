@@ -438,8 +438,8 @@ fn replay_reference(recording: &Path, file: &str, out: &Path, meta: &mut serde_j
             }
         }
         let mut pose = puppet.model.pose(&puppet.standing);
-        let (retextured, stilled) = puppet.express(&mut pose, 1, RECORDED_DELTA);
-        puppet.settle(&mut pose, root * to_root, &[], RECORDED_DELTA, &stilled);
+        let (retextured, idle) = puppet.express(&mut pose, 1, RECORDED_DELTA);
+        puppet.settle(&mut pose, root * to_root, &[], RECORDED_DELTA, &idle);
         let worlds = puppet.model.worlds(&pose);
         if (window.0..window.1).contains(&frame) {
             for (id, node) in &tips {

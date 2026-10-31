@@ -3,10 +3,10 @@
 usage: publish-avatar.py NEW.vrm CATALOG.vrm [--drop PREFIX ...]
 
 Every node, image, morph target, material, spring joint, collider a spring collides with, VRM expression and avatar
-expression part (parameter, layer, menu control, material target, curve, shown node, mask) the catalog file carries
-must survive into the new one, or match a --drop prefix naming it as an intended removal. A target effect or look
-field the overlay's vr/src/vrm/effects.json does not list is refused: the overlay would leave it still. The replaced
-file stays beside the catalog in .previous/."""
+expression part (parameter, layer, menu control, material target, curve, shown node, switched spring or collider,
+mask) the catalog file carries must survive into the new one, or match a --drop prefix naming it as an intended
+removal. A target effect or look field the overlay's vr/src/vrm/effects.json does not list is refused: the overlay
+would leave it still. The replaced file stays beside the catalog in .previous/."""
 import argparse
 from collections import Counter
 import hashlib
@@ -74,6 +74,8 @@ def inventory(doc):
     out.update('target:' + t for t in targets)
     out.update('curve:' + (targets[c['target']] if c['target'] < len(targets) else str(c['target'])) for clip in x.get('clips', []) for c in clip.get('curves', []))
     out.update('shown:' + name(s['node']) for s in x.get('shown', []))
+    out.update('switched-spring:' + ','.join(name(j) for j in s['joints']) for s in x.get('springs', []))
+    out.update('switched-collider:' + (name(colliders[s['collider']]['node']) if s['collider'] < len(colliders) else str(s['collider'])) for s in x.get('colliders', []))
     out.update(f'icon:{i}' for i, _ in enumerate(x.get('icons', [])))
     out.update('expressions:' + k for k, v in x.items() if isinstance(v, str) and v)
     return out

@@ -858,14 +858,13 @@ impl Controller {
         let mut targets: Vec<usize> = animated.iter().flat_map(|part| part.keys().copied()).collect();
         targets.sort_unstable();
         targets.dedup();
+        // A child whose motion keys no curve on a target adds nothing to it, as Unity blends: an empty clip in a direct
+        // tree's child does not write the target's default over a sibling's value.
         for target in targets {
-            let default = expressions.targets[target].default;
-            let value: f32 = if blend == Blend::Direct {
-                animated.iter().zip(&weights).filter_map(|(part, &share)| part.get(&target).map(|&value| share * value)).sum()
-            } else {
-                animated.iter().zip(&weights).map(|(part, &share)| share * part.get(&target).copied().unwrap_or(default)).sum()
-            };
-            *into.entry(target).or_insert(0.0) += weight * value;
+            let keyed: Vec<(f32, f32)> = animated.iter().zip(&weights).filter(|&(_, &share)| share > 0.0).filter_map(|(part, &share)| part.get(&target).map(|&value| (share, value))).collect();
+            if !keyed.is_empty() {
+                *into.entry(target).or_insert(0.0) += weight * keyed.iter().map(|(share, value)| share * value).sum::<f32>();
+            }
         }
     }
 }
@@ -1079,6 +1078,25 @@ mod tests {
         child.speed = 0.0;
         child.offset = 0.25;
         assert_eq!(controller.step(&expressions, 0.0), vec![0.25]);
+    }
+
+    #[test]
+    fn a_direct_child_whose_chosen_motion_keys_nothing_leaves_a_sibling_s_value() {
+        let expressions = Expressions::parse(&serde_json::json!({
+            "menu": [], "parameters": [{"name": "Weight", "type": "float", "default": 1}, {"name": "Toggle", "type": "bool"}, {"name": "Loop", "type": "bool"}],
+            "layers": [{"states": [{"motion": {"blend": "direct", "children": [
+                {"parameter": "Weight", "motion": {"blend": "1d", "parameters": ["Toggle"], "children": [{"motion": {"clip": 0}, "threshold": 0}, {"motion": {"clip": 1}, "threshold": 1}]}},
+                {"parameter": "Weight", "motion": {"blend": "1d", "parameters": ["Loop"], "children": [{"motion": {"clip": 2}, "threshold": 0}, {"motion": {"clip": 0}, "threshold": 1}]}}
+            ]}}]}],
+            "clips": [{"length": 1, "curves": [{"target": 0, "keys": [[0, 0]], "step": true}]}, {"length": 1, "curves": [{"target": 0, "keys": [[0, 1]], "step": true}]}, {"length": 1, "curves": []}],
+            "targets": [{"effect": "switch", "default": 1}]
+        })).unwrap();
+        let mut controller = Controller::new(&expressions, &Configuration::default());
+        assert_eq!(controller.step(&expressions, 0.1), vec![0.0], "toggle off, loop off: the loop's empty clip adds nothing, so the flag is off");
+        controller.set("Toggle", 1.0);
+        assert_eq!(controller.step(&expressions, 0.1), vec![1.0], "toggle on, loop off: on");
+        controller.set("Loop", 1.0);
+        assert_eq!(controller.step(&expressions, 0.1), vec![1.0], "toggle on, loop keys it off: the direct tree adds the two");
     }
 
     #[test]

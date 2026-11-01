@@ -157,6 +157,27 @@ test('a retryable rejection that arrives while its frame is still sending is ret
   assert.deepEqual(sent, ['sent', 'sent']);
 });
 
+test('a frame whose transfer outlasts the acknowledgment timeout settles on its acknowledgment instead of resending forever', async () => {
+  const timers = [];
+  let release;
+  const sent = [];
+  let uploader;
+  uploader = new AckUploader(async () => {
+    sent.push('sent');
+    if (sent.length > 1) return new Promise(() => {});
+    await new Promise((resolve) => { release = resolve; });
+    queueMicrotask(() => uploader.ack('audio:session_6:mic:0'));
+  }, { pause: async () => {}, timeout: 1000, later: (run) => timers.push(run), cancel: () => {} });
+  uploader.add('audio:session_6:mic:0', Uint8Array.of(1));
+  await new Promise((resolve) => setImmediate(resolve));
+  for (const run of timers.splice(0)) run();
+  assert.equal(timers.length, 0);
+  release();
+  for (let turn = 0; turn < 10; turn++) await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(sent, ['sent']);
+  assert.equal(uploader.running, false);
+});
+
 test('a hub reply records its spoken text on its delegation', () => {
   const trace = new ConversationTrace();
   const heard = trace.heard('check the queue');

@@ -254,24 +254,20 @@ export class AckUploader {
       for (;;) {
         let timer;
         try {
-          const acknowledged = new Promise((resolve, reject) => {
-            timer = this.later(() => reject(new Error('persistence acknowledgment timed out')), this.timeout);
-            this.current = {
-              item,
-              resolve: () => { this.cancel(timer); resolve(); },
-              reject: (error) => { this.cancel(timer); reject(error); },
-            };
-          });
+          const acknowledged = new Promise((resolve, reject) => { this.current = { item, resolve, reject }; });
           // Awaited only once the send settles; handled now so an earlier rejection is not reported as unhandled.
           acknowledged.catch(() => {});
           await this.send(item.frame);
+          // Timed from the end of the send: a slow transfer is not a lost acknowledgment.
+          timer = this.later(() => this.current?.reject(new Error('persistence acknowledgment timed out')), this.timeout);
           await acknowledged;
           break;
         } catch {
-          if (timer !== undefined) this.cancel(timer);
           this.current = null;
           await this.pause(retry);
           retry = Math.min(retry * 2, 10000);
+        } finally {
+          this.cancel(timer);
         }
       }
       this.current = null;

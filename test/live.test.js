@@ -283,7 +283,7 @@ test('pending holds only the words heard since the last delegation and leaves th
   assert.equal(trace.pending().sent, '');
 });
 
-test('a request ended with the hand-off phrase carries every user turn since the last such request or sleep, without the phrase', () => {
+test('a request ended with the hand-off phrase carries only the user turns since the previous hand-off, without the phrase', () => {
   assert.equal(HAND_OFF_PHRASE, 'Fly, Corvus');
   assert.equal(withoutTrailingPhrase('Check the printer. Okay, fly corvus!', HAND_OFF_PHRASE), 'Check the printer. Okay');
   assert.equal(withoutTrailingPhrase('Fly, Corvus, check the printer.', HAND_OFF_PHRASE), 'Fly, Corvus, check the printer.');
@@ -297,12 +297,12 @@ test('a request ended with the hand-off phrase carries every user turn since the
   assert.equal(trace.delegated('b', 400).sent, 'give me a Chesterton');
   trace.heard('fence analysis. Fly, Corvus.', 500);
   assert.equal(trace.endsRequest(), true);
-  assert.equal(trace.delegated('c', 600).sent, 'Egdod issue fourteen\ngive me a Chesterton\nfence analysis.');
+  assert.equal(trace.delegated('c', 600).sent, 'fence analysis.');
   assert.equal(trace.endsRequest(), false);
   trace.heard('Check the printer', 700);
   assert.equal(trace.delegated('d', 800).sent, 'Check the printer');
   trace.heard('and the deck. Fly corvus', 900);
-  assert.equal(trace.delegated('e', 1000).sent, 'Check the printer\nand the deck.');
+  assert.equal(trace.delegated('e', 1000).sent, 'and the deck.');
   trace.heard('Fly, Corvus.', 1100);
   assert.equal(trace.delegated('f', 1200).sent, 'Fly, Corvus.');
   trace.heard('before the sleep', 1300);

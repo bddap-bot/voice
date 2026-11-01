@@ -64,7 +64,6 @@ pub struct Trace {
     sleeps: Vec<(usize, Instant)>,
     /// The turn count at the last delegation or sleep; user turns from here on are the next delegation's text, and the next turn of either speaker starts fresh.
     pending_from: usize,
-    request_from: usize,
     heard_at: Option<Instant>,
     force_new_speech: bool,
     pub calls: Calls,
@@ -138,7 +137,6 @@ impl Trace {
     pub fn slept(&mut self, now: Instant) {
         self.sleeps.push((self.turns.len(), now));
         self.pending_from = self.turns.len();
-        self.request_from = self.turns.len();
         self.heard_at = None;
     }
 
@@ -156,13 +154,12 @@ impl Trace {
         without_trailing_phrase(&sent, &identity().hand_off_phrase) != sent
     }
 
-    /// The user's words since the last delegation, or since the last hand-off phrase when they end with it, and up to a window of turns before them.
+    /// The user's words since the last delegation, without a trailing hand-off phrase, and up to a window of turns before them.
     pub fn pending(&self, now: Instant) -> Delegation {
         let sent = self.heard_text(self.pending_from);
-        let request = self.heard_text(self.request_from);
-        let text = match without_trailing_phrase(&request, &identity().hand_off_phrase) {
-            whole if self.ends_request() && !whole.is_empty() => whole.to_owned(),
-            _ => sent,
+        let text = match without_trailing_phrase(&sent, &identity().hand_off_phrase) {
+            "" => sent.clone(),
+            request => request.to_owned(),
         };
         let context = self.context(|index| self.is_pending(index));
         let duration_ms = self.heard_at.map_or(0, |at| now.saturating_duration_since(at).as_millis() as u64);
@@ -171,9 +168,6 @@ impl Trace {
 
     pub fn delegated(&mut self, now: Instant) -> Delegation {
         let delegation = self.pending(now);
-        if self.ends_request() {
-            self.request_from = self.turns.len();
-        }
         self.heard_at = None;
         self.pending_from = self.turns.len();
         delegation
@@ -376,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn a_request_ended_with_the_hand_off_phrase_carries_every_user_turn_since_the_last_such_request_or_sleep() {
+    fn a_request_ended_with_the_hand_off_phrase_carries_only_the_user_turns_since_the_previous_hand_off() {
         let start = Instant::now();
         let mut trace = opened();
         trace.heard("Egdod issue fourteen", start);
@@ -386,12 +380,12 @@ mod tests {
         assert_eq!(trace.delegated(start).text, "give me a Chesterton");
         trace.heard("fence analysis. Fly, Corvus.", start);
         assert!(trace.ends_request());
-        assert_eq!(trace.delegated(start).text, "Egdod issue fourteen\ngive me a Chesterton\nfence analysis.");
+        assert_eq!(trace.delegated(start).text, "fence analysis.");
         assert!(!trace.ends_request());
         trace.heard("Check the printer", start);
         assert_eq!(trace.delegated(start).text, "Check the printer");
         trace.heard("and the deck. Fly corvus", start);
-        assert_eq!(trace.delegated(start).text, "Check the printer\nand the deck.");
+        assert_eq!(trace.delegated(start).text, "and the deck.");
         trace.heard("Fly, Corvus.", start);
         assert_eq!(trace.delegated(start).text, "Fly, Corvus.");
         trace.heard("before the sleep", start);

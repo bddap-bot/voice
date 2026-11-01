@@ -982,7 +982,7 @@ mod tests {
     }
 
     #[test]
-    fn a_request_ended_with_the_hand_off_phrase_goes_whole_from_the_model_within_three_seconds_or_else_from_the_hub() {
+    fn a_request_ended_with_the_hand_off_phrase_goes_from_the_model_within_three_seconds_or_else_from_the_hub() {
         let mut f = Fixture::new();
         f.hear("Is the printer");
         f.delegate("item_printer");
@@ -1001,7 +1001,7 @@ mod tests {
         f.wait(Duration::from_millis(200), false);
         let frames = f.frames("delegate");
         assert!(frames[3]["id"].as_str().unwrap().starts_with("turn_"));
-        assert_eq!(frames.iter().map(|frame| frame["text"].as_str().unwrap()).collect::<Vec<_>>(), ["Is the printer", "Is the printer\nbusy right now?", "And the backup", "And the backup\nfrom last night."]);
+        assert_eq!(frames.iter().map(|frame| frame["text"].as_str().unwrap()).collect::<Vec<_>>(), ["Is the printer", "busy right now?", "And the backup", "from last night."]);
     }
 
     #[test]

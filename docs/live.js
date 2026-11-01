@@ -384,7 +384,6 @@ export class ConversationTrace {
     this.entries = entries;
     this.pendingTurns = [];
     this.pendingEntries = new Set();
-    this.requestFrom = entries.length;
     this.heardAt = 0;
     this.nextSpeechSource = 'model alone';
     this.activeSpeechSource = null;
@@ -452,14 +451,12 @@ export class ConversationTrace {
     return withoutTrailingPhrase(sent, HAND_OFF_PHRASE) !== sent;
   }
   pending(now = Date.now()) {
-    const request = this.endsRequest() && withoutTrailingPhrase(heardText(this.entries.slice(this.requestFrom).filter((item) => item.kind === 'heard').map((item) => item.text)), HAND_OFF_PHRASE);
-    return { sent: request || heardText(this.pendingTurns), context: this.context(this.pendingEntries), duration_ms: this.heardAt ? now - this.heardAt : 0 };
+    const heard = heardText(this.pendingTurns);
+    return { sent: withoutTrailingPhrase(heard, HAND_OFF_PHRASE) || heard, context: this.context(this.pendingEntries), duration_ms: this.heardAt ? now - this.heardAt : 0 };
   }
   delegated(id, now = Date.now()) {
-    const complete = this.endsRequest();
     const entry = { kind: 'delegation', id, ...this.pending(now), reply: '', timing: null };
     this.entries.push(entry);
-    if (complete) this.requestFrom = this.entries.length;
     this.pendingTurns = [];
     this.pendingEntries.clear();
     this.heardAt = 0;
@@ -493,7 +490,6 @@ export class ConversationTrace {
   }
   slept(now = Date.now()) {
     this.sleeps.push({ index: this.entries.length, at: now });
-    this.requestFrom = this.entries.length;
     for (const entry of this.entries) {
       if (entry.kind === 'delegation' && !entry.shared && entry.timing === null && !entry.failed) {
         entry.reply = 'cancelled';

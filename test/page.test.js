@@ -1511,7 +1511,7 @@ window.addEventListener('test-ready', async () => {
   assert.match(result.log, /sent to hub: How many jobs are queued\?[\s\S]*hub reply: Four jobs are queued\./);
 });
 
-test('a request ended with the hand-off phrase goes to the hub whole, from the model within three seconds or else from the page', async () => {
+test('a request ended with the hand-off phrase goes to the hub without what earlier hand-offs carried, from the model within three seconds or else from the page', async () => {
   const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1538,9 +1538,9 @@ window.addEventListener('test-ready', async () => {
   assert.deepEqual([result.byModel, result.beforeTimeout], [2, 3]);
   assert.deepEqual(result.frames.map(({ id, text }) => [id.startsWith('turn_') ? 'page' : id, text]), [
     ['item_printer', 'Is the printer'],
-    ['item_complete', 'Is the printer\nbusy right now?'],
+    ['item_complete', 'busy right now?'],
     ['item_backup', 'And the backup'],
-    ['page', 'And the backup\nfrom last night.'],
+    ['page', 'from last night.'],
   ]);
 });
 
@@ -1586,7 +1586,7 @@ window.addEventListener('test-ready', async () => {
   assert.deepEqual(result.frames, [
     { id: 'item_idea', text: 'Okay. So I have an idea.' },
     { id: 'item_figure', text: 'Just need to figure out' },
-    { id: 'item_printer', text: 'Okay. So I have an idea.\nJust need to figure out\nIs the printer busy?' },
+    { id: 'item_printer', text: 'Is the printer busy?' },
   ]);
   assert.equal(result.tapped, true);
 });

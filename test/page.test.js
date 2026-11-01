@@ -980,7 +980,6 @@ for (const [width, height] of [[1440, 900], [390, 844]]) test(`a full display pa
     await page('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
     const words = await box('.display-item p');
     await page('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: words.left + 8, y: words.y }] });
-    await new Promise((resolve) => setTimeout(resolve, 800));
     await page('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await settle();
     await page('Emulation.setTouchEmulationEnabled', { enabled: false });
@@ -1887,8 +1886,7 @@ test('ending the call from the page reports no error', async () => {
   const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {
   document.querySelector('#puppet').click();
-  await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false');
-  await new Promise((resolve) => setTimeout(resolve, 500));
+  await until(() => telemetryBatches.flat().some((event) => event.kind === 'session' && event.name === 'close'));
   document.body.dataset.result = JSON.stringify(fleetLines);
 });
 `);
@@ -1899,7 +1897,11 @@ test('a closed frame for an earlier call leaves the open conversation running', 
   const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', async () => {
   closeLive('call ended', 'an-earlier-offer');
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  replyFromHub('after-close', 'after-close');
+  await until(() => globalThis.hubAcks?.includes('after-close'));
+  const marked = telemetryBatches.length;
+  hear('');
+  await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false' || telemetryBatches.slice(marked).flat().some((event) => event.name === 'input_utterance'));
   document.body.dataset.result = JSON.stringify({ active: document.querySelector('#puppet').getAttribute('aria-pressed'), fleetLines });
 });
 `);
@@ -1914,9 +1916,9 @@ window.addEventListener('test-ready', async () => {
   usage({ status: 'exhausted', reset_seconds: 120 });
   await until(() => globalThis.usageLimitFrames?.length);
   usage({ status: 'exhausted', reset_seconds: 60 });
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  const cancels = sentVerbs.filter((verb) => verb === 'cancel').length;
   document.querySelector('#puppet').click();
-  await until(() => document.querySelector('#puppet').getAttribute('aria-pressed') === 'false');
+  await until(() => sentVerbs.filter((verb) => verb === 'cancel').length > cancels);
   document.body.dataset.result = JSON.stringify({ frames: usageLimitFrames, line: document.querySelector('#log .usage').textContent });
 });
 `);

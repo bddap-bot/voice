@@ -1,20 +1,21 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { access, readdir } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
-import { launchChromium, renderDom } from '../scripts/chromium.mjs';
+import { HANG_MS, launchChromium, renderDom } from '../scripts/chromium.mjs';
 
 const execute = promisify(execFile);
 
-async function running(pid) {
+async function running(pid, { zombie = false } = {}) {
   const { stdout } = await execute('ps', ['-eo', 'pid=,stat=']);
   return stdout.trim().split('\n').some(line => {
     const [id, state] = line.trim().split(/\s+/);
-    return Number(id) === pid && !state.startsWith('Z');
+    return Number(id) === pid && (zombie || !state.startsWith('Z'));
   });
 }
 
@@ -40,23 +41,26 @@ test('Chromium cleanup waits for every process holding the browser output, even 
     fs.writeFileSync(temporary, 'active');
     let file = 0;
     setInterval(() => { try { fs.writeFileSync(process.argv[1] + '/' + file++, 'active'); } catch {} }, 1);
-    process.stderr.write(process.pid + ' ' + temporary + '\\n');
+    process.stderr.write(process.pid + ' ' + browser + ' ' + temporary + '\\n');
     const watch = setInterval(() => { if (process.ppid !== browser) { clearInterval(watch); process.stderr.write('orphaned\\n'); } }, 5);
   `;
   const chrome = await launchFake(`
     require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(writer)}, process.argv[1].split('=')[1]], { detached: true, stdio: ['ignore', 'ignore', 'inherit'] });
     setInterval(() => {}, 1000);
   `);
-  let child;
+  let child, released = false, exited = false;
+  chrome.exited.then(() => { exited = true; });
   try {
-    const [, pid, temporary] = /^(\d+) (.+)$/m.exec(chrome.stderr);
+    const [, pid, browser, temporary] = /^(\d+) (\d+) (.+)$/m.exec(chrome.stderr);
     child = Number(pid);
-    const closing = chrome.close();
-    while (!chrome.stderr.includes('orphaned')) await delay(10);
-    assert.equal(await Promise.race([closing.then(() => 'closed', () => 'closed'), delay(1000, 'waiting')]), 'waiting', 'cleanup finished while the writer still ran');
+    const closing = chrome.close().then(() => released);
+    while (!chrome.stderr.includes('orphaned') || await running(Number(browser), { zombie: true })) await delay(10);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(exited, false, 'the browser output closed while the writer still held it');
+    released = true;
     process.kill(child, 'SIGKILL');
     child = undefined;
-    await closing;
+    assert.equal(await closing, true, 'cleanup finished while the writer still ran');
     for (const path of [chrome.scratch, temporary]) await assert.rejects(access(path), { code: 'ENOENT' });
   } finally {
     if (child) process.kill(child, 'SIGKILL');
@@ -84,23 +88,33 @@ test('Chromium keeps its config, cache and crash database in its own scratch and
   }
 });
 
-test('Chromium launches past the host-wide slot bound wait until a running browser closes', async () => {
+test('Chromium launches past the host-wide slot bound wait until a running browser closes', { timeout: HANG_MS }, async () => {
   const script = `
     import { launchChromium } from ${JSON.stringify(new URL('../scripts/chromium.mjs', import.meta.url).href)};
-    import { setTimeout as delay } from 'node:timers/promises';
+    import { once } from 'node:events';
     const fake = () => launchChromium({ executable: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)', '--'] });
     const first = await fake();
-    let second;
-    const launching = fake().then(chrome => { second = chrome; });
-    await delay(500);
+    process.stderr.write('first launched\\n');
+    let second, firstClosed = false, afterFirst;
+    const launching = fake().then(chrome => { second = chrome; afterFirst = firstClosed; process.stderr.write('second launched\\n'); });
+    await once(process.stdin, 'data');
     const waited = second === undefined;
     await first.close();
+    firstClosed = true;
     await launching;
     await second.close();
-    process.stdout.write(JSON.stringify({ waited, launched: second !== undefined }));
+    process.stdout.write(JSON.stringify({ waited, afterFirst }));
   `;
-  const { stdout } = await execute(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, VOICE_CHROMIUM_SLOTS: '1' } });
-  assert.deepEqual(JSON.parse(stdout), { waited: true, launched: true });
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, VOICE_CHROMIUM_SLOTS: '1' }, stdio: ['pipe', 'pipe', 'pipe'] });
+  let stdout = '', stderr = '';
+  child.stdout.on('data', chunk => { stdout += chunk; });
+  child.stderr.on('data', chunk => {
+    stderr += chunk;
+    if (!child.stdin.writableEnded && /first launched\n[^]*(waiting for one of|second launched)/.test(stderr)) child.stdin.end('waiting\n');
+  });
+  const [code] = await once(child, 'close');
+  assert.equal(code, 0, stderr);
+  assert.deepEqual(JSON.parse(stdout), { waited: true, afterFirst: true });
 });
 
 test('Chromium cleanup removes the profile when spawning fails', async () => {

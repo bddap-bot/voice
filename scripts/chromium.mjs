@@ -29,7 +29,7 @@ function chromiumSlots(configured) {
 // Two dozen browsers on 16 cores starved Chromium's timers and it suspended AudioContexts on its own, so every
 // process on the host shares SLOTS. An abstract socket is released by the kernel when its holder dies.
 async function chromiumSlot() {
-  for (;;) {
+  for (let attempt = 0; ; attempt++) {
     for (let slot = 0; slot < SLOTS; slot++) {
       const server = createServer();
       const held = await new Promise((resolve, reject) => {
@@ -42,6 +42,7 @@ async function chromiumSlot() {
         return () => { if (!released) { released = true; server.close(); } };
       }
     }
+    if (attempt === 0) process.stderr.write(`voice: waiting for one of ${SLOTS} host-wide Chromium slots\n`);
     await new Promise(resolve => setTimeout(resolve, 100));
   }
 }

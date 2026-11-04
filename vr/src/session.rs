@@ -27,7 +27,7 @@ const START_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(10);
 /// How long a summon keeps dialing an unreachable relay: a headset just out of sleep reassociates its Wi-Fi within about a minute.
 pub const CONNECT_PATIENCE: Duration = Duration::from_secs(90);
-const REDIAL: Duration = Duration::from_secs(2);
+pub const REDIAL: Duration = Duration::from_secs(2);
 /// Most of the microphone queued for sending; anything older is dropped so speech goes out live.
 const BACKLOG: usize = 3 * FRAME;
 

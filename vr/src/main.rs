@@ -347,7 +347,24 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
     tracing::info!("display {:.0} px/rad, windows sized for {:.0} px/rad at {} m: puppet {} texels per eye, object {}", runtime.display_density(), render::DISPLAY_DENSITY, render::NEAREST, eye_texels(QUAD, render::NEAREST), eye_texels(object::QUAD, render::NEAREST));
     let mut renderer = Renderer::new(gpu.clone(), [eye_texels(QUAD, render::NEAREST); 2], HEIGHT / render::PAGE_HEIGHT)?;
     let cache = state.join("assets");
-    let mut relay = Relay::connect(token, &cache)?;
+    let give_up = Instant::now() + session::CONNECT_PATIENCE;
+    let mut quit = false;
+    let relay = Relay::connect_while(token, &cache, |_| {
+        let redial = Instant::now() + session::REDIAL;
+        while Instant::now() < redial.min(give_up) {
+            if let Some(Signal::Quit) = runtime.poll() {
+                quit = true;
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Instant::now() < give_up
+    });
+    if quit {
+        tracing::info!("SteamVR asked the overlay to quit");
+        return Ok(());
+    }
+    let mut relay = relay?;
     let catalog = relay.catalog()?;
     let active = chosen::read(&cache, &catalog.avatars)?;
     let mut settings = settings::Settings::read(state);

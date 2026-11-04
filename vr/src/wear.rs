@@ -8,7 +8,7 @@ use crate::point::Pointing;
 use crate::relay::{Relay, Token};
 use crate::render::{eye_projection, eye_texels, Renderer, NEAREST, PAGE_HEIGHT};
 use crate::vulkan::Gpu;
-use crate::{action, load, preview, touching, FLOOR, HEIGHT, QUAD};
+use crate::{action, grown_window, lit, load, preview, touching, FLOOR, HEIGHT, QUAD};
 
 const FRAME: Duration = Duration::from_micros(11_111);
 /// The wearer's head in the hand-held puppet's frame, its feet at the origin: a little above and in front, as the controller is held.
@@ -33,9 +33,19 @@ const SWEEP: f32 = 0.1;
 const CLIP_EVERY: usize = 3;
 /// What the puppet points at: where the overlay's first object stands beside a hand-held puppet.
 const TARGET: Vec3 = [0.22, 0.12, 0.0];
+/// The animator's seed, so every run draws the same idles at the same times and two runs' pictures compare.
+const SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+/// The puppet standing full size on the floor, seen from a standing wearer's eye height this far away, metres.
+const GROUNDED: [f32; 3] = [2.5, 1.5, 1.0];
+const GROUNDED_EYE_HEIGHT: f32 = 1.6;
+/// Tangent of half the Frame's view per eye, which a grounded window is clipped to.
+const GROUNDED_VIEW: f32 = 1.43;
+/// Standing full size before the first grounded view, so what the growth set swinging settles first.
+const GROUNDED_SETTLE: Duration = Duration::from_secs(2);
 
-/// Wears each named appearance of the catalog, or all of it, as the host does off any headset: with `--speech`, first speaking a 48 kHz mono float recording, its mouth following the recording's level as it follows a heard reply's; its idle, carried by a controller swinging and twisting it and then held still, touched by the other controller's hand sweeping through the back of its head, each gesture the page can reach while speaking, and a point at a spot beside it, each frame posed, skinned and drawn for both eyes through the host's own path.
-/// Writes the revealed appearance library, a picture of each phase and a 30 frames a second clip of the whole run per appearance under the out directory, and reports each appearance's per-frame work and, where the kernel counts it, its GPU time.
+/// Wears each named appearance of the catalog, or all of it, as the host does off any headset: with `--speech`, first speaking a 48 kHz mono float recording, its mouth following the recording's level as it follows a heard reply's; its idle, carried by a controller swinging and twisting it and then held still, touched by the other controller's hand sweeping through the back of its head, each gesture the page can reach while speaking, a point at a spot beside it, and standing full size on the floor seen from each of `GROUNDED`'s distances, each frame posed, skinned and drawn for both eyes through the host's own path.
+/// Writes the revealed appearance library, a picture of each phase and a 30 frames a second clip of the hand-held run per appearance under the out directory, and reports each appearance's per-frame work and, where the kernel counts it, its GPU time, the hand-held run's and each grounded view's apart.
+/// A grounded view's picture is the left eye as the display shows it: the window's image resampled to the display's density there.
 pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
     let usage = "usage: voice-vr wear <out-dir> [--speech <audio.f32>] [<catalog id>...]";
     let (out, mut ids) = args.split_first().ok_or(usage)?;
@@ -67,6 +77,7 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
         let clip = pictures.join("clip");
         std::fs::create_dir_all(&clip).map_err(|error| format!("{}: {error}", clip.display()))?;
         let mut puppet = load(&mut relay, &avatar.id, &mut renderer, &Default::default())?;
+        puppet.animator.reseed(crate::motion::Random(SEED));
         let mut pointing = Pointing::default();
         let mut work = Vec::new();
         let mut played = Vec::new();
@@ -138,15 +149,22 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
         for at in 0..frames(POINT) {
             frame(&mut puppet, &mut pointing, HELD, None, speaking(at), (at == frames(POINT_PICTURE)).then(|| pictures.join("point.png")).as_deref())?;
         }
+        drop(frame);
+        let held_gpu = gpu_before.zip(gpu_time()).map(|(before, after)| (after - before) as f64 / 1e6 / work.len() as f64);
+        stand_grounded(&mut puppet, &mut renderer, GROUNDED[0], GROUNDED_SETTLE, None)?;
+        let mut grounded = Vec::new();
+        for distance in GROUNDED {
+            grounded.push(stand_grounded(&mut puppet, &mut renderer, distance, Duration::from_secs(1), Some(&pictures.join(format!("grounded-{distance}m.png"))))?);
+        }
         write_motion(motion, clipped, &pictures.join("spring-motion.json"))?;
         write_motion(constraints, clipped, &pictures.join("constraint-motion.json"))?;
         let pointed = pointing.hand().map_or("no reach".to_owned(), |hand| format!("{hand:?} hand"));
-        let gpu = gpu_before.zip(gpu_time()).map_or("not counted".to_owned(), |(before, after)| format!("{:.2} ms", (after - before) as f64 / 1e6 / work.len() as f64));
+        let gpu = held_gpu.map_or("not counted".to_owned(), |ms| format!("{ms:.2} ms"));
         let measured: Vec<f64> = work.iter().skip(45).map(|time| time.as_secs_f64() * 1e3).collect();
         let mut sorted = measured.clone();
         sorted.sort_by(f64::total_cmp);
         let report = format!(
-            "{}: {} vertices, {} joints, {} spring joints; gestures {played:?}; pointed with the {pointed}; {} frames past the first 45: work mean {:.2} p95 {:.2} max {:.2} ms; GPU {gpu} per frame",
+            "{}: {} vertices, {} joints, {} spring joints; gestures {played:?}; pointed with the {pointed}; {} frames past the first 45: work mean {:.2} p95 {:.2} max {:.2} ms; GPU {gpu} per frame; {}",
             avatar.id,
             puppet.skinned.vertices.len(),
             puppet.skinned.joints(),
@@ -155,11 +173,45 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
             measured.iter().sum::<f64>() / measured.len() as f64,
             sorted[sorted.len() * 95 / 100],
             sorted[sorted.len() - 1],
+            grounded.join("; "),
         );
         println!("{report}");
         std::fs::write(pictures.join("cost.txt"), report + "\n").map_err(|error| format!("{}: {error}", pictures.display()))?;
     }
     Ok(())
+}
+
+/// The puppet standing full size on the floor `distance` metres ahead of the wearer, drawn as the host draws it there for `span`; with a `path`, the GPU time per frame is measured and the last frame's picture written there, and the window's texels per eye against the display's need said.
+fn stand_grounded(puppet: &mut crate::Puppet, renderer: &mut Renderer, distance: f32, span: Duration, path: Option<&Path>) -> Result<String, String> {
+    let full = puppet.full;
+    let stand = HELD;
+    let head = Pose { t: [0.0, GROUNDED_EYE_HEIGHT, distance], ..HELD };
+    let eyes = [-EYES, EYES].map(|x| head.apply([x, 0.0, 0.0]));
+    let frames = (span.as_secs_f64() / FRAME.as_secs_f64()) as usize;
+    let held_outline = renderer.outline_scale;
+    renderer.outline_scale = HEIGHT * full / PAGE_HEIGHT;
+    let before = gpu_time();
+    let mut shown = (0, 0);
+    for _ in 0..frames {
+        let (posed, body, _) = puppet.step(FRAME.as_secs_f32(), |_, _| stand, full, head.t, &[], 0.0, &mut Pointing::default(), Instant::now(), |_| None);
+        let (quad, half) = grown_window(&puppet.skinned, &puppet.drawn.hidden, &posed, body, &head, &eyes, GROUNDED_VIEW);
+        let local = quad.inverse();
+        let figure = facing(stand.apply([0.0, -FLOOR * full, 0.0]), head.t);
+        let (skin, to_window) = lit(&quad, &figure, body);
+        puppet.draw(&posed, skin);
+        let seen = eyes.map(|eye| local.apply(eye));
+        let depth = seen[0][2].min(seen[1][2]);
+        let texels = renderer.texels(2.0 * half, depth);
+        renderer.render(&puppet.drawn, seen.map(|eye| eye_projection(eye.into(), half, half)), to_window, texels)?;
+        shown = (texels, eye_texels(2.0 * half, depth));
+    }
+    let gpu = before.zip(gpu_time()).map_or("not counted".to_owned(), |(before, after)| format!("{:.2} ms", (after - before) as f64 / 1e6 / frames as f64));
+    renderer.outline_scale = held_outline;
+    let (texels, needed) = shown;
+    let Some(path) = path else { return Ok(String::new()) };
+    let window = eye(&renderer.read()?, texels);
+    image::imageops::resize(&window, needed, needed, image::imageops::FilterType::Triangle).save(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(format!("grounded at {distance} m: {texels} texels per eye for the display's {needed}, GPU {gpu} per frame"))
 }
 
 const HELD: Pose = Pose { r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], t: [0.0; 3] };

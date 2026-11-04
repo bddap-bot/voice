@@ -18,6 +18,8 @@ pub struct Gpu {
     pub queue: vk::Queue,
     pub family: u32,
     pub pool: vk::CommandPool,
+    /// The device's widest anisotropic filtering, None where it has none.
+    pub anisotropy: Option<f32>,
     allocations: std::cell::Cell<usize>,
     /// SteamVR's client creates Vulkan objects of its own on this device and destroys them when its session closes, so the session lives and dies inside the device.
     pub vr: Option<Runtime>,
@@ -46,10 +48,13 @@ impl Gpu {
         let device_names: Vec<_> = device_extensions.iter().map(|name| name.as_ptr()).collect();
         let priorities = [1.0];
         let queues = [vk::DeviceQueueCreateInfo::default().queue_family_index(family).queue_priorities(&priorities)];
-        let device = unsafe { instance.create_device(physical, &vk::DeviceCreateInfo::default().queue_create_infos(&queues).enabled_extension_names(&device_names), None) }.map_err(vk_error("vkCreateDevice"))?;
+        let anisotropic = unsafe { instance.get_physical_device_features(physical) }.sampler_anisotropy == vk::TRUE;
+        let anisotropy = anisotropic.then(|| unsafe { instance.get_physical_device_properties(physical) }.limits.max_sampler_anisotropy);
+        let features = vk::PhysicalDeviceFeatures::default().sampler_anisotropy(anisotropic);
+        let device = unsafe { instance.create_device(physical, &vk::DeviceCreateInfo::default().queue_create_infos(&queues).enabled_extension_names(&device_names).enabled_features(&features), None) }.map_err(vk_error("vkCreateDevice"))?;
         let queue = unsafe { device.get_device_queue(family, 0) };
         let pool = unsafe { device.create_command_pool(&vk::CommandPoolCreateInfo::default().queue_family_index(family).flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER), None) }.map_err(vk_error("vkCreateCommandPool"))?;
-        Ok(Gpu { _entry: entry, instance, physical, device, queue, family, pool, allocations: Default::default(), vr })
+        Ok(Gpu { _entry: entry, instance, physical, device, queue, family, pool, anisotropy, allocations: Default::default(), vr })
     }
 
     pub fn memory_type(&self, bits: u32, flags: vk::MemoryPropertyFlags) -> Result<u32, String> {

@@ -187,6 +187,11 @@ impl Animator {
         animator
     }
 
+    /// Starts over as a new animator drawing from `random`.
+    pub fn reseed(&mut self, random: Random) {
+        *self = Animator::new(std::mem::take(&mut self.clips), std::mem::take(&mut self.own), random);
+    }
+
     fn variants(&self, of: &str) -> Vec<String> {
         let mut variants: Vec<String> = self.clips.keys().filter(|action| family(action) == of).cloned().collect();
         variants.sort();

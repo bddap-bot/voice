@@ -17,6 +17,8 @@ const FAR: f32 = 10.0;
 const SAMPLES: vk::SampleCountFlags = vk::SampleCountFlags::TYPE_4;
 /// The Frame's display: 2160 pixels across a 110° field per eye, in pixels per radian.
 pub const DISPLAY_DENSITY: f32 = 2160.0 / (110.0 * std::f32::consts::PI / 180.0);
+/// The widest anisotropic filtering the avatar's textures take: on the Frame 16x cost about 0.3 ms a frame more than 4x.
+const ANISOTROPY: f32 = 4.0;
 /// The closest a window is seen from: the puppet held up on the hand.
 pub const NEAREST: f32 = 0.35;
 
@@ -298,6 +300,8 @@ impl Renderer {
                     .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
                     .address_mode_u(vk::SamplerAddressMode::REPEAT)
                     .address_mode_v(vk::SamplerAddressMode::REPEAT)
+                    .anisotropy_enable(gpu.anisotropy.is_some())
+                    .max_anisotropy(gpu.anisotropy.unwrap_or(1.0).min(ANISOTROPY))
                     .max_lod(vk::LOD_CLAMP_NONE),
                 None,
             )

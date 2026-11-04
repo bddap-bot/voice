@@ -918,7 +918,11 @@ impl Model {
         };
         let spreads = object && extensions[SPREAD].is_object();
         let menu = match extensions.get(expressions::EXTENSION) {
-            Some(value) => Some(Expressions::parse(value)?),
+            Some(value) => {
+                let mut menu = Expressions::parse(value)?;
+                menu.read_looks(document.json["images"].as_array().map_or(0, Vec::len), |image| document.image(image))?;
+                Some(menu)
+            }
             None => None,
         };
         if let Some(menu) = &menu {

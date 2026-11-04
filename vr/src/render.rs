@@ -22,8 +22,12 @@ const ANISOTROPY: f32 = 4.0;
 /// The closest a window is seen from: the puppet held up on the hand.
 pub const NEAREST: f32 = 0.35;
 
+/// The most one decal page takes with its mipmaps, unless one decal alone takes more: drivers refuse a single allocation of a
+/// whole avatar's decals.
+const PAGE_BYTES: u64 = 512 << 20;
+
 const VERTEX_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vertex.spv"));
-const FRAGMENT_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fragment.spv"));
+include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -76,6 +80,9 @@ struct LookData {
     decal: [f32; 4],
     intensity: [f32; 4],
     multiply: [f32; 4],
+    rect: [f32; 4],
+    page: [i32; 4],
+    layer: [u32; 4],
     emission_color: [f32; 3],
     emission_strength: f32,
     emission_hue: f32,
@@ -85,7 +92,7 @@ struct LookData {
     matcaps: [MatcapData; 4],
 }
 
-fn look_data(look: &crate::vrm::expressions::Look) -> LookData {
+fn look_data(look: &crate::vrm::expressions::Look, places: &[Place]) -> LookData {
     use crate::vrm::expressions::{Lighting, Mapping};
     let decal = |value: fn(&crate::vrm::expressions::Decal) -> f32| look.decals.each_ref().map(|decal| decal.as_ref().map_or(0.0, value));
     let emission = look.emission.as_ref();
@@ -93,6 +100,9 @@ fn look_data(look: &crate::vrm::expressions::Look) -> LookData {
         decal: decal(|decal| decal.alpha),
         intensity: decal(|decal| decal.intensity),
         multiply: decal(|decal| decal.multiply as u32 as f32),
+        rect: look.rect,
+        page: look.decals.each_ref().map(|decal| decal.as_ref().map_or(-1, |decal| places[decal.image].page as i32)),
+        layer: look.decals.each_ref().map(|decal| decal.as_ref().map_or(0, |decal| places[decal.image].layer)),
         emission_color: emission.map_or([0.0; 3], |emission| emission.color),
         emission_strength: emission.map_or(0.0, |emission| emission.strength),
         emission_hue: emission.map_or(0.0, |emission| emission.hue),
@@ -127,6 +137,34 @@ fn look_data(look: &crate::vrm::expressions::Look) -> LookData {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Place {
+    page: usize,
+    layer: u32,
+}
+
+/// Every Vulkan device takes at least this many layers in one image.
+const PAGE_LAYERS: u64 = 256;
+
+fn decal_pages(decals: &[crate::vrm::Image]) -> (Vec<Vec<usize>>, Vec<Place>) {
+    let mut sizes: std::collections::BTreeMap<(u32, u32), Vec<usize>> = Default::default();
+    for (at, decal) in decals.iter().enumerate() {
+        sizes.entry((decal.width, decal.height)).or_default().push(at);
+    }
+    let mut pages = Vec::new();
+    let mut places = vec![Place { page: 0, layer: 0 }; decals.len()];
+    for ((width, height), same) in sizes {
+        let layer = width as u64 * height as u64 * 4 * 4 / 3;
+        for page in same.chunks((PAGE_BYTES / layer).clamp(1, PAGE_LAYERS) as usize) {
+            for (layer, &at) in page.iter().enumerate() {
+                places[at] = Place { page: pages.len(), layer: layer as u32 };
+            }
+            pages.push(page.to_vec());
+        }
+    }
+    (pages, places)
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct MaterialData {
@@ -149,6 +187,7 @@ struct PipelineKey {
     blend: bool,
     cull: Cull,
     depth_write: bool,
+    pages: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -215,6 +254,7 @@ pub struct Renderer {
     layout: vk::PipelineLayout,
     pipelines: HashMap<PipelineKey, vk::Pipeline>,
     sampler: vk::Sampler,
+    edge_sampler: vk::Sampler,
     pub outline_scale: f32,
     next: usize,
     last: Option<(usize, u32)>,
@@ -286,32 +326,34 @@ impl Renderer {
             vk::DescriptorSetLayoutBinding::default().binding(6).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(7).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(8).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
-            vk::DescriptorSetLayoutBinding::default().binding(9).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default().binding(9).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(DECAL_PAGES as u32).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(10).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(11).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(12).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(13).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(14).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default().binding(15).descriptor_type(vk::DescriptorType::SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
         ];
         let set_layout = unsafe { device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None) }.map_err(vk_error("vkCreateDescriptorSetLayout"))?;
         let set_layouts = [set_layout];
         let push_ranges = [vk::PushConstantRange::default().stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT).size(std::mem::size_of::<Push>() as u32)];
         let layout = unsafe { device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts).push_constant_ranges(&push_ranges), None) }.map_err(vk_error("vkCreatePipelineLayout"))?;
-        let sampler = unsafe {
+        let sampler = |address| unsafe {
             device.create_sampler(
                 &vk::SamplerCreateInfo::default()
                     .mag_filter(vk::Filter::LINEAR)
                     .min_filter(vk::Filter::LINEAR)
                     .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-                    .address_mode_u(vk::SamplerAddressMode::REPEAT)
-                    .address_mode_v(vk::SamplerAddressMode::REPEAT)
+                    .address_mode_u(address)
+                    .address_mode_v(address)
                     .anisotropy_enable(gpu.anisotropy.is_some())
                     .max_anisotropy(gpu.anisotropy.unwrap_or(1.0).min(ANISOTROPY))
                     .max_lod(vk::LOD_CLAMP_NONE),
                 None,
             )
         }
-        .map_err(vk_error("vkCreateSampler"))?;
+        .map_err(vk_error("vkCreateSampler"));
+        let (sampler, edge_sampler) = (sampler(vk::SamplerAddressMode::REPEAT)?, sampler(vk::SamplerAddressMode::CLAMP_TO_EDGE)?);
         let mut renderer = Renderer {
             depth: Texture { image: vk::Image::null(), memory: vk::DeviceMemory::null(), view: vk::ImageView::null() },
             samples: Texture { image: vk::Image::null(), memory: vk::DeviceMemory::null(), view: vk::ImageView::null() },
@@ -323,6 +365,7 @@ impl Renderer {
             layout,
             pipelines: HashMap::new(),
             sampler,
+            edge_sampler,
             outline_scale,
             next: 0,
             last: None,
@@ -337,10 +380,17 @@ impl Renderer {
     }
 
     pub fn appearance(&mut self, model: &Model, skinned: &Skinned) -> Result<Appearance, String> {
+        let looks = model.menu.as_ref().and_then(|menu| menu.looks.as_ref());
+        let decals = looks.map(|looks| &looks.decals[..]).unwrap_or_default();
+        let (pages, places) = decal_pages(decals);
+        if pages.len() > DECAL_PAGES {
+            return Err(format!("the decals take {} pages, over {DECAL_PAGES}", pages.len()));
+        }
         let key = |material: &crate::vrm::Material, outline: bool| PipelineKey {
             blend: material.alpha == Alpha::Blend,
             cull: if outline { Cull::Front } else if material.double_sided { Cull::None } else { Cull::Back },
             depth_write: material.depth_write,
+            pages: pages.len(),
         };
         let keys: Vec<PipelineKey> = model.materials.iter().flat_map(|material| [Some(key(material, false)), material.outline.as_ref().map(|_| key(material, true))]).flatten().filter(|key| !self.pipelines.contains_key(key)).collect();
         let created = self.pipelines(&keys)?;
@@ -350,8 +400,8 @@ impl Renderer {
         let device = &gpu.device;
         let set_count = model.materials.len() as u32;
         let sizes = [
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: 10 * set_count },
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLER, descriptor_count: set_count },
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: (9 + DECAL_PAGES as u32) * set_count },
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLER, descriptor_count: 2 * set_count },
             vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 4 * set_count },
         ];
         let descriptors = unsafe { device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(set_count).pool_sizes(&sizes), None) }.map_err(vk_error("vkCreateDescriptorPool"))?;
@@ -362,8 +412,7 @@ impl Renderer {
         };
         let joints = skinned.joints();
         let material_data: Vec<MaterialData> = model.materials.iter().map(material_data).collect();
-        let looks = model.menu.as_ref().and_then(|menu| menu.looks.as_ref());
-        let look_data: Vec<LookData> = std::iter::once(LookData::default()).chain(looks.into_iter().flat_map(|looks| looks.materials.iter().map(look_data))).collect();
+        let look_data: Vec<LookData> = std::iter::once(LookData { page: [-1; 4], ..LookData::default() }).chain(looks.into_iter().flat_map(|looks| looks.materials.iter().map(|look| look_data(look, &places)))).collect();
         let mut appearance = Appearance {
             gpu: gpu.clone(),
             descriptors,
@@ -391,15 +440,20 @@ impl Renderer {
             appearance.textures.push(texture(gpu, atlas.width, atlas.height, &atlas.rgba, FORMAT)?);
             Some(index)
         } else { None };
-        let mut array = |layers: &[crate::vrm::Image], empty: [u8; 4]| -> Result<usize, String> {
+        let mut array = |layers: &[&crate::vrm::Image], empty: [u8; 4]| -> Result<usize, String> {
             appearance.textures.push(match layers {
                 [] => layered(gpu, 1, 1, 1, &empty, FORMAT, vk::ImageViewType::TYPE_2D_ARRAY)?,
                 layers => layered(gpu, layers[0].width, layers[0].height, layers.len() as u32, &layers.iter().flat_map(|layer| layer.rgba.iter().copied()).collect::<Vec<_>>(), FORMAT, vk::ImageViewType::TYPE_2D_ARRAY)?,
             });
             Ok(appearance.textures.len() - 1)
         };
-        let decals = array(looks.map(|looks| &looks.decals[..]).unwrap_or_default(), [0; 4])?;
-        let matcaps = array(looks.map(|looks| &looks.matcaps[..]).unwrap_or_default(), [255; 4])?;
+        let mut decal_textures = Vec::new();
+        for page in &pages {
+            decal_textures.push(array(&page.iter().map(|&at| &decals[at]).collect::<Vec<_>>(), [0; 4])?);
+        }
+        let no_decal = array(&[], [0; 4])?;
+        decal_textures.resize(DECAL_PAGES, no_decal);
+        let matcaps = array(&looks.into_iter().flat_map(|looks| &looks.matcaps).collect::<Vec<_>>(), [255; 4])?;
         let mut single = |image: Option<&crate::vrm::Image>, format: vk::Format| -> Result<Option<usize>, String> {
             let Some(image) = image else { return Ok(None) };
             appearance.textures.push(texture(gpu, image.width, image.height, &image.rgba, format)?);
@@ -419,11 +473,12 @@ impl Renderer {
             let (base, shade, width) = (image(material.base_image), image(material.shade_image), image(material.outline.as_ref().and_then(|outline| outline.width_image)));
             let mask = image(hue_mask);
             let color = image(color_atlas);
-            let decal = image(Some(decals));
+            let decal: Vec<_> = decal_textures.iter().map(|&texture| vk::DescriptorImageInfo::default().image_view(appearance.textures[texture].view).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)).collect();
             let (index, matcap, masks, glow) = (image(Some(look_index.unwrap_or(black))), image(Some(matcaps)), image(matcap_masks), image(Some(emission.unwrap_or(black))));
             let surfaces = [vk::DescriptorBufferInfo::default().buffer(appearance.surfaces.0).range(vk::WHOLE_SIZE)];
             let looks = [vk::DescriptorBufferInfo::default().buffer(appearance.looks.0).range(vk::WHOLE_SIZE)];
             let sampler = [vk::DescriptorImageInfo::default().sampler(self.sampler)];
+            let edge_sampler = [vk::DescriptorImageInfo::default().sampler(self.edge_sampler)];
             let palette = [vk::DescriptorBufferInfo::default().buffer(appearance.palette.0).range(vk::WHOLE_SIZE)];
             let materials = [vk::DescriptorBufferInfo::default().buffer(appearance.materials.0).range(vk::WHOLE_SIZE)];
             let writes = [
@@ -442,6 +497,7 @@ impl Renderer {
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(12).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&matcap),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(13).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&masks),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(14).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&glow),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(15).descriptor_type(vk::DescriptorType::SAMPLER).image_info(&edge_sampler),
             ];
             unsafe { device.update_descriptor_sets(&writes, &[]) };
         }
@@ -465,11 +521,12 @@ impl Renderer {
             unsafe { device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None) }.map_err(vk_error("vkCreateShaderModule"))
         };
         let vertex = module(VERTEX_SHADER)?;
-        let fragment = module(FRAGMENT_SHADER)?;
-        let stages = [
-            vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vertex).name(c"vertex"),
-            vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(fragment).name(c"fragment"),
-        ];
+        let mut fragments = HashMap::new();
+        for key in keys {
+            if let std::collections::hash_map::Entry::Vacant(entry) = fragments.entry(key.pages) {
+                entry.insert(module(FRAGMENT_SHADERS[key.pages])?);
+            }
+        }
         let vertex_bindings = [vk::VertexInputBindingDescription::default().stride(std::mem::size_of::<Vertex>() as u32).input_rate(vk::VertexInputRate::VERTEX)];
         let vertex_attributes = [
             vk::VertexInputAttributeDescription::default().location(0).format(vk::Format::R32G32B32_SFLOAT).offset(0),
@@ -508,6 +565,10 @@ impl Renderer {
                     .alpha_blend_op(vk::BlendOp::ADD)
                     .color_write_mask(vk::ColorComponentFlags::RGBA)];
                 let color = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachment);
+                let stages = [
+                    vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vertex).name(c"vertex"),
+                    vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(fragments[&key.pages]).name(c"fragment"),
+                ];
                 let info = vk::GraphicsPipelineCreateInfo::default()
                     .stages(&stages)
                     .vertex_input_state(&input)
@@ -526,7 +587,9 @@ impl Renderer {
         }
         unsafe {
             device.destroy_shader_module(vertex, None);
-            device.destroy_shader_module(fragment, None);
+            for &fragment in fragments.values() {
+                device.destroy_shader_module(fragment, None);
+            }
         }
         Ok(pipelines)
     }
@@ -700,6 +763,7 @@ impl Drop for Renderer {
                 device.destroy_pipeline(pipeline, None);
             }
             device.destroy_sampler(self.sampler, None);
+            device.destroy_sampler(self.edge_sampler, None);
             device.destroy_pipeline_layout(self.layout, None);
             device.destroy_descriptor_set_layout(self.set_layout, None);
             device.destroy_render_pass(self.render_pass, None);
@@ -887,8 +951,8 @@ mod tests {
             menu.hue_mask = Some(crate::vrm::Image { width: 2, height: 1, rgba: mask });
             menu.color_atlas = Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![255; 4] });
             let mut look = looks_test::look();
-            look.decals[1] = Some(crate::vrm::expressions::Decal { alpha: 0.0, intensity: 1.0, multiply: space == 8.0 });
-            menu.looks = Some(crate::vrm::expressions::Looks { index: crate::vrm::Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }, materials: vec![look], decals: vec![crate::vrm::Image { width: 2, height: 1, rgba: vec![255; 8] }, crate::vrm::Image { width: 2, height: 1, rgba: vec![0, 255, 0, 255, 0, 0, 0, 0] }], matcaps: Vec::new(), matcap_masks: None, emission: None });
+            look.decals[1] = Some(crate::vrm::expressions::Decal { alpha: 0.0, intensity: 1.0, multiply: space == 8.0, image: 0 });
+            menu.looks = Some(crate::vrm::expressions::Looks { index: crate::vrm::Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }, materials: vec![look], decals: vec![crate::vrm::Image { width: 2, height: 1, rgba: vec![0, 255, 0, 255, 0, 0, 0, 0] }], matcaps: Vec::new(), matcap_masks: None, emission: None });
             model.menu = Some(menu);
             let mut skinned = model.skinned().unwrap();
             let original_vertices = bytes_of(&skinned.vertices).to_vec();
@@ -926,7 +990,7 @@ mod tests {
         use crate::vrm::expressions::{Lighting, Look, Mapping, Matcap, MatcapHue};
 
         pub fn look() -> Look {
-            Look { decals: [None, None, None, None], matcaps: [None, None, None, None], emission: None, lighting: Lighting::Lit }
+            Look { rect: [0.0, 0.0, 1.0, 1.0], decals: [None, None, None, None], matcaps: [None, None, None, None], emission: None, lighting: Lighting::Lit }
         }
 
         pub fn matcap() -> Matcap {
@@ -955,7 +1019,7 @@ mod tests {
         menu.looks = Some(crate::vrm::expressions::Looks {
             index: crate::vrm::Image { width: 2, height: 1, rgba: vec![1, 0, 0, 255, 0, 0, 0, 255] },
             materials: vec![look],
-            decals: vec![crate::vrm::Image { width: 2, height: 1, rgba: vec![0; 8] }, crate::vrm::Image { width: 2, height: 1, rgba: vec![0, 255, 0, 255, 0, 255, 0, 255] }],
+            decals: vec![crate::vrm::Image { width: 1, height: 1, rgba: vec![0, 255, 0, 255] }],
             matcaps,
             matcap_masks: None,
             emission: Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![255; 4] }),
@@ -996,7 +1060,7 @@ mod tests {
     #[test]
     fn a_decal_no_clip_animates_draws_at_its_saved_alpha() {
         let mut look = looks_test::look();
-        look.decals[1] = Some(crate::vrm::expressions::Decal { alpha: 1.0, intensity: 1.0, multiply: false });
+        look.decals[1] = Some(crate::vrm::expressions::Decal { alpha: 1.0, intensity: 1.0, multiply: false, image: 0 });
         let (shown, _, _) = look_drawn([255, 0, 0, 255], look.clone(), None, 0.0, 0.0, Vec::new());
         assert!(shown[1] > shown[0], "the texel's material lays its decal on with no surface value: {shown:?}");
         let (hidden, _, _) = look_drawn([255, 0, 0, 255], looks_test::look(), None, 0.0, 0.0, Vec::new());
@@ -1005,6 +1069,84 @@ mod tests {
         let (kept, cleared, right) = look_drawn([255, 0, 0, 255], look, Some(effect), 0.5, 0.0, Vec::new());
         assert!(kept[1] > kept[0], "a target at rest leaves the material its own alpha: {kept:?}");
         assert!(cleared[0] > cleared[1] && right, "an animated alpha overrides the saved one wherever the renderer shows: {cleared:?}");
+    }
+
+    /// A square quad textured black over the whole atlas, whose 8x8 look index gives material 1 the top-right quarter,
+    /// `[0.5, 0.0, 1.0, 0.5]`, and its first slot `decal`: the quad's covered pixels, a 64-pixel-wide eye.
+    fn decal_drawn(decal: crate::vrm::Image) -> Vec<u8> {
+        let mut builder = crate::vrm::tests::Builder::new(serde_json::json!({"VRMC_vrm": {"humanoid": {"humanBones": {}}}}));
+        let position = builder.accessor("VEC3", &[-0.5, 0.0, 0.0, 0.5, 0.0, 0.0, 0.5, 1.0, 0.0, -0.5, 1.0, 0.0]);
+        let normal = builder.accessor("VEC3", &[0.0, 0.0, 1.0].repeat(4));
+        let uv = builder.accessor("VEC2", &[0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
+        let indices = builder.indices(&[0, 1, 2, 0, 2, 3]);
+        builder.set("nodes", serde_json::json!([{"mesh": 0}]));
+        builder.set("meshes", serde_json::json!([{"primitives": [{"attributes": {"POSITION": position, "NORMAL": normal, "TEXCOORD_0": uv}, "indices": indices, "material": 0}]}]));
+        builder.set("materials", serde_json::json!([{"pbrMetallicRoughness": {"baseColorFactor": [1.0, 1.0, 1.0, 1.0]}}]));
+        let mut model = Model::parse(&builder.glb()).unwrap();
+        model.images.push(crate::vrm::Image { width: 1, height: 1, rgba: vec![0, 0, 0, 255] });
+        model.materials[0].base_image = Some(0);
+        model.materials[0].shade_image = Some(0);
+        let mut menu = crate::vrm::expressions::Expressions::parse(&serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": []})).unwrap();
+        let mut look = looks_test::look();
+        look.rect = [0.5, 0.0, 1.0, 0.5];
+        look.decals[0] = Some(crate::vrm::expressions::Decal { alpha: 1.0, intensity: 1.0, multiply: false, image: 1 });
+        let index = (0..64).flat_map(|at| [(at % 8 >= 4 && at / 8 < 4) as u8, 0, 0, 255]).collect();
+        let unused = crate::vrm::Image { width: 3, height: 5, rgba: vec![255; 60] };
+        menu.looks = Some(crate::vrm::expressions::Looks { index: crate::vrm::Image { width: 8, height: 8, rgba: index }, materials: vec![look], decals: vec![unused, decal], matcaps: Vec::new(), matcap_masks: None, emission: None });
+        model.menu = Some(menu);
+        let skinned = model.skinned().unwrap();
+        let worlds = model.worlds(&model.rest());
+        let fit = crate::vrm::Fit::new(&model, &skinned, crate::HEIGHT);
+        let palette = skinned.palette(&worlds, fit.placement(&model, &worlds, crate::FLOOR));
+        let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [64, 64], crate::HEIGHT / PAGE_HEIGHT).unwrap();
+        let mut appearance = renderer.appearance(&model, &skinned).unwrap();
+        appearance.update(&palette, &skinned, &[]);
+        renderer.render(&appearance, [eye_projection(Vec3::new(0.0, 0.0, 0.4), 0.2, 0.2), None], Mat4::IDENTITY, 64).unwrap();
+        renderer.read().unwrap()
+    }
+
+    #[test]
+    fn a_decal_of_any_size_spans_exactly_its_materials_cell() {
+        let quadrants = |side: u32| {
+            let colors = [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255], [255, 255, 255, 255]];
+            let rgba = (0..side * side).flat_map(|at| colors[((at / side >= side / 2) as usize) * 2 + (at % side >= side / 2) as usize]).collect();
+            crate::vrm::Image { width: side, height: side, rgba }
+        };
+        for side in [2, 16] {
+            let pixels = decal_drawn(quadrants(side));
+            let covered: Vec<(u32, u32)> = (0..64).flat_map(|y| (0..64).map(move |x| (x, y))).filter(|&(x, y)| pixel(&pixels, 128, x, y)[3] == 255).collect();
+            let (left, right) = (covered.iter().map(|p| p.0).min().unwrap(), covered.iter().map(|p| p.0).max().unwrap() + 1);
+            let (top, bottom) = (covered.iter().map(|p| p.1).min().unwrap(), covered.iter().map(|p| p.1).max().unwrap() + 1);
+            assert!(left > 0 && right < 64 && top > 0 && bottom < 64, "the whole quad is in view: {left}..{right} x {top}..{bottom}");
+            let at = |u: f32, v: f32| pixel(&pixels, 128, left + (u * (right - left) as f32) as u32, top + (v * (bottom - top) as f32) as u32);
+            let dominant = |color: [u8; 4]| -> &str {
+                let [r, g, b, _] = color.map(u32::from);
+                if r.max(g).max(b) < 24 { "black" } else if r.min(g).min(b) * 2 > r.max(g).max(b) { "white" } else if r > 2 * g && r > 2 * b { "red" } else if g > 2 * r && g > 2 * b { "green" } else if b > 2 * r && b > 2 * g { "blue" } else { "mixed" }
+            };
+            for (u, v, expected) in [(0.625, 0.125, "red"), (0.875, 0.125, "green"), (0.625, 0.375, "blue"), (0.875, 0.375, "white")] {
+                assert_eq!(dominant(at(u, v)), expected, "a {side}x{side} decal's quadrant lands on its quarter of the cell at uv ({u}, {v}): {:?}", at(u, v));
+            }
+            for (u, v) in [(0.25, 0.25), (0.25, 0.75), (0.75, 0.75), (0.45, 0.25), (0.75, 0.55)] {
+                assert_eq!(dominant(at(u, v)), "black", "a {side}x{side} decal stays off the atlas outside its cell at uv ({u}, {v}): {:?}", at(u, v));
+            }
+        }
+    }
+
+    #[test]
+    fn decals_share_pages_by_size_and_no_page_outgrows_its_budget_but_a_lone_decal() {
+        let image = |side: u32| crate::vrm::Image { width: side, height: side, rgba: Vec::new() };
+        let decals: Vec<crate::vrm::Image> = [[2048; 25].as_slice(), &[1024; 7], &[512; 4], &[4096; 2], &[4; 2], &[8192; 1]].concat().into_iter().map(image).collect();
+        let (pages, places) = decal_pages(&decals);
+        for page in &pages {
+            let decal = &decals[page[0]];
+            assert!(page.iter().all(|&at| (decals[at].width, decals[at].height) == (decal.width, decal.height)), "a page holds one size");
+            let bytes = page.len() as u64 * decal.width as u64 * decal.height as u64 * 16 / 3;
+            assert!(bytes <= PAGE_BYTES || page.len() == 1, "{} decals of {}: {bytes} bytes", page.len(), decal.width);
+        }
+        assert_eq!(pages.len(), 2 + 1 + 1 + 1 + 1 + 1);
+        for (at, place) in places.iter().enumerate() {
+            assert_eq!(pages[place.page][place.layer as usize], at, "each decal's place names it");
+        }
     }
 
     #[test]

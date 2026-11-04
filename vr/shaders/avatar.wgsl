@@ -35,7 +35,7 @@ struct Surface {
 }
 @group(0) @binding(7) var<storage, read> surfaces: array<Surface>;
 @group(0) @binding(8) var color_texture: texture_2d<f32>;
-@group(0) @binding(9) var decal_layers: texture_2d_array<f32>;
+@group(0) @binding(9) var decal_pages: binding_array<texture_2d_array<f32>, 8>;
 
 struct Matcap {
     color: vec4<f32>,
@@ -62,6 +62,9 @@ struct Look {
     decal: vec4<f32>,
     intensity: vec4<f32>,
     multiply: vec4<f32>,
+    rect: vec4<f32>,
+    page: vec4<i32>,
+    layer: vec4<u32>,
     emission_color: vec3<f32>,
     emission_strength: f32,
     emission_hue: f32,
@@ -75,6 +78,7 @@ struct Look {
 @group(0) @binding(12) var matcap_textures: texture_2d_array<f32>;
 @group(0) @binding(13) var matcap_masks: texture_2d<f32>;
 @group(0) @binding(14) var emission_map: texture_2d<f32>;
+@group(0) @binding(15) var edge_sampler: sampler;
 
 // Rows of Surface.look, in the order of expressions::Field.
 const DECAL = 0u;
@@ -201,11 +205,45 @@ fn value(at: u32, row: u32, slot: u32, rest: f32) -> f32 {
     return select(rest, surfaces[at].look[row][slot], ((surfaces[at].animated[bit / 32u] >> (bit % 32u)) & 1u) != 0u);
 }
 
+// How many pages a pipeline samples: build.rs compiles one fragment shader per count, since every sampled page costs the
+// driver's compiler whether a figure fills it or not.
+override decal_pages_used: u32;
+
+// Pages are indexed by constants alone: indexing them by a per-texel value needs a device feature the overlay does not ask for.
+fn decal(page: i32, layer: u32, uv: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>) -> vec4<f32> {
+    switch page {
+        case 0: { if 0u < decal_pages_used { return textureSampleGrad(decal_pages[0], edge_sampler, uv, layer, dx, dy); } }
+        case 1: { if 1u < decal_pages_used { return textureSampleGrad(decal_pages[1], edge_sampler, uv, layer, dx, dy); } }
+        case 2: { if 2u < decal_pages_used { return textureSampleGrad(decal_pages[2], edge_sampler, uv, layer, dx, dy); } }
+        case 3: { if 3u < decal_pages_used { return textureSampleGrad(decal_pages[3], edge_sampler, uv, layer, dx, dy); } }
+        case 4: { if 4u < decal_pages_used { return textureSampleGrad(decal_pages[4], edge_sampler, uv, layer, dx, dy); } }
+        case 5: { if 5u < decal_pages_used { return textureSampleGrad(decal_pages[5], edge_sampler, uv, layer, dx, dy); } }
+        case 6: { if 6u < decal_pages_used { return textureSampleGrad(decal_pages[6], edge_sampler, uv, layer, dx, dy); } }
+        case 7: { if 7u < decal_pages_used { return textureSampleGrad(decal_pages[7], edge_sampler, uv, layer, dx, dy); } }
+        default: {}
+    }
+    return vec4<f32>(0.0);
+}
+
+// The albedo and the shade share one sample of each decal.
+fn decal_samples(look: u32, uv: vec2<f32>) -> array<vec4<f32>, 4> {
+    var samples: array<vec4<f32>, 4>;
+    let rect = looks[look].rect;
+    let size = rect.zw - rect.xy;
+    let local = (uv - rect.xy) / size;
+    let dx = dpdx(uv) / size;
+    let dy = dpdy(uv) / size;
+    for (var slot = 0u; slot < 4u; slot++) {
+        samples[slot] = decal(looks[look].page[slot], looks[look].layer[slot], local, dx, dy);
+    }
+    return samples;
+}
+
 // Poiyomi lays its decals over the adjusted albedo in slot order; the shade takes them through its own tint.
-fn decals(color: vec3<f32>, tint: vec3<f32>, at: u32, look: u32, uv: vec2<f32>) -> vec3<f32> {
+fn decals(color: vec3<f32>, tint: vec3<f32>, at: u32, look: u32, samples: array<vec4<f32>, 4>) -> vec3<f32> {
     var result = color;
-    for (var slot = 0u; slot < min(textureNumLayers(decal_layers), 4u); slot++) {
-        let layer = textureSample(decal_layers, texture_sampler, uv, slot);
+    for (var slot = 0u; slot < 4u; slot++) {
+        let layer = samples[slot];
         let laid = mix(layer.rgb * tint, result * layer.rgb, looks[look].multiply[slot]);
         let alpha = value(at, DECAL, slot, looks[look].decal[slot]) * value(at, DECAL_INTENSITY, slot, looks[look].intensity[slot]);
         result = mix(result, laid, clamp(layer.a * alpha, 0.0, 1.0));
@@ -279,8 +317,9 @@ fn fragment(input: Varying, @builtin(front_facing) front: bool) -> @location(0) 
     if sampled.a < material.cutoff {
         discard;
     }
-    var albedo = decals(adjust(mix(sampled.rgb, raw * material.base.rgb, surface.color.a), surface, mask), vec3<f32>(1.0), input.surface, look, input.uv);
-    var shade = decals(adjust(mix(textureSample(shade_texture, texture_sampler, input.uv).rgb, raw, surface.color.a) * material.shade, surface, mask), material.shade, input.surface, look, input.uv);
+    let laid = decal_samples(look, input.uv);
+    var albedo = decals(adjust(mix(sampled.rgb, raw * material.base.rgb, surface.color.a), surface, mask), vec3<f32>(1.0), input.surface, look, laid);
+    var shade = decals(adjust(mix(textureSample(shade_texture, texture_sampler, input.uv).rgb, raw, surface.color.a) * material.shade, surface, mask), material.shade, input.surface, look, laid);
     let glow = matcaps(&albedo, &shade, material.shade, input.surface, look, input.uv, normal, view, lit);
     let base = vec4<f32>(albedo, sampled.a);
     var light: vec3<f32>;

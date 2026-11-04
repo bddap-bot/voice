@@ -333,6 +333,8 @@ pub struct Decal {
     pub alpha: f32,
     pub intensity: f32,
     pub multiply: bool,
+    /// Its place in `Looks::decals`, not a glTF image index.
+    pub image: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -355,6 +357,8 @@ pub enum Lighting {
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct Look {
+    /// The material's cell of the atlas, `[x0, y0, x1, y1]` in atlas UV; each of its decals spans it corner to corner.
+    pub rect: [f32; 4],
     pub decals: [Option<Decal>; 4],
     pub matcaps: [Option<Matcap>; 4],
     pub emission: Option<Emission>,
@@ -367,7 +371,7 @@ struct EncodedLooks {
     index: String,
     materials: Vec<Look>,
     #[serde(default)]
-    decals: Vec<String>,
+    decals: Vec<usize>,
     #[serde(default)]
     matcaps: Vec<String>,
     #[serde(default)]
@@ -377,7 +381,7 @@ struct EncodedLooks {
 }
 
 /// What each atlas texel's material lays over the albedo: `index`'s red channel names a texel's entry in `materials`,
-/// one-based, zero for none.
+/// one-based, zero for none. `decals` are the glTF images the extension names, each at its own size.
 #[derive(Clone, Debug)]
 pub struct Looks {
     pub index: Image,
@@ -536,25 +540,30 @@ fn image(encoded: &str) -> Result<Image, String> {
     Ok(Image { width: image.width(), height: image.height(), rgba: image.into_raw() })
 }
 
-fn looks(encoded: EncodedLooks) -> Result<Looks, String> {
-    let layers = |encoded: &[String], what: &str| -> Result<Vec<Image>, String> {
-        let layers: Vec<Image> = encoded.iter().map(|encoded| image(encoded)).collect::<Result<_, _>>().map_err(|error| format!("{EXTENSION}: {what}: {error}"))?;
-        if layers.iter().any(|layer| (layer.width, layer.height) != (layers[0].width, layers[0].height)) {
-            return Err(format!("{EXTENSION}: {what} of differing sizes"));
-        }
-        Ok(layers)
-    };
+fn looks(encoded: EncodedLooks, images: usize, decal: impl Fn(usize) -> Result<Image, String>) -> Result<Looks, String> {
+    let matcaps: Vec<Image> = encoded.matcaps.iter().map(|encoded| image(encoded)).collect::<Result<_, _>>().map_err(|error| format!("{EXTENSION}: matcaps: {error}"))?;
+    if matcaps.iter().any(|layer| (layer.width, layer.height) != (matcaps[0].width, matcaps[0].height)) {
+        return Err(format!("{EXTENSION}: matcaps of differing sizes"));
+    }
     let looks = Looks {
         index: image(&encoded.index).map_err(|error| format!("{EXTENSION}: look index: {error}"))?,
-        decals: layers(&encoded.decals, "decal layers")?,
-        matcaps: layers(&encoded.matcaps, "matcaps")?,
+        decals: encoded.decals.iter().map(|&image| if image < images { decal(image) } else { Err(format!("image {image} is not in the file")) }).collect::<Result<_, _>>().map_err(|error| format!("{EXTENSION}: a decal: {error}"))?,
+        matcaps,
         matcap_masks: encoded.matcap_masks.as_deref().map(image).transpose().map_err(|error| format!("{EXTENSION}: matcap masks: {error}"))?,
         emission: encoded.emission.as_deref().map(image).transpose().map_err(|error| format!("{EXTENSION}: emission: {error}"))?,
         materials: encoded.materials,
     };
     let textures = looks.matcaps.len() as u32;
-    if looks.decals.len() > 4 || looks.index.rgba.chunks_exact(4).any(|texel| texel[0] as usize > looks.materials.len()) || looks.materials.iter().flat_map(|look| look.matcaps.iter().flatten()).any(|matcap| matcap.texture.is_some_and(|texture| texture >= textures)) {
-        return Err(format!("{EXTENSION}: a look names a decal slot, material or matcap it does not have"));
+    let cell = |look: &Look| {
+        let [x0, y0, x1, y1] = look.rect;
+        let spanned = if look.decals.iter().any(Option::is_some) { x0 < x1 && y0 < y1 } else { x0 <= x1 && y0 <= y1 };
+        spanned && look.rect.iter().all(|v| (0.0..=1.0).contains(v))
+    };
+    if !looks.materials.iter().all(cell) {
+        return Err(format!("{EXTENSION}: a look's cell is not a rectangle of the atlas"));
+    }
+    if looks.materials.iter().flat_map(|look| look.decals.iter().flatten()).any(|decal| decal.image >= looks.decals.len()) || looks.index.rgba.chunks_exact(4).any(|texel| texel[0] as usize > looks.materials.len()) || looks.materials.iter().flat_map(|look| look.matcaps.iter().flatten()).any(|matcap| matcap.texture.is_some_and(|texture| texture >= textures)) {
+        return Err(format!("{EXTENSION}: a look names a decal, material or matcap it does not have"));
     }
     Ok(looks)
 }
@@ -577,7 +586,6 @@ impl Expressions {
         expressions.encoded_icons.clear();
         expressions.hue_mask = expressions.encoded_hue_mask.take().map(|encoded| image(&encoded)).transpose().map_err(|error| format!("{EXTENSION}: hue mask: {error}"))?;
         expressions.color_atlas = expressions.encoded_color_atlas.take().map(|encoded| image(&encoded)).transpose().map_err(|error| format!("{EXTENSION}: color atlas: {error}"))?;
-        expressions.looks = expressions.encoded_looks.take().map(looks).transpose()?;
         let unread: BTreeSet<&str> = expressions.targets.iter().filter_map(|target| match &target.effect { Effect::Unread(name) => Some(name.as_str()), _ => None }).collect();
         if !unread.is_empty() {
             tracing::warn!("{EXTENSION}: targets of effects the overlay does not read hold still: {unread:?}");
@@ -609,6 +617,11 @@ impl Expressions {
             return Err(format!("{EXTENSION}: a curve or switched node, spring or collider names a target it does not have"));
         }
         Ok(expressions)
+    }
+
+    pub(super) fn read_looks(&mut self, images: usize, decal: impl Fn(usize) -> Result<Image, String>) -> Result<(), String> {
+        self.looks = self.encoded_looks.take().map(|encoded| looks(encoded, images, decal)).transpose()?;
+        Ok(())
     }
 
     pub(super) fn check(&self, nodes: usize, meshes: &[super::Mesh]) -> Result<(), String> {

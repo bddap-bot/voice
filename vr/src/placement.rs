@@ -150,7 +150,7 @@ impl Anchor {
 pub const NEAREST: f32 = 0.4;
 pub const FARTHEST: f32 = 1.52;
 /// Half the cone ahead of the headset that counts as in view, peripheral vision included.
-pub const IN_VIEW: f32 = std::f32::consts::FRAC_PI_3;
+pub const IN_VIEW: f32 = 4.0 * std::f32::consts::PI / 9.0;
 /// Where it walks back to: this far off the line of sight and this far away, so it stands in view without blocking it.
 const ASIDE: f32 = 0.5;
 const KEEP: f32 = (NEAREST + FARTHEST) / 2.0;

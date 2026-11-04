@@ -34,11 +34,19 @@ const CLIP_EVERY: usize = 3;
 /// What the puppet points at: where the overlay's first object stands beside a hand-held puppet.
 const TARGET: Vec3 = [0.22, 0.12, 0.0];
 
-/// Wears each named appearance of the catalog, or all of it, as the host does off any headset: its idle, carried by a controller swinging and twisting it and then held still, touched by the other controller's hand sweeping through the back of its head, each gesture the page can reach while speaking, and a point at a spot beside it, each frame posed, skinned and drawn for both eyes through the host's own path.
+/// Wears each named appearance of the catalog, or all of it, as the host does off any headset: with `--speech`, first speaking a 48 kHz mono float recording, its mouth following the recording's level as it follows a heard reply's; its idle, carried by a controller swinging and twisting it and then held still, touched by the other controller's hand sweeping through the back of its head, each gesture the page can reach while speaking, and a point at a spot beside it, each frame posed, skinned and drawn for both eyes through the host's own path.
 /// Writes the revealed appearance library, a picture of each phase and a 30 frames a second clip of the whole run per appearance under the out directory, and reports each appearance's per-frame work and, where the kernel counts it, its GPU time.
 pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
-    let usage = "usage: voice-vr wear <out-dir> [<catalog id>...]";
-    let (out, ids) = args.split_first().ok_or(usage)?;
+    let usage = "usage: voice-vr wear <out-dir> [--speech <audio.f32>] [<catalog id>...]";
+    let (out, mut ids) = args.split_first().ok_or(usage)?;
+    let speech = match ids {
+        [flag, path, rest @ ..] if flag == "--speech" => {
+            ids = rest;
+            let bytes = std::fs::read(path).map_err(|error| format!("{path}: {error}"))?;
+            Some(crate::audio::floats(&bytes).collect::<Vec<f32>>())
+        }
+        _ => None,
+    };
     let out = PathBuf::from(out);
     std::fs::create_dir_all(&out).map_err(|error| format!("{}: {error}", out.display()))?;
     let cache = state.join("assets");
@@ -99,6 +107,14 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
             Ok(())
         };
         let frames = |span: Duration| (span.as_secs_f64() / FRAME.as_secs_f64()) as usize;
+        if let Some(samples) = &speech {
+            let mut mouth = 0.0;
+            let per_frame = FRAME.as_secs_f64() * crate::audio::RATE as f64;
+            for at in 0..=(samples.len() as f64 / per_frame).ceil() as usize {
+                mouth = crate::audio::follow(mouth, crate::audio::level_at(samples, (at as f64 * per_frame) as usize));
+                frame(&mut puppet, &mut pointing, HELD, None, mouth, None)?;
+            }
+        }
         for at in 0..frames(IDLE) {
             frame(&mut puppet, &mut pointing, HELD, None, 0.0, (at + 1 == frames(IDLE)).then(|| pictures.join("idle.png")).as_deref())?;
         }

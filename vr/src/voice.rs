@@ -14,8 +14,6 @@ use crate::turn::Judge;
 
 /// The page's wait for quiet after the sign-off.
 const SIGN_OFF_QUIET: Duration = Duration::from_secs(2);
-/// The page's per-frame easing of the mouth toward its target.
-const MOUTH_EASING: f32 = 0.65;
 /// How long a session that never opened stays up to show why before going dormant.
 const FAILED_HOLD: Duration = Duration::from_secs(10);
 /// An opened call that dies is reopened with the conversation, at most once in this long.
@@ -337,7 +335,7 @@ impl Voice {
     /// The mouth opening, easing toward what the reply's output energy asks for.
     pub fn mouth(&mut self) -> f32 {
         let Some(awake) = &mut self.awake else { return 0.0 };
-        awake.mouth += (audio::mouth(awake.session.level()) - awake.mouth) * MOUTH_EASING;
+        awake.mouth = audio::follow(awake.mouth, awake.session.level());
         awake.mouth
     }
 }

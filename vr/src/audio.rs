@@ -41,6 +41,8 @@ const SILENT: f32 = 0.001;
 /// The page's jitter delay before playback starts.
 const DELAY: usize = (RATE as usize * 15) / 100;
 const CAPACITY: usize = RATE as usize * 180;
+/// The page's per-frame easing of the mouth toward its target.
+const MOUTH_EASING: f32 = 0.65;
 /// The page's analyser window for the mouth.
 const WINDOW: usize = 256;
 /// Server-side buffering: small, so the mouth moves with what is heard.
@@ -103,7 +105,7 @@ impl PlaybackBuffer {
         }
         self.since_push += output.len();
         let window = &output[output.len().saturating_sub(WINDOW)..];
-        self.level = (window.iter().map(|sample| sample * sample).sum::<f32>() / window.len().max(1) as f32).sqrt();
+        self.level = level(window);
     }
 
     /// The root-mean-square of the latest output, which the mouth follows.
@@ -112,13 +114,29 @@ impl PlaybackBuffer {
     }
 }
 
+/// The root-mean-square of `window`, the output energy the mouth follows.
+pub fn level(window: &[f32]) -> f32 {
+    (window.iter().map(|sample| sample * sample).sum::<f32>() / window.len().max(1) as f32).sqrt()
+}
+
+/// The level of `samples` as heard at sample `at`: the analyser window ending there.
+pub fn level_at(samples: &[f32], at: usize) -> f32 {
+    let end = at.min(samples.len());
+    level(&samples[end.saturating_sub(WINDOW)..end])
+}
+
+/// The mouth one frame on from `mouth`, eased as the page eases it toward the opening `energy` asks for.
+pub fn follow(mouth: f32, energy: f32) -> f32 {
+    mouth + (self::mouth(energy) - mouth) * MOUTH_EASING
+}
+
 /// The page's `loudnessViseme` amount: the mouth opening for an output energy.
 pub fn mouth(energy: f32) -> f32 {
     let t = ((energy - 0.018) / (0.16 - 0.018)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t) * 0.82
 }
 
-fn floats(bytes: &[u8]) -> impl Iterator<Item = f32> + '_ {
+pub fn floats(bytes: &[u8]) -> impl Iterator<Item = f32> + '_ {
     bytes.chunks_exact(4).map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
 }
 

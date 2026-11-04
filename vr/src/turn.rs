@@ -141,7 +141,7 @@ pub fn replay(args: &[String]) -> Result<(), String> {
     let [audio, cuts @ ..] = args else { return Err("usage: voice-vr turn <audio.f32> <seconds>...".into()) };
     let model = Model::load(&std::env::var_os("VOICE_VR_TURN_MODEL").map(PathBuf::from).ok_or("VOICE_VR_TURN_MODEL is not set")?)?;
     let bytes = std::fs::read(audio).map_err(|error| format!("{audio}: {error}"))?;
-    let samples: Vec<f32> = bytes.chunks_exact(4).map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap())).collect();
+    let samples: Vec<f32> = crate::audio::floats(&bytes).collect();
     for cut in cuts {
         let seconds: f64 = cut.parse().map_err(|_| format!("{cut}: not a time in seconds"))?;
         let started = Instant::now();

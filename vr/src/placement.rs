@@ -146,8 +146,8 @@ impl Anchor {
     }
 }
 
-/// The band a floor puppet keeps around the headset, measured across the floor: two to five feet.
-pub const NEAREST: f32 = 0.61;
+/// The band a floor puppet keeps around the headset, measured across the floor: within a hand's reach of him without its head reaching his, out to five feet.
+pub const NEAREST: f32 = 0.4;
 pub const FARTHEST: f32 = 1.52;
 /// Half the cone ahead of the headset that counts as in view, peripheral vision included.
 pub const IN_VIEW: f32 = std::f32::consts::FRAC_PI_3;

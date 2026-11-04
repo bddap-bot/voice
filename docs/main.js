@@ -366,17 +366,35 @@ function keepPage() {
   else sessionStorage.removeItem(PAGE_KEY);
 }
 
+// A hub reply rides the relay's bulk lane, its display as hub-chunk frames, so an answer can overtake it.
+function joinHub(line, chunks) {
+  const head = enc.encode(`hub\n${dec.decode(line)}${chunks.length ? '\n' : ''}`);
+  const joined = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, head.length));
+  joined.set(head);
+  chunks.reduce((offset, chunk) => { joined.set(chunk, offset); return offset + chunk.length; }, head.length);
+  return joined;
+}
+
 async function listen(mine) {
+  let chunks = [];
   try {
     for (;;) {
       const raw = await recv();
       if (mine !== generation) return;
       relayHeardAt = performance.now();
       if (await puppetChannel.receive(raw)) continue;
-      const value = dec.decode(raw);
-      const at = value.indexOf('\n');
-      const verb = at < 0 ? value : value.slice(0, at);
-      const body = at < 0 ? '' : value.slice(at + 1);
+      const at = raw.indexOf(10);
+      const verb = dec.decode(at < 0 ? raw : raw.subarray(0, at));
+      if (verb === 'hub-chunk') {
+        chunks.push(raw.slice(at + 1));
+        continue;
+      }
+      if (verb === 'hub-end') {
+        receiveHub(joinHub(raw.subarray(at + 1), chunks)).catch(recordPageError);
+        chunks = [];
+        continue;
+      }
+      const body = at < 0 ? '' : dec.decode(raw.subarray(at + 1));
       if (verb === 'hub') receiveHub(raw).catch(recordPageError);
       else if (verb === 'answer') {
         const answer = JSON.parse(body);

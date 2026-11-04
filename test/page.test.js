@@ -1316,6 +1316,26 @@ window.addEventListener('test-ready', () => {
   assert.deepEqual(result, { count: 2, first: 'Newest', link: 'https://example.test/result', image: true, gestured: false }, stderr);
 });
 
+test('a display image in hub-chunk frames shows whole once its hub-end arrives, and a bare hub-end is a reply without one', async () => {
+  const { result, stderr } = await runPage(`
+window.addEventListener('test-ready', () => {
+  const enc = new TextEncoder();
+  const join = (...parts) => { const out = new Uint8Array(parts.reduce((n, part) => n + part.length, 0)); parts.reduce((at, part) => { out.set(part, at); return at + part.length; }, 0); return out; };
+  const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAQAAAADCAIAAAA7ljmRAAAAEElEQVR4nGM4kGAARww4OQA6Fg/BwfqvjwAAAABJRU5ErkJggg=='), (c) => c.charCodeAt(0));
+  deliverRelay(join(enc.encode('hub-chunk\\n'), png.subarray(0, 20)));
+  deliverRelay(join(enc.encode('hub-chunk\\n'), png.subarray(20)));
+  deliverRelay(enc.encode('hub-end\\n' + JSON.stringify({ id: 'unknown', commentary: [], instructions: [], timing_ms: 1, stamp: 'chunked', display: { markdown: 'Chunked', image: { mime: 'image/png' } } })));
+  deliverRelay(enc.encode('hub-end\\n' + JSON.stringify({ id: 'unknown', commentary: [], instructions: [], timing_ms: 1, stamp: 'bare', display: { markdown: 'Bare' } })));
+  until(() => globalThis.hubAcks?.includes('bare') && document.querySelectorAll('.display-item').length === 2).then(async () => {
+    const image = document.querySelector('.display-item:last-child img');
+    const bytes = new Uint8Array(await (await fetch(image.src)).arrayBuffer());
+    document.body.dataset.result = JSON.stringify({ acks: globalThis.hubAcks, items: [...document.querySelectorAll('.display-item')].map((item) => item.textContent), whole: bytes.length === png.length && bytes.every((byte, index) => byte === png[index]), bareImage: Boolean(document.querySelector('.display-item:first-child img')) });
+  });
+});
+`);
+  assert.deepEqual(result, { acks: ['chunked', 'bare'], items: ['Bare', 'Chunked'], whole: true, bareImage: false }, stderr);
+});
+
 for (const size of ['720,1280', '1440,900']) test(`the delegation log keeps its newest entry in view at ${size}`, async () => {
   const { result, stderr } = await runPage(`
 window.addEventListener('test-ready', () => {

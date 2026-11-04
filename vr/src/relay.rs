@@ -85,6 +85,7 @@ struct Iroh {
     connection: iroh::endpoint::Connection,
     send: Option<iroh::endpoint::SendStream>,
     recv: Option<iroh::endpoint::RecvStream>,
+    join: HubJoin,
 }
 
 async fn read_frame(recv: &mut iroh::endpoint::RecvStream) -> Result<Vec<u8>, String> {
@@ -97,6 +98,38 @@ async fn read_frame(recv: &mut iroh::endpoint::RecvStream) -> Result<Vec<u8>, St
     let mut frame = vec![0u8; length];
     recv.read_exact(&mut frame).await.map_err(|error| format!("relay read: {error}"))?;
     Ok(frame)
+}
+
+/// A hub reply rides the relay's bulk lane as `hub-chunk` frames ahead of its `hub-end`, so an answer can overtake it.
+#[derive(Default)]
+struct HubJoin(Vec<u8>);
+
+impl HubJoin {
+    fn frame(&mut self, frame: Vec<u8>) -> Result<Option<Vec<u8>>, String> {
+        if let Some(chunk) = frame.strip_prefix(b"hub-chunk\n") {
+            if self.0.len() + chunk.len() > MAX_FRAME {
+                return Err(format!("hub display over {MAX_FRAME} bytes"));
+            }
+            self.0.extend_from_slice(chunk);
+            return Ok(None);
+        }
+        let Some(line) = frame.strip_prefix(b"hub-end\n") else { return Ok(Some(frame)) };
+        let image = std::mem::take(&mut self.0);
+        let mut joined = [b"hub\n", line].concat();
+        if !image.is_empty() {
+            joined.push(b'\n');
+            joined.extend(image);
+        }
+        Ok(Some(joined))
+    }
+}
+
+async fn read_joined(recv: &mut iroh::endpoint::RecvStream, join: &mut HubJoin) -> Result<Vec<u8>, String> {
+    loop {
+        if let Some(frame) = join.frame(read_frame(recv).await?)? {
+            return Ok(frame);
+        }
+    }
 }
 
 pub fn split(frame: &[u8]) -> (&str, &[u8]) {
@@ -117,7 +150,7 @@ fn dial(address: &iroh::EndpointAddr) -> Result<Iroh, String> {
         Ok::<_, String>((connection, send, recv))
     });
     match opened {
-        Ok((connection, send, recv)) => Ok(Iroh { runtime: Arc::new(runtime), endpoint, connection, send: Some(send), recv: Some(recv) }),
+        Ok((connection, send, recv)) => Ok(Iroh { runtime: Arc::new(runtime), endpoint, connection, send: Some(send), recv: Some(recv), join: HubJoin::default() }),
         Err(error) => {
             runtime.block_on(endpoint.close());
             Err(error)
@@ -324,15 +357,17 @@ impl Wire for Iroh {
         let Some(recv) = self.recv.as_mut() else {
             return Err("the relay stream lost its framing".into());
         };
-        self.runtime.block_on(async { tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), read_frame(recv)).await.map_err(|_| "the relay went quiet".to_owned())? })
+        let join = &mut self.join;
+        self.runtime.block_on(async { tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), read_joined(recv, join)).await.map_err(|_| "the relay went quiet".to_owned())? })
     }
 
     fn listen(&mut self) -> mpsc::Receiver<Result<Vec<u8>, String>> {
         let (sender, receiver) = mpsc::channel();
         if let Some(mut recv) = self.recv.take() {
+            let mut join = std::mem::take(&mut self.join);
             self.runtime.spawn(async move {
                 loop {
-                    let frame = read_frame(&mut recv).await;
+                    let frame = read_joined(&mut recv, &mut join).await;
                     let failed = frame.is_err();
                     if sender.send(frame).is_err() || failed {
                         break;
@@ -417,6 +452,17 @@ mod tests {
         let token = Token::decode(&format!(" {encoded}\n")).unwrap();
         assert_eq!((token.endpoint_id.as_str(), token.relay_url.as_deref(), token.secret.as_str()), ("abc", Some("https://relay.example/"), "s?>"));
         assert!(Token::decode("not a token!").is_err());
+    }
+
+    #[test]
+    fn hub_chunks_rejoin_as_the_hub_frame_their_hub_end_stands_for() {
+        let mut join = HubJoin::default();
+        assert_eq!(join.frame(b"hub-chunk\nPN".to_vec()), Ok(None));
+        assert_eq!(join.frame(b"answer\n{}".to_vec()), Ok(Some(b"answer\n{}".to_vec())));
+        assert_eq!(join.frame(b"hub-chunk\nG\n".to_vec()), Ok(None));
+        assert_eq!(join.frame(b"hub-end\n{\"id\":\"a\"}".to_vec()), Ok(Some(b"hub\n{\"id\":\"a\"}\nPNG\n".to_vec())));
+        assert_eq!(join.frame(b"hub-end\n{\"id\":\"b\"}".to_vec()), Ok(Some(b"hub\n{\"id\":\"b\"}".to_vec())));
+        assert!(join.frame([&b"hub-chunk\n"[..], &vec![0; MAX_FRAME + 1]].concat()).is_err());
     }
 
     #[test]

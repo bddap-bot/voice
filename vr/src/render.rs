@@ -1078,11 +1078,15 @@ mod tests {
             { "attributes": { "POSITION": position, "NORMAL": normal }, "indices": far, "material": 1 }
         ] }]));
         let toon = |zwrite: bool, color: [f32; 4]| serde_json::json!({ "alphaMode": "BLEND", "pbrMetallicRoughness": { "baseColorFactor": color }, "extensions": { "VRMC_materials_mtoon": { "transparentWithZWrite": zwrite } } });
-        builder.set("materials", serde_json::json!([toon(true, [1.0, 0.0, 0.0, 0.5]), toon(false, [0.0, 0.0, 1.0, 0.5])]));
-        let model = Model::parse(&builder.glb()).unwrap();
-        let pixels = draw(&model, &model.rest(), [32, 32], [eye_projection(Vec3::new(0.0, 0.0, 0.4), 0.2, 0.2), None], Vec3::ZERO);
-        let center = pixel(&pixels, 64, 16, 16);
-        assert!(center[0] > 100 && center[2] == 0, "only the near surface shows: {center:?}");
+        let plain = |zwrite: bool, color: [f32; 4]| serde_json::json!({ "alphaMode": "BLEND", "pbrMetallicRoughness": { "baseColorFactor": color }, "extras": { "depthWrite": zwrite } });
+        for material in [toon, plain] {
+            let mut builder = builder.clone();
+            builder.set("materials", serde_json::json!([material(true, [1.0, 0.0, 0.0, 0.5]), material(false, [0.0, 0.0, 1.0, 0.5])]));
+            let model = Model::parse(&builder.glb()).unwrap();
+            let pixels = draw(&model, &model.rest(), [32, 32], [eye_projection(Vec3::new(0.0, 0.0, 0.4), 0.2, 0.2), None], Vec3::ZERO);
+            let center = pixel(&pixels, 64, 16, 16);
+            assert!(center[0] > 100 && center[2] == 0, "only the near surface shows: {center:?}");
+        }
     }
 
     #[test]

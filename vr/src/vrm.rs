@@ -626,7 +626,8 @@ fn material_one(document: &Document, material: &Value) -> Material {
     };
     let toon = &material["extensions"]["VRMC_materials_mtoon"];
     let lit = toon.is_null();
-    let depth_write = alpha != Alpha::Blend || toon["transparentWithZWrite"].as_bool() == Some(true);
+    // A converter keeps Unity's ZWrite On on a plain blended material in its glTF extras.
+    let depth_write = alpha != Alpha::Blend || toon["transparentWithZWrite"].as_bool() == Some(true) || material["extras"]["depthWrite"].as_bool() == Some(true);
     let queue = match alpha {
         Alpha::Opaque => 2000,
         Alpha::Cutout(_) => 2450,
@@ -1536,6 +1537,7 @@ pub fn bounds(points: &[Vec3]) -> (Vec3, Vec3) {
 pub mod tests {
     use super::*;
 
+    #[derive(Clone)]
     pub struct Builder {
         json: Value,
         binary: Vec<u8>,

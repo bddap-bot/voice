@@ -273,9 +273,10 @@ pub enum Field {
     MatcapMultiply,
     MatcapAdd,
     MatcapMixed,
+    DecalHue,
 }
 
-pub const FIELDS: usize = Field::MatcapMixed as usize + 1;
+pub const FIELDS: usize = Field::DecalHue as usize + 1;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct LookRegion {
@@ -295,7 +296,7 @@ pub enum Mapping {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
-pub struct MatcapHue {
+pub struct HueShift {
     pub shift: f32,
     pub space: f32,
     pub select: f32,
@@ -324,7 +325,7 @@ pub struct Matcap {
     pub light_add: f32,
     pub emission: f32,
     pub light_mask: f32,
-    pub hue: Option<MatcapHue>,
+    pub hue: Option<HueShift>,
     pub circle: Option<Circle>,
 }
 
@@ -335,6 +336,8 @@ pub struct Decal {
     pub multiply: bool,
     /// Its place in `Looks::decals`, not a glTF image index.
     pub image: usize,
+    /// Set where a clip turns the decal's hue, so its image holds it unturned.
+    pub hue: Option<HueShift>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]

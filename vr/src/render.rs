@@ -83,6 +83,7 @@ struct LookData {
     rect: [f32; 4],
     page: [i32; 4],
     layer: [u32; 4],
+    decal_hue: [[f32; 4]; 4],
     emission_color: [f32; 3],
     emission_strength: f32,
     emission_hue: f32,
@@ -103,6 +104,7 @@ fn look_data(look: &crate::vrm::expressions::Look, places: &[Place]) -> LookData
         rect: look.rect,
         page: look.decals.each_ref().map(|decal| decal.as_ref().map_or(-1, |decal| places[decal.image].page as i32)),
         layer: look.decals.each_ref().map(|decal| decal.as_ref().map_or(0, |decal| places[decal.image].layer)),
+        decal_hue: look.decals.each_ref().map(|decal| decal.as_ref().and_then(|decal| decal.hue.as_ref()).map_or([0.0; 4], |hue| [hue.shift, hue.space, hue.select, 1.0])),
         emission_color: emission.map_or([0.0; 3], |emission| emission.color),
         emission_strength: emission.map_or(0.0, |emission| emission.strength),
         emission_hue: emission.map_or(0.0, |emission| emission.hue),
@@ -951,7 +953,7 @@ mod tests {
             menu.hue_mask = Some(crate::vrm::Image { width: 2, height: 1, rgba: mask });
             menu.color_atlas = Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![255; 4] });
             let mut look = looks_test::look();
-            look.decals[1] = Some(crate::vrm::expressions::Decal { alpha: 0.0, intensity: 1.0, multiply: space == 8.0, image: 0 });
+            look.decals[1] = Some(crate::vrm::expressions::Decal { alpha: 0.0, intensity: 1.0, multiply: space == 8.0, image: 0, hue: None });
             menu.looks = Some(crate::vrm::expressions::Looks { index: crate::vrm::Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }, materials: vec![look], decals: vec![crate::vrm::Image { width: 2, height: 1, rgba: vec![0, 255, 0, 255, 0, 0, 0, 0] }], matcaps: Vec::new(), matcap_masks: None, emission: None });
             model.menu = Some(menu);
             let mut skinned = model.skinned().unwrap();
@@ -987,14 +989,14 @@ mod tests {
     }
 
     mod looks_test {
-        use crate::vrm::expressions::{Lighting, Look, Mapping, Matcap, MatcapHue};
+        use crate::vrm::expressions::{Lighting, Look, Mapping, Matcap, HueShift};
 
         pub fn look() -> Look {
             Look { rect: [0.0, 0.0, 1.0, 1.0], decals: [None, None, None, None], matcaps: [None, None, None, None], emission: None, lighting: Lighting::Lit }
         }
 
         pub fn matcap() -> Matcap {
-            Matcap { texture: Some(0), mode: Mapping::Normal, border: 0.5, color: [1.0; 4], intensity: 1.0, base_mix: 0.0, replace: 1.0, multiply: 0.0, add: 0.0, screen: 0.0, mixed: 0.0, light_add: 0.0, emission: 0.0, light_mask: 0.0, hue: Some(MatcapHue { shift: 0.0, space: 0.0, select: 1.0 }), circle: None }
+            Matcap { texture: Some(0), mode: Mapping::Normal, border: 0.5, color: [1.0; 4], intensity: 1.0, base_mix: 0.0, replace: 1.0, multiply: 0.0, add: 0.0, screen: 0.0, mixed: 0.0, light_add: 0.0, emission: 0.0, light_mask: 0.0, hue: Some(HueShift { shift: 0.0, space: 0.0, select: 1.0 }), circle: None }
         }
     }
 
@@ -1060,7 +1062,7 @@ mod tests {
     #[test]
     fn a_decal_no_clip_animates_draws_at_its_saved_alpha() {
         let mut look = looks_test::look();
-        look.decals[1] = Some(crate::vrm::expressions::Decal { alpha: 1.0, intensity: 1.0, multiply: false, image: 0 });
+        look.decals[1] = Some(crate::vrm::expressions::Decal { alpha: 1.0, intensity: 1.0, multiply: false, image: 0, hue: None });
         let (shown, _, _) = look_drawn([255, 0, 0, 255], look.clone(), None, 0.0, 0.0, Vec::new());
         assert!(shown[1] > shown[0], "the texel's material lays its decal on with no surface value: {shown:?}");
         let (hidden, _, _) = look_drawn([255, 0, 0, 255], looks_test::look(), None, 0.0, 0.0, Vec::new());
@@ -1069,6 +1071,20 @@ mod tests {
         let (kept, cleared, right) = look_drawn([255, 0, 0, 255], look, Some(effect), 0.5, 0.0, Vec::new());
         assert!(kept[1] > kept[0], "a target at rest leaves the material its own alpha: {kept:?}");
         assert!(cleared[0] > cleared[1] && right, "an animated alpha overrides the saved one wherever the renderer shows: {cleared:?}");
+    }
+
+    #[test]
+    fn a_clip_turns_a_decals_hue_and_its_rest_turn_holds_without_one() {
+        let mut look = looks_test::look();
+        let hue = crate::vrm::expressions::HueShift { shift: 0.0, space: 1.0, select: 1.0 };
+        look.decals[1] = Some(crate::vrm::expressions::Decal { alpha: 1.0, intensity: 1.0, multiply: false, image: 0, hue: Some(hue.clone()) });
+        let effect = serde_json::json!({"look": [{"node": 0, "rect": [0.0, 0.0, 1.0, 1.0], "field": "decalHue", "slot": 1}]});
+        let (rest, turned, _) = look_drawn([0, 0, 0, 255], look.clone(), Some(effect), 0.0, 1.0 / 3.0, Vec::new());
+        assert!(rest[1] > 2 * rest[2], "at its rest turn the green decal stays green: {rest:?}");
+        assert!(turned[2] > 2 * turned[1], "a third of a turn in HSV takes green to blue: {turned:?}");
+        look.decals[1].as_mut().unwrap().hue = Some(crate::vrm::expressions::HueShift { shift: 1.0 / 3.0, ..hue });
+        let (saved, _, _) = look_drawn([0, 0, 0, 255], look, None, 0.0, 0.0, Vec::new());
+        assert!(saved[2] > 2 * saved[1], "no clip: the decal draws turned by its saved shift: {saved:?}");
     }
 
     /// A square quad textured black over the whole atlas, whose 8x8 look index gives material 1 the top-right quarter,
@@ -1089,7 +1105,7 @@ mod tests {
         let mut menu = crate::vrm::expressions::Expressions::parse(&serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": []})).unwrap();
         let mut look = looks_test::look();
         look.rect = [0.5, 0.0, 1.0, 0.5];
-        look.decals[0] = Some(crate::vrm::expressions::Decal { alpha: 1.0, intensity: 1.0, multiply: false, image: 1 });
+        look.decals[0] = Some(crate::vrm::expressions::Decal { alpha: 1.0, intensity: 1.0, multiply: false, image: 1, hue: None });
         let index = (0..64).flat_map(|at| [(at % 8 >= 4 && at / 8 < 4) as u8, 0, 0, 255]).collect();
         let unused = crate::vrm::Image { width: 3, height: 5, rgba: vec![255; 60] };
         menu.looks = Some(crate::vrm::expressions::Looks { index: crate::vrm::Image { width: 8, height: 8, rgba: index }, materials: vec![look], decals: vec![unused, decal], matcaps: Vec::new(), matcap_masks: None, emission: None });

@@ -30,7 +30,7 @@ struct Surface {
     hue: vec4<f32>,
     color: vec4<f32>,
     tone: vec4<f32>,
-    look: array<vec4<f32>, 10>,
+    look: array<vec4<f32>, 11>,
     animated: vec4<u32>,
 }
 @group(0) @binding(7) var<storage, read> surfaces: array<Surface>;
@@ -65,6 +65,7 @@ struct Look {
     rect: vec4<f32>,
     page: vec4<i32>,
     layer: vec4<u32>,
+    decal_hue: array<vec4<f32>, 4>,
     emission_color: vec3<f32>,
     emission_strength: f32,
     emission_hue: f32,
@@ -91,6 +92,7 @@ const MATCAP_REPLACE = 6u;
 const MATCAP_MULTIPLY = 7u;
 const MATCAP_ADD = 8u;
 const MATCAP_MIXED = 9u;
+const DECAL_HUE = 10u;
 
 @group(0) @binding(2) var texture_sampler: sampler;
 @group(0) @binding(3) var outline_width_texture: texture_2d<f32>;
@@ -244,7 +246,9 @@ fn decals(color: vec3<f32>, tint: vec3<f32>, at: u32, look: u32, samples: array<
     var result = color;
     for (var slot = 0u; slot < 4u; slot++) {
         let layer = samples[slot];
-        let laid = mix(layer.rgb * tint, result * layer.rgb, looks[look].multiply[slot]);
+        let turn = looks[look].decal_hue[slot];
+        let colour = hue(layer.rgb, vec4<f32>(value(at, DECAL_HUE, slot, turn.x), turn.yzw));
+        let laid = mix(colour * tint, result * colour, looks[look].multiply[slot]);
         let alpha = value(at, DECAL, slot, looks[look].decal[slot]) * value(at, DECAL_INTENSITY, slot, looks[look].intensity[slot]);
         result = mix(result, laid, clamp(layer.a * alpha, 0.0, 1.0));
     }

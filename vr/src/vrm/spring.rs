@@ -24,7 +24,7 @@ enum Bound {
     Polar,
 }
 
-/// How far a joint may swing from its rest direction, as a VRChat PhysBone's limit: angles in radians about the axis `rotation` turns the rest direction and the joint's X to.
+/// How far a joint may swing, as a VRChat PhysBone's limit: angles in radians about its axis, `rotation` turning the joint's Y to that axis and its X to the limit's own X, as VRChat's CalcLimitAxis builds them from the bone's direction and limitRotation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Limit {
     bound: Bound,
@@ -49,10 +49,9 @@ impl Limit {
         Some(Limit { bound, x: number(&limit["x"], 180.0).to_radians(), z: number(&limit["z"], 180.0).to_radians(), rotation })
     }
 
-    /// `toward`, a direction in the joint's rest axes, brought back inside the limit about `rest`.
-    fn keep(&self, rest: Vec3, toward: Vec3) -> Vec3 {
-        let up = self.rotation * rest.normalize();
-        let side = (self.rotation * Vec3::X).reject_from(up).try_normalize().unwrap_or_else(|| up.any_orthonormal_vector());
+    /// `toward`, a direction in the joint's rest axes, brought back inside the limit.
+    fn keep(&self, toward: Vec3) -> Vec3 {
+        let (up, side) = (self.rotation * Vec3::Y, self.rotation * Vec3::X);
         let front = side.cross(up);
         let (mut x, y, z) = (toward.dot(side), toward.dot(up), toward.dot(front));
         if self.bound == Bound::Hinge {
@@ -70,7 +69,8 @@ impl Limit {
             return toward;
         }
         let swing = swing.min(self.x);
-        let across = across.try_normalize().unwrap_or(Vec3::ZERO);
+        // Straight against the axis, VRChat turns it about the limit's X.
+        let across = across.try_normalize().unwrap_or(Vec3::Z);
         up * swing.cos() + (side * across.x + front * across.z) * swing.sin()
     }
 }
@@ -605,7 +605,7 @@ impl Springs {
                 }
                 if let Some(limit) = limit {
                     let rest = initial.inverse();
-                    next = origin + initial.transform_vector3(limit.keep(joint.tail, rest.transform_vector3(next - origin).normalize_or(joint.tail.normalize()))).normalize_or(axis) * length;
+                    next = origin + initial.transform_vector3(limit.keep(rest.transform_vector3(next - origin).normalize_or(joint.tail.normalize()))).normalize_or(axis) * length;
                 }
                 *tail = Tail { now: next, before: tail.now, ..*tail };
             }
@@ -654,7 +654,11 @@ impl Springs {
                     let rotation = if fresh { node.rotation } else { pose.rotations[joint.node] };
                     let world = local(rotation);
                     let end = world.transform_point3(joint.tail);
-                    *tail = Tail { rotation, now: end, vector: end - world.w_axis.truncate(), velocity: Vec3::ZERO, felt: Vec3::ZERO, anchored: immobile.inverse().transform_point3(end), length: joint.tail.length(), ..*tail };
+                    let felt = match joint.physbone {
+                        Some(bone) if !fresh => carried(bone, tail, &Frames { immobile, carrier }).1,
+                        _ => Vec3::ZERO,
+                    };
+                    *tail = Tail { rotation, now: end, vector: end - world.w_axis.truncate(), velocity: Vec3::ZERO, felt, anchored: immobile.inverse().transform_point3(end), length: joint.tail.length(), ..*tail };
                 } else if let Some(bone) = joint.physbone {
                     tail.rotation = swing(joint, bone, node.rotation, tail, &local, Frames { immobile, carrier }, (ratio, whole), joint.groups.iter().flat_map(|&group| &rig.groups[group]).filter(|&&collider| !idle.colliders.contains(&rig.colliders[collider].source)).map(|&collider| &colliders[collider]).chain(if joint.others { hands } else { &[] }));
                 }
@@ -696,6 +700,12 @@ struct Frames {
     carrier: Mat4,
 }
 
+/// How far immobile holds the tail back toward where it was, and the motion of its chain's anchor at the tail beyond that.
+fn carried(bone: PhysBone, tail: &Tail, Frames { immobile, carrier }: &Frames) -> (Vec3, Vec3) {
+    let held = (immobile.transform_point3(tail.anchored) - tail.now) * bone.immobile;
+    (held, carrier.transform_point3(tail.now) - tail.now - held)
+}
+
 /// One VRChat PhysBone step of a bone, its tail's state kept in `tail`, returning the bone's turn.
 fn swing<'a>(joint: &Joint, bone: PhysBone, resting: Quat, tail: &mut Tail, local: &impl Fn(Quat) -> Mat4, Frames { immobile, carrier }: Frames, (ratio, whole): (f32, bool), touching: impl Iterator<Item = &'a Placed>) -> Quat {
     let along = joint.tail.normalize();
@@ -711,12 +721,11 @@ fn swing<'a>(joint: &Joint, bone: PhysBone, resting: Quat, tail: &mut Tail, loca
     let mut target = original.transform_point3(joint.tail);
     let rest = (target - begin).length().max(8e-6);
     let start = tail.now;
-    let held = (immobile.transform_point3(tail.anchored) - start) * bone.immobile;
-    // Steady motion of the chain's anchor carries the tail with it; only a change in that motion swings it, at the share immobile leaves felt.
-    let felt = carrier.transform_point3(start) - start - held;
-    let mut end = start + held + felt;
-    let from = end;
-    let velocity = tail.velocity + tail.felt - felt;
+    let (held, felt) = carried(bone, tail, &Frames { immobile, carrier });
+    // The tail keeps on with the anchor's motion of the last step, so steady motion carries it and only a change in that motion swings it, whatever its spring.
+    let from = start + held + felt;
+    let mut end = start + held + tail.felt;
+    let velocity = tail.velocity;
     let vector = carrier.transform_vector3(tail.vector);
     let down = Vec3::NEG_Y;
     let weigh = |gravity: f32| {
@@ -748,7 +757,7 @@ fn swing<'a>(joint: &Joint, bone: PhysBone, resting: Quat, tail: &mut Tail, loca
             }
             step = step.lerp(velocity, momentum);
             if whole {
-                tail.velocity = step;
+                tail.velocity = end + step - from;
             }
         }
         step = begin + (end + step - begin).normalize_or_zero() * length - end;
@@ -766,7 +775,7 @@ fn swing<'a>(joint: &Joint, bone: PhysBone, resting: Quat, tail: &mut Tail, loca
         } else {
             step = ((target - end) * bone.pull).lerp(velocity, momentum);
             if whole {
-                tail.velocity = step;
+                tail.velocity = end + step - from;
             }
         }
         if bone.stretch_motion < 1.0 {
@@ -794,7 +803,7 @@ fn swing<'a>(joint: &Joint, bone: PhysBone, resting: Quat, tail: &mut Tail, loca
     let end = begin + (from.lerp(pressed.end, blend) - begin).normalize_or_zero() * length;
     tail.length = joint.tail.length() * (length / rest);
     let axis = original.inverse().transform_point3(end).normalize_or(along);
-    let axis = joint.settings.limit.map_or(axis, |limit| limit.keep(joint.tail, axis));
+    let axis = joint.settings.limit.map_or(axis, |limit| limit.keep(axis));
     let rotation = (resting * turn(along, axis)).normalize();
     let end = local(rotation).transform_point3(along * tail.length);
     if whole {
@@ -1236,18 +1245,75 @@ mod tests {
     fn a_hand_swings_a_limited_joint_no_further_than_its_limit() {
         let free = swung(None);
         assert!(free > 40.0, "unlimited, the hand lifts the strand's first segment well past 20 degrees: {free}");
+        // The strand reaches along Z, so each limit's frame turns the joint's Y to it.
+        let along = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
         for shape in ["angle", "hinge", "polar"] {
-            let held = swung(Some(serde_json::json!({ "shape": shape, "x": 20.0, "z": 20.0 })));
+            let held = swung(Some(serde_json::json!({ "shape": shape, "x": 20.0, "z": 20.0, "rotation": along.to_array() })));
             assert!(held <= 20.0 + 0.1 && held > 15.0, "a {shape} limit of 20 degrees holds the pushed segment at it: {held}");
         }
-        let tilted = swung(Some(serde_json::json!({ "shape": "angle", "x": 20.0, "rotation": [-(7.5f32.to_radians().sin()), 0.0, 0.0, 7.5f32.to_radians().cos()] })));
+        let tilted = swung(Some(serde_json::json!({ "shape": "angle", "x": 20.0, "rotation": (along * Quat::from_rotation_x(-15f32.to_radians())).to_array() })));
         assert!(tilted > 25.0 && tilted <= 35.0 + 0.1, "the limit's rotation tilts the cone it keeps the joint in: {tilted}");
+    }
+
+    /// VRChat's CalcLimitAxis and ApplyAngleLimits (VRC.Dynamics 3.10.5), line for line: the limit's X and Y from the bone's direction and limitRotation in degrees, and `axis` kept inside it.
+    fn vrchat_limit(bound: Bound, bone: Vec3, euler: Vec3, max: [f32; 2], axis: Vec3) -> Vec3 {
+        let euler = euler * std::f32::consts::PI / 180.0;
+        let q = Quat::from_rotation_arc(Vec3::Y, bone.normalize()) * Quat::from_rotation_z(euler.z) * Quat::from_rotation_y(euler.y) * Quat::from_rotation_x(euler.x);
+        let (x, y) = (q * Vec3::X, q * Vec3::Y);
+        let cone = |axis: Vec3| {
+            if y.dot(axis).clamp(-1.0, 1.0).acos() > max[0].to_radians() {
+                Quat::from_axis_angle(y.cross(axis).try_normalize().unwrap_or(x), max[0].to_radians()) * y
+            } else {
+                axis
+            }
+        };
+        match bound {
+            Bound::Angle => cone(axis),
+            Bound::Hinge => cone((axis - x * x.dot(axis)).normalize_or_zero()),
+            Bound::Polar => {
+                let z = x.cross(y).normalize();
+                let normal = Vec3::new(z.dot(axis), x.dot(axis), y.dot(axis)).normalize();
+                let flat = Vec3::new(normal.x, 0.0, normal.z).normalize_or_zero();
+                let mut around = Vec3::Z.dot(flat).acos();
+                if Vec3::X.dot(flat) < 0.0 {
+                    around = -around;
+                }
+                let over = (Vec3::Y.dot(normal).acos() - std::f32::consts::FRAC_PI_2).clamp(-max[1].to_radians(), max[1].to_radians());
+                let around = around.clamp(-max[0].to_radians(), max[0].to_radians());
+                let local = Quat::from_rotation_y(around) * Quat::from_rotation_x(over) * Vec3::Z;
+                (z * local.x + x * local.y + y * local.z).normalize()
+            }
+        }
+    }
+
+    #[test]
+    fn a_limit_keeps_a_joint_where_vrchat_keeps_it_whichever_way_its_bone_lies() {
+        let bones = [Vec3::Y, Vec3::X, Vec3::Z, Vec3::new(0.3, -0.5, 0.8), Vec3::new(-1.0, 0.2, 0.1)];
+        let eulers = [Vec3::ZERO, Vec3::new(30.0, 0.0, 0.0), Vec3::new(10.0, -25.0, 40.0)];
+        let towards = (0..64).map(|i| {
+            let (a, b) = (i as f32 * 2.399, (i as f32 + 0.5) / 64.0 * 2.0 - 1.0);
+            Vec3::new((1.0 - b * b).sqrt() * a.cos(), b, (1.0 - b * b).sqrt() * a.sin())
+        });
+        let towards: Vec<Vec3> = towards.collect();
+        for bound in [Bound::Angle, Bound::Hinge, Bound::Polar] {
+            for bone in bones {
+                for euler in eulers {
+                    let rotation = Quat::from_rotation_arc(Vec3::Y, bone.normalize()) * Quat::from_rotation_z(euler.z.to_radians()) * Quat::from_rotation_y(euler.y.to_radians()) * Quat::from_rotation_x(euler.x.to_radians());
+                    let limit = Limit { bound, x: 25f32.to_radians(), z: 40f32.to_radians(), rotation };
+                    for &toward in &towards {
+                        let ours = limit.keep(toward);
+                        let theirs = vrchat_limit(bound, bone, euler, [25.0, 40.0], toward);
+                        assert!(ours.angle_between(theirs) < 1e-3, "{bound:?} on a bone along {bone}, limitRotation {euler}: {toward} kept at {ours}, VRChat's at {theirs}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
     fn a_polar_limit_lets_a_joint_swing_its_own_way_further_each_way() {
         let wide = Limit { bound: Bound::Polar, x: 10f32.to_radians(), z: 40f32.to_radians(), rotation: Quat::IDENTITY };
-        let far = |toward: Vec3| wide.keep(Vec3::Y, (Vec3::Y + toward).normalize()).angle_between(Vec3::Y).to_degrees();
+        let far = |toward: Vec3| wide.keep((Vec3::Y + toward).normalize()).angle_between(Vec3::Y).to_degrees();
         assert!((far(Vec3::Z * 5.0) - 10.0).abs() < 0.1, "toward Z it stops at x: {}", far(Vec3::Z * 5.0));
         assert!((far(Vec3::X * 5.0) - 40.0).abs() < 0.1, "toward X at z: {}", far(Vec3::X * 5.0));
         assert!(far(Vec3::X * 0.3) < 40.0 && (far(Vec3::X * 0.3) - 0.3f32.atan().to_degrees()).abs() < 0.01, "and inside it is left alone");
@@ -1266,7 +1332,7 @@ mod tests {
         Mat4::from_rotation_translation(from_unity_turn(Quat::from_array(q)), from_unity(p))
     }
 
-    /// A chain of nodes hanging from the root, each given in Unity's axes below the last, every one but the last a joint with its extras "physbone" from `bones`, and `limit` if any.
+    /// A chain of nodes hanging from the root, each given in Unity's axes below the last, every one but the last a joint with its extras "physbone" from `bones`, and `limit` if any, its frame turned to the bone as CalcLimitAxis turns it.
     fn physbones(nodes: &[([f32; 3], Quat)], bones: &[Value], limit: Option<Value>) -> Model {
         let mut listed = vec![serde_json::json!({ "children": [1], "mesh": 0 })];
         for (at, (position, turn)) in nodes.iter().enumerate() {
@@ -1281,6 +1347,7 @@ mod tests {
             let mut extras = serde_json::json!({ "physbone": bone });
             if let Some(limit) = &limit {
                 extras["limit"] = limit.clone();
+                extras["limit"]["rotation"] = serde_json::json!(Quat::from_rotation_arc(Vec3::Y, from_unity(nodes[at + 1].0).normalize()).to_array());
             }
             serde_json::json!({ "node": at + 1, "extras": extras })
         }).collect();
@@ -1358,6 +1425,26 @@ mod tests {
         }
         assert!(trail[..30].iter().copied().fold(0.0, f32::max) > 0.002, "setting off at 1 m/s swings the tip: {:?}", &trail[..30]);
         assert!(trail[200..].iter().all(|off| *off < 1e-4), "gliding on at that speed it hangs as at rest, where VRChat's would trail: {:?}", &trail[200..]);
+    }
+
+    #[test]
+    fn a_physbone_without_spring_still_lags_a_change_of_speed_and_returns() {
+        for integration in ["simplified", "advanced"] {
+            let bone = |depth: usize| serde_json::json!({ "version": "1.1", "integration": integration, "pull": 0.2, "spring": 0.0, "stiffness": 0.0, "depth": depth });
+            let model = physbones(&[([0.0, 0.0, 0.0], Quat::IDENTITY), ([0.0, 0.0, 0.1], Quat::IDENTITY), ([0.0, 0.0, 0.1], Quat::IDENTITY)], &[bone(0), bone(1)], None);
+            let mut springs = Springs::default();
+            let rest = rested(&model, &mut springs, Mat4::IDENTITY, None, 60);
+            let mut trail = Vec::new();
+            for frame in 0..240 {
+                let anchor = Mat4::from_translation(Vec3::new(frame as f32 / 60.0, 0.0, 0.0));
+                let mut pose = model.rest();
+                springs.step(&model, &mut pose, anchor, &[], 1.0 / 60.0, &Idle::default());
+                trail.push(model.worlds(&pose)[model.nodes.len() - 1].w_axis.truncate().distance(rest));
+            }
+            let most = trail[..30].iter().copied().fold(0.0, f32::max);
+            assert!(most > 0.005, "{integration}: setting off at 1 m/s swings the tip back though spring is 0: {:?}", &trail[..30]);
+            assert!(trail[200..].iter().all(|off| *off < 1e-4), "{integration}: gliding on it returns to rest: {:?}", &trail[200..]);
+        }
     }
 
     #[test]

@@ -200,8 +200,9 @@ struct PipelineKey {
 enum Pass {
     /// Lays down the depth of what passes the alpha test, before anything is shaded.
     Depth,
-    /// Shades where the depth pass left this surface's own depth.
-    Equal,
+    /// Shades where the depth pass left this surface's own depth. An alpha-tested surface still discards here, where
+    /// another surface coplanar with its holes left that depth; with depth writes off a discard keeps the early test.
+    Equal { cutout: bool },
     /// Shades whatever passes the depth test: a blended surface, whose cutoff is zero.
     Shade,
     /// Shades what passes the alpha test: an outline hull, or an alpha-tested surface that writes no depth.
@@ -416,7 +417,7 @@ impl Renderer {
             pass: match (outline, depth) {
                 (true, _) => Pass::Cutout,
                 (false, true) => Pass::Depth,
-                (false, false) if prepassed(material) => Pass::Equal,
+                (false, false) if prepassed(material) => Pass::Equal { cutout: matches!(material.alpha, Alpha::Cutout(_)) },
                 (false, false) if matches!(material.alpha, Alpha::Cutout(_)) => Pass::Cutout,
                 (false, false) => Pass::Shade,
             },
@@ -561,9 +562,9 @@ impl Renderer {
         };
         let vertex = module(VERTEX_SHADER)?;
         let shader = |key: &PipelineKey| match key.pass {
-            Pass::Equal | Pass::Shade => (FRAGMENT_SHADERS[key.pages], c"fragment"),
+            Pass::Equal { cutout: false } | Pass::Shade => (FRAGMENT_SHADERS[key.pages], c"fragment"),
             Pass::Depth => (DEPTH_SHADER, c"depth"),
-            Pass::Cutout => (CUTOUT_SHADERS[key.pages], c"cutout"),
+            Pass::Equal { cutout: true } | Pass::Cutout => (CUTOUT_SHADERS[key.pages], c"cutout"),
         };
         let mut fragments = HashMap::new();
         for key in keys {
@@ -600,7 +601,7 @@ impl Renderer {
                 };
                 let raster = vk::PipelineRasterizationStateCreateInfo::default().polygon_mode(vk::PolygonMode::FILL).cull_mode(cull).front_face(vk::FrontFace::COUNTER_CLOCKWISE).line_width(1.0);
                 let (compare, write) = match key.pass {
-                    Pass::Equal => (vk::CompareOp::EQUAL, false),
+                    Pass::Equal { .. } => (vk::CompareOp::EQUAL, false),
                     _ => (vk::CompareOp::LESS_OR_EQUAL, key.depth_write),
                 };
                 let depth = vk::PipelineDepthStencilStateCreateInfo::default().depth_test_enable(true).depth_write_enable(write).depth_compare_op(compare);
@@ -682,7 +683,6 @@ impl Renderer {
         let device = &self.gpu.device;
         let target = &self.targets[self.next];
         unsafe { device.wait_for_fences(&[target.fence], true, u64::MAX) }.map_err(vk_error("vkWaitForFences"))?;
-        unsafe { device.reset_fences(&[target.fence]) }.map_err(vk_error("vkResetFences"))?;
         let [width, height] = self.eye;
         assert!(texels <= width && texels <= height, "{texels} texels per eye overflow the {width}x{height} target");
         let clear = [vk::ClearValue { color: vk::ClearColorValue { float32: [0.0; 4] } }, vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } }];
@@ -718,12 +718,19 @@ impl Renderer {
             device.cmd_end_render_pass(target.commands);
             device.end_command_buffer(target.commands).map_err(vk_error("vkEndCommandBuffer"))?;
             let buffers = [target.commands];
+            device.reset_fences(&[target.fence]).map_err(vk_error("vkResetFences"))?;
             device.queue_submit(self.gpu.queue, &[vk::SubmitInfo::default().command_buffers(&buffers)], target.fence).map_err(vk_error("vkQueueSubmit"))?;
         }
         appearance.drawing.set(Some(target.fence));
         self.last = Some((self.next, texels));
         self.next = (self.next + 1) % RING;
         Ok(self.gpu.texture_data(target.texture.image, width * 2, height, FORMAT))
+    }
+
+    /// Waits for the last drawing to finish.
+    pub fn finish(&self) -> Result<(), String> {
+        let Some((target, _)) = self.last else { return Ok(()) };
+        unsafe { self.gpu.device.wait_for_fences(&[self.targets[target].fence], true, u64::MAX) }.map_err(vk_error("vkWaitForFences"))
     }
 
     /// The last frame's two eye images side by side, at the size it drew them.

@@ -447,6 +447,7 @@ impl<S: Surface> Object<S> {
         let part = texels as f32 / self.renderer.eye[0] as f32;
         let started = Instant::now();
         let texture = self.renderer.render(&drawn.appearance, seen.map(|eye| eye_projection(eye.into(), QUAD / 2.0, QUAD / 2.0)), Mat4::IDENTITY, texels)?;
+        self.renderer.finish()?;
         let spent = started.elapsed();
         self.frames += 1;
         let measured = self.frames as f32 - WINDOW;

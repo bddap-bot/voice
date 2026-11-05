@@ -258,10 +258,10 @@ fn decals(color: vec3<f32>, tint: vec3<f32>, at: u32, look: u32, samples: array<
 
 // Poiyomi's matcaps over the decalled albedo and shade, each sampled by the normal as seen from `view`; returns what
 // they add to the light.
-fn matcaps(base: ptr<function, vec3<f32>>, shade: ptr<function, vec3<f32>>, tint: vec3<f32>, at: u32, look: u32, uv: vec2<f32>, normal: vec3<f32>, view: vec3<f32>, lit: f32) -> vec3<f32> {
+fn matcaps(base: ptr<function, vec3<f32>>, shade: ptr<function, vec3<f32>>, tint: vec3<f32>, at: u32, look: u32, uv: vec2<f32>, gradient: mat2x2<f32>, normal: vec3<f32>, view: vec3<f32>, lit: f32) -> vec3<f32> {
     var glow = vec3<f32>(0.0);
     if (looks[look].matcaps[0].on | looks[look].matcaps[1].on | looks[look].matcaps[2].on | looks[look].matcaps[3].on) == 0u { return glow; }
-    let masks = textureSampleGrad(matcap_masks, texture_sampler, uv, dpdx(uv), dpdy(uv));
+    let masks = textureSampleGrad(matcap_masks, texture_sampler, uv, gradient[0], gradient[1]);
     let up = normalize(vec3<f32>(0.0, 1.0, 0.0) - view * dot(view, vec3<f32>(0.0, 1.0, 0.0)));
     let right = normalize(cross(view, up));
     let reflected = reflect(-view, normal);
@@ -305,10 +305,10 @@ fn blend(color: vec3<f32>, light: vec3<f32>, tint: vec3<f32>, strengths: vec4<f3
 }
 
 // VRChat Toon Standard's emission, turned by its hue shift under the hue mask.
-fn emission(at: u32, look: u32, uv: vec2<f32>, mask: f32) -> vec3<f32> {
+fn emission(at: u32, look: u32, uv: vec2<f32>, gradient: mat2x2<f32>, mask: f32) -> vec3<f32> {
     let strength = value(at, EMISSION, 0u, looks[look].emission_strength);
     if strength == 0.0 { return vec3<f32>(0.0); }
-    let glow = textureSampleGrad(emission_map, texture_sampler, uv, dpdx(uv), dpdy(uv)).rgb * looks[look].emission_color * strength;
+    let glow = textureSampleGrad(emission_map, texture_sampler, uv, gradient[0], gradient[1]).rgb * looks[look].emission_color * strength;
     return mix(glow, hue(glow, vec4<f32>(value(at, EMISSION_HUE, 0u, looks[look].emission_hue), 2.0, 0.0, 1.0)), mask * looks[look].shifts_hue);
 }
 
@@ -339,6 +339,8 @@ fn covered(input: Varying) -> f32 {
 }
 
 fn shaded(input: Varying, front: bool) -> vec4<f32> {
+    // Taken before any branch on the look, which differs within a quad along a look's edge.
+    let gradient = mat2x2<f32>(dpdx(input.uv), dpdy(input.uv));
     let material = materials[draw.material];
     let surface = surfaces[input.surface];
     let indices = vec2<f32>(textureDimensions(look_index));
@@ -355,7 +357,7 @@ fn shaded(input: Varying, front: bool) -> vec4<f32> {
     let laid = decal_samples(input.surface, look, input.uv);
     var albedo = decals(adjust(mix(sampled.rgb, raw * material.base.rgb, surface.color.a), surface, mask), vec3<f32>(1.0), input.surface, look, laid);
     var shade = decals(adjust(mix(textureSample(shade_texture, texture_sampler, input.uv).rgb, raw, surface.color.a) * material.shade, surface, mask), material.shade, input.surface, look, laid);
-    let glow = matcaps(&albedo, &shade, material.shade, input.surface, look, input.uv, normal, view, lit);
+    let glow = matcaps(&albedo, &shade, material.shade, input.surface, look, input.uv, gradient, normal, view, lit);
     let base = vec4<f32>(albedo, sampled.a);
     var light: vec3<f32>;
     // A flat material takes its main light's colour whole, as a Lambert surface square to it would, and the ambient
@@ -367,7 +369,7 @@ fn shaded(input: Varying, front: bool) -> vec4<f32> {
         let hemisphere = mix(GROUND, SKY, 0.5 * normal.y + 0.5);
         light = direct + mix(hemisphere, 0.5 * (SKY + GROUND), material.equalization) * base.rgb;
     }
-    var color = light + glow + emission(input.surface, look, input.uv, mask.r);
+    var color = light + glow + emission(input.surface, look, input.uv, gradient, mask.r);
     if draw.outline != 0u {
         color = material.outline_color * mix(vec3<f32>(1.0), color, material.outline_lighting_mix);
     }

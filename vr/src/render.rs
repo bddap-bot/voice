@@ -292,6 +292,8 @@ pub struct Appearance {
     looks: Buffer,
     drawn: Vec<DrawCall>,
     pub hidden: std::collections::HashSet<usize>,
+    /// The fence of the last frame drawn from these buffers, which `update` waits on before it rewrites them.
+    drawing: std::cell::Cell<Option<vk::Fence>>,
 }
 
 fn color_range(levels: u32) -> vk::ImageSubresourceRange {
@@ -453,6 +455,7 @@ impl Renderer {
             looks: upload(bytes_of(&look_data), vk::BufferUsageFlags::STORAGE_BUFFER)?,
             drawn: Vec::new(),
             hidden: Default::default(),
+            drawing: Default::default(),
         };
         for image in &model.images {
             appearance.textures.push(texture(gpu, image.width, image.height, &image.rgba, FORMAT)?);
@@ -674,6 +677,7 @@ impl Renderer {
     }
 
     /// Draws each eye's image `texels` square, packed from the target's top left; the overlay shows that part through `Overlay::part`.
+    /// Returns once the drawing is submitted: SteamVR copies the image on the same queue, after it.
     pub fn render(&mut self, appearance: &Appearance, eyes: [Option<Mat4>; 2], space: Mat4, texels: u32) -> Result<openvr_sys::VRVulkanTextureData_t, String> {
         let device = &self.gpu.device;
         let target = &self.targets[self.next];
@@ -715,8 +719,8 @@ impl Renderer {
             device.end_command_buffer(target.commands).map_err(vk_error("vkEndCommandBuffer"))?;
             let buffers = [target.commands];
             device.queue_submit(self.gpu.queue, &[vk::SubmitInfo::default().command_buffers(&buffers)], target.fence).map_err(vk_error("vkQueueSubmit"))?;
-            device.wait_for_fences(&[target.fence], true, u64::MAX).map_err(vk_error("vkWaitForFences"))?;
         }
+        appearance.drawing.set(Some(target.fence));
         self.last = Some((self.next, texels));
         self.next = (self.next + 1) % RING;
         Ok(self.gpu.texture_data(target.texture.image, width * 2, height, FORMAT))
@@ -759,6 +763,9 @@ fn material_data(material: &crate::vrm::Material) -> MaterialData {
 impl Appearance {
     pub fn update(&mut self, palette: &[Mat4], skinned: &Skinned, changed: &[u32]) {
         assert_eq!(palette.len(), self.joints, "the palette has one matrix per joint");
+        if let Some(fence) = self.drawing.take() {
+            unsafe { self.gpu.device.wait_for_fences(&[fence], true, u64::MAX) }.expect("vkWaitForFences");
+        }
         let bytes = bytes_of(palette);
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.palette.2, bytes.len()) };
         let bytes = bytes_of(&skinned.surfaces);

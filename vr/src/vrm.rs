@@ -1458,6 +1458,23 @@ impl Skinned {
         self.joints.iter().map(|&(node, inverse)| placement * worlds[node] * inverse).collect()
     }
 
+    /// The bounds of `positions`, skinned across the cores: the frame loop bounds every vertex of the posed figure.
+    pub fn bounds(&self, palette: &[Mat4], hidden: &HashSet<usize>) -> (Vec3, Vec3) {
+        let mut visible = vec![true; self.vertices.len()];
+        for span in hidden.iter().filter_map(|node| self.spans.get(node)) {
+            visible[span.clone()].fill(false);
+        }
+        let empty = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+        let chunk = self.vertices.len().div_ceil(std::thread::available_parallelism().map_or(1, |cores| cores.get())).max(4096);
+        std::thread::scope(|scope| {
+            let parts: Vec<_> = self.vertices.chunks(chunk).zip(visible.chunks(chunk)).map(|(vertices, visible)| scope.spawn(move || vertices.iter().zip(visible).filter(|(_, visible)| **visible).fold(empty, |(low, high), (vertex, _)| {
+                let point = skin(vertex, palette);
+                (low.min(point), high.max(point))
+            }))).collect();
+            parts.into_iter().map(|part| part.join().expect("a bounding thread panicked")).fold(empty, |(low, high), (part_low, part_high)| (low.min(part_low), high.max(part_high)))
+        })
+    }
+
     pub fn positions(&self, palette: &[Mat4], hidden: &HashSet<usize>) -> Vec<Vec3> {
         let mut visible = vec![true; self.vertices.len()];
         for span in hidden.iter().filter_map(|node| self.spans.get(node)) {
@@ -1830,6 +1847,16 @@ pub mod tests {
     fn positions(model: &Model, pose: &Pose) -> Vec<Vec3> {
         let skinned = model.skinned().unwrap();
         skinned.positions(&skinned.palette(&model.worlds(pose), Mat4::IDENTITY), &HashSet::new())
+    }
+
+    #[test]
+    fn bounding_across_threads_bounds_what_positions_skins() {
+        let model = Model::parse(&figure(Version::One)).unwrap();
+        let skinned = model.skinned().unwrap();
+        let mut pose = model.rest();
+        pose.rotations[1] = Quat::from_rotation_z(0.7);
+        let palette = skinned.palette(&model.worlds(&pose), Mat4::from_translation(Vec3::new(0.3, -0.2, 1.0)));
+        assert_eq!(skinned.bounds(&palette, &HashSet::new()), bounds(&skinned.positions(&palette, &HashSet::new())));
     }
 
     #[test]

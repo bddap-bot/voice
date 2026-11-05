@@ -69,8 +69,7 @@ const DORMANT_POLL: Duration = Duration::from_micros(11_111);
 const SPOTTER_RETRY: Duration = Duration::from_secs(10);
 
 fn grown_window(skinned: &Skinned, hidden: &HashSet<usize>, worlds: &[glam::Mat4], body: glam::Mat4, head: &Pose, eyes: &[Vec3], view: f32) -> (Pose, f32) {
-    let points = skinned.positions(&skinned.palette(worlds, head.inverse().mat4() * body), hidden);
-    let (low, high) = vrm::bounds(&points);
+    let (low, high) = skinned.bounds(&skinned.palette(worlds, head.inverse().mat4() * body), hidden);
     // Bound the posed mesh in the view's axes, with room for its outline. A bone's
     // reach sphere can spend most of the texture on empty space around the figure.
     let corners: Vec<Vec3> = (0..8).map(|corner| {
@@ -90,11 +89,16 @@ fn directory(variable: &str, fallback: &str) -> PathBuf {
     std::env::var_os(variable).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").expect("HOME")).join(fallback)).join("voice-vr")
 }
 
+/// What a frame's work goes to, in order: input, posing and springs, bounding the window, writing the GPU's buffers (after the
+/// previous frame's drawing is done with them), recording and submitting the drawing, and handing it to SteamVR.
+const PHASES: [&str; 5] = ["animate", "window", "draw", "render", "present"];
+
 #[derive(Default)]
 struct Meter {
     window: Option<Instant>,
     interval: Vec<Duration>,
     work: Vec<Duration>,
+    phases: [Vec<Duration>; PHASES.len()],
 }
 
 fn summary(samples: &mut [Duration]) -> String {
@@ -105,15 +109,20 @@ fn summary(samples: &mut [Duration]) -> String {
 }
 
 impl Meter {
-    fn frame(&mut self, interval: Duration, work: Duration) {
+    /// `marks` are when each phase ended, from `started`.
+    fn frame(&mut self, interval: Duration, started: Instant, marks: [Instant; PHASES.len()]) {
         let now = Instant::now();
         let window = *self.window.get_or_insert(now);
         self.interval.push(interval);
-        self.work.push(work);
+        self.work.push(now - started);
+        for (phase, (from, to)) in self.phases.iter_mut().zip(std::iter::once(started).chain(marks).zip(marks)) {
+            phase.push(to - from);
+        }
         let elapsed = now - window;
         if elapsed >= Duration::from_secs(5) {
             let rate = self.interval.len() as f64 / elapsed.as_secs_f64();
-            tracing::info!("overlay {rate:.1} fps; frame interval {}; animate+draw+submit {}", summary(&mut self.interval), summary(&mut self.work));
+            let phases: Vec<String> = PHASES.iter().zip(&mut self.phases).map(|(name, samples)| format!("{name} {}", summary(samples))).collect();
+            tracing::info!("overlay {rate:.1} fps; frame interval {}; work {}; {}", summary(&mut self.interval), summary(&mut self.work), phases.join("; "));
             *self = Meter { window: Some(now), ..Meter::default() };
         }
     }
@@ -772,11 +781,14 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             }
         }, size, head.t, &touching(&hands, tip, &outlines.iter().filter(|(&which, &(device, _))| runtime.hand_index(which) == Some(device)).map(|(&which, &(_, hull))| (which, hull)).collect()), voice.mouth(), &mut pointing, started, |name| objects.locate(name));
         objects.step(started, &object::View { stand, size, head, eyes: eye_offsets, tip: right.map(|(right, _)| right.apply(tip)) });
+        let animated = Instant::now();
         let eye_points = eye_offsets.map(|eye: Pose| head.then(&eye).t);
         let (quad, half) = if size > 1.0 { grown_window(&puppet.skinned, &puppet.drawn.hidden, &posed, body, &head, &eye_points, view) } else { (figure, QUAD / 2.0) };
+        let bounded = Instant::now();
         let local = quad.inverse();
         let (skin, to_window) = lit(&quad, &figure, body);
         puppet.draw(&posed, skin);
+        let drawn = Instant::now();
         let place = match anchor {
             Anchor::Stuck(_) | Anchor::Grounded(_) => Place::World(quad),
             _ => Place::On(device, left.inverse().then(&quad)),
@@ -785,8 +797,9 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         let seen = eye_points.map(|eye| local.apply(eye));
         let texels = renderer.texels(2.0 * half, seen[0][2].min(seen[1][2]));
         let mut texture = renderer.render(&puppet.drawn, seen.map(|eye| eye_projection(eye.into(), half, half)), to_window, texels)?;
+        let rendered = Instant::now();
         overlay.present(&mut texture, &place, 2.0 * half, texels as f32 / renderer.eye[0] as f32)?;
-        meter.frame(interval, started.elapsed());
+        meter.frame(interval, started, [animated, bounded, drawn, rendered, Instant::now()]);
         runtime.wait_frame();
     }
 }

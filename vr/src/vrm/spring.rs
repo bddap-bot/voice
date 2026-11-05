@@ -427,7 +427,7 @@ struct Tail {
     before: Vec3,
     /// `now` in the joint's rest frame, so a step can tell the tail's own motion from the motion its parent carries it through.
     held: Vec3,
-    /// A PhysBone's direction and velocity at its last whole step, beside the motion of its carrying frame it felt then.
+    /// A PhysBone's direction and velocity at its last whole step, the velocity relative to its carrying frame, beside the motion of that frame it felt then.
     vector: Vec3,
     velocity: Vec3,
     felt: Vec3,
@@ -655,8 +655,9 @@ impl Springs {
                     let world = local(rotation);
                     let end = world.transform_point3(joint.tail);
                     let felt = match joint.physbone {
-                        Some(bone) if !fresh => carried(bone, tail, &Frames { immobile, carrier }).1,
-                        _ => Vec3::ZERO,
+                        Some(bone) if !fresh && whole => carried(bone, tail, &Frames { immobile, carrier }).1,
+                        _ if fresh => Vec3::ZERO,
+                        _ => tail.felt,
                     };
                     *tail = Tail { rotation, now: end, vector: end - world.w_axis.truncate(), velocity: Vec3::ZERO, felt, anchored: immobile.inverse().transform_point3(end), length: joint.tail.length(), ..*tail };
                 } else if let Some(bone) = joint.physbone {
@@ -722,9 +723,9 @@ fn swing<'a>(joint: &Joint, bone: PhysBone, resting: Quat, tail: &mut Tail, loca
     let rest = (target - begin).length().max(8e-6);
     let start = tail.now;
     let (held, felt) = carried(bone, tail, &Frames { immobile, carrier });
-    // The tail keeps on with the anchor's motion of the last step, so steady motion carries it and only a change in that motion swings it, whatever its spring.
+    // The tail keeps on with the anchor's motion of the last step, for the share of a step this one covers, so steady motion carries it and only a change in that motion swings it, whatever its spring.
     let from = start + held + felt;
-    let mut end = start + held + tail.felt;
+    let mut end = start + held + tail.felt * ratio;
     let velocity = tail.velocity;
     let vector = carrier.transform_vector3(tail.vector);
     let down = Vec3::NEG_Y;
@@ -1425,6 +1426,24 @@ mod tests {
         }
         assert!(trail[..30].iter().copied().fold(0.0, f32::max) > 0.002, "setting off at 1 m/s swings the tip: {:?}", &trail[..30]);
         assert!(trail[200..].iter().all(|off| *off < 1e-4), "gliding on at that speed it hangs as at rest, where VRChat's would trail: {:?}", &trail[200..]);
+    }
+
+    #[test]
+    fn gliding_steadily_at_a_headsets_frame_rate_leaves_a_physbone_at_rest() {
+        for rate in [72.0, 90.0, 120.0] {
+            let model = breast();
+            let mut springs = Springs::default();
+            let rest = rested(&model, &mut springs, Mat4::IDENTITY, None, 600);
+            let mut trail = Vec::new();
+            for frame in 0..(4.0 * rate) as usize {
+                let anchor = Mat4::from_translation(Vec3::new(0.0, 0.0, frame as f32 / rate));
+                let mut pose = model.rest();
+                springs.step(&model, &mut pose, anchor, &[], 1.0 / rate, &Idle::default());
+                trail.push(model.worlds(&pose)[model.nodes.len() - 1].w_axis.truncate().distance(rest));
+            }
+            let late = trail[(3.0 * rate) as usize..].iter().copied().fold(0.0, f32::max);
+            assert!(late < 1e-4, "at {rate} Hz, gliding on at 1 m/s it hangs as at rest, between the 60 Hz steps too: {late}");
+        }
     }
 
     #[test]

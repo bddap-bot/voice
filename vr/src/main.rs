@@ -99,6 +99,8 @@ struct Meter {
     interval: Vec<Duration>,
     work: Vec<Duration>,
     phases: [Vec<Duration>; PHASES.len()],
+    gpu: Vec<Duration>,
+    density: Vec<f32>,
 }
 
 fn summary(samples: &mut [Duration]) -> String {
@@ -110,7 +112,9 @@ fn summary(samples: &mut [Duration]) -> String {
 
 impl Meter {
     /// `marks` are when each phase ended, from `started`.
-    fn frame(&mut self, interval: Duration, started: Instant, marks: [Instant; PHASES.len()]) {
+    fn frame(&mut self, interval: Duration, started: Instant, marks: [Instant; PHASES.len()], renderer: &Renderer) {
+        self.gpu.extend(renderer.drawing);
+        self.density.push(renderer.scale);
         let now = Instant::now();
         let window = *self.window.get_or_insert(now);
         self.interval.push(interval);
@@ -122,7 +126,9 @@ impl Meter {
         if elapsed >= Duration::from_secs(5) {
             let rate = self.interval.len() as f64 / elapsed.as_secs_f64();
             let phases: Vec<String> = PHASES.iter().zip(&mut self.phases).map(|(name, samples)| format!("{name} {}", summary(samples))).collect();
-            tracing::info!("overlay {rate:.1} fps; frame interval {}; work {}; {}", summary(&mut self.interval), summary(&mut self.work), phases.join("; "));
+            let gpu = if self.gpu.is_empty() { "untimed".to_owned() } else { summary(&mut self.gpu) };
+            let density = self.density.iter().fold(f32::INFINITY, |least, &scale| least.min(scale));
+            tracing::info!("overlay {rate:.1} fps; frame interval {}; work {}; {}; gpu {gpu}; least density {density:.2}", summary(&mut self.interval), summary(&mut self.work), phases.join("; "));
             *self = Meter { window: Some(now), ..Meter::default() };
         }
     }
@@ -794,13 +800,14 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             _ => Place::On(device, left.inverse().then(&quad)),
         };
         renderer.outline_scale = HEIGHT * size / render::PAGE_HEIGHT;
+        renderer.budget = runtime.drawing_budget();
         let seen = eye_points.map(|eye| local.apply(eye));
         let texels = renderer.texels(2.0 * half, seen[0][2].min(seen[1][2]));
         let mut texture = renderer.render(&puppet.drawn, seen.map(|eye| eye_projection(eye.into(), half, half)), to_window, texels)?;
         let rendered = Instant::now();
         overlay.present(&mut texture, &place, 2.0 * half, texels as f32 / renderer.eye[0] as f32)?;
-        meter.frame(interval, started, [animated, bounded, drawn, rendered, Instant::now()]);
-        runtime.wait_frame();
+        meter.frame(interval, started, [animated, bounded, drawn, rendered, Instant::now()], &renderer);
+        runtime.wait_frames(started);
     }
 }
 

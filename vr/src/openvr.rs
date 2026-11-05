@@ -3,6 +3,11 @@ use std::ffi::{CStr, CString};
 
 use crate::placement::{Hand, HandPose, Pose, Vec3};
 
+/// The least rate the overlay draws at.
+const OVERLAY_RATE: f32 = 72.0;
+/// What share of a frame the overlay's drawing may take, the rest left to the compositor.
+const DRAWING_SHARE: f32 = 0.75;
+
 pub struct Runtime {
     system: &'static sys::VR_IVRSystem_FnTable,
     overlay: &'static sys::VR_IVROverlay_FnTable,
@@ -105,6 +110,35 @@ impl Runtime {
                 widest.max((x / z).abs()).max((y / z).abs())
             })
         })
+    }
+
+    /// The display's refresh rate, None where SteamVR does not say.
+    fn display_rate(&self) -> Option<f32> {
+        let mut error = 0;
+        let rate = call!(self.system, GetFloatTrackedDeviceProperty, sys::k_unTrackedDeviceIndex_Hmd as u32, sys::ETrackedDeviceProperty_Prop_DisplayFrequency_Float, &mut error);
+        (error == 0 && rate > 0.0).then_some(rate)
+    }
+
+    /// How many refreshes each overlay frame spans: the compositor shows the last image at every refresh, so a display
+    /// refreshing at a multiple of the overlay's rate gets a frame every that many.
+    pub fn refreshes_per_frame(&self) -> u32 {
+        self.display_rate().map_or(1, |rate| ((rate / OVERLAY_RATE).floor() as u32).max(1))
+    }
+
+    /// How long the overlay may take to draw a frame: a share of the refreshes it spans.
+    pub fn drawing_budget(&self) -> Option<std::time::Duration> {
+        self.display_rate().map(|rate| std::time::Duration::from_secs_f32(DRAWING_SHARE * self.refreshes_per_frame() as f32 / rate))
+    }
+
+    /// Waits for the refresh the next frame is drawn for: the first at least all but half a refresh of its span after
+    /// the frame that `started`.
+    pub fn wait_frames(&self, started: std::time::Instant) {
+        let span = self.refreshes_per_frame();
+        let least = self.display_rate().map_or(std::time::Duration::ZERO, |rate| std::time::Duration::from_secs_f32((span as f32 - 0.5) / rate));
+        self.wait_frame();
+        while started.elapsed() < least {
+            self.wait_frame();
+        }
     }
 
     /// The left eye's recommended render width over its horizontal field, in pixels per radian.

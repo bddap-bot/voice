@@ -20,6 +20,8 @@ pub struct Gpu {
     pub pool: vk::CommandPool,
     /// The device's widest anisotropic filtering, None where it has none.
     pub anisotropy: Option<f32>,
+    /// Nanoseconds per timestamp tick on the queue and the mask of the bits it counts, None where it counts none.
+    pub timestamp: Option<(f32, u64)>,
     allocations: std::cell::Cell<usize>,
     /// SteamVR's client creates Vulkan objects of its own on this device and destroys them when its session closes, so the session lives and dies inside the device.
     pub vr: Option<Runtime>,
@@ -40,10 +42,10 @@ impl Gpu {
         let wanted = runtime.map(|runtime| runtime.output_device(instance.handle().as_raw()));
         let physicals = unsafe { instance.enumerate_physical_devices() }.map_err(vk_error("vkEnumeratePhysicalDevices"))?;
         let physical = physicals.iter().copied().find(|device| Some(device.as_raw()) == wanted).or_else(|| physicals.first().copied()).ok_or("no Vulkan device")?;
-        let family = unsafe { instance.get_physical_device_queue_family_properties(physical) }
-            .iter()
-            .position(|family| family.queue_flags.contains(vk::QueueFlags::GRAPHICS))
-            .ok_or("no graphics queue")? as u32;
+        let families = unsafe { instance.get_physical_device_queue_family_properties(physical) };
+        let family = families.iter().position(|family| family.queue_flags.contains(vk::QueueFlags::GRAPHICS)).ok_or("no graphics queue")? as u32;
+        let bits = families[family as usize].timestamp_valid_bits;
+        let timestamp = (bits > 0).then(|| (unsafe { instance.get_physical_device_properties(physical) }.limits.timestamp_period, u64::MAX >> (64 - bits.min(64))));
         let device_extensions: Vec<CString> = runtime.map(|runtime| runtime.device_extensions(physical.as_raw())).unwrap_or_default();
         let device_names: Vec<_> = device_extensions.iter().map(|name| name.as_ptr()).collect();
         let priorities = [1.0];
@@ -54,7 +56,7 @@ impl Gpu {
         let device = unsafe { instance.create_device(physical, &vk::DeviceCreateInfo::default().queue_create_infos(&queues).enabled_extension_names(&device_names).enabled_features(&features), None) }.map_err(vk_error("vkCreateDevice"))?;
         let queue = unsafe { device.get_device_queue(family, 0) };
         let pool = unsafe { device.create_command_pool(&vk::CommandPoolCreateInfo::default().queue_family_index(family).flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER), None) }.map_err(vk_error("vkCreateCommandPool"))?;
-        Ok(Gpu { _entry: entry, instance, physical, device, queue, family, pool, anisotropy, allocations: Default::default(), vr })
+        Ok(Gpu { _entry: entry, instance, physical, device, queue, family, pool, anisotropy, timestamp, allocations: Default::default(), vr })
     }
 
     pub fn memory_type(&self, bits: u32, flags: vk::MemoryPropertyFlags) -> Result<u32, String> {

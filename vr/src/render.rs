@@ -278,7 +278,21 @@ pub struct Renderer {
     pub outline_scale: f32,
     next: usize,
     last: Option<(usize, u32)>,
+    /// Two timestamps a target, bracketing its drawing; None where the queue keeps no time.
+    timestamps: Option<vk::QueryPool>,
+    timed: [bool; RING],
+    /// The GPU time a drawing may take, None to draw every image at full density.
+    pub budget: Option<std::time::Duration>,
+    /// What texels draws of each eye's full density: the square of what the last drawings' GPU time allows of the budget.
+    pub scale: f32,
+    /// How long the GPU took over the last drawing it finished.
+    pub drawing: Option<std::time::Duration>,
+    /// The GPU's drawing time, averaged over recent frames so one slow frame moves the density little.
+    typical: Option<f32>,
 }
+
+/// The least density `budget` lowers an image to.
+const LEAST_SCALE: f32 = 0.5;
 
 pub struct Appearance {
     gpu: Rc<Gpu>,
@@ -391,7 +405,16 @@ impl Renderer {
             outline_scale,
             next: 0,
             last: None,
+            timestamps: None,
+            timed: [false; RING],
+            budget: None,
+            scale: 1.0,
+            drawing: None,
+            typical: None,
         };
+        if renderer.gpu.timestamp.is_some() {
+            renderer.timestamps = Some(unsafe { renderer.gpu.device.create_query_pool(&vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::TIMESTAMP).query_count(2 * RING as u32), None) }.map_err(vk_error("vkCreateQueryPool"))?);
+        }
         renderer.depth = renderer.attachment(DEPTH, SAMPLES, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::ImageAspectFlags::DEPTH)?;
         renderer.samples = renderer.attachment(FORMAT, SAMPLES, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT, vk::ImageAspectFlags::COLOR)?;
         for _ in 0..RING {
@@ -674,7 +697,27 @@ impl Renderer {
 
     /// Texels per eye for a window `width` metres wide seen from `distance`, at most what the target holds.
     pub fn texels(&self, width: f32, distance: f32) -> u32 {
-        eye_texels(width, distance).min(self.eye[0]).min(self.eye[1])
+        ((eye_texels(width, distance).min(self.eye[0]).min(self.eye[1]) as f32 * self.scale).round() as u32).max(1)
+    }
+
+    /// Reads the GPU time of the drawing `target` finished, and moves the density toward what fits the budget: a
+    /// drawing's cost goes as its texels, the square of the scale.
+    fn time_drawing(&mut self, target: usize) -> Result<(), String> {
+        let (Some(pool), Some((tick, mask))) = (self.timestamps, self.gpu.timestamp) else { return Ok(()) };
+        if !std::mem::take(&mut self.timed[target]) {
+            return Ok(());
+        }
+        let mut stamps = [0u64; 2];
+        unsafe { self.gpu.device.get_query_pool_results(pool, 2 * target as u32, &mut stamps, vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT) }.map_err(vk_error("vkGetQueryPoolResults"))?;
+        let took = std::time::Duration::from_nanos(((stamps[1].wrapping_sub(stamps[0]) & mask) as f64 * tick as f64) as u64);
+        self.drawing = Some(took);
+        let typical = self.typical.map_or(took.as_secs_f32(), |typical| typical + (took.as_secs_f32() - typical) / 16.0);
+        self.typical = Some(typical);
+        if let Some(budget) = self.budget {
+            let fits = (budget.as_secs_f32() / typical.max(1e-6)).sqrt().clamp(0.99, 1.01);
+            self.scale = (self.scale * fits).clamp(LEAST_SCALE, 1.0);
+        }
+        Ok(())
     }
 
     /// Draws each eye's image `texels` square, packed from the target's top left; the overlay shows that part through `Overlay::part`.
@@ -683,12 +726,19 @@ impl Renderer {
         let device = &self.gpu.device;
         let target = &self.targets[self.next];
         unsafe { device.wait_for_fences(&[target.fence], true, u64::MAX) }.map_err(vk_error("vkWaitForFences"))?;
+        self.time_drawing(self.next)?;
+        let device = &self.gpu.device;
+        let target = &self.targets[self.next];
         let [width, height] = self.eye;
         assert!(texels <= width && texels <= height, "{texels} texels per eye overflow the {width}x{height} target");
         let clear = [vk::ClearValue { color: vk::ClearColorValue { float32: [0.0; 4] } }, vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } }];
         unsafe {
             device.reset_command_buffer(target.commands, vk::CommandBufferResetFlags::empty()).map_err(vk_error("vkResetCommandBuffer"))?;
             device.begin_command_buffer(target.commands, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).map_err(vk_error("vkBeginCommandBuffer"))?;
+            if let Some(pool) = self.timestamps {
+                device.cmd_reset_query_pool(target.commands, pool, 2 * self.next as u32, 2);
+                device.cmd_write_timestamp(target.commands, vk::PipelineStageFlags::TOP_OF_PIPE, pool, 2 * self.next as u32);
+            }
             device.cmd_begin_render_pass(
                 target.commands,
                 &vk::RenderPassBeginInfo::default().render_pass(self.render_pass).framebuffer(target.framebuffer).render_area(vk::Rect2D { offset: vk::Offset2D::default(), extent: vk::Extent2D { width: texels * 2, height: texels } }).clear_values(&clear),
@@ -716,12 +766,16 @@ impl Renderer {
                 }
             }
             device.cmd_end_render_pass(target.commands);
+            if let Some(pool) = self.timestamps {
+                device.cmd_write_timestamp(target.commands, vk::PipelineStageFlags::BOTTOM_OF_PIPE, pool, 2 * self.next as u32 + 1);
+            }
             device.end_command_buffer(target.commands).map_err(vk_error("vkEndCommandBuffer"))?;
             let buffers = [target.commands];
             device.reset_fences(&[target.fence]).map_err(vk_error("vkResetFences"))?;
             device.queue_submit(self.gpu.queue, &[vk::SubmitInfo::default().command_buffers(&buffers)], target.fence).map_err(vk_error("vkQueueSubmit"))?;
         }
         appearance.drawing.set(Some(target.fence));
+        self.timed[self.next] = self.timestamps.is_some();
         self.last = Some((self.next, texels));
         self.next = (self.next + 1) % RING;
         Ok(self.gpu.texture_data(target.texture.image, width * 2, height, FORMAT))
@@ -821,6 +875,9 @@ impl Drop for Renderer {
             }
             destroy(&self.gpu, &self.depth);
             destroy(&self.gpu, &self.samples);
+            if let Some(pool) = self.timestamps {
+                device.destroy_query_pool(pool, None);
+            }
             for &pipeline in self.pipelines.values() {
                 device.destroy_pipeline(pipeline, None);
             }

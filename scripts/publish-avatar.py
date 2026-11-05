@@ -6,8 +6,9 @@ Every node, image, morph target, material, spring joint, collider a spring colli
 expression part (parameter, layer, menu control, material target, curve, shown node, switched spring or collider,
 mask) the catalog file carries must survive into the new one, or match a --drop prefix naming it as an intended
 removal. A target effect or look field the overlay's vr/src/vrm/effects.json does not list is refused: the overlay
-would leave it still. The installed file carries VOICE_arms, the arm spread `voice-vr arms` (the binary $VOICE_VR names, else
-voice-vr on PATH) measures on its body against the clips the server plays; the overlay refuses a figure without it.
+would leave it still. So is a look without its material's lighting, which the overlay refuses to load. The installed
+file carries VOICE_arms, the arm spread `voice-vr arms` (the binary $VOICE_VR names, else voice-vr on PATH) measures on
+its body against the clips the server plays; the overlay refuses a figure without it.
 The replaced file stays beside the catalog in .previous/."""
 import argparse
 from collections import Counter
@@ -128,6 +129,10 @@ def publish(new_path, catalog_path, drops=()):
     unknown = unread(document(data))
     if unknown:
         raise SystemExit(f'{new_path} carries expression parts the overlay does not read; teach voice-vr them and list them in vr/src/vrm/effects.json:\n' + '\n'.join('  ' + k for k in unknown))
+    looks = document(data).get('extensions', {}).get('VRCHAT_expressions', {}).get('looks', {}).get('materials', [])
+    unlit = [i for i, look in enumerate(looks) if 'lighting' not in look]
+    if unlit:
+        raise SystemExit(f'{new_path} has looks without the lighting the overlay reads (materials {unlit}); reconvert it with the current converter')
     spread = measure(new_path)
     catalog = Path(catalog_path)
     if catalog.exists():

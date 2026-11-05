@@ -101,6 +101,15 @@ class Publishing(unittest.TestCase):
             self.assertIn(part, str(refused.exception))
             self.assertEqual(self.catalog.read_bytes(), before)
 
+    def test_a_look_without_its_lighting_is_refused(self):
+        look = {'decals': [None] * 4, 'matcaps': [None] * 4, 'emission': None}
+        before = self.catalog.read_bytes()
+        with self.assertRaises(SystemExit) as refused:
+            publisher.publish(self.candidate(lambda doc: doc['extensions']['VRCHAT_expressions'].update(looks={'index': 'iVBOR', 'materials': [look]})), self.catalog)
+        self.assertIn('lighting', str(refused.exception))
+        self.assertEqual(self.catalog.read_bytes(), before)
+        publisher.publish(self.candidate(lambda doc: doc['extensions']['VRCHAT_expressions'].update(looks={'index': 'iVBOR', 'materials': [look | {'lighting': {'model': 'flat'}}]})), self.catalog)
+
     def test_every_look_field_and_effect_the_overlay_lists_publishes(self):
         targets = [{'effect': kind if kind == 'switch' else {kind: []}} for kind in publisher.READ['effects']]
         targets.append({'effect': {'look': [{'node': 1, 'rect': [0, 0, 1, 1], 'field': field, 'slot': 0} for field in publisher.READ['looks']]}})

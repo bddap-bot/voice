@@ -80,12 +80,13 @@ struct LookData {
     emission_strength: f32,
     emission_hue: f32,
     shifts_hue: f32,
-    pad: [f32; 2],
+    flat: u32,
+    light_cap: f32,
     matcaps: [MatcapData; 4],
 }
 
 fn look_data(look: &crate::vrm::expressions::Look) -> LookData {
-    use crate::vrm::expressions::Mapping;
+    use crate::vrm::expressions::{Lighting, Mapping};
     let decal = |value: fn(&crate::vrm::expressions::Decal) -> f32| look.decals.each_ref().map(|decal| decal.as_ref().map_or(0.0, value));
     let emission = look.emission.as_ref();
     LookData {
@@ -96,7 +97,11 @@ fn look_data(look: &crate::vrm::expressions::Look) -> LookData {
         emission_strength: emission.map_or(0.0, |emission| emission.strength),
         emission_hue: emission.map_or(0.0, |emission| emission.hue),
         shifts_hue: emission.is_some_and(|emission| emission.shifts_hue) as u32 as f32,
-        pad: [0.0; 2],
+        flat: matches!(look.lighting, Lighting::Flat { .. }) as u32,
+        light_cap: match look.lighting {
+            Lighting::Flat { cap: Some(cap) } => cap,
+            _ => f32::MAX,
+        },
         matcaps: look.matcaps.each_ref().map(|matcap| matcap.as_ref().map_or_else(MatcapData::default, |m| MatcapData {
             color: m.color,
             hue: m.hue.as_ref().map_or([0.0; 4], |hue| [hue.shift, hue.space, hue.select, 1.0]),
@@ -918,10 +923,10 @@ mod tests {
     }
 
     mod looks_test {
-        use crate::vrm::expressions::{Look, Mapping, Matcap, MatcapHue};
+        use crate::vrm::expressions::{Lighting, Look, Mapping, Matcap, MatcapHue};
 
         pub fn look() -> Look {
-            Look { decals: [None, None, None, None], matcaps: [None, None, None, None], emission: None }
+            Look { decals: [None, None, None, None], matcaps: [None, None, None, None], emission: None, lighting: Lighting::Lit }
         }
 
         pub fn matcap() -> Matcap {
@@ -973,6 +978,19 @@ mod tests {
         skinned.surface_values(model.menu.as_ref().unwrap(), &vec![value; targets]);
         let after = capture(&skinned);
         (pixel(&before, 64, 8, 16), pixel(&after, 64, 8, 16), pixel(&before, 64, 24, 16) == pixel(&after, 64, 24, 16))
+    }
+
+    #[test]
+    fn a_flat_material_draws_its_albedo_under_its_cap_whichever_way_it_faces() {
+        let mut flat = looks_test::look();
+        flat.lighting = crate::vrm::expressions::Lighting::Flat { cap: Some(1.0) };
+        let (drawn, _, _) = look_drawn([128, 64, 32, 255], flat.clone(), None, 0.0, 0.0, Vec::new());
+        assert!(drawn[..3].iter().zip([128, 64, 32]).all(|(&a, b)| a.abs_diff(b) <= 2), "capped at 1 under the overlay's lights, the albedo as its texture holds it: {drawn:?}");
+        let (lit, _, _) = look_drawn([128, 64, 32, 255], looks_test::look(), None, 0.0, 0.0, Vec::new());
+        assert!(lit[..3].iter().zip([128, 64, 32]).any(|(&a, b)| a.abs_diff(b) > 8), "a lit material facing the viewer is shaded by its lights' angles: {lit:?}");
+        flat.lighting = crate::vrm::expressions::Lighting::Flat { cap: None };
+        let (uncapped, _, _) = look_drawn([128, 64, 32, 255], flat, None, 0.0, 0.0, Vec::new());
+        assert!(uncapped[0] > 140, "uncapped, it takes its main and ambient light whole: {uncapped:?}");
     }
 
     #[test]

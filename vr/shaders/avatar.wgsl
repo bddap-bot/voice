@@ -66,6 +66,8 @@ struct Look {
     emission_strength: f32,
     emission_hue: f32,
     shifts_hue: f32,
+    flat: u32,
+    light_cap: f32,
     matcaps: array<Matcap, 4>,
 }
 @group(0) @binding(10) var look_index: texture_2d<f32>;
@@ -281,10 +283,17 @@ fn fragment(input: Varying, @builtin(front_facing) front: bool) -> @location(0) 
     var shade = decals(adjust(mix(textureSample(shade_texture, texture_sampler, input.uv).rgb, raw, surface.color.a) * material.shade, surface, mask), material.shade, input.surface, look, input.uv);
     let glow = matcaps(&albedo, &shade, material.shade, input.surface, look, input.uv, normal, view, lit);
     let base = vec4<f32>(albedo, sampled.a);
-    let direct = mix(shade, base.rgb, lit) * KEY_COLOR + mix(shade, base.rgb, toon(material, normal, RIM_DIRECTION)) * RIM_COLOR;
-    let hemisphere = mix(GROUND, SKY, 0.5 * normal.y + 0.5);
-    let indirect = mix(hemisphere, 0.5 * (SKY + GROUND), material.equalization) * base.rgb;
-    var color = direct + indirect + glow + emission(input.surface, look, input.uv, mask.r);
+    var light: vec3<f32>;
+    // A flat material takes its main light's colour whole, as a Lambert surface square to it would, and the ambient
+    // light, whichever way it faces: Unity's base pass, which lights it by the one main directional light.
+    if looks[look].flat != 0u {
+        light = min(KEY_COLOR + 0.5 * (SKY + GROUND), vec3<f32>(looks[look].light_cap)) * base.rgb;
+    } else {
+        let direct = mix(shade, base.rgb, lit) * KEY_COLOR + mix(shade, base.rgb, toon(material, normal, RIM_DIRECTION)) * RIM_COLOR;
+        let hemisphere = mix(GROUND, SKY, 0.5 * normal.y + 0.5);
+        light = direct + mix(hemisphere, 0.5 * (SKY + GROUND), material.equalization) * base.rgb;
+    }
+    var color = light + glow + emission(input.surface, look, input.uv, mask.r);
     if draw.outline != 0u {
         color = material.outline_color * mix(vec3<f32>(1.0), color, material.outline_lighting_mix);
     }

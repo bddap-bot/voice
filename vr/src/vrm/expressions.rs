@@ -344,11 +344,21 @@ pub struct Emission {
     pub shifts_hue: bool,
 }
 
+/// How a material takes the light: by the angle it meets each light at, or `Flat`, by the lights' colour alone, capped
+/// at `cap` where its shader caps it.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", tag = "model")]
+pub enum Lighting {
+    Lit,
+    Flat { cap: Option<f32> },
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct Look {
     pub decals: [Option<Decal>; 4],
     pub matcaps: [Option<Matcap>; 4],
     pub emission: Option<Emission>,
+    pub lighting: Lighting,
 }
 
 #[derive(Clone, Debug, Deserialize)]

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use glam::Vec3;
@@ -226,6 +227,67 @@ pub fn sweep(args: &[String]) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Frames of an avatar in a file walking the bundled clip in place for `WALKED` seconds at the overlay's frame rate, seen
+/// from `--eye` in the hand-held puppet's frame, with each kept frame's humanoid and spring-joint places and the joints
+/// sitting deepest in the colliders that push them.
+pub fn walk(args: &[String]) -> Result<(), String> {
+    let usage = "usage: voice-vr walk <out-dir> <avatar.vrm> [--eye <x> <y> <z>]";
+    let (head, [out, file]) = match args {
+        [out, file] => ([0.0, -FLOOR + 0.12, 0.5], [out, file]),
+        [out, file, flag, x, y, z] if flag == "--eye" => {
+            let eye = [x, y, z].map(|arg| arg.parse::<f32>().ok().filter(|value| value.is_finite()));
+            let [Some(x), Some(y), Some(z)] = eye else { return Err(usage.into()) };
+            if x * x + z * z < 0.0001 { return Err("the camera must be outside the avatar's vertical axis".into()); }
+            ([x, y, z], [out, file])
+        }
+        _ => return Err(usage.into()),
+    };
+    let frames = PathBuf::from(out);
+    std::fs::create_dir_all(&frames).map_err(|error| format!("{}: {error}", frames.display()))?;
+    let gpu = std::rc::Rc::new(Gpu::new(None)?);
+    let mut renderer = Renderer::new(gpu, [eye_texels(QUAD, NEAREST); 2], HEIGHT / PAGE_HEIGHT)?;
+    let bytes = std::fs::read(file).map_err(|error| format!("{file}: {error}"))?;
+    let model = crate::vrm::Model::parse(&bytes)?;
+    let mut puppet = crate::dressed(model, Default::default(), file, &mut renderer, &Default::default())?;
+    let mut pointing = crate::point::Pointing::default();
+    let stand = Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0; 3]);
+    let local = facing(stand.apply([0.0, -FLOOR, 0.0]), head).inverse();
+    let eye = local.apply(head);
+    let eyes = [-0.032, 0.032].map(|x| eye_projection([eye[0] + x, eye[1], eye[2]].into(), QUAD / 2.0, QUAD / 2.0));
+    puppet.animator.walk(true);
+    let create = |name: &str| std::fs::File::create(frames.join(name)).map(std::io::BufWriter::new).map_err(|error| format!("{}: {error}", frames.join(name).display()));
+    let (mut points, mut depth_log) = (create("points.tsv")?, create("depths.tsv")?);
+    let steps = (WALKED / DELTA).round() as usize;
+    for number in 0..steps {
+        let (worlds, body, _) = puppet.step(DELTA, |_, _| stand, 1.0, head, &[], 0.0, &mut pointing, std::time::Instant::now(), |_| None);
+        if number % 3 != 0 {
+            continue;
+        }
+        let springs = puppet.model.spring_motion(&worlds).into_iter().map(|(_, name, _, at)| (name, at));
+        for (name, at) in puppet.model.humanoid_points(&worlds, &WALKERS).into_iter().map(|(name, at)| (name.to_owned(), at)).chain(springs) {
+            writeln!(points, "{}\t{name}\t{}\t{}\t{}", number / 3, at.x, at.y, at.z).map_err(|error| format!("points.tsv: {error}"))?;
+        }
+        let depths = puppet.model.collider_depths(&worlds);
+        let deepest = depths.iter().take(4).map(|(name, depth)| format!("\t{name}={depth:.4}")).collect::<String>();
+        writeln!(depth_log, "{}{deepest}", number / 3).map_err(|error| format!("depths.tsv: {error}"))?;
+        puppet.draw(&worlds, local.mat4() * body);
+        renderer.render(&puppet.drawn, eyes, glam::Mat4::IDENTITY, renderer.eye[0])?;
+        let figure = left(&renderer)?;
+        let side = ((figure.len() / 4) as f64).sqrt() as u32;
+        let path = frames.join(format!("{:04}.png", number / 3));
+        image::RgbaImage::from_raw(side, side, figure).ok_or("the eye's image is not square")?.save(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    }
+    points.flush().and(depth_log.flush()).map_err(|error| format!("{}: {error}", frames.display()))?;
+    println!("{file}: {} frames at 30 a second in {}", steps.div_ceil(3), frames.display());
+    Ok(())
+}
+
+/// The humanoid bones whose places `walk` records, enough to pose the legs and hips elsewhere.
+const WALKERS: [&str; 13] = ["hips", "spine", "chest", "leftUpperLeg", "leftLowerLeg", "leftFoot", "leftToes", "rightUpperLeg", "rightLowerLeg", "rightFoot", "rightToes", "head", "neck"];
+
+/// Seconds walked: past the walk's fade in and two strides.
+const WALKED: f32 = 4.0;
 
 const SWEEP: usize = 120;
 const CLOCK: f32 = 1.0 / 30.0;

@@ -874,6 +874,9 @@ fn run() -> Result<(), String> {
     if args.get(1).is_some_and(|mode| mode == "sweep") {
         return dress::sweep(&args[2..]);
     }
+    if args.get(1).is_some_and(|mode| mode == "walk") {
+        return dress::walk(&args[2..]);
+    }
     if args.get(1).is_some_and(|mode| mode == "reference") {
         return dress::reference(&args[2..]);
     }

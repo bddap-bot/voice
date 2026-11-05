@@ -1121,6 +1121,11 @@ impl Model {
         Some([*self.humanoid.get("leftFoot")?, *self.humanoid.get("rightFoot")?].map(|node| worlds[node].w_axis.truncate()))
     }
 
+    /// Where each named humanoid bone of the file stands at `worlds`, in its name's order.
+    pub fn humanoid_points(&self, worlds: &[Mat4], names: &[&'static str]) -> Vec<(&'static str, Vec3)> {
+        names.iter().filter_map(|&name| Some((name, worlds[*self.humanoid.get(name)?].w_axis.truncate()))).collect()
+    }
+
     pub fn skinned(&self) -> Result<Skinned, String> {
         let palette_index = |index: usize| u16::try_from(index).map_err(|_| "the model has 65536 or more joints".to_owned());
         let mut vertices = Vec::new();

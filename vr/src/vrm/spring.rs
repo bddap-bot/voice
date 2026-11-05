@@ -168,6 +168,18 @@ struct Collider {
     shape: Shape,
 }
 
+impl Collider {
+    /// The collider where `worlds` hold its node.
+    fn placed(&self, worlds: &[Mat4]) -> Placed {
+        let world = worlds[self.node];
+        let at = world.transform_point3(self.offset);
+        match self.shape {
+            Shape::Round { tail, radius, inside } => Placed::Round { center: at, end: tail.map(|tail| world.transform_point3(tail)), reach: radius * scale_of(&world), inside },
+            Shape::Plane { normal } => Placed::Plane { point: at, normal: world.transform_vector3(normal).normalize_or(Vec3::Y) },
+        }
+    }
+}
+
 /// What the avatar's menu leaves off: the bones of each switched-off and each running switched spring, and the file indices of its switched-off colliders.
 #[derive(Debug, Default, PartialEq)]
 pub struct Idle {
@@ -387,6 +399,25 @@ impl Model {
     pub fn spring_joints(&self) -> usize {
         self.rig.joints.len()
     }
+
+    /// How far the step's collision would move each PhysBone joint's tail that colliders push, with its bone where `worlds` hold it: the depth it sits inside the deepest of every collider its spring lists, by its node's name, deepest first.
+    pub fn collider_depths(&self, worlds: &[Mat4]) -> Vec<(String, f32)> {
+        let mut depths: Vec<(String, f32)> = self.rig.joints.iter().filter(|joint| !joint.groups.is_empty()).filter_map(|joint| {
+            let bone = joint.physbone?;
+            let world = worlds[joint.node];
+            let begin = world.w_axis.truncate();
+            let end = joint.child.map_or_else(|| world.transform_point3(joint.tail), |child| worlds[child].w_axis.truncate());
+            let scale = world.x_axis.truncate().length().max(world.y_axis.truncate().length()).max(world.z_axis.truncate().length());
+            let deepest = joint.groups.iter().flat_map(|&group| &self.rig.groups[group]).map(|&at| {
+                let mut pressed = Pressed { begin, end, radius: bone.radius.map(|radius| radius * scale), shortest: 0.0, longest: (end - begin).length(), fallback: end - begin };
+                self.rig.colliders[at].placed(worlds).press(&mut pressed);
+                (pressed.end - end).length()
+            }).fold(0.0, f32::max);
+            Some((self.nodes[joint.node].name.clone().unwrap_or_default(), deepest))
+        }).collect();
+        depths.sort_by(|a, b| b.1.total_cmp(&a.1));
+        depths
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -516,18 +547,7 @@ impl Springs {
             return;
         }
         let mut worlds: Vec<Mat4> = model.worlds(pose).into_iter().map(|world| model_to_world * world).collect();
-        let colliders: Vec<Placed> = rig
-            .colliders
-            .iter()
-            .map(|collider| {
-                let world = worlds[collider.node];
-                let at = world.transform_point3(collider.offset);
-                match collider.shape {
-                    Shape::Round { tail, radius, inside } => Placed::Round { center: at, end: tail.map(|tail| world.transform_point3(tail)), reach: radius * scale_of(&world), inside },
-                    Shape::Plane { normal } => Placed::Plane { point: at, normal: world.transform_vector3(normal).normalize_or(Vec3::Y) },
-                }
-            })
-            .collect();
+        let colliders: Vec<Placed> = rig.colliders.iter().map(|collider| collider.placed(&worlds)).collect();
         let hands: Vec<Placed> = hands.iter().map(|hand| Placed::Round { center: hand.center, end: None, reach: hand.radius, inside: false }).collect();
         let fresh = self.tails.len() != rig.joints.len();
         let place = model_to_world.w_axis.truncate();

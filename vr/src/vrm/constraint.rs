@@ -81,6 +81,7 @@ impl Constraints {
 
     pub fn step(&mut self, model: &Model, pose: &mut Pose, body: Mat4) {
         for c in &model.constraints {
+            let weight = pose.constraint_weights.get(&c.node).copied().unwrap_or(c.weight);
             let worlds = model.worlds(pose);
             let parent = model.nodes[c.node].parent.map_or(body, |p| body * worlds[p]);
             let current = body * worlds[c.node];
@@ -118,8 +119,8 @@ impl Constraints {
                     _ => unreachable!(),
                 }
             }
-            let p = if c.kind == "LookAt" { current_position } else { rest_position.lerp(target_position, c.weight) };
-            let r = if c.kind == "Position" { current_turn } else { rest_turn.slerp(target_turn, c.weight) };
+            let p = if c.kind == "LookAt" { current_position } else { rest_position.lerp(target_position, weight) };
+            let r = if c.kind == "Position" { current_turn } else { rest_turn.slerp(target_turn, weight) };
             let local = parent.inverse() * Mat4::from_scale_rotation_translation(scale, r, p);
             let (_, mut r, mut p) = local.to_scale_rotation_translation();
             if c.kind != "LookAt" {
@@ -213,6 +214,24 @@ mod tests {
         let desired = (worlds[4].w_axis - worlds[3].w_axis).truncate().normalize();
         assert!((worlds[3].w_axis.truncate() - before).length() < 1e-6);
         assert!((rotation(&worlds[3]) * Vec3::Z - desired).length() < 1e-6);
+    }
+
+    #[test]
+    fn a_clip_weights_a_constraint_its_file_saves_at_zero() {
+        let mut model = fixture();
+        let identity = Mat4::IDENTITY.to_cols_array();
+        let away = Mat4::from_translation(Vec3::new(2.0, 0.0, 0.0)).to_cols_array();
+        model.constraints = parse(Some(&json!({"constraints": [{"kind": "Parent", "node": 2, "sources": [{"world": away, "offset": identity, "weight": 1.0}], "weight": 0.0, "translation": [true, true, true], "rotation": [true, true, true], "rest": identity, "offset": identity}]})), model.nodes()).unwrap();
+        let menu = crate::vrm::expressions::Expressions::parse(&json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": [{"effect": {"constraint": {"node": 2}}, "default": 0.0}]})).unwrap();
+        let at = |value: f32| {
+            let mut pose = model.rest();
+            menu.apply(&[value], &mut pose);
+            Constraints::default().step(&model, &mut pose, Mat4::IDENTITY);
+            model.worlds(&pose)[2].w_axis.x
+        };
+        assert!(at(0.0).abs() < 1e-6, "at its saved weight of zero the node keeps its rest");
+        assert!((at(1.0) - 2.0).abs() < 1e-5, "a clip at full weight puts it on its source");
+        assert!((at(0.25) - 0.5).abs() < 1e-5, "and part way at part weight");
     }
 
     #[test]

@@ -432,6 +432,7 @@ pub enum Effect {
     Rotation(Rotation),
     Translation { node: usize, direction: [f32; 3] },
     Material { node: usize, choices: Vec<[f32; 4]> },
+    Constraint { node: usize },
     /// An effect a newer converter writes: its target holds still rather than refusing the avatar.
     #[serde(skip)]
     Unread(String),
@@ -639,6 +640,7 @@ impl Expressions {
             Effect::Rotation(rotation) => rotation.node < nodes && matches!(rotation.rest.len(), 3 | 4) && rotation.axis < rotation.rest.len() && rotation.rest.iter().all(|v| v.is_finite())
                 && self.targets.iter().all(|other| !matches!(&other.effect, Effect::Rotation(other) if other.node == rotation.node && other.rest != rotation.rest)),
             Effect::Translation { node, direction } => *node < nodes && direction.iter().all(|v| v.is_finite()),
+            Effect::Constraint { node } => *node < nodes,
             Effect::Material { node, choices } => *node < nodes && !choices.is_empty(),
         });
         if !fits || self.shown.iter().any(|shown| shown.node >= nodes) || self.springs.iter().flat_map(|spring| &spring.joints).any(|&joint| joint >= nodes) {
@@ -682,6 +684,7 @@ impl Expressions {
                 Effect::Scale { node, axis } => pose.scales[*node][*axis] *= value,
                 Effect::Rotation(rotation) => turned.entry(rotation.node).or_insert_with(|| (rotation, rotation.rest.clone())).1[rotation.axis] = value,
                 Effect::Translation { node, direction } => pose.translations[*node] += value * Vec3::from(*direction),
+                Effect::Constraint { node } => { pose.constraint_weights.insert(*node, value.clamp(0.0, 1.0)); }
                 Effect::Material { .. } | Effect::Hue(_) | Effect::Color(_) | Effect::Tone(_) | Effect::Look(_) | Effect::Unread(_) => {}
             }
         }
@@ -1182,7 +1185,7 @@ mod tests {
     }
 
     fn unposed(nodes: usize) -> super::super::Pose {
-        super::super::Pose { rotations: vec![Quat::IDENTITY; nodes], translations: vec![Vec3::ZERO; nodes], scales: vec![Vec3::ONE; nodes], weights: Vec::new() }
+        super::super::Pose { rotations: vec![Quat::IDENTITY; nodes], translations: vec![Vec3::ZERO; nodes], scales: vec![Vec3::ONE; nodes], weights: Vec::new(), constraint_weights: HashMap::new() }
     }
 
     fn euler(axes: &[usize]) -> Expressions {

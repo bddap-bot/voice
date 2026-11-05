@@ -277,6 +277,8 @@ pub struct Pose {
     translations: Vec<Vec3>,
     scales: Vec<Vec3>,
     pub weights: Vec<Vec<f32>>,
+    /// The weights clips give constraints, by constrained node, over the weights the file saves.
+    constraint_weights: HashMap<usize, f32>,
 }
 
 impl Pose {
@@ -1011,7 +1013,7 @@ impl Model {
     }
 
     pub fn rest(&self) -> Pose {
-        Pose { rotations: self.nodes.iter().map(|node| node.rotation).collect(), translations: self.nodes.iter().map(|node| node.translation).collect(), scales: self.nodes.iter().map(|node| node.scale).collect(), weights: self.meshes.iter().map(|mesh| mesh.weights.clone()).collect() }
+        Pose { rotations: self.nodes.iter().map(|node| node.rotation).collect(), translations: self.nodes.iter().map(|node| node.translation).collect(), scales: self.nodes.iter().map(|node| node.scale).collect(), weights: self.meshes.iter().map(|mesh| mesh.weights.clone()).collect(), constraint_weights: HashMap::new() }
     }
 
     pub fn standing(&self) -> Humanoid {

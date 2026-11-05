@@ -27,6 +27,7 @@ pub const NEAREST: f32 = 0.35;
 const PAGE_BYTES: u64 = 512 << 20;
 
 const VERTEX_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vertex.spv"));
+const DEPTH_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/depth.spv"));
 include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
 
 #[repr(C)]
@@ -190,6 +191,21 @@ struct PipelineKey {
     cull: Cull,
     depth_write: bool,
     pages: usize,
+    pass: Pass,
+}
+
+/// How a draw meets the depth buffer. A fragment shader that may discard is shaded before its depth test, so only the
+/// depth pass and outline hulls discard, and a depth-writing surface is shaded only where it is the nearest.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Pass {
+    /// Lays down the depth of what passes the alpha test, before anything is shaded.
+    Depth,
+    /// Shades where the depth pass left this surface's own depth.
+    Equal,
+    /// Shades whatever passes the depth test: a blended surface, whose cutoff is zero.
+    Shade,
+    /// Shades what passes the alpha test: an outline hull, or an alpha-tested surface that writes no depth.
+    Cutout,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -237,6 +253,7 @@ struct DrawCall {
     first: u32,
     count: u32,
     set: vk::DescriptorSet,
+    depth: Option<vk::Pipeline>,
     pipeline: vk::Pipeline,
     material: u32,
     outline: bool,
@@ -388,13 +405,21 @@ impl Renderer {
         if pages.len() > DECAL_PAGES {
             return Err(format!("the decals take {} pages, over {DECAL_PAGES}", pages.len()));
         }
-        let key = |material: &crate::vrm::Material, outline: bool| PipelineKey {
+        let prepassed = |material: &crate::vrm::Material| material.alpha != Alpha::Blend && material.depth_write;
+        let key = |material: &crate::vrm::Material, outline: bool, depth: bool| PipelineKey {
             blend: material.alpha == Alpha::Blend,
             cull: if outline { Cull::Front } else if material.double_sided { Cull::None } else { Cull::Back },
             depth_write: material.depth_write,
             pages: pages.len(),
+            pass: match (outline, depth) {
+                (true, _) => Pass::Cutout,
+                (false, true) => Pass::Depth,
+                (false, false) if prepassed(material) => Pass::Equal,
+                (false, false) if matches!(material.alpha, Alpha::Cutout(_)) => Pass::Cutout,
+                (false, false) => Pass::Shade,
+            },
         };
-        let keys: Vec<PipelineKey> = model.materials.iter().flat_map(|material| [Some(key(material, false)), material.outline.as_ref().map(|_| key(material, true))]).flatten().filter(|key| !self.pipelines.contains_key(key)).collect();
+        let keys: Vec<PipelineKey> = model.materials.iter().flat_map(|material| [Some(key(material, false, false)), prepassed(material).then(|| key(material, false, true)), material.outline.as_ref().map(|_| key(material, true, false))]).flatten().filter(|key| !self.pipelines.contains_key(key)).collect();
         let created = self.pipelines(&keys)?;
         self.pipelines.extend(created);
 
@@ -508,7 +533,16 @@ impl Renderer {
             .iter()
             .flat_map(|draw| {
                 let material = &model.materials[draw.material];
-                let call = |outline| DrawCall { first: draw.first, count: draw.count, set: sets[draw.material], pipeline: self.pipelines[&key(material, outline)], material: draw.material as u32, outline, switched: draw.switched };
+                let call = |outline: bool| DrawCall {
+                    first: draw.first,
+                    count: draw.count,
+                    set: sets[draw.material],
+                    depth: (!outline && prepassed(material)).then(|| self.pipelines[&key(material, false, true)]),
+                    pipeline: self.pipelines[&key(material, outline, false)],
+                    material: draw.material as u32,
+                    outline,
+                    switched: draw.switched,
+                };
                 [Some(call(false)), material.outline.as_ref().map(|_| call(true))]
             })
             .flatten()
@@ -523,10 +557,16 @@ impl Renderer {
             unsafe { device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None) }.map_err(vk_error("vkCreateShaderModule"))
         };
         let vertex = module(VERTEX_SHADER)?;
+        let shader = |key: &PipelineKey| match key.pass {
+            Pass::Equal | Pass::Shade => (FRAGMENT_SHADERS[key.pages], c"fragment"),
+            Pass::Depth => (DEPTH_SHADER, c"depth"),
+            Pass::Cutout => (CUTOUT_SHADERS[key.pages], c"cutout"),
+        };
         let mut fragments = HashMap::new();
         for key in keys {
-            if let std::collections::hash_map::Entry::Vacant(entry) = fragments.entry(key.pages) {
-                entry.insert(module(FRAGMENT_SHADERS[key.pages])?);
+            let (code, _) = shader(key);
+            if let std::collections::hash_map::Entry::Vacant(entry) = fragments.entry(code.as_ptr()) {
+                entry.insert(module(code)?);
             }
         }
         let vertex_bindings = [vk::VertexInputBindingDescription::default().stride(std::mem::size_of::<Vertex>() as u32).input_rate(vk::VertexInputRate::VERTEX)];
@@ -556,7 +596,11 @@ impl Renderer {
                     Cull::Front => vk::CullModeFlags::FRONT,
                 };
                 let raster = vk::PipelineRasterizationStateCreateInfo::default().polygon_mode(vk::PolygonMode::FILL).cull_mode(cull).front_face(vk::FrontFace::COUNTER_CLOCKWISE).line_width(1.0);
-                let depth = vk::PipelineDepthStencilStateCreateInfo::default().depth_test_enable(true).depth_write_enable(key.depth_write).depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
+                let (compare, write) = match key.pass {
+                    Pass::Equal => (vk::CompareOp::EQUAL, false),
+                    _ => (vk::CompareOp::LESS_OR_EQUAL, key.depth_write),
+                };
+                let depth = vk::PipelineDepthStencilStateCreateInfo::default().depth_test_enable(true).depth_write_enable(write).depth_compare_op(compare);
                 let attachment = [vk::PipelineColorBlendAttachmentState::default()
                     .blend_enable(key.blend)
                     .src_color_blend_factor(vk::BlendFactor::ONE)
@@ -565,11 +609,11 @@ impl Renderer {
                     .src_alpha_blend_factor(vk::BlendFactor::ONE)
                     .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
                     .alpha_blend_op(vk::BlendOp::ADD)
-                    .color_write_mask(vk::ColorComponentFlags::RGBA)];
+                    .color_write_mask(if key.pass == Pass::Depth { vk::ColorComponentFlags::empty() } else { vk::ColorComponentFlags::RGBA })];
                 let color = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachment);
                 let stages = [
                     vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vertex).name(c"vertex"),
-                    vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(fragments[&key.pages]).name(c"fragment"),
+                    vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(fragments[&shader(&key).0.as_ptr()]).name(shader(&key).1),
                 ];
                 let info = vk::GraphicsPipelineCreateInfo::default()
                     .stages(&stages)
@@ -655,10 +699,12 @@ impl Renderer {
                     let x = (side as u32 * texels) as f32;
                     device.cmd_set_viewport(target.commands, 0, &[vk::Viewport { x, y: 0.0, width: texels as f32, height: texels as f32, min_depth: 0.0, max_depth: 1.0 }]);
                     device.cmd_set_scissor(target.commands, 0, &[vk::Rect2D { offset: vk::Offset2D { x: x as i32, y: 0 }, extent: vk::Extent2D { width: texels, height: texels } }]);
-                    for drawn in appearance.drawn.iter().filter(|drawn| drawn.switched.is_none_or(|node| !appearance.hidden.contains(&node))) {
+                    let shown = || appearance.drawn.iter().filter(|drawn| drawn.switched.is_none_or(|node| !appearance.hidden.contains(&node)));
+                    let depths = shown().filter_map(|drawn| Some((drawn, drawn.depth?)));
+                    for (drawn, pipeline) in depths.chain(shown().map(|drawn| (drawn, drawn.pipeline))) {
                         let push = Push { view_projection: view_projection.to_cols_array(), camera: camera(view_projection).to_array(), material: drawn.material, outline: drawn.outline as u32, outline_scale: self.outline_scale, focal: projection.y_axis.y, pad: 0.0 };
                         let bytes = std::slice::from_raw_parts(&push as *const Push as *const u8, std::mem::size_of::<Push>());
-                        device.cmd_bind_pipeline(target.commands, vk::PipelineBindPoint::GRAPHICS, drawn.pipeline);
+                        device.cmd_bind_pipeline(target.commands, vk::PipelineBindPoint::GRAPHICS, pipeline);
                         device.cmd_bind_descriptor_sets(target.commands, vk::PipelineBindPoint::GRAPHICS, self.layout, 0, &[drawn.set], &[]);
                         device.cmd_push_constants(target.commands, self.layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, bytes);
                         device.cmd_draw_indexed(target.commands, drawn.count, 1, drawn.first, 0, 0);

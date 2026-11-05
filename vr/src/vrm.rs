@@ -1522,8 +1522,8 @@ impl Skinned {
 }
 
 fn skin(vertex: &Vertex, palette: &[Mat4]) -> Vec3 {
-    let matrix = vertex.joints.iter().zip(vertex.weights).filter(|(_, weight)| *weight > 0.0).fold(Mat4::ZERO, |sum, (&joint, weight)| sum + palette[joint as usize] * weight);
-    matrix.transform_point3(vertex.position.into())
+    let position = Vec3::from(vertex.position);
+    vertex.joints.iter().zip(vertex.weights).filter(|(_, weight)| *weight > 0.0).fold(Vec3::ZERO, |sum, (&joint, weight)| sum + palette[joint as usize].transform_point3(position) * weight)
 }
 
 pub struct Fit {

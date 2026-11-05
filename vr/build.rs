@@ -18,9 +18,14 @@ fn main() {
         std::fs::write(out.join(file), words.iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
     };
     write(naga::ShaderStage::Vertex, "vertex", 0, "vertex.spv".into());
-    for used in 0..=pages {
-        write(naga::ShaderStage::Fragment, "fragment", used, format!("fragment-{used}.spv"));
+    write(naga::ShaderStage::Fragment, "depth", 0, "depth.spv".into());
+    let mut shaders = format!("const DECAL_PAGES: usize = {pages};\n");
+    for (entry, name) in [("fragment", "FRAGMENT_SHADERS"), ("cutout", "CUTOUT_SHADERS")] {
+        for used in 0..=pages {
+            write(naga::ShaderStage::Fragment, entry, used, format!("{entry}-{used}.spv"));
+        }
+        let modules: String = (0..=pages).map(|used| format!("include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{entry}-{used}.spv\")),")).collect();
+        shaders += &format!("const {name}: [&[u8]; {}] = [{modules}];\n", pages + 1);
     }
-    let fragments: String = (0..=pages).map(|used| format!("include_bytes!(concat!(env!(\"OUT_DIR\"), \"/fragment-{used}.spv\")),")).collect();
-    std::fs::write(out.join("shaders.rs"), format!("const DECAL_PAGES: usize = {pages};\nconst FRAGMENT_SHADERS: [&[u8]; {}] = [{fragments}];\n", pages + 1)).unwrap();
+    std::fs::write(out.join("shaders.rs"), shaders).unwrap();
 }

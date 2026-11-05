@@ -109,7 +109,7 @@ struct Vertex {
 }
 
 struct Varying {
-    @builtin(position) clip: vec4<f32>,
+    @builtin(position) @invariant clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) @interpolate(flat) surface: u32,
@@ -228,7 +228,7 @@ fn decal(page: i32, layer: u32, uv: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>) -> 
 }
 
 // The albedo and the shade share one sample of each decal.
-fn decal_samples(look: u32, uv: vec2<f32>) -> array<vec4<f32>, 4> {
+fn decal_samples(at: u32, look: u32, uv: vec2<f32>) -> array<vec4<f32>, 4> {
     var samples: array<vec4<f32>, 4>;
     let rect = looks[look].rect;
     let size = rect.zw - rect.xy;
@@ -236,6 +236,7 @@ fn decal_samples(look: u32, uv: vec2<f32>) -> array<vec4<f32>, 4> {
     let dx = dpdx(uv) / size;
     let dy = dpdy(uv) / size;
     for (var slot = 0u; slot < 4u; slot++) {
+        if value(at, DECAL, slot, looks[look].decal[slot]) * value(at, DECAL_INTENSITY, slot, looks[look].intensity[slot]) == 0.0 { continue; }
         samples[slot] = decal(looks[look].page[slot], looks[look].layer[slot], local, dx, dy);
     }
     return samples;
@@ -259,13 +260,19 @@ fn decals(color: vec3<f32>, tint: vec3<f32>, at: u32, look: u32, samples: array<
 // they add to the light.
 fn matcaps(base: ptr<function, vec3<f32>>, shade: ptr<function, vec3<f32>>, tint: vec3<f32>, at: u32, look: u32, uv: vec2<f32>, normal: vec3<f32>, view: vec3<f32>, lit: f32) -> vec3<f32> {
     var glow = vec3<f32>(0.0);
-    let masks = textureSample(matcap_masks, texture_sampler, uv);
+    if (looks[look].matcaps[0].on | looks[look].matcaps[1].on | looks[look].matcaps[2].on | looks[look].matcaps[3].on) == 0u { return glow; }
+    let masks = textureSampleGrad(matcap_masks, texture_sampler, uv, dpdx(uv), dpdy(uv));
     let up = normalize(vec3<f32>(0.0, 1.0, 0.0) - view * dot(view, vec3<f32>(0.0, 1.0, 0.0)));
     let right = normalize(cross(view, up));
     let reflected = reflect(-view, normal);
     for (var slot = 0u; slot < 4u; slot++) {
         let matcap = looks[look].matcaps[slot];
         if matcap.on == 0u { continue; }
+        let replace_at = value(at, MATCAP_REPLACE, slot, matcap.replace);
+        let multiply_at = value(at, MATCAP_MULTIPLY, slot, matcap.multiply);
+        let add_at = value(at, MATCAP_ADD, slot, matcap.add);
+        let mixed_at = value(at, MATCAP_MIXED, slot, matcap.mixed);
+        if replace_at == 0.0 && multiply_at == 0.0 && add_at == 0.0 && mixed_at == 0.0 && matcap.screen == 0.0 && matcap.light_add + matcap.emission == 0.0 { continue; }
         let mapped = select(vec2<f32>(dot(right, normal), dot(up, normal)), reflected.xy, matcap.reflection != 0u) * matcap.border + 0.5;
         let sampled = select(vec4<f32>(1.0), textureSampleLevel(matcap_textures, texture_sampler, mapped, max(matcap.texture, 0), 0.0), matcap.texture >= 0) * matcap.color;
         let light = sampled.rgb * value(at, MATCAP_INTENSITY, slot, matcap.intensity);
@@ -275,10 +282,10 @@ fn matcaps(base: ptr<function, vec3<f32>>, shade: ptr<function, vec3<f32>>, tint
         }
         let cover = sampled.a * mask;
         let hue_settings = vec4<f32>(value(at, MATCAP_HUE, slot, matcap.hue.x), matcap.hue.yzw);
-        let replace = value(at, MATCAP_REPLACE, slot, matcap.replace) * cover;
-        let multiply = value(at, MATCAP_MULTIPLY, slot, matcap.multiply) * cover;
-        let add = value(at, MATCAP_ADD, slot, matcap.add) * cover;
-        let mixed = value(at, MATCAP_MIXED, slot, matcap.mixed) * cover;
+        let replace = replace_at * cover;
+        let multiply = multiply_at * cover;
+        let add = add_at * cover;
+        let mixed = mixed_at * cover;
         let strengths = vec4<f32>(replace, multiply, add, matcap.screen * cover);
         let colored = hue(mix(light, light * *base, matcap.base_mix), hue_settings);
         *base = blend(*base, colored, vec3<f32>(1.0), strengths, mixed);
@@ -299,12 +306,39 @@ fn blend(color: vec3<f32>, light: vec3<f32>, tint: vec3<f32>, strengths: vec4<f3
 
 // VRChat Toon Standard's emission, turned by its hue shift under the hue mask.
 fn emission(at: u32, look: u32, uv: vec2<f32>, mask: f32) -> vec3<f32> {
-    let glow = textureSample(emission_map, texture_sampler, uv).rgb * looks[look].emission_color * value(at, EMISSION, 0u, looks[look].emission_strength);
+    let strength = value(at, EMISSION, 0u, looks[look].emission_strength);
+    if strength == 0.0 { return vec3<f32>(0.0); }
+    let glow = textureSampleGrad(emission_map, texture_sampler, uv, dpdx(uv), dpdy(uv)).rgb * looks[look].emission_color * strength;
     return mix(glow, hue(glow, vec4<f32>(value(at, EMISSION_HUE, 0u, looks[look].emission_hue), 2.0, 0.0, 1.0)), mask * looks[look].shifts_hue);
 }
 
+// A fragment shader that may discard runs before its depth test, so shading never discards: an alpha-tested surface
+// that writes depth is drawn first by `depth`, then shaded where its own depth is the nearest.
 @fragment
 fn fragment(input: Varying, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    return shaded(input, front);
+}
+
+@fragment
+fn depth(input: Varying) {
+    if covered(input) < materials[draw.material].cutoff {
+        discard;
+    }
+}
+
+@fragment
+fn cutout(input: Varying, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    if covered(input) < materials[draw.material].cutoff {
+        discard;
+    }
+    return shaded(input, front);
+}
+
+fn covered(input: Varying) -> f32 {
+    return textureSample(base_texture, texture_sampler, input.uv).a * materials[draw.material].base.a;
+}
+
+fn shaded(input: Varying, front: bool) -> vec4<f32> {
     let material = materials[draw.material];
     let surface = surfaces[input.surface];
     let indices = vec2<f32>(textureDimensions(look_index));
@@ -318,10 +352,7 @@ fn fragment(input: Varying, @builtin(front_facing) front: bool) -> @location(0) 
     let raw = textureSample(color_texture, texture_sampler, input.uv).rgb * surface.color.rgb;
     let sampled = textureSample(base_texture, texture_sampler, input.uv) * material.base;
     let mask = textureSample(hue_mask, texture_sampler, input.uv);
-    if sampled.a < material.cutoff {
-        discard;
-    }
-    let laid = decal_samples(look, input.uv);
+    let laid = decal_samples(input.surface, look, input.uv);
     var albedo = decals(adjust(mix(sampled.rgb, raw * material.base.rgb, surface.color.a), surface, mask), vec3<f32>(1.0), input.surface, look, laid);
     var shade = decals(adjust(mix(textureSample(shade_texture, texture_sampler, input.uv).rgb, raw, surface.color.a) * material.shade, surface, mask), material.shade, input.surface, look, laid);
     let glow = matcaps(&albedo, &shade, material.shade, input.surface, look, input.uv, normal, view, lit);

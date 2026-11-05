@@ -984,6 +984,11 @@ fn run() -> Result<(), String> {
 }
 
 fn main() {
+    // On the headset's driver a tiled render pass replays the figure's geometry once per tile, and a dense figure over the
+    // multisampled target costs more that way than drawn directly: 13.2 against 11.4 ms a frame for the densest catalog figure.
+    if std::env::var_os("TU_DEBUG").is_none() {
+        std::env::set_var("TU_DEBUG", "sysmem");
+    }
     let telemetry = telemetry::init(directory("XDG_STATE_HOME", ".local/state").join("crashes"));
     if let Err(error) = run() {
         tracing::error!("voice-vr: {error}");

@@ -68,3 +68,10 @@ test('an idle loops: its last frame returns to its first', () => {
 test('a window shorter than a second is refused', () => {
   assert.throws(() => motion(asf(), amc(Array.from({ length: 30 }, () => ({ root: [0, 15.8, 0, 0, 0, 0] }))), { name: 'short', rate: 60 }), /shorter than a second/);
 });
+
+test('a capture whose feet leap for one sample and back is refused, since the overlay stands the figure on its feet each frame', () => {
+  const frames = Array.from({ length: 121 }, (_, index) => ({ root: [0, 15.8, 0, 0, 0, 0], ...STANDING, rfemur: index === 60 || index === 61 ? [40, 0, 20] : [0, 0, 20] }));
+  assert.throws(() => motion(asf(), amc(frames), { name: 'glitch', rate: 60 }), /glitch: its feet jump [\d.]+% of hip height out and back at 1\.00 s of the take/);
+  const steady = Array.from({ length: 121 }, (_, index) => ({ root: [0, 15.8, 0, 0, 0, 0], ...STANDING, rfemur: [40 * index / 120, 0, 20] }));
+  assert.doesNotThrow(() => motion(asf(), amc(steady), { name: 'swing', rate: 60 }), 'a leg swinging steadily is no leap');
+});

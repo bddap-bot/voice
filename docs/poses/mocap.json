@@ -19,14 +19,6 @@
       "asf": "13d3c7488671d3902c0ea7faa672e1c79465c034c050de88668ace164e519a37",
       "amc": "543b7172ddd9ef6dc11b2d50920647151c9626da4081f9c70448cf00f8499426"
     },
-    "141_20": {
-      "id": "141_20",
-      "subject": "141",
-      "description": "Waiting",
-      "rate": 120,
-      "asf": "e32993b8079c0914ed4d865ad53f7b9646398808855233e6f650d4f4417df2bb",
-      "amc": "223616f94b053b965bdcf650c77fcb8ef00423405d819419a7d7af62428b06c2"
-    },
     "40_10": {
       "id": "40_10",
       "subject": "40",
@@ -147,14 +139,6 @@
       "asf": "c72f244092c214c2c4fd496d214a20ec7bb58dbb626458dda2a2b953a465ae85",
       "amc": "90c00a1c151565246d71eebdefc661753d63076245bcb5faacd7381c9876c543"
     },
-    "141_26": {
-      "id": "141_26",
-      "subject": "141",
-      "description": "Curtsey",
-      "rate": 120,
-      "asf": "e32993b8079c0914ed4d865ad53f7b9646398808855233e6f650d4f4417df2bb",
-      "amc": "3e4b7861bf5573321582657a196a4fa1bb1c45842500420fbcb3da2c0cf6a775"
-    },
     "80_43": {
       "id": "80_43",
       "subject": "80",
@@ -248,10 +232,6 @@
     {
       "action": "idle-6",
       "take": "140_07"
-    },
-    {
-      "action": "idle-7",
-      "take": "141_20"
     },
     {
       "action": "idle-8",
@@ -352,10 +332,6 @@
       "action": "look-around-3",
       "take": "77_04",
       "to": 8
-    },
-    {
-      "action": "bow-2",
-      "take": "141_26"
     },
     {
       "action": "pleased",

@@ -7,6 +7,7 @@ const root = path.resolve(import.meta.dirname, '..');
 const cache = process.env.VOICE_MOCAP_CACHE ?? path.join(root, 'node_modules/.cache/mocap');
 const FPS = 30;
 const SEAM = 0.5;
+const STANCE_JUMP = 0.01;
 
 const BONES = {
   root: 'hips', lowerback: 'spine', upperback: 'chest', thorax: 'upperChest', lowerneck: 'neck', head: 'head',
@@ -142,8 +143,11 @@ export function motion(asf, amc, { name, rate, from = 0, to = Infinity, loop = f
     for (const [source, target] of Object.entries(BONES)) {
       rotations[target] = a.world.get(source).clone().slerp(b.world.get(source), t).multiply(align.get(target));
     }
-    samples.push({ rotations, hips: a.start.get('root').clone().lerp(b.start.get('root'), t) });
+    const ankles = ['lfoot', 'rfoot'].map((bone) => a.start.get(bone).clone().lerp(b.start.get(bone), t));
+    samples.push({ rotations, hips: a.start.get('root').clone().lerp(b.start.get('root'), t), stance: new THREE.Vector3((ankles[0].x + ankles[1].x) / 2, Math.min(ankles[0].y, ankles[1].y), (ankles[0].z + ankles[1].z) / 2) });
   }
+  const jump = stanceJump(samples.map(({ stance }) => stance), hipsHeight);
+  if (jump.size > STANCE_JUMP) throw new Error(`${name}: its feet jump ${(jump.size * 100).toFixed(1)}% of hip height out and back at ${(from + jump.index / FPS).toFixed(2)} s of the take`);
   const facing = samples.reduce((sum, { rotations }) => sum.add(new THREE.Vector3(0, 0, 1).applyQuaternion(rotations.hips).setY(0).normalize()), new THREE.Vector3());
   const yaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -Math.atan2(facing.x, facing.z));
   const origin = samples[0].hips.clone().applyQuaternion(yaw);
@@ -166,6 +170,15 @@ export function motion(asf, amc, { name, rate, from = 0, to = Infinity, loop = f
   }));
   tracks.push({ name: 'hips.position', times, values: local.flatMap(({ hips }) => hips.toArray().map(round)) });
   return { name, duration: round((count - 1) / FPS), hipsHeight: round(hipsHeight), tracks };
+}
+
+export function stanceJump(stances, hipsHeight) {
+  let worst = { size: 0, index: 0 };
+  for (let index = 1; index < stances.length - 1; index++) {
+    const size = stances[index].distanceTo(stances[index - 1].clone().add(stances[index + 1]).multiplyScalar(0.5)) / hipsHeight;
+    if (size > worst.size && size > stances[index - 1].distanceTo(stances[index + 1]) / hipsHeight) worst = { size, index };
+  }
+  return worst;
 }
 
 const round = (value) => Math.round(value * 1e5) / 1e5;
@@ -215,7 +228,9 @@ async function main() {
     written.add(file);
     entries.push({ action: clip.action, name: file, source: `${sources.source} ${take.id} (${take.description}), ${clip.from ?? 0}–${clip.to ?? 'end'} s`, licence: sources.licence });
   }
-  manifest.clips = [...manifest.clips.filter((entry) => !written.has(entry.name) && !entries.some((own) => own.action === entry.action)), ...entries];
+  const own = (entry) => entry.source?.startsWith(`${sources.source} `);
+  for (const entry of manifest.clips.filter((entry) => own(entry) && !written.has(entry.name))) fs.rmSync(path.join(out, entry.name), { force: true });
+  manifest.clips = [...manifest.clips.filter((entry) => !own(entry) && !written.has(entry.name) && !entries.some((mine) => mine.action === entry.action)), ...entries];
   fs.writeFileSync(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`);
   console.log(`${entries.length} clips written to ${out}`);
 }

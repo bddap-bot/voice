@@ -263,7 +263,8 @@
     },
     {
       "action": "idle-13",
-      "take": "77_02"
+      "take": "77_02",
+      "from": 5.6
     },
     {
       "action": "wave-2",

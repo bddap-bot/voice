@@ -8,7 +8,8 @@ use crate::point::Pointing;
 use crate::relay::{Relay, Token};
 use crate::render::{eye_projection, eye_texels, Renderer, NEAREST, PAGE_HEIGHT};
 use crate::vulkan::Gpu;
-use crate::{action, grown_window, lit, load, preview, touching, FLOOR, HEIGHT, QUAD};
+use crate::vrm::spring::{Contact, Contacts};
+use crate::{action, grown_window, lit, load, preview, touching, FINGERTIP, FLOOR, HEIGHT, QUAD};
 
 const FRAME: Duration = Duration::from_micros(11_111);
 /// The wearer's head in the hand-held puppet's frame, its feet at the origin: a little above and in front, as the controller is held.
@@ -29,6 +30,16 @@ const TWIST: f32 = 0.6;
 const TOUCHED: Duration = Duration::from_millis(3000);
 const REACHED: Vec3 = [0.0, 0.26, -0.04];
 const SWEEP: f32 = 0.1;
+/// The right controller's drawn shape in its own frame, a capsule behind its fingertip at `TIP`, standing in for a render model off any headset.
+const OUTLINE: (glam::Vec3, glam::Vec3, f32) = (glam::Vec3::new(0.0, 0.0, -0.01), glam::Vec3::new(0.0, 0.0, 0.06), 0.015);
+/// The fingertip's paths toward the puppet, from a start in its standing frame along a direction: at the back of the head, at its side, and down onto its top.
+const PROBES: [(Vec3, Vec3); 3] = [([0.0, 0.26, -0.14], [0.0, 0.0, 1.0]), ([0.12, 0.25, 0.0], [-1.0, 0.0, 0.0]), ([0.0, 0.40, 0.0], [0.0, -1.0, 0.0])];
+/// How near the fingertip stops before touching, and how long it waits there; how far it then presses on past the first touch, how far it drags across, and how fast it moves.
+const SHY: f32 = 0.003;
+const WAIT: Duration = Duration::from_millis(1500);
+const PRESS: f32 = 0.008;
+const DRAG: f32 = 0.03;
+const SPEED: f32 = 0.02;
 /// Every how many frames the clip keeps one: 30 a second.
 const CLIP_EVERY: usize = 3;
 /// What the puppet points at: where the overlay's first object stands beside a hand-held puppet.
@@ -85,15 +96,17 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
         let mut clipped = 0;
         let mut motion = Motion::default();
         let mut constraints = Motion::default();
-        let mut frame = |puppet: &mut crate::Puppet, pointing: &mut Pointing, stand: Pose, hand: Option<Pose>, mouth: f32, picture: Option<&Path>| -> Result<(), String> {
+        let outlines = HashMap::from([(Hand::Right, OUTLINE)]);
+        let mut frame = |puppet: &mut crate::Puppet, pointing: &mut Pointing, stand: Pose, hand: Option<Pose>, mouth: f32, picture: Option<&Path>| -> Result<Vec<glam::Mat4>, String> {
             let started = Instant::now();
             let hands: Vec<HandPose> = hand.into_iter().map(|pose| HandPose { hand: Hand::Right, pose }).collect();
-            let (posed, body, _) = puppet.step(FRAME.as_secs_f32(), |_, _| stand, 1.0, HEAD, &touching(&hands, TIP), mouth, pointing, started, |_| Some(TARGET));
+            let (posed, body, _) = puppet.step(FRAME.as_secs_f32(), |_, _| stand, 1.0, HEAD, &touching(&hands, TIP, &outlines), mouth, pointing, started, |_| Some(TARGET));
             let quad = facing(stand.apply([0.0, -FLOOR, 0.0]), HEAD);
             let local = quad.inverse();
             puppet.draw(&posed, local.mat4() * body);
             let eyes = [-EYES, EYES].map(|x| eye_projection(local.apply([HEAD[0] + x, HEAD[1], HEAD[2]]).into(), QUAD / 2.0, QUAD / 2.0));
             renderer.render(&puppet.drawn, eyes, glam::Mat4::IDENTITY, renderer.eye[0])?;
+            let touched = puppet.reach.iter().any(|reach| reach.gap < 0.0);
             work.push(started.elapsed());
             let kept = (work.len() % CLIP_EVERY == 1).then(|| clip.join(format!("{clipped:05}.png")));
             if kept.is_some() {
@@ -106,16 +119,19 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
                 }
             }
             if picture.is_some() || kept.is_some() {
-                let stereo = renderer.read()?;
+                let mut image = eye(&renderer.read()?, renderer.eye[0]);
+                if let (Some(hand), Some(projection)) = (hand, eyes[0]) {
+                    mark(&mut image, projection * local.mat4(), &hand, touched);
+                }
                 for path in picture.into_iter().chain(kept.as_deref()) {
-                    save(&stereo, renderer.eye[0], path)?;
+                    image.save(path).map_err(|error| format!("{}: {error}", path.display()))?;
                 }
                 clipped += kept.is_some() as usize;
             }
             if let Some(wait) = (started + FRAME).checked_duration_since(Instant::now()) {
                 std::thread::sleep(wait);
             }
-            Ok(())
+            Ok(posed)
         };
         let frames = |span: Duration| (span.as_secs_f64() / FRAME.as_secs_f64()) as usize;
         if let Some(samples) = &speech {
@@ -145,6 +161,95 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
                 frame(&mut puppet, &mut pointing, HELD, None, speaking(at), (at == frames(GESTURE_PICTURE)).then(|| pictures.join(format!("gesture-{gesture}.png"))).as_deref())?;
             }
         }
+        let mut rows = String::from("seconds,probe,phase,gap_mm,bone,turn_deg_since_near\n");
+        let mut log = String::new();
+        let mut contacts = Contacts::default();
+        let mut clock = 0usize;
+        for (probe, &(start, toward)) in PROBES.iter().enumerate() {
+            let toward = glam::Vec3::from(toward);
+            let across = toward.any_orthonormal_vector();
+            let held = |at: glam::Vec3| {
+                let z = -toward;
+                let x = across;
+                let pose = Pose::from_axes(x.into(), z.cross(x).into(), z.into(), [0.0; 3]);
+                Pose { t: (at - glam::Vec3::from(pose.apply(TIP))).into(), ..pose }
+            };
+            let step = SPEED * FRAME.as_secs_f32();
+            let mut at = glam::Vec3::from(start);
+            let mut phase = Phase::Approach(0.0);
+            let mut rest: HashMap<usize, glam::Quat> = HashMap::new();
+            let mut picture = None;
+            while phase != Phase::Done {
+                let posed = frame(&mut puppet, &mut pointing, HELD, (!matches!(phase, Phase::Settle(_))).then(|| held(at)), 0.0, picture.take().map(|name: String| pictures.join(name)).as_deref())?;
+                clock += 1;
+                let seconds = clock as f32 * FRAME.as_secs_f32();
+                let tip = puppet.reach.iter().find(|reach| reach.hand == FINGERTIP).copied();
+                let gap = tip.map_or(f32::INFINITY, |tip| tip.gap);
+                let bone = |node: Option<usize>| node.and_then(|node| puppet.model.name(node)).unwrap_or_default();
+                let turn = tip.and_then(|tip| tip.node).and_then(|node| Some((*rest.get(&node)?, node))).and_then(|(rest, node)| puppet.model.spring_motion(&posed).into_iter().find(|&(at, ..)| at == node).map(|(_, _, rotation, _)| rest.angle_between(rotation).to_degrees()));
+                for event in contacts.observe(&puppet.reach) {
+                    let line = match event {
+                        Contact::Touched { hand, gap, node } => format!("{seconds:.3} s probe {probe}: {hand} touched {} {:.2} mm deep", bone(node), -gap * 1e3),
+                        Contact::Released { hand } => format!("{seconds:.3} s probe {probe}: {hand} let go"),
+                        Contact::Passed { hand, closest, node } => format!("{seconds:.3} s probe {probe}: {hand} passed {} {:.2} mm away without touching", bone(node), closest * 1e3),
+                    };
+                    log.push_str(&line);
+                    log.push('\n');
+                }
+                rows.push_str(&format!("{seconds:.3},{probe},{},{},{},{}\n", phase.name(), if gap.is_finite() { format!("{:.3}", gap * 1e3) } else { String::new() }, bone(tip.and_then(|tip| tip.node)), turn.map_or(String::new(), |turn| format!("{turn:.3}"))));
+                phase = match phase {
+                    Phase::Approach(travelled) if gap <= SHY => {
+                        rest = puppet.model.spring_motion(&posed).into_iter().map(|(node, _, rotation, _)| (node, rotation)).collect();
+                        log.push_str(&format!("{seconds:.3} s probe {probe}: fingertip held {:.2} mm from {} after {:.0} mm\n", gap * 1e3, bone(tip.and_then(|tip| tip.node)), travelled * 1e3));
+                        Phase::Wait(0)
+                    }
+                    Phase::Approach(travelled) if travelled > 0.2 => {
+                        log.push_str(&format!("{seconds:.3} s probe {probe}: nothing others may push within 200 mm of its path\n"));
+                        Phase::Settle(0)
+                    }
+                    Phase::Approach(travelled) => {
+                        at += toward * step;
+                        Phase::Approach(travelled + step)
+                    }
+                    Phase::Wait(frames) if frames >= (WAIT.as_secs_f32() / FRAME.as_secs_f32()) as usize => Phase::Press(None),
+                    Phase::Wait(frames) => {
+                        if frames + 1 == (WAIT.as_secs_f32() / FRAME.as_secs_f32()) as usize {
+                            picture = Some(format!("probe{probe}-near.png"));
+                        }
+                        Phase::Wait(frames + 1)
+                    }
+                    Phase::Press(Some(pressed)) if pressed >= PRESS => Phase::Drag(0.0),
+                    Phase::Press(pressed) => {
+                        at += toward * step / 2.0;
+                        let pressed = pressed.or((gap < 0.0).then_some(0.0)).map(|pressed| pressed + step / 2.0);
+                        if pressed.is_none() && gap > 0.05 {
+                            Phase::Leave(0.0)
+                        } else {
+                            Phase::Press(pressed)
+                        }
+                    }
+                    Phase::Drag(dragged) if dragged >= DRAG => {
+                        picture = Some(format!("probe{probe}-dragged.png"));
+                        Phase::Leave(0.0)
+                    }
+                    Phase::Drag(dragged) => {
+                        at += across * step;
+                        Phase::Drag(dragged + step)
+                    }
+                    Phase::Leave(left) if left >= 0.1 => Phase::Settle(0),
+                    Phase::Leave(left) => {
+                        at -= toward * step * 2.0;
+                        Phase::Leave(left + step * 2.0)
+                    }
+                    Phase::Settle(frames) if frames >= 90 => Phase::Done,
+                    Phase::Settle(frames) => Phase::Settle(frames + 1),
+                    Phase::Done => Phase::Done,
+                };
+            }
+        }
+        std::fs::write(pictures.join("contact.csv"), rows).map_err(|error| format!("{}: {error}", pictures.display()))?;
+        std::fs::write(pictures.join("contact.log"), &log).map_err(|error| format!("{}: {error}", pictures.display()))?;
+        print!("{}: contact\n{log}", avatar.id);
         pointing.start("target".into(), Instant::now());
         for at in 0..frames(POINT) {
             frame(&mut puppet, &mut pointing, HELD, None, speaking(at), (at == frames(POINT_PICTURE)).then(|| pictures.join("point.png")).as_deref())?;
@@ -214,6 +319,58 @@ fn stand_grounded(puppet: &mut crate::Puppet, renderer: &mut Renderer, distance:
     Ok(format!("grounded at {distance} m: {texels} texels per eye for the display's {needed}, GPU {gpu} per frame"))
 }
 
+/// Where a probe of the fingertip toward the puppet is: coming nearer by the distance so far, waiting a little short of touching, pressing on past the first touch, dragging across, drawing away, and its hand gone while what it moved settles.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Phase {
+    Approach(f32),
+    Wait(usize),
+    Press(Option<f32>),
+    Drag(f32),
+    Leave(f32),
+    Settle(usize),
+    Done,
+}
+
+impl Phase {
+    fn name(&self) -> &'static str {
+        match self {
+            Phase::Approach(_) => "approach",
+            Phase::Wait(_) => "near",
+            Phase::Press(_) => "press",
+            Phase::Drag(_) => "drag",
+            Phase::Leave(_) => "leave",
+            Phase::Settle(_) | Phase::Done => "settle",
+        }
+    }
+}
+
+/// Draws the right controller into a picture through `to_eye`, the eye's projection of the window: its drawn shape grey and its fingertip green, red while the hand touches.
+fn mark(image: &mut image::RgbImage, to_eye: glam::Mat4, hand: &Pose, touched: bool) {
+    let size = image.width() as f32;
+    let pixel = |at: glam::Vec3| {
+        let clip = to_eye * at.extend(1.0);
+        let ndc = clip.truncate() / clip.w;
+        glam::Vec2::new((ndc.x + 1.0) / 2.0 * size, (ndc.y + 1.0) / 2.0 * size)
+    };
+    let mut disc = |at: glam::Vec3, radius: f32, colour: [u8; 3], ring: bool| {
+        let centre = pixel(at);
+        let reach = (pixel(at + glam::Vec3::from(hand.apply([radius, 0.0, 0.0])) - glam::Vec3::from(hand.t)) - centre).length().max(2.0);
+        for y in (centre.y - reach).floor().max(0.0) as u32..((centre.y + reach).ceil() as u32).min(image.height()) {
+            for x in (centre.x - reach).floor().max(0.0) as u32..((centre.x + reach).ceil() as u32).min(image.width()) {
+                let distance = (glam::Vec2::new(x as f32 + 0.5, y as f32 + 0.5) - centre).length();
+                if distance <= reach && (!ring || distance >= reach - 1.5) {
+                    image.put_pixel(x, y, image::Rgb(colour));
+                }
+            }
+        }
+    };
+    let (from, to, radius) = OUTLINE;
+    for step in 0..=6 {
+        disc(hand.apply(from.lerp(to, step as f32 / 6.0).into()).into(), radius, [150, 150, 150], true);
+    }
+    disc(hand.apply(TIP).into(), crate::FINGER_RADIUS, if touched { [230, 40, 40] } else { [40, 220, 80] }, false);
+}
+
 const HELD: Pose = Pose { r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], t: [0.0; 3] };
 
 /// The controller `progress` of the way through two swings side to side, each twisting the puppet about its upright, and held still past the end.
@@ -248,10 +405,6 @@ fn library(avatars: &[crate::relay::Avatar], active: usize, token: &Token, cache
     image.save(path).map_err(|error| format!("{}: {error}", path.display()))?;
     println!("wrote {}", path.display());
     Ok(())
-}
-
-fn save(stereo: &[u8], eye_texels: u32, path: &Path) -> Result<(), String> {
-    eye(stereo, eye_texels).save(path).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 /// The left eye of a stereo render, its premultiplied colour over a dark backdrop.

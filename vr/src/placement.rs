@@ -379,7 +379,7 @@ pub fn marker(board: &Pose, right: &Pose, at: Vec3) -> Pose {
     right.inverse().then(&Pose { r: board.r, t: board.apply(at) })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Hand {
     Left,
     Right,

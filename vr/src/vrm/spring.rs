@@ -244,11 +244,165 @@ struct Bone {
     others: bool,
 }
 
-/// A hand that is not the avatar's own, as a sphere in world space.
+/// A hand that is not the avatar's own, as a capsule in world space, a sphere when its ends meet; `name` tells it from the others across frames.
+/// A hand that `grips` carries what it touches along as it moves; one that does not only pushes, as a VRChat collider does.
 #[derive(Clone, Copy, Debug)]
 pub struct Hand {
-    pub center: Vec3,
+    pub name: &'static str,
+    pub from: Vec3,
+    pub to: Vec3,
     pub radius: f32,
+    pub grips: bool,
+}
+
+impl Hand {
+    pub fn sphere(name: &'static str, center: Vec3, radius: f32) -> Hand {
+        Hand { name, from: center, to: center, radius, grips: true }
+    }
+
+    fn mapped(&self, matrix: Mat4) -> Hand {
+        Hand { from: matrix.transform_point3(self.from), to: matrix.transform_point3(self.to), ..*self }
+    }
+
+    fn lerp(&self, to: &Hand, share: f32) -> Hand {
+        Hand { from: self.from.lerp(to.from, share), to: self.to.lerp(to.to, share), ..*to }
+    }
+
+    fn placed(&self) -> Placed {
+        Placed::Round { center: self.from, end: Some(self.to), reach: self.radius, inside: false }
+    }
+
+    /// The nearest point of its axis to `at`, and how far along the axis it lies.
+    fn nearest(&self, at: Vec3) -> (Vec3, f32) {
+        let span = self.to - self.from;
+        let along = ((at - self.from).dot(span) / span.length_squared().max(f32::MIN_POSITIVE)).clamp(0.0, 1.0);
+        (self.from + span * along, along)
+    }
+}
+
+/// The capsule a held thing fills, from its drawn vertices in its own frame: along their longest spread, its ends a twentieth of them in from each end, as thick as all but a seventh of them reach from its axis, so it lies under the surface that is seen but for its thinnest parts, and what comes near the surface without meeting it is not touched.
+pub fn hull(points: &[Vec3]) -> Option<(Vec3, Vec3, f32)> {
+    if points.len() < 4 {
+        return None;
+    }
+    let center = points.iter().sum::<Vec3>() / points.len() as f32;
+    let spread = points.iter().fold(glam::Mat3::ZERO, |sum, &point| {
+        let away = point - center;
+        sum + glam::Mat3::from_cols(away * away.x, away * away.y, away * away.z)
+    });
+    let mut axis = Vec3::ONE.normalize();
+    for _ in 0..32 {
+        axis = (spread * axis).normalize_or(Vec3::Z);
+    }
+    let mut along: Vec<f32> = points.iter().map(|&point| (point - center).dot(axis)).collect();
+    let mut across: Vec<f32> = points.iter().map(|&point| (point - center - axis * (point - center).dot(axis)).length()).collect();
+    along.sort_by(f32::total_cmp);
+    across.sort_by(f32::total_cmp);
+    let (low, high) = (along[along.len() / 20], along[along.len() - 1 - along.len() / 20]);
+    let radius = across[across.len() / 7].min((high - low) / 2.0);
+    Some((center + axis * (low + radius), center + axis * (high - radius), radius))
+}
+
+/// What a hand reached this step: the least gap between it and a bone others may push, before any push, so below zero it touched; and that bone's node.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Reach {
+    pub hand: &'static str,
+    pub gap: f32,
+    pub node: Option<usize>,
+}
+
+impl Reach {
+    fn note(&mut self, gap: f32, node: usize) {
+        if gap < self.gap {
+            self.gap = gap;
+            self.node = Some(node);
+        }
+    }
+}
+
+/// How near a hand passing a bone others may push counts as a pass worth logging.
+pub const NEAR: f32 = 0.03;
+
+/// A hand's touch, release or near pass, from what it reached.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Contact {
+    /// It reached into a bone by `-gap`, pushing it.
+    Touched { hand: &'static str, gap: f32, node: Option<usize> },
+    Released { hand: &'static str },
+    /// It came within `NEAR` and left without touching, `closest` at its nearest.
+    Passed { hand: &'static str, closest: f32, node: Option<usize> },
+}
+
+struct Pass {
+    hand: &'static str,
+    touching: bool,
+    touched: bool,
+    closest: f32,
+    node: Option<usize>,
+}
+
+/// Each hand's passes by the bones others may push, told apart as touches and near misses.
+#[derive(Default)]
+pub struct Contacts {
+    passes: Vec<Pass>,
+}
+
+impl Contacts {
+    pub fn observe(&mut self, reach: &[Reach]) -> Vec<Contact> {
+        let mut seen = Vec::new();
+        for pass in &mut self.passes {
+            let Reach { gap, node, .. } = reach.iter().find(|reach| reach.hand == pass.hand).copied().unwrap_or(Reach { hand: pass.hand, gap: f32::INFINITY, node: None });
+            if gap < 0.0 && !pass.touching {
+                seen.push(Contact::Touched { hand: pass.hand, gap, node });
+                (pass.touching, pass.touched) = (true, true);
+            } else if pass.touching && gap > SKIN {
+                seen.push(Contact::Released { hand: pass.hand });
+                pass.touching = false;
+            }
+            if !pass.touched && gap < pass.closest {
+                (pass.closest, pass.node) = (gap, node);
+            }
+        }
+        let fresh: Vec<Reach> = reach.iter().filter(|reach| reach.gap <= NEAR && !self.passes.iter().any(|pass| pass.hand == reach.hand)).copied().collect();
+        for reach in fresh {
+            let touching = reach.gap < 0.0;
+            if touching {
+                seen.push(Contact::Touched { hand: reach.hand, gap: reach.gap, node: reach.node });
+            }
+            self.passes.push(Pass { hand: reach.hand, touching, touched: touching, closest: reach.gap, node: reach.node });
+        }
+        self.passes.retain(|pass| {
+            let gap = reach.iter().find(|reach| reach.hand == pass.hand).map_or(f32::INFINITY, |reach| reach.gap);
+            if gap <= NEAR || pass.touching {
+                return true;
+            }
+            if !pass.touched {
+                seen.push(Contact::Passed { hand: pass.hand, closest: pass.closest, node: pass.node });
+            }
+            false
+        });
+        seen
+    }
+}
+
+/// A hand as a step presses with it and carries what it holds: where it is, and where it was at the last frame and at the last whole PhysBone step, each moved with the figure since, so a hand moving with the figure, as one holding it does, carries nothing.
+struct Grip {
+    placed: Placed,
+    now: Hand,
+    before: Option<Hand>,
+    stepped: Option<Hand>,
+}
+
+/// How far a hand that touched must draw back before it has let go, against the float error of a tail just pushed onto its surface.
+const SKIN: f32 = 1e-3;
+
+/// How far the hand that pushed the tail at `at` at the last step has carried it since `then`, `share` of the way to where it is now: as the nearest point of its axis moved, but never pulled along as it draws away, so a strand caught in the hand drags with it until its own pull wins or the hand leaves it.
+fn hand_carry(grips: &[Grip], held: Option<&str>, at: Vec3, then: impl Fn(&Grip) -> Option<Hand>, share: f32) -> Vec3 {
+    let Some((before, now)) = grips.iter().find(|grip| Some(grip.now.name) == held && grip.now.grips).and_then(|grip| Some((then(grip)?, grip.now))) else { return Vec3::ZERO };
+    let (near, along) = before.nearest(at);
+    let normal = (at - near).normalize_or_zero();
+    let moved = (now.from.lerp(now.to, along) - near) * share;
+    moved - normal * moved.dot(normal).min(0.0)
 }
 
 /// Whether a spring's (or VRM 0 bone group's) extras let others' hands push it: its "collide" lists "wearer" and "others", as a VRChat PhysBone's allowCollision does, and a spring without the list is everyone's to touch.
@@ -436,6 +590,8 @@ struct Tail {
     length: f32,
     /// The world's down in the bone's rest axes, which gravity falloff weighs the bone's turn against.
     down: Vec3,
+    /// The hand that pushed it at the last step, which carries it as it moves.
+    gripped: Option<&'static str>,
 }
 
 #[derive(Default)]
@@ -446,6 +602,9 @@ pub struct Springs {
     /// Each chain's anchor at its last whole step, and the figure's place then.
     anchors: Vec<(Vec3, Quat)>,
     place: Vec3,
+    /// The hands in the figure's frame at the last step, and as far as the last whole PhysBone step took them, which carry what they held since.
+    hands: Vec<Hand>,
+    stepped: Vec<Hand>,
 }
 
 const PHYSBONE_STEP: f32 = 1.0 / 60.0;
@@ -479,6 +638,29 @@ struct Pressed {
     fallback: Vec3,
 }
 
+/// The point of a bone, a tapered capsule from `begin` when it has a radius there, nearest `toward`, and the bone's radius at it.
+fn tapered(begin: Vec3, end: Vec3, radius: [f32; 2], toward: Vec3) -> (Vec3, f32) {
+    let span = end - begin;
+    if radius[0] <= 0.0 || span.length_squared() <= 0.0 {
+        return (end, radius[1]);
+    }
+    let clear = 1.0 - ((span.length() - radius[0]) / span.length()).max(0.0);
+    let along = ((toward - begin).dot(span) / span.length_squared()).clamp(0.0, 1.0).max(clear);
+    (begin.lerp(end, along), radius[0] + (radius[1] - radius[0]) * along)
+}
+
+impl Pressed {
+    /// The gap between this bone and a hand, below zero by how far they overlap; None for a bone with no radius at its tail, which nothing touches.
+    fn gap(&self, hand: &Hand) -> Option<f32> {
+        if self.radius[1] <= 0.0 {
+            return None;
+        }
+        let (nearest, _) = hand.nearest(self.end);
+        let (at, round) = tapered(self.begin, self.end, self.radius, nearest);
+        Some((at - nearest).length() - round - hand.radius)
+    }
+}
+
 impl Placed {
     /// Moves the bone's tail out of the shape, or inside it, as VRChat does: a bone with a radius at its start is a tapered capsule from there.
     fn press(&self, bone: &mut Pressed) -> bool {
@@ -496,14 +678,7 @@ impl Placed {
                     let depth = (end - nearest).length() + radius[1] - reach;
                     (depth > 0.0).then(|| end + (nearest - end).normalize_or_zero() * depth)
                 } else if radius[1] > 0.0 {
-                    let (mut at, mut round) = (end, radius[1]);
-                    let span = end - begin;
-                    if radius[0] > 0.0 && span.length_squared() > 0.0 {
-                        let clear = 1.0 - ((span.length() - radius[0]) / span.length()).max(0.0);
-                        let along = ((nearest - begin).dot(span) / span.length_squared()).clamp(0.0, 1.0).max(clear);
-                        at = begin.lerp(end, along);
-                        round = radius[0] + (radius[1] - radius[0]) * along;
-                    }
+                    let (at, round) = tapered(begin, end, radius, nearest);
                     let gap = (at - nearest).length() - (round + reach);
                     (gap < 0.0).then(|| end + (nearest - at).normalize_or_zero() * gap)
                 } else {
@@ -525,6 +700,8 @@ impl Springs {
     /// Starts the next step from rest, so a jump of the anchor does not fling the hair.
     pub fn reset(&mut self) {
         self.tails.clear();
+        self.hands.clear();
+        self.stepped.clear();
     }
 
     pub fn restore(&self, model: &Model, pose: &mut Pose, idle: &Idle) {
@@ -541,15 +718,18 @@ impl Springs {
     }
 
     /// Swings each joint but the `idle` ones, which keep the pose's rotation and carry their tails along so they set off from it, against every collider but the `idle` ones.
-    pub fn step(&mut self, model: &Model, pose: &mut Pose, model_to_world: Mat4, hands: &[Hand], delta: f32, idle: &Idle) {
+    /// Returns, for each hand, what it reached.
+    pub fn step(&mut self, model: &Model, pose: &mut Pose, model_to_world: Mat4, hands: &[Hand], delta: f32, idle: &Idle) -> Vec<Reach> {
         let rig = &model.rig;
+        let mut reach: Vec<Reach> = hands.iter().map(|hand| Reach { hand: hand.name, gap: f32::INFINITY, node: None }).collect();
         if rig.joints.is_empty() {
-            return;
+            return reach;
         }
         let mut worlds: Vec<Mat4> = model.worlds(pose).into_iter().map(|world| model_to_world * world).collect();
         let colliders: Vec<Placed> = rig.colliders.iter().map(|collider| collider.placed(&worlds)).collect();
-        let hands: Vec<Placed> = hands.iter().map(|hand| Placed::Round { center: hand.center, end: None, reach: hand.radius, inside: false }).collect();
         let fresh = self.tails.len() != rig.joints.len();
+        let then = |list: &[Hand], hand: &Hand| list.iter().find(|before| before.name == hand.name).filter(|_| !fresh).map(|before| before.mapped(model_to_world));
+        let grips: Vec<Grip> = hands.iter().map(|&hand| Grip { placed: hand.placed(), now: hand, before: then(&self.hands, &hand), stepped: then(&self.stepped, &hand) }).collect();
         let place = model_to_world.w_axis.truncate();
         if fresh {
             let rest = model.worlds(&model.rest());
@@ -568,7 +748,7 @@ impl Springs {
             let at = match *unit {
                 Unit::Joint(at) => at,
                 Unit::Chain(chain) => {
-                    self.chain(model, pose, &mut worlds, chain, (place, executions), [&colliders, &hands], idle, fresh);
+                    self.chain(model, pose, &mut worlds, chain, (place, executions), (&colliders, &grips, &mut reach), idle, fresh);
                     continue;
                 }
             };
@@ -581,11 +761,11 @@ impl Springs {
             let rest = initial.transform_point3(joint.tail);
             let still = idle.still(joint.node, joint.child);
             if fresh {
-                *tail = Tail { now: rest, before: rest, held: joint.tail, rotation: node.rotation, ..*tail };
+                *tail = Tail { now: rest, before: rest, held: joint.tail, rotation: node.rotation, gripped: None, ..*tail };
             }
             if still {
                 let now = (parent * model.local(pose, joint.node)).transform_point3(joint.tail);
-                *tail = Tail { now, before: tail.now, rotation: pose.rotations[joint.node], ..*tail };
+                *tail = Tail { now, before: tail.now, rotation: pose.rotations[joint.node], gripped: None, ..*tail };
             } else if !fresh && delta > 0.0 {
                 let Settings { stiffness, drag, gravity, radius, limit } = joint.settings;
                 let length = (rest - origin).length();
@@ -593,14 +773,26 @@ impl Springs {
                 let scale = scale_of(&initial);
                 // Drag slows the tail only relative to its carrying frame: steady motion of the figure leaves it at rest, and only acceleration swings it.
                 let carried = initial.transform_point3(tail.held);
-                let moved = carried + (tail.now - tail.before - (carried - tail.now)) * (1.0 - drag) + (axis * stiffness + gravity) * (delta * scale);
+                let grips = if joint.others { &grips[..] } else { &[] };
+                let moved = carried + (tail.now - tail.before - (carried - tail.now)) * (1.0 - drag) + (axis * stiffness + gravity) * (delta * scale) + hand_carry(grips, tail.gripped, tail.now, |grip| grip.before, 1.0);
                 let mut next = origin + (moved - origin).normalize_or(axis) * length;
-                let touching = if joint.others { &hands[..] } else { &[] };
+                for (grip, reach) in grips.iter().zip(reach.iter_mut()) {
+                    let (nearest, _) = grip.now.nearest(next);
+                    reach.note((next - nearest).length() - grip.now.radius - radius * scale, joint.node);
+                }
                 let running = joint.groups.iter().flat_map(|&group| &rig.groups[group]).filter(|&&collider| !idle.colliders.contains(&rig.colliders[collider].source));
-                for placed in running.map(|&collider| &colliders[collider]).chain(touching) {
+                for placed in running.map(|&collider| &colliders[collider]) {
                     let pushed = placed.push(next, radius * scale);
                     if pushed != next {
                         next = origin + (pushed - origin).normalize_or(axis) * length;
+                    }
+                }
+                tail.gripped = None;
+                for grip in grips {
+                    let pushed = grip.placed.push(next, radius * scale);
+                    if pushed != next {
+                        next = origin + (pushed - origin).normalize_or(axis) * length;
+                        tail.gripped = tail.gripped.or(Some(grip.now.name));
                     }
                 }
                 if let Some(limit) = limit {
@@ -620,11 +812,20 @@ impl Springs {
         if executions >= 1.0 {
             self.place = place;
         }
+        let to_figure = model_to_world.inverse();
+        let whole = executions.floor() / executions;
+        self.stepped = grips.iter().map(|grip| match grip.stepped {
+            Some(stepped) if executions >= 1.0 => stepped.lerp(&grip.now, whole).mapped(to_figure),
+            Some(stepped) => stepped.mapped(to_figure),
+            None => grip.now.mapped(to_figure),
+        }).collect();
+        self.hands = hands.iter().map(|hand| hand.mapped(to_figure)).collect();
+        reach
     }
 
     /// Steps one PhysBone chain as VRChat does: whole 60 Hz steps with its anchor moved part way for each, and a part step for time left over that only shows.
     #[allow(clippy::too_many_arguments)]
-    fn chain(&mut self, model: &Model, pose: &mut Pose, worlds: &mut [Mat4], at: usize, (place, executions): (Vec3, f32), [colliders, hands]: [&[Placed]; 2], idle: &Idle, fresh: bool) {
+    fn chain(&mut self, model: &Model, pose: &mut Pose, worlds: &mut [Mat4], at: usize, (place, executions): (Vec3, f32), (colliders, grips, reach): (&[Placed], &[Grip], &mut [Reach]), idle: &Idle, fresh: bool) {
         let rig = &model.rig;
         let chain = &rig.chains[at];
         let now = worlds[chain.anchor];
@@ -634,8 +835,11 @@ impl Springs {
         let travel = chain.joints.first().and_then(|&joint| rig.joints[joint].physbone).is_some_and(|bone| bone.travel);
         let steps = (executions.ceil() as usize).max(1);
         let mut before = Mat4::from_rotation_translation(last.1, last.0) * shape;
+        let mut done = 0.0;
         for step in 0..steps {
             let (through, ratio) = if steps == 1 { (1.0, executions) } else { ((step as f32 + 1.0).min(executions) / executions, (executions - step as f32).min(1.0)) };
+            let share = through - done;
+            done = through;
             let held = (last.0.lerp(position, through), last.1.slerp(rotation, through));
             let anchor = Mat4::from_rotation_translation(held.1, held.0) * shape;
             let immobile = if travel { Mat4::from_translation(last_place.lerp(place, through)) } else { anchor };
@@ -659,9 +863,11 @@ impl Springs {
                         _ if fresh => Vec3::ZERO,
                         _ => tail.felt,
                     };
-                    *tail = Tail { rotation, now: end, vector: end - world.w_axis.truncate(), velocity: Vec3::ZERO, felt, anchored: immobile.inverse().transform_point3(end), length: joint.tail.length(), ..*tail };
+                    *tail = Tail { rotation, now: end, vector: end - world.w_axis.truncate(), velocity: Vec3::ZERO, felt, anchored: immobile.inverse().transform_point3(end), length: joint.tail.length(), gripped: None, ..*tail };
                 } else if let Some(bone) = joint.physbone {
-                    tail.rotation = swing(joint, bone, node.rotation, tail, &local, Frames { immobile, carrier }, (ratio, whole), joint.groups.iter().flat_map(|&group| &rig.groups[group]).filter(|&&collider| !idle.colliders.contains(&rig.colliders[collider].source)).map(|&collider| &colliders[collider]).chain(if joint.others { hands } else { &[] }));
+                    let running = joint.groups.iter().flat_map(|&group| &rig.groups[group]).filter(|&&collider| !idle.colliders.contains(&rig.colliders[collider].source)).map(|&collider| &colliders[collider]);
+                    let touching = Touching { grips: if joint.others { grips } else { &[] }, share, reach: &mut *reach, node: joint.node };
+                    tail.rotation = swing(joint, bone, node.rotation, tail, &local, Frames { immobile, carrier }, (ratio, whole), running, touching);
                 }
                 pose.rotations[joint.node] = tail.rotation;
                 if let (Some(child), false) = (joint.child, joint.physbone.is_some_and(|bone| bone.endpoint)) {
@@ -707,8 +913,17 @@ fn carried(bone: PhysBone, tail: &Tail, Frames { immobile, carrier }: &Frames) -
     (held, carrier.transform_point3(tail.now) - tail.now - held)
 }
 
+/// The hands a PhysBone step presses `node` with, the step's share of their motion since the last frame, and what each reached.
+struct Touching<'a> {
+    grips: &'a [Grip],
+    share: f32,
+    reach: &'a mut [Reach],
+    node: usize,
+}
+
 /// One VRChat PhysBone step of a bone, its tail's state kept in `tail`, returning the bone's turn.
-fn swing<'a>(joint: &Joint, bone: PhysBone, resting: Quat, tail: &mut Tail, local: &impl Fn(Quat) -> Mat4, Frames { immobile, carrier }: Frames, (ratio, whole): (f32, bool), touching: impl Iterator<Item = &'a Placed>) -> Quat {
+#[allow(clippy::too_many_arguments)]
+fn swing<'a>(joint: &Joint, bone: PhysBone, resting: Quat, tail: &mut Tail, local: &impl Fn(Quat) -> Mat4, Frames { immobile, carrier }: Frames, (ratio, whole): (f32, bool), colliders: impl Iterator<Item = &'a Placed>, touching: Touching<'a>) -> Quat {
     let along = joint.tail.normalize();
     let current = local(tail.rotation);
     let begin = current.w_axis.truncate();
@@ -787,14 +1002,31 @@ fn swing<'a>(joint: &Joint, bone: PhysBone, resting: Quat, tail: &mut Tail, loca
         }
     }
     end += step;
-    let mut pressed = Pressed { begin, end, radius: bone.radius.map(|radius| radius * scale), shortest: rest * bone.squish, longest: rest * bone.stretch, fallback: reach };
+    let radius = bone.radius.map(|radius| radius * scale);
+    end += hand_carry(touching.grips, tail.gripped, start, |grip| grip.stepped, touching.share);
+    let mut pressed = Pressed { begin, end, radius, shortest: rest * bone.squish, longest: rest * bone.stretch, fallback: reach };
     pressed.end = begin + clamp_length(end - begin, pressed.shortest, pressed.longest, reach);
     // A collider may squish the bone but, as in VRChat, never stretch it past the length it reached this step.
     pressed.fallback = pressed.end - begin;
     pressed.longest = pressed.fallback.length();
+    for (grip, reach) in touching.grips.iter().zip(touching.reach.iter_mut()) {
+        if let Some(gap) = pressed.gap(&grip.now) {
+            reach.note(gap, touching.node);
+        }
+    }
     let mut hit = false;
-    for placed in touching {
+    for placed in colliders {
         hit |= placed.press(&mut pressed);
+    }
+    let mut gripped = None;
+    for grip in touching.grips {
+        if grip.placed.press(&mut pressed) {
+            gripped = gripped.or(Some(grip.now.name));
+        }
+    }
+    hit |= gripped.is_some();
+    if whole {
+        tail.gripped = gripped;
     }
     if hit && !bone.advanced && whole {
         tail.velocity *= 0.75;
@@ -1191,7 +1423,7 @@ mod tests {
         }
         let model = strand(group, serde_json::json!([]));
         let mut springs = Springs::default();
-        let hand = [Hand { center: Vec3::new(0.0, 0.97, 0.3), radius: 0.05 }];
+        let hand = [Hand::sphere("hand", Vec3::new(0.0, 0.97, 0.3), 0.05)];
         let mut pose = model.rest();
         for _ in 0..90 {
             pose = model.rest();
@@ -1211,6 +1443,69 @@ mod tests {
             let at = touched(Some(refused.clone()));
             assert!(at.abs_diff_eq(rest, 1e-4), "a hand passes through a strand whose collide is {refused}: {at}");
         }
+    }
+
+    /// Where the strand's tip ends, and what the hand's touches and near passes were, with a hand `over` above the tip's place at rest held there a moment and then sliding `across` sideways at the same height.
+    fn dragged(over: f32, across: f32) -> (Vec3, Vec<Contact>) {
+        let group = serde_json::json!({ "bones": [2], "stiffiness": 0.05, "dragForce": 0.4, "gravityPower": 0.0, "hitRadius": 0.01 });
+        let model = strand(group, serde_json::json!([]));
+        let mut springs = Springs::default();
+        let mut contacts = Contacts::default();
+        let mut seen = Vec::new();
+        let mut end = Vec3::ZERO;
+        for frame in 0..270 {
+            let x = across * (frame as f32 - 30.0).clamp(0.0, 120.0) / 120.0;
+            let hand = [Hand::sphere("hand", Vec3::new(x, 1.0 + over, 0.3), 0.03)];
+            let mut pose = model.rest();
+            seen.extend(contacts.observe(&springs.step(&model, &mut pose, Mat4::IDENTITY, &hand, 1.0 / 90.0, &Idle::default())));
+            end = tip(&model, &pose, Mat4::IDENTITY);
+        }
+        (end, seen)
+    }
+
+    #[test]
+    fn a_hand_5_mm_into_a_strand_touches_it_and_one_5_mm_short_of_it_passes_and_leaves_it_be() {
+        let rest = Vec3::new(0.0, 1.0, 0.3);
+        let (near, passes) = dragged(0.045, 0.06);
+        assert!(near.abs_diff_eq(rest, 1e-5), "a hand 5 mm short of the strand moves nothing: {near}");
+        assert!(matches!(passes[..], [Contact::Passed { closest, .. }] if (closest - 0.005).abs() < 1e-3), "{passes:?}");
+        let (_, touches) = dragged(0.035, 0.06);
+        assert!(matches!(touches[..], [Contact::Touched { gap, .. }, ..] if (gap + 0.005).abs() < 1e-3), "{touches:?}");
+    }
+
+    #[test]
+    fn contacts_tell_a_touch_from_a_near_pass() {
+        let reach = |gap: f32| [Reach { hand: "hand", gap, node: Some(3) }];
+        let mut contacts = Contacts::default();
+        let seen: Vec<Contact> = [1.0, 0.02, 0.004, 0.01, 1.0, 0.01, -0.002, 0.0, 0.0005, 0.004, 1.0].into_iter().flat_map(|gap| contacts.observe(&reach(gap))).collect();
+        assert_eq!(seen, [
+            Contact::Passed { hand: "hand", closest: 0.004, node: Some(3) },
+            Contact::Touched { hand: "hand", gap: -0.002, node: Some(3) },
+            Contact::Released { hand: "hand" },
+        ]);
+        assert_eq!(contacts.observe(&reach(-0.001)), [Contact::Touched { hand: "hand", gap: -0.001, node: Some(3) }], "a touch from afar is told at once");
+        assert_eq!(contacts.observe(&[]), [Contact::Released { hand: "hand" }], "a hand lost from tracking lets go");
+    }
+
+    #[test]
+    fn a_controller_shape_fits_inside_its_drawn_surface() {
+        let mut points = Vec::new();
+        for ring in 0..=40 {
+            for around in 0..24 {
+                let (sin, cos) = (around as f32 * std::f32::consts::TAU / 24.0).sin_cos();
+                points.push(Vec3::new(0.02 * cos, 0.02 * sin, -0.06 + 0.12 * ring as f32 / 40.0));
+            }
+        }
+        let turn = Quat::from_rotation_x(0.7);
+        let (from, to, radius) = hull(&points.iter().map(|&point| turn * point + Vec3::X).collect::<Vec<_>>()).expect("a shape");
+        assert!((radius - 0.02).abs() < 1e-3, "{radius}");
+        let ends = [from, to].map(|end| turn.inverse() * (end - Vec3::X));
+        assert!(ends.iter().all(|end| end.x.abs() < 1e-3 && end.y.abs() < 1e-3), "{ends:?}");
+        assert!(ends.iter().all(|end| (end.z.abs() - 0.034).abs() < 2e-3), "its ends sit a radius in from a twentieth of the way along: {ends:?}");
+        assert!(hull(&points[..3]).is_none());
+        let tapered: Vec<Vec3> = points.iter().map(|point| Vec3::new(point.x, point.y, 0.0) * (1.0 + (point.z + 0.06) / 0.12 * 0.6) * 0.75 + Vec3::Z * point.z).collect();
+        let (_, _, radius) = hull(&tapered).expect("a shape");
+        assert!(radius < 0.0175, "a tapering body is touched no wider than near its thin end, 15 mm there: {radius}");
     }
 
     /// How far, in degrees, a hand rising up through a three-segment strand reaching forward swings its first segment at most, each joint's extras `limit` as given.
@@ -1233,7 +1528,7 @@ mod tests {
         let mut springs = Springs::default();
         let mut most = 0.0f32;
         for frame in 0..90 {
-            let hand = [Hand { center: Vec3::new(0.0, 0.9 + 0.4 * frame as f32 / 90.0, 0.12), radius: 0.07 }];
+            let hand = [Hand::sphere("hand", Vec3::new(0.0, 0.9 + 0.4 * frame as f32 / 90.0, 0.12), 0.07)];
             let mut pose = model.rest();
             springs.step(&model, &mut pose, Mat4::IDENTITY, &hand, 1.0 / 90.0, &Idle::default());
             let worlds = model.worlds(&pose);
@@ -1362,9 +1657,13 @@ mod tests {
 
     /// A breast-like two-bone PhysBone on a chest, its last bone ending at an endpoint: version 1.1, advanced, immobile, a polar limit and squish.
     fn breast() -> Model {
+        breast_limited(Some(serde_json::json!({ "shape": "polar", "x": 14.0, "z": 16.0 })))
+    }
+
+    fn breast_limited(limit: Option<Value>) -> Model {
         let bone = |gravity: f32, radius: [f32; 2], depth: usize, endpoint: bool| serde_json::json!({ "version": "1.1", "integration": "advanced", "pull": 0.066, "spring": 0.765, "stiffness": 0.064, "gravity": gravity, "immobile": 0.38, "immobileType": "allMotion", "maxSquish": 0.37, "radius": radius, "depth": depth, "endpoint": endpoint });
         let tilted = Quat::from_euler(glam::EulerRot::YXZ, 10f32.to_radians(), 80f32.to_radians(), 0.0);
-        physbones(&[([-0.08, 0.0, 0.10], tilted), ([0.0, 0.05, 0.01], Quat::IDENTITY), ([0.0, 0.019, 0.0], Quat::IDENTITY)], &[bone(0.003, [0.0288, 0.0324], 0, false), bone(0.01, [0.0324, 0.036], 1, true)], Some(serde_json::json!({ "shape": "polar", "x": 14.0, "z": 16.0 })))
+        physbones(&[([-0.08, 0.0, 0.10], tilted), ([0.0, 0.05, 0.01], Quat::IDENTITY), ([0.0, 0.019, 0.0], Quat::IDENTITY)], &[bone(0.003, [0.0288, 0.0324], 0, false), bone(0.01, [0.0324, 0.036], 1, true)], limit)
     }
 
     /// Where the PhysBone's last node sits in the anchor's frame after `frames` 60 Hz steps with the anchor held at `anchor` and the hand, if any, where given.
@@ -1372,7 +1671,7 @@ mod tests {
         let mut pose = model.rest();
         for _ in 0..frames {
             pose = model.rest();
-            let hands: Vec<Hand> = hand.map(|center| Hand { center, radius: 0.04 }).into_iter().collect();
+            let hands: Vec<Hand> = hand.map(|center| Hand { grips: false, ..Hand::sphere("hand", center, 0.04) }).into_iter().collect();
             springs.step(model, &mut pose, anchor, &hands, 1.0 / 60.0, &Idle::default());
         }
         model.worlds(&pose)[model.nodes.len() - 1].w_axis.truncate()
@@ -1391,6 +1690,45 @@ mod tests {
             let tip = rested(&model, &mut springs, chest, Some(hand), 30);
             assert!(tip.distance(Vec3::from(*unity)) < 1e-4, "push {step}: the tip rests at {tip}, VRChat's at {unity:?}");
         }
+    }
+
+    /// How far a PhysBone's tip rises at most from where it rests on the chest, and where it is from there each frame, stepped every `delta`, with a hand pressed into it sliding 4 cm up over a second, or with the chest moving `carried` and the hand with it.
+    fn lifted(grips: bool, delta: f32, carried: Vec3) -> (f32, Vec<Vec3>) {
+        let model = breast_limited(None);
+        let chest = from_unity_pose([0.000945, 1.190331, 0.003663], [0.003841, -0.005742, -0.000175, 0.999976]);
+        let mut springs = Springs::default();
+        let at = rested(&model, &mut springs, chest, None, 600);
+        let mut farthest = 0.0f32;
+        let mut trace = Vec::new();
+        for frame in 0..(2.0 / delta) as usize {
+            let progress = (frame as f32 * delta).min(1.0);
+            let moved = Mat4::from_translation(carried * progress);
+            let up = if carried == Vec3::ZERO { 0.04 * progress } else { 0.0 };
+            let hand = [Hand { grips, ..Hand::sphere("hand", moved.transform_point3(from_unity([-0.10, 1.21 + up, 0.22])), 0.04) }];
+            let mut pose = model.rest();
+            springs.step(&model, &mut pose, moved * chest, &hand, delta, &Idle::default());
+            let end = model.worlds(&pose)[model.nodes.len() - 1].w_axis.truncate() - at;
+            farthest = farthest.max(end.y);
+            trace.push(end);
+        }
+        (farthest, trace)
+    }
+
+    #[test]
+    fn a_gripping_hand_sliding_along_a_physbone_drags_it_where_a_vrchat_collider_slides_past() {
+        for delta in [1.0 / 60.0, 1.0 / 90.0, 1.0 / 144.0] {
+            let (gripped, pushed) = (lifted(true, delta, Vec3::ZERO).0, lifted(false, delta, Vec3::ZERO).0);
+            assert!(gripped > 0.003 && pushed < 0.001, "at {:.0} Hz: lifted {gripped} m gripped, {pushed} m pushed", 1.0 / delta);
+        }
+    }
+
+    #[test]
+    fn a_hand_moving_with_the_figure_carries_nothing_it_holds() {
+        let carried = Vec3::new(0.0, 0.0, 0.15);
+        let (gripped, pushed) = (lifted(true, 1.0 / 90.0, carried).1, lifted(false, 1.0 / 90.0, carried).1);
+        assert!(pushed.iter().any(|at| at.length() > 1e-3), "the hand presses the bone aside");
+        let apart = gripped.iter().zip(&pushed).map(|(a, b)| a.distance(*b)).fold(0.0f32, f32::max);
+        assert!(apart < 5e-4, "a hand moving across with the chest moves it as pushing alone does, {apart} m apart at most");
     }
 
     #[test]

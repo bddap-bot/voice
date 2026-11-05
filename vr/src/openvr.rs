@@ -8,6 +8,8 @@ pub struct Runtime {
     overlay: &'static sys::VR_IVROverlay_FnTable,
     compositor: &'static sys::VR_IVRCompositor_FnTable,
     render_models: &'static sys::VR_IVRRenderModels_FnTable,
+    /// Render models loaded while others of the same device still load, kept so a slow one does not send the rest back to loading.
+    loaded: std::cell::RefCell<std::collections::HashMap<CString, *mut sys::RenderModel_t>>,
 }
 
 fn table<T>(version: &[u8]) -> Result<&'static T, String> {
@@ -41,7 +43,7 @@ impl Runtime {
         if error != 0 {
             return Err(init_error(error));
         }
-        Ok(Runtime { system: table(sys::IVRSystem_Version)?, overlay: table(sys::IVROverlay_Version)?, compositor: table(sys::IVRCompositor_Version)?, render_models: table(sys::IVRRenderModels_Version)? })
+        Ok(Runtime { system: table(sys::IVRSystem_Version)?, overlay: table(sys::IVROverlay_Version)?, compositor: table(sys::IVRCompositor_Version)?, render_models: table(sys::IVRRenderModels_Version)?, loaded: Default::default() })
     }
 
     pub fn instance_extensions(&self) -> Vec<CString> {
@@ -123,14 +125,77 @@ impl Runtime {
         (index < sys::k_unMaxTrackedDeviceCount as u32).then_some(index)
     }
 
-    pub fn tip(&self, device: u32) -> Result<Vec3, String> {
+    fn render_model(&self, device: u32) -> Result<CString, String> {
         let mut buffer = vec![0 as std::os::raw::c_char; 256];
         let mut error = 0;
         call!(self.system, GetStringTrackedDeviceProperty, device, sys::ETrackedDeviceProperty_Prop_RenderModelName_String, buffer.as_mut_ptr(), buffer.len() as u32, &mut error);
         if error != 0 {
             return Err(format!("device {device} has no render model name (property error {error})"));
         }
-        let model = unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_owned();
+        Ok(unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_owned())
+    }
+
+    /// The vertices of the device's render model, as drawn, in its tracking frame: its components' meshes where it has them, else its own; None while SteamVR still loads one.
+    pub fn outline(&self, device: u32) -> Result<Option<Vec<Vec3>>, String> {
+        let model = self.render_model(device)?;
+        let count = call!(self.render_models, GetComponentCount, model.as_ptr() as *mut _);
+        let mut meshes = Vec::new();
+        for index in 0..count {
+            let mut name = vec![0 as std::os::raw::c_char; 128];
+            call!(self.render_models, GetComponentName, model.as_ptr() as *mut _, index, name.as_mut_ptr(), name.len() as u32);
+            let mut mesh = vec![0 as std::os::raw::c_char; 256];
+            if call!(self.render_models, GetComponentRenderModelName, model.as_ptr() as *mut _, name.as_mut_ptr(), mesh.as_mut_ptr(), mesh.len() as u32) == 0 {
+                continue;
+            }
+            let mut controller: sys::VRControllerState_t = unsafe { std::mem::zeroed() };
+            let mut mode: sys::RenderModel_ControllerMode_State_t = unsafe { std::mem::zeroed() };
+            let mut state: sys::RenderModel_ComponentState_t = unsafe { std::mem::zeroed() };
+            if !call!(self.render_models, GetComponentState, model.as_ptr() as *mut _, name.as_mut_ptr(), &mut controller, &mut mode, &mut state) || state.uProperties & sys::EVRComponentProperty_VRComponentProperty_IsVisible == 0 {
+                continue;
+            }
+            meshes.push((unsafe { CStr::from_ptr(mesh.as_ptr()) }.to_owned(), Some(Pose::from_m34(&state.mTrackingToComponentRenderModel.m))));
+        }
+        if meshes.is_empty() {
+            meshes.push((model.clone(), None));
+        }
+        let mut kept = self.loaded.borrow_mut();
+        let mut waiting = false;
+        let mut failed = None;
+        for (mesh, _) in &meshes {
+            if kept.contains_key(mesh) {
+                continue;
+            }
+            let mut model_data: *mut sys::RenderModel_t = std::ptr::null_mut();
+            match call!(self.render_models, LoadRenderModel_Async, mesh.as_ptr() as *mut _, &mut model_data) {
+                sys::EVRRenderModelError_VRRenderModelError_None if !model_data.is_null() => {
+                    kept.insert(mesh.clone(), model_data);
+                }
+                sys::EVRRenderModelError_VRRenderModelError_None => {}
+                sys::EVRRenderModelError_VRRenderModelError_Loading => waiting = true,
+                error => failed = failed.or(Some(format!("render model {mesh:?} of {model:?}: error {error}"))),
+            }
+        }
+        if waiting && failed.is_none() {
+            return Ok(None);
+        }
+        let mut points = Vec::new();
+        for (mesh, placed) in &meshes {
+            let Some(model_data) = kept.remove(mesh) else { continue };
+            let (data, count) = unsafe { ((*model_data).rVertexData, (*model_data).unVertexCount as usize) };
+            if !data.is_null() && failed.is_none() {
+                let vertices = unsafe { std::slice::from_raw_parts(data, count) };
+                points.extend(vertices.iter().map(|vertex| placed.map_or(vertex.vPosition.v, |placed| placed.apply(vertex.vPosition.v))));
+            }
+            call!(self.render_models, FreeRenderModel, model_data);
+        }
+        if let Some(error) = failed {
+            return Err(error);
+        }
+        Ok(Some(points))
+    }
+
+    pub fn tip(&self, device: u32) -> Result<Vec3, String> {
+        let model = self.render_model(device)?;
         let tip = CString::new("tip").unwrap();
         let mut controller: sys::VRControllerState_t = unsafe { std::mem::zeroed() };
         let mut mode: sys::RenderModel_ControllerMode_State_t = unsafe { std::mem::zeroed() };

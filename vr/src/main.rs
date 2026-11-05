@@ -59,9 +59,10 @@ const QUAD: f32 = 0.4;
 const HEIGHT: f32 = 0.3;
 const MARGIN: f32 = 0.03;
 const FLOOR: f32 = -QUAD / 2.0 + MARGIN;
-/// The spheres a controller is to the puppet's springs, as another player's hand is to an avatar's: the hand around its origin and a fingertip at its tip.
-const HAND_RADIUS: f32 = 0.04;
-const FINGER_RADIUS: f32 = 0.01;
+/// The fingertip at the right controller's pressing point, which touches the puppet's springs beside the controller's own drawn shape.
+const FINGER_RADIUS: f32 = 0.005;
+const FINGERTIP: &str = "right fingertip";
+const OUTLINE_RETRY: Duration = Duration::from_secs(1);
 /// The tallest and shortest a model may stand set down full size, against a model whose units are not metres.
 const FULL_HEIGHT: [f32; 2] = [0.5, 2.5];
 const DORMANT_POLL: Duration = Duration::from_micros(11_111);
@@ -128,6 +129,9 @@ struct Puppet {
     animator: Animator,
     gaze: Gaze,
     springs: Springs,
+    /// What each hand reached at the last step, and its touches and near passes so far.
+    reach: Vec<spring::Reach>,
+    contacts: spring::Contacts,
     constraints: vrm::constraint::Constraints,
     drawn: Appearance,
     /// The vertices the last step's morph moved.
@@ -221,7 +225,7 @@ fn dressed(model: Model, mut clips: HashMap<String, Clip>, id: &str, renderer: &
     tracing::info!("appearance {} stands {height:.2} m full size", id);
     let drawn = renderer.appearance(&model, &skinned)?;
     let controller = model.menu.as_ref().map(|menu| Controller::new(menu, remembered));
-    Ok(Puppet { model, skinned, fit, full: height / HEIGHT, standing, animator: Animator::new(clips, own, Random::seeded()), gaze: Gaze::default(), springs: Springs::default(), constraints: vrm::constraint::Constraints::default(), drawn, changed: Vec::new(), controller })
+    Ok(Puppet { model, skinned, fit, full: height / HEIGHT, standing, animator: Animator::new(clips, own, Random::seeded()), gaze: Gaze::default(), springs: Springs::default(), reach: Vec::new(), contacts: spring::Contacts::default(), constraints: vrm::constraint::Constraints::default(), drawn, changed: Vec::new(), controller })
 }
 
 impl Puppet {
@@ -272,7 +276,15 @@ impl Puppet {
     fn settle(&mut self, pose: &mut vrm::Pose, body: glam::Mat4, hands: &[spring::Hand], delta: f32, idle: &spring::Idle) {
         self.springs.restore(&self.model, pose, idle);
         self.constraints.step(&self.model, pose, body);
-        self.springs.step(&self.model, pose, body, hands, delta, idle);
+        self.reach = self.springs.step(&self.model, pose, body, hands, delta, idle);
+        for contact in self.contacts.observe(&self.reach) {
+            let bone = |node: Option<usize>| node.and_then(|node| self.model.name(node)).unwrap_or_default();
+            match contact {
+                spring::Contact::Touched { hand, gap, node } => tracing::info!("contact: {hand} touched {} {:.1} mm deep", bone(node), -gap * 1e3),
+                spring::Contact::Released { hand } => tracing::info!("contact: {hand} let go"),
+                spring::Contact::Passed { hand, closest, node } => tracing::info!("contact: {hand} passed {} {:.1} mm away without touching", bone(node), closest * 1e3),
+            }
+        }
     }
 
     fn draw(&mut self, posed: &[glam::Mat4], to_window: glam::Mat4) {
@@ -303,13 +315,19 @@ impl Puppet {
     }
 }
 
-/// Each tracked controller as the hand spheres it pushes the puppet's springs with, the right one's fingertip at its calibrated `tip`.
-fn touching(hands: &[HandPose], tip: Vec3) -> Vec<spring::Hand> {
-    hands
-        .iter()
-        .flat_map(|hand| [(hand.pose.t, HAND_RADIUS), (hand.pose.apply(if hand.hand == Hand::Right { tip } else { TIP }), FINGER_RADIUS)])
-        .map(|(center, radius)| spring::Hand { center: center.into(), radius })
-        .collect()
+/// Each tracked controller as what touches the puppet's springs: its drawn shape, once known, as the capsule it fills, and the right one's fingertip at its calibrated `tip`.
+fn touching(hands: &[HandPose], tip: Vec3, outlines: &HashMap<Hand, (glam::Vec3, glam::Vec3, f32)>) -> Vec<spring::Hand> {
+    let mut touching = Vec::new();
+    for hand in hands {
+        let place = |at: glam::Vec3| glam::Vec3::from(hand.pose.apply(at.into()));
+        if let Some(&(from, to, radius)) = outlines.get(&hand.hand) {
+            touching.push(spring::Hand { name: if hand.hand == Hand::Right { "right controller" } else { "left controller" }, from: place(from), to: place(to), radius, grips: true });
+        }
+        if hand.hand == Hand::Right {
+            touching.push(spring::Hand::sphere(FINGERTIP, hand.pose.apply(tip).into(), FINGER_RADIUS));
+        }
+    }
+    touching
 }
 
 fn operate(controller: &mut Controller, control: &vrm::expressions::Control, [x, y]: [f32; 2]) -> Option<String> {
@@ -420,6 +438,8 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
     let mut anchor = Anchor::Riding;
     let mut glide = Glide::default();
     let mut calibration = (epoch, String::new());
+    let mut outlines: HashMap<Hand, (u32, (glam::Vec3, glam::Vec3, f32))> = HashMap::new();
+    let mut outline_tried: HashMap<Hand, (Instant, String)> = HashMap::new();
     let mut voice = Voice::new(token.clone(), cache.clone(), state.join("voiceprint.json"));
     let wake_file = state.join("wake.json");
     let wake_head = match std::fs::read(&wake_file).map_err(|error| format!("{}: {error}", wake_file.display())).and_then(|bytes| wake::Head::parse(&bytes, wake::phrase())) {
@@ -561,6 +581,27 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             }
         }
         let tip = pressing.filter(|&(known, _)| Some(known) == right_device).map_or(TIP, |(_, tip)| tip);
+        for (which, device) in [Hand::Left, Hand::Right].into_iter().filter_map(|which| Some((which, runtime.hand_index(which)?))) {
+            let tried = outline_tried.entry(which).or_insert((epoch, String::new()));
+            if started < tried.0 || outlines.get(&which).is_some_and(|&(known, _)| known == device) {
+                continue;
+            }
+            tried.0 = started + OUTLINE_RETRY;
+            let shaped = runtime.outline(device).and_then(|points| points.map(|points| spring::hull(&points.iter().map(|&point| point.into()).collect::<Vec<_>>()).map(|hull| (points.len(), hull)).ok_or_else(|| format!("device {device}'s render model has {} vertices, too few for a shape", points.len()))).transpose());
+            match shaped {
+                Ok(Some((count, hull))) => {
+                    tracing::info!("{which:?} controller's touching shape from {count} drawn vertices: a capsule {:.3?} to {:.3?}, {:.1} mm round", hull.0, hull.1, hull.2 * 1e3);
+                    outlines.insert(which, (device, hull));
+                    tried.1.clear();
+                }
+                Ok(None) => {}
+                Err(error) if error != tried.1 => {
+                    tracing::info!("{which:?} controller's touching shape: {error}; until it loads, the controller touches nothing{}", if which == Hand::Right { " but its fingertip" } else { "" });
+                    tried.1 = error;
+                }
+                Err(_) => {}
+            }
+        }
         let held = anchor.stand(started, &left, head.t);
         let (stand, size) = glide.step(started, held, if anchor.grounded() { puppet.full } else { 1.0 });
         let figure = facing(stand.apply([0.0, -FLOOR * size, 0.0]), head.t);
@@ -729,7 +770,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
                 }
                 _ => stand,
             }
-        }, size, head.t, &touching(&hands, tip), voice.mouth(), &mut pointing, started, |name| objects.locate(name));
+        }, size, head.t, &touching(&hands, tip, &outlines.iter().filter(|(&which, &(device, _))| runtime.hand_index(which) == Some(device)).map(|(&which, &(_, hull))| (which, hull)).collect()), voice.mouth(), &mut pointing, started, |name| objects.locate(name));
         objects.step(started, &object::View { stand, size, head, eyes: eye_offsets, tip: right.map(|(right, _)| right.apply(tip)) });
         let eye_points = eye_offsets.map(|eye: Pose| head.then(&eye).t);
         let (quad, half) = if size > 1.0 { grown_window(&puppet.skinned, &puppet.drawn.hidden, &posed, body, &head, &eye_points, view) } else { (figure, QUAD / 2.0) };

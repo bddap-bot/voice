@@ -1302,11 +1302,14 @@ pub mod tests {
             shelf.show(|_| Object::spawn(Counted::new(), gpu.clone(), bytes[now.duration_since(start).as_secs() as usize % 5 % 2].clone(), UNBUDGETED, now));
             drawn(shelf.objects.last_mut().unwrap(), now);
         };
-        spawn(&mut shelf, start);
-        let warming = Arc::downgrade(&shelf.objects.last().unwrap().runner.exchange);
-        shelf.clear("warm-up");
-        while warming.strong_count() > 0 {
-            std::thread::sleep(Duration::from_millis(1));
+        // Each kind is drawn once first: the driver keeps what it compiled for a kind's pipelines after the object goes.
+        for kind in 0..bytes.len() as u64 {
+            spawn(&mut shelf, start + Duration::from_secs(kind));
+            let warming = Arc::downgrade(&shelf.objects.last().unwrap().runner.exchange);
+            shelf.clear("warm-up");
+            while warming.strong_count() > 0 {
+                std::thread::sleep(Duration::from_millis(1));
+            }
         }
         let (surfaces, allocations, threads_before, resident_before) = (SURFACES.load(Ordering::SeqCst), gpu.allocations(), threads(), resident());
         assert_eq!(surfaces, 0);

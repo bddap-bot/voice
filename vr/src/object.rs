@@ -1275,6 +1275,20 @@ pub mod tests {
         threads()
     }
 
+    /// The thread count once a warm-up's threads have finished exiting: unchanged over a tenth of a second.
+    fn quiet() -> usize {
+        let deadline = Instant::now() + HANG;
+        let (mut last, mut since) = (threads(), Instant::now());
+        while since.elapsed() < Duration::from_millis(100) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+            let now = threads();
+            if now != last {
+                (last, since) = (now, Instant::now());
+            }
+        }
+        last
+    }
+
     fn resident() -> usize {
         let statm = std::fs::read_to_string("/proc/self/statm").unwrap();
         statm.split_whitespace().nth(1).unwrap().parse::<usize>().unwrap() * 4096
@@ -1311,7 +1325,7 @@ pub mod tests {
                 std::thread::sleep(Duration::from_millis(1));
             }
         }
-        let (surfaces, allocations, threads_before, resident_before) = (SURFACES.load(Ordering::SeqCst), gpu.allocations(), threads(), resident());
+        let (surfaces, allocations, threads_before, resident_before) = (SURFACES.load(Ordering::SeqCst), gpu.allocations(), quiet(), resident());
         assert_eq!(surfaces, 0);
         let mut peak = 0;
         for round in 0..120 {

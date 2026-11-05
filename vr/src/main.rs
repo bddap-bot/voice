@@ -4,6 +4,7 @@ mod bench;
 mod board;
 mod calls;
 mod chosen;
+mod clearance;
 mod playback;
 mod conversation;
 mod device;
@@ -144,23 +145,45 @@ struct Fetched {
 }
 
 /// Fetches appearance `id` from the catalog the server serves now: one read when the host started names the files of that moment, so a republish since would be refused or worn stale.
+/// Refuses a figure whose arm spread is missing, or was measured on another body or against other clips than the server plays now.
 fn fetch(relay: &mut Relay, id: &str) -> Result<Fetched, String> {
     let avatar = relay.catalog()?.avatars.into_iter().find(|avatar| avatar.id == id).ok_or_else(|| format!("appearance {id} is not in the catalog"))?;
     let model = Model::parse(&relay.puppet(&avatar)?).map_err(|error| format!("{id}: {error}"))?;
+    let (clips, measured, _) = served(relay, &model)?;
+    let spread = model.arms.as_ref().map_err(|why| format!("{id}: {why}"))?;
+    if spread.clips != measured {
+        return Err(format!("{id}: its {} was measured against other clips than the server plays now: republish it", vrm::arms::EXTENSION));
+    }
+    Ok(Fetched { model, clips })
+}
+
+/// The catalog clips the overlay plays on `model`, read for it; the digest of those an arm spread is measured against, named by the catalog whether or not each read; and those of them that did not read.
+fn served(relay: &mut Relay, model: &Model) -> Result<(HashMap<String, Clip>, String, Vec<String>), String> {
     let mut clips = HashMap::new();
+    let mut sources = vec![(motion::WALK.to_owned(), vrm::arms::walk_source())];
+    let mut unread = Vec::new();
     for entry in relay.clips()?.iter().filter(|entry| played(&entry.action)) {
         if !["fbx", "motion"].contains(&entry.format.as_str()) {
             tracing::info!("{}: {} clips are not played natively", entry.name, entry.format);
             continue;
         }
+        let reference = clearance::reference(&entry.action);
+        if reference {
+            sources.push((entry.action.clone(), entry.content_hash.clone()));
+        }
         match relay.motion(entry).and_then(|bytes| Clip::parse(&bytes, model.version, model.rest_hips())) {
             Ok(clip) => {
                 clips.insert(entry.action.clone(), clip);
             }
-            Err(error) => tracing::warn!("{}: {error}", entry.name),
+            Err(error) => {
+                tracing::warn!("{}: {error}", entry.name);
+                if reference {
+                    unread.push(format!("{}: {error}", entry.name));
+                }
+            }
         }
     }
-    Ok(Fetched { model, clips })
+    Ok((clips, vrm::arms::clips_digest(sources.iter().map(|(name, source)| (name.as_str(), source.as_str()))), unread))
 }
 
 /// A picked appearance on its way: its catalog index, when it was picked, and its fetch.
@@ -188,7 +211,7 @@ fn load(relay: &mut Relay, id: &str, renderer: &mut Renderer, remembered: &vrm::
 /// A puppet of `model` with its played `clips`, as `id`.
 fn dressed(model: Model, mut clips: HashMap<String, Clip>, id: &str, renderer: &mut Renderer, remembered: &vrm::expressions::Configuration) -> Result<Puppet, String> {
     let standing = model.standing();
-    clips.insert(motion::WALK.to_owned(), Clip::parse(include_bytes!("../motions/walk.json"), model.version, model.rest_hips())?);
+    clips.insert(motion::WALK.to_owned(), Clip::parse(vrm::arms::WALK, model.version, model.rest_hips())?);
     let idles = clips.keys().filter(|name| motion::family(name) == IDLE).count();
     let own = model.own_expressions();
     tracing::info!("appearance {} with {idles} standing idle clips, other clips {:?}, own expressions {own:?}, {} spring joints", id, clips.keys().filter(|name| motion::family(name) != IDLE).collect::<Vec<_>>(), model.spring_joints());
@@ -893,6 +916,9 @@ fn run() -> Result<(), String> {
     if args.get(1).is_some_and(|mode| mode == "wear") {
         return wear::run(&Token::decode(&token)?, &state, &args[2..]);
     }
+    if args.get(1).is_some_and(|mode| mode == "arms") {
+        return clearance::run(&Token::decode(&token)?, &state, &args[2..]);
+    }
     if args.get(1).is_some_and(|mode| mode == "load") {
         return measure::run(&Token::decode(&token)?, &state, &args[2..]);
     }
@@ -1076,7 +1102,11 @@ mod tests {
 
     /// A server whose catalog serves `figure.vrm` as appearance "a" now, with no clips.
     fn republished(cache: &std::path::Path) -> (String, Relay) {
-        let (hash, frames) = relay::served("puppet", "a", include_bytes!("../golden/figure.vrm"));
+        serving(cache, &vrm::arms::measured(include_bytes!("../golden/figure.vrm"), 0.1, &vrm::arms::clips_digest([(motion::WALK, vrm::arms::walk_source().as_str())])))
+    }
+
+    fn serving(cache: &std::path::Path, figure: &[u8]) -> (String, Relay) {
+        let (hash, frames) = relay::served("puppet", "a", figure);
         let catalog = serde_json::json!({ "avatars": [{ "id": "a", "contentHash": hash }] });
         (hash, relay::scripted(cache, move |verb, _| match verb {
             "puppets" => vec![format!("puppets\n{catalog}").into_bytes()],
@@ -1096,6 +1126,20 @@ mod tests {
         let worn = load(&mut relay, &startup.id, &mut renderer, &Default::default());
         std::fs::remove_dir_all(&cache).unwrap();
         assert!(worn.is_ok(), "{:?}", worn.err());
+    }
+
+    #[test]
+    fn a_figure_without_a_spread_measured_on_its_body_against_the_served_clips_is_refused() {
+        let golden = include_bytes!("../golden/figure.vrm");
+        let measured = vrm::arms::measured(golden, 0.1, &vrm::arms::clips_digest([(motion::WALK, vrm::arms::walk_source().as_str())]));
+        let tampered = vrm::arms::rewritten(&measured, |json| json["nodes"][1]["translation"] = serde_json::json!([0.0, 0.5, 0.0]));
+        for (figure, refusal) in [(golden.to_vec(), "publish-avatar"), (vrm::arms::measured(golden, 0.1, "other clips"), "other clips"), (tampered, "another body")] {
+            let cache = std::env::temp_dir().join(format!("voice-vr-spread-{}-{refusal}", std::process::id()));
+            let (_, mut relay) = serving(&cache, &figure);
+            let fetched = fetch(&mut relay, "a");
+            std::fs::remove_dir_all(&cache).ok();
+            assert!(fetched.as_ref().err().is_some_and(|error| error.contains(refusal)), "{refusal}: {:?}", fetched.err());
+        }
     }
 
     #[test]

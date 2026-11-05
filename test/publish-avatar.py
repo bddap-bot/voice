@@ -40,6 +40,18 @@ AVATAR = {
 }
 
 
+SPREAD = {'angle': 0.1, 'body': 'b', 'clips': 'c', 'revision': 1}
+measured = []
+publisher.measure = lambda path: measured.append(Path(path).read_bytes()) or SPREAD
+
+
+def without_arms(data):
+    doc = publisher.document(data)
+    assert doc['extensions'].pop(publisher.ARMS) == SPREAD
+    doc['extensionsUsed'].remove(publisher.ARMS)
+    return doc
+
+
 class Publishing(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(dir=Path.cwd())
@@ -113,19 +125,46 @@ class Publishing(unittest.TestCase):
         before = self.catalog.read_bytes()
         new = self.candidate(lambda doc: doc['extensionsUsed'].append('VRMC_vrm'))
         publisher.publish(new, self.catalog)
-        self.assertEqual(self.catalog.read_bytes(), new.read_bytes())
+        self.assertEqual(without_arms(self.catalog.read_bytes()), publisher.document(new.read_bytes()))
         self.assertEqual((self.root / '.previous' / 'avatar.vrm').read_bytes(), before)
 
     def test_a_named_removal_installs(self):
         new = self.candidate(lambda doc: doc['meshes'][0]['extras'].update(targetNames=['smile']))
         publisher.publish(new, self.catalog, ['morph:Body:blink'])
-        self.assertEqual(self.catalog.read_bytes(), new.read_bytes())
+        self.assertEqual(without_arms(self.catalog.read_bytes()), publisher.document(new.read_bytes()))
 
     def test_a_new_catalog_entry_installs(self):
         new = self.candidate(lambda doc: None)
         target = self.root / 'fresh.vrm'
         publisher.publish(new, target)
-        self.assertEqual(target.read_bytes(), new.read_bytes())
+        self.assertEqual(without_arms(target.read_bytes()), publisher.document(new.read_bytes()))
+
+    def test_a_figure_whose_spread_cannot_be_measured_leaves_the_catalog_and_its_backup_untouched(self):
+        before = self.catalog.read_bytes()
+        new = self.candidate(lambda doc: doc['extensionsUsed'].append('VRMC_vrm'))
+        def refuse(path):
+            raise RuntimeError('no drawn left thigh skin to measure')
+        measure, publisher.measure = publisher.measure, refuse
+        try:
+            with self.assertRaises(RuntimeError):
+                publisher.publish(new, self.catalog)
+        finally:
+            publisher.measure = measure
+        self.assertEqual(self.catalog.read_bytes(), before)
+        self.assertFalse((self.root / '.previous').exists())
+
+    def test_the_installed_file_carries_the_spread_measured_on_it_with_its_binary_untouched(self):
+        body = b'BODY'
+        data = glb(AVATAR)
+        new = self.root / 'new.vrm'
+        new.write_bytes(data[:8] + struct.pack('<I', len(data) + 8 + len(body)) + data[12:] + struct.pack('<I4s', len(body), b'BIN\0') + body)
+        measured.clear()
+        publisher.publish(new, self.catalog)
+        installed = self.catalog.read_bytes()
+        self.assertEqual(measured, [new.read_bytes()])
+        self.assertEqual(without_arms(installed), AVATAR)
+        self.assertEqual(installed[-len(body) - 8:], struct.pack('<I4s', len(body), b'BIN\0') + body)
+        self.assertEqual(struct.unpack_from('<I', installed, 8)[0], len(installed))
 
 
 if __name__ == '__main__':

@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use glam::{Mat4, Quat, Vec2, Vec3};
 use serde_json::Value;
 
+pub mod arms;
 pub mod constraint;
 pub mod expressions;
 pub mod spring;
@@ -191,6 +192,8 @@ pub struct Model {
     /// Whether the object's parts spread apart when the pointer pushes deep into it.
     pub spreads: bool,
     pub menu: Option<Expressions>,
+    /// The arm spread the file carries, or why it carries none this host may wear: the overlay refuses the figure then.
+    pub arms: Result<arms::Spread, String>,
 }
 
 pub struct ObjectProgram {
@@ -921,7 +924,8 @@ impl Model {
         if let Some(menu) = &menu {
             menu.check(nodes.len(), &meshes)?;
         }
-        let mut model = Model { version, nodes, meshes, skins, materials, images, humanoid, expressions, own, look_at, rest_turns: Vec::new(), rig, constraints, program, spreads, menu };
+        let arms = if object { Err("an object has no arms".to_owned()) } else { arms::parse(json, document.binary) };
+        let mut model = Model { version, nodes, meshes, skins, materials, images, humanoid, expressions, own, look_at, rest_turns: Vec::new(), rig, constraints, program, spreads, menu, arms };
         model.rest_turns = model.worlds(&model.rest()).iter().map(rotation).collect();
         Ok(model)
     }
@@ -1030,12 +1034,21 @@ impl Model {
     }
 
     pub fn pose(&self, humanoid: &Humanoid) -> Pose {
+        self.pose_spread(humanoid, self.arms.as_ref().map_or(0.0, |spread| spread.angle))
+    }
+
+    /// The pose of `humanoid` with the upper arms turned out by `spread` radians instead of the figure's own.
+    pub fn pose_spread(&self, humanoid: &Humanoid, spread: f32) -> Pose {
         let mut pose = self.rest();
         let parent_rotation = |node: usize| self.nodes[node].parent.map_or(Quat::IDENTITY, |parent| self.rest_turns[parent]);
         for (name, normalized) in &humanoid.rotations {
             let Some(&node) = self.humanoid.get(name) else { continue };
             let parent = parent_rotation(node);
-            pose.rotations[node] = (parent.inverse() * *normalized * parent * self.nodes[node].rotation).normalize();
+            let normalized = match name.strip_suffix("UpperArm") {
+                Some(side) if spread != 0.0 => *normalized * arms::turn(self.version, side, spread),
+                _ => *normalized,
+            };
+            pose.rotations[node] = (parent.inverse() * normalized * parent * self.nodes[node].rotation).normalize();
         }
         if let (Some(position), Some(&hips)) = (humanoid.hips, self.humanoid.get("hips")) {
             let parent = self.nodes[hips].parent.map_or(Mat4::IDENTITY, |parent| self.worlds(&pose)[parent]);
@@ -1450,11 +1463,12 @@ impl Skinned {
             .iter()
             .zip(visible)
             .filter(|(_, visible)| *visible)
-            .map(|(vertex, _)| {
-                let matrix = vertex.joints.iter().zip(vertex.weights).filter(|(_, weight)| *weight > 0.0).fold(Mat4::ZERO, |sum, (&joint, weight)| sum + palette[joint as usize] * weight);
-                matrix.transform_point3(vertex.position.into())
-            })
+            .map(|(vertex, _)| skin(vertex, palette))
             .collect()
+    }
+
+    pub fn skin(&self, palette: &[Mat4], vertex: usize) -> Vec3 {
+        skin(&self.vertices[vertex], palette)
     }
 
     pub fn morph(&mut self, weights: &[Vec<f32>]) -> Vec<u32> {
@@ -1501,6 +1515,11 @@ impl Skinned {
     pub fn joint_node(&self, joint: u16) -> usize {
         self.joints[joint as usize].0
     }
+}
+
+fn skin(vertex: &Vertex, palette: &[Mat4]) -> Vec3 {
+    let matrix = vertex.joints.iter().zip(vertex.weights).filter(|(_, weight)| *weight > 0.0).fold(Mat4::ZERO, |sum, (&joint, weight)| sum + palette[joint as usize] * weight);
+    matrix.transform_point3(vertex.position.into())
 }
 
 pub struct Fit {

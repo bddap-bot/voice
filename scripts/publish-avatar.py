@@ -6,7 +6,9 @@ Every node, image, morph target, material, spring joint, collider a spring colli
 expression part (parameter, layer, menu control, material target, curve, shown node, switched spring or collider,
 mask) the catalog file carries must survive into the new one, or match a --drop prefix naming it as an intended
 removal. A target effect or look field the overlay's vr/src/vrm/effects.json does not list is refused: the overlay
-would leave it still. The replaced file stays beside the catalog in .previous/."""
+would leave it still. The installed file carries VOICE_arms, the arm spread `voice-vr arms` (the binary $VOICE_VR names, else
+voice-vr on PATH) measures on its body against the clips the server plays; the overlay refuses a figure without it.
+The replaced file stays beside the catalog in .previous/."""
 import argparse
 from collections import Counter
 import hashlib
@@ -15,6 +17,7 @@ import os
 from pathlib import Path
 import shutil
 import struct
+import subprocess
 import tempfile
 
 
@@ -84,6 +87,25 @@ def inventory(doc):
 READ = json.loads((Path(__file__).resolve().parents[1] / 'vr/src/vrm/effects.json').read_text())
 
 
+ARMS = 'VOICE_arms'
+
+
+def measure(path):
+    run = subprocess.run([os.environ.get('VOICE_VR', 'voice-vr'), 'arms', str(path)], check=True, stdout=subprocess.PIPE, text=True)
+    return json.loads(run.stdout)
+
+
+def with_arms(data, spread):
+    size = struct.unpack_from('<I', data, 12)[0]
+    doc = document(data)
+    doc.setdefault('extensions', {})[ARMS] = spread
+    doc['extensionsUsed'] = sorted(set(doc.get('extensionsUsed', [])) | {ARMS})
+    text = json.dumps(doc, separators=(',', ':')).encode()
+    text += b' ' * (-len(text) % 4)
+    rest = data[20 + size:]
+    return struct.pack('<4sII', b'glTF', 2, 20 + len(text) + len(rest)) + struct.pack('<I4s', len(text), b'JSON') + text + rest
+
+
 def unread(doc):
     out = set()
     for t in doc.get('extensions', {}).get('VRCHAT_expressions', {}).get('targets', []):
@@ -106,6 +128,7 @@ def publish(new_path, catalog_path, drops=()):
     unknown = unread(document(data))
     if unknown:
         raise SystemExit(f'{new_path} carries expression parts the overlay does not read; teach voice-vr them and list them in vr/src/vrm/effects.json:\n' + '\n'.join('  ' + k for k in unknown))
+    spread = measure(new_path)
     catalog = Path(catalog_path)
     if catalog.exists():
         gone = lost(inventory(document(catalog.read_bytes())), inventory(document(data)), drops)
@@ -114,6 +137,7 @@ def publish(new_path, catalog_path, drops=()):
         previous = catalog.parent / '.previous'
         previous.mkdir(exist_ok=True)
         shutil.copy2(catalog, previous / catalog.name)
+    data = with_arms(data, spread)
     with tempfile.NamedTemporaryFile(dir=catalog.parent, prefix='.' + catalog.name, delete=False) as out:
         out.write(data)
     os.replace(out.name, catalog)

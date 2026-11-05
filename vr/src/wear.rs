@@ -100,7 +100,7 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
         let mut frame = |puppet: &mut crate::Puppet, pointing: &mut Pointing, stand: Pose, hand: Option<Pose>, mouth: f32, picture: Option<&Path>| -> Result<Vec<glam::Mat4>, String> {
             let started = Instant::now();
             let hands: Vec<HandPose> = hand.into_iter().map(|pose| HandPose { hand: Hand::Right, pose }).collect();
-            let (posed, body, _) = puppet.step(FRAME.as_secs_f32(), |_, _| stand, 1.0, HEAD, &touching(&hands, TIP, &outlines), mouth, pointing, started, |_| Some(TARGET));
+            let (posed, body, _) = puppet.step(FRAME.as_secs_f32(), |_| stand, 1.0, HEAD, &touching(&hands, TIP, &outlines), mouth, pointing, started, |_| Some(TARGET));
             let quad = facing(stand.apply([0.0, -FLOOR, 0.0]), HEAD);
             let local = quad.inverse();
             puppet.draw(&posed, local.mat4() * body);
@@ -298,7 +298,7 @@ fn stand_grounded(puppet: &mut crate::Puppet, renderer: &mut Renderer, distance:
     let before = gpu_time();
     let mut shown = (0, 0);
     for _ in 0..frames {
-        let (posed, body, _) = puppet.step(FRAME.as_secs_f32(), |_, _| stand, full, head.t, &[], 0.0, &mut Pointing::default(), Instant::now(), |_| None);
+        let (posed, body, _) = puppet.step(FRAME.as_secs_f32(), |_| stand, full, head.t, &[], 0.0, &mut Pointing::default(), Instant::now(), |_| None);
         let (quad, half) = grown_window(&puppet.skinned, &puppet.drawn.hidden, &posed, body, &head, &eyes, GROUNDED_VIEW);
         let local = quad.inverse();
         let figure = facing(stand.apply([0.0, -FLOOR * full, 0.0]), head.t);

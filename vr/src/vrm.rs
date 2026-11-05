@@ -1524,7 +1524,6 @@ fn skin(vertex: &Vertex, palette: &[Mat4]) -> Vec3 {
 
 pub struct Fit {
     pub scale: f32,
-    pub ground: f32,
     pub ankle: f32,
 }
 
@@ -1537,7 +1536,7 @@ impl Fit {
         let (_, high) = bounds(&points);
         let feet = model.feet(&worlds).map_or(0.0, |feet| feet[0].y.min(feet[1].y));
         // The model's origin is where it stands, as VRChat and VRM both put it; what hangs below, such as a heel or hoof, sinks into the floor.
-        Fit { scale: if high.y > 0.0 { height / high.y } else { 1.0 }, ground: 0.0, ankle: feet }
+        Fit { scale: if high.y > 0.0 { height / high.y } else { 1.0 }, ankle: feet }
     }
 
     pub fn placement(&self, model: &Model, worlds: &[Mat4], floor: f32) -> Mat4 {
@@ -1547,7 +1546,7 @@ impl Fit {
                 let [left, right] = feet.map(|foot| oriented.transform_point3(foot));
                 Vec3::new(-(left.x + right.x) / 2.0, floor + self.ankle * self.scale - left.y.min(right.y), -(left.z + right.z) / 2.0)
             }
-            None => Vec3::new(0.0, floor - self.ground * self.scale, 0.0),
+            None => Vec3::new(0.0, floor, 0.0),
         };
         Mat4::from_translation(shift) * oriented
     }

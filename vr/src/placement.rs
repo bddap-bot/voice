@@ -180,17 +180,14 @@ impl Floor {
         self.goal.is_some() && self.heading.abs() < STEER
     }
 
-    /// Moves it by the stride of `feet` while `walking`, then turns it toward where it is going, or toward `head` once there.
-    /// It holds the lower foot because the fit stands it on that one, so the foot on the floor is the one that does not slide; a foot
-    /// touching down while still swinging forward would pull the body back, so then the body waits and that foot slides the remainder.
-    pub fn step(&mut self, feet: Option<[Vec3; 2]>, walking: bool, head: &Pose, delta: f32) -> Pose {
-        let previous = self.feet;
-        self.feet = feet;
+    /// The fit stands it on its lower foot, so that is the one held on the floor. Going, it never moves back: the walk lands each foot while it still swings forward.
+    pub fn step(&mut self, feet: Option<[Vec3; 2]>, head: &Pose, delta: f32) -> Pose {
+        let previous = std::mem::replace(&mut self.feet, feet);
         let mut planted = None;
-        if let (true, Some(previous), Some(feet)) = (walking, previous, feet) {
+        if let (Some(previous), Some(feet)) = (previous, feet) {
             let support = usize::from(feet[1][1] < feet[0][1]);
             let [x, _, z] = sub(previous[support], feet[support]);
-            if z > 0.0 {
+            if z > 0.0 || !self.going() {
                 self.pose.t = add(self.pose.t, self.pose.rotate([x, 0.0, z]));
                 self.pose.t[1] = 0.0;
             }
@@ -466,6 +463,11 @@ mod tests {
     /// With no time passing the floor turns nowhere, so these isolate the stride.
     const STILL: Pose = Pose { r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], t: VIEWER };
 
+    /// A headset far ahead of `pose` and facing it, so a floor there walks straight on.
+    fn beckoning(pose: &Pose) -> Pose {
+        Pose { r: pose.r, t: add(pose.apply([0.0, 0.0, 100.0]), VIEWER) }
+    }
+
     fn walking_feet(time: f32) -> [Vec3; 2] {
         let phase = time.rem_euclid(1.0);
         let (support, phase) = if phase < 0.5 { (0, phase * 2.0) } else { (1, (phase - 0.5) * 2.0) };
@@ -481,13 +483,14 @@ mod tests {
         for rate in [30, 90, 144] {
             for size in [0.6, 1.0, 1.5] {
                 let mut floor = Floor::new(turned(0.0, [0.0; 3]));
+                let ahead = beckoning(&floor.pose);
                 let mut previous = walking_feet(0.0).map(|f| scale(f, size));
-                floor.step(Some(previous), true, &STILL, 0.0);
+                floor.step(Some(previous), &ahead, 0.0);
                 for frame in 1..=rate {
                     let feet = walking_feet(frame as f32 / rate as f32).map(|f| scale(f, size));
                     let support = usize::from(feet[1][1] < feet[0][1]);
                     let (before, planted) = (floor.pose.t, floor.pose.apply(previous[support]));
-                    let next = floor.step(Some(feet), true, &STILL, 0.0);
+                    let next = floor.step(Some(feet), &ahead, 0.0);
                     if feet[support][2] <= previous[support][2] {
                         let moved = sub(next.apply(feet[support]), planted);
                         assert!(length([moved[0], 0.0, moved[2]]) < 1e-5);
@@ -503,23 +506,49 @@ mod tests {
     }
 
     #[test]
-    fn placement_and_resuming_a_step_preserve_any_chosen_position() {
-        for position in [[0.0; 3], [3.0, 0.0, -4.0]] {
+    fn standing_it_holds_the_lower_foot_and_a_gap_in_the_feet_moves_nothing() {
+        for position in [[0.0, 0.0, -1.0], [3.0, 0.0, -4.0]] {
             let initial = turned(0.7, position);
             let mut floor = Floor::new(initial);
-            for frame in 0..900 {
-                assert_eq!(floor.step(Some(walking_feet(frame as f32 / 90.0)), false, &STILL, 0.0), initial);
-            }
-            floor.step(Some(walking_feet(0.7)), false, &STILL, 0.0);
-            assert_eq!(floor.step(Some(walking_feet(0.7)), true, &STILL, 0.0), initial);
-            for frame in 1..=900 {
-                let pose = floor.step(Some(walking_feet(0.7 + frame as f32 / 90.0)), true, &STILL, 0.0);
+            let watching = Pose { t: add(position, [0.0, 1.6, 1.0]), ..STILL };
+            assert_eq!(floor.step(Some(walking_feet(0.3)), &watching, 0.0), initial, "set down, it stands where it was put");
+            let mut previous = walking_feet(0.3);
+            for frame in 1..900 {
+                let feet = walking_feet(0.3 + frame as f32 / 90.0);
+                let support = usize::from(feet[1][1] < feet[0][1]);
+                let planted = floor.pose.apply(previous[support]);
+                let pose = floor.step(Some(feet), &watching, 0.0);
+                assert!(close(level(pose.apply(feet[support])), level(planted)), "frame {frame}");
                 assert_eq!(pose.r, initial.r);
+                previous = feet;
             }
-            assert!(length(sub(floor.pose.t, initial.t)) > 9.0);
-            let stopped = floor.step(None, false, &STILL, 0.0);
-            assert_eq!(floor.step(Some(walking_feet(0.2)), true, &STILL, 0.0), stopped);
+            let stopped = floor.step(None, &watching, 0.0);
+            assert_eq!(floor.step(Some(walking_feet(0.2)), &watching, 0.0), stopped);
         }
+    }
+
+    /// One foot steps out to the side and back while the other stands, centred over the feet as the fit centres them.
+    fn side_step(time: f32) -> [Vec3; 2] {
+        let phase = time.rem_euclid(2.0);
+        let out = 0.2 * (2.0 * phase.min(2.0 - phase)).min(1.0);
+        let lift = if phase < 0.5 || (1.5..2.0).contains(&phase) { 0.05 * (2.0 * phase * std::f32::consts::PI).sin().abs() } else { 0.0 };
+        let feet = [[-0.1, 0.0, 0.0], [0.1 + out, 0.001 + lift, 0.0]];
+        let middle = (feet[0][0] + feet[1][0]) / 2.0;
+        feet.map(|foot| [foot[0] - middle, foot[1], foot[2]])
+    }
+
+    #[test]
+    fn a_step_out_and_back_leaves_the_standing_foot_and_the_body_where_they_were() {
+        let start = turned(0.0, [0.0, 0.0, -1.0]);
+        let watching = Pose { t: [0.0, 1.6, 0.0], ..STILL };
+        let mut floor = Floor::new(start);
+        let standing = floor.step(Some(side_step(0.0)), &watching, 0.0).apply(side_step(0.0)[0]);
+        for frame in 1..=360 {
+            let feet = side_step(frame as f32 / 90.0);
+            let pose = floor.step(Some(feet), &watching, 0.0);
+            assert!(close(level(pose.apply(feet[0])), level(standing)), "frame {frame}: the standing foot stays put");
+        }
+        assert!(close(floor.pose.t, start.t), "two loops leave it where it started: {:?}", floor.pose.t);
     }
 
     #[test]
@@ -535,7 +564,7 @@ mod tests {
                 let worlds = model.worlds(&model.pose(&clip.sample((frame as f32 / rate as f32) % clip.duration())));
                 let fitted = fit.placement(&model, &worlds, 0.0);
                 let feet = model.feet(&worlds).unwrap().map(|foot| fitted.transform_point3(foot).to_array());
-                let stand = floor.step(Some(feet), true, &STILL, 0.0);
+                let stand = floor.step(Some(feet), &beckoning(&turned(0.0, [0.0; 3])), 0.0);
                 let hips = (stand.mat4() * fitted * worlds[1]).w_axis.z;
                 if let Some(before) = previous { assert!(hips >= before - 1e-6, "rate {rate} frame {frame}: {before} -> {hips}"); }
                 previous = Some(hips);
@@ -548,13 +577,13 @@ mod tests {
         let head = headset(0.0, 0.0, VIEWER);
         let mut floor = Floor::new(turned(0.0, [2.5, 0.0, -3.0]));
         let mut previous = walking_feet(0.0);
-        floor.step(Some(previous), true, &head, 1.0 / 90.0);
+        floor.step(Some(previous), &head, 1.0 / 90.0);
         let start = floor.pose.axis(2);
         for frame in 1..270 {
             let feet = walking_feet(frame as f32 / 90.0);
             let support = usize::from(feet[1][1] < feet[0][1]);
             let planted = floor.pose.apply(previous[support]);
-            let next = floor.step(Some(feet), true, &head, 1.0 / 90.0);
+            let next = floor.step(Some(feet), &head, 1.0 / 90.0);
             if feet[support][2] <= previous[support][2] {
                 let moved = sub(next.apply(feet[support]), planted);
                 assert!(length([moved[0], 0.0, moved[2]]) < 1e-5, "frame {frame}: {moved:?}");
@@ -575,7 +604,7 @@ mod tests {
             let worlds = model.worlds(&model.pose(&clip.sample((frame as f32 / 90.0) % clip.duration())));
             let fitted = fit.placement(&model, &worlds, 0.0);
             let feet = model.feet(&worlds).unwrap().map(|foot| fitted.transform_point3(foot).to_array());
-            let stand = floor.step(Some(feet), true, &STILL, 0.0);
+            let stand = floor.step(Some(feet), &beckoning(&turned(0.0, [0.0; 3])), 0.0);
             feet.map(|foot| stand.apply(foot))
         }).collect();
         let ground = placed.iter().flatten().map(|foot| foot[1]).fold(f32::INFINITY, f32::min);
@@ -598,9 +627,9 @@ mod tests {
         let mut floor = Floor::new(turned(0.0, [2.0, 0.0, 3.0]));
         let standing = [[-0.2, 0.08, 0.018], [0.2, 0.078, -0.018]];
         let stepping = [[-0.197, 0.081, 0.023], [0.197, 0.078, -0.023]];
-        floor.step(Some(standing), false, &STILL, 0.0);
+        floor.step(Some(standing), &STILL, 0.0);
         let planted = floor.pose.apply(standing[1]);
-        let next = floor.step(Some(stepping), true, &STILL, 0.0);
+        let next = floor.step(Some(stepping), &STILL, 0.0);
         assert!(close(next.apply(stepping[1]), planted));
     }
 
@@ -613,15 +642,17 @@ mod tests {
         Pose::from_axes(x, cross(z, x), z, at)
     }
 
-    /// Steps a floor puppet at 90 Hz, its feet striding whenever it asks to walk, returning every pose it stood in.
+    /// Steps a floor puppet at 90 Hz, its feet striding whenever it asks to walk and easing back together otherwise, returning every pose it stood in.
     fn walk_for(floor: &mut Floor, head: impl Fn(f32) -> Pose, seconds: f32) -> Vec<Pose> {
         let mut gait = 0.0;
+        let mut feet = STANDING_FEET;
         (0..(seconds * 90.0) as usize).map(|frame| {
-            let going = floor.going();
-            if going { gait += 1.0 / 90.0; }
-            floor.step(Some(walking_feet(gait)), going, &head(frame as f32 / 90.0), 1.0 / 90.0)
+            feet = if floor.going() { gait += 1.0 / 90.0; walking_feet(gait) } else { std::array::from_fn(|at| add(feet[at], scale(sub(STANDING_FEET[at], feet[at]), 0.1))) };
+            floor.step(Some(feet), &head(frame as f32 / 90.0), 1.0 / 90.0)
         }).collect()
     }
+
+    const STANDING_FEET: [Vec3; 2] = [[-0.1, 0.0, 0.0], [0.1, 0.0, 0.0]];
 
     fn across(head: &Pose, at: Vec3) -> f32 {
         length([at[0] - head.t[0], 0.0, at[2] - head.t[2]])
@@ -648,7 +679,7 @@ mod tests {
                 let label = format!("headset yaw {yaw}, start {start:?}: ended {distance:.2} m off, facing {away:.2} rad away, {aside:.2} rad off the line of sight");
                 assert!((NEAREST..=FARTHEST).contains(&distance), "{label}");
                 assert!(away < 0.05, "settles facing the headset: {label}");
-                assert!((0.25..std::f32::consts::FRAC_PI_4).contains(&aside), "in view, off centre within 45 degrees: {label}");
+                assert!((0.25..IN_VIEW).contains(&aside), "in view, off the line of sight: {label}");
                 assert!(!floor.going(), "settled: {label}");
                 let entered = poses.iter().position(|pose| (NEAREST..=FARTHEST).contains(&across(&head, pose.t))).unwrap();
                 assert!(poses[entered..].iter().all(|pose| across(&head, pose.t) >= NEAREST * 0.9), "once in the band it circles him rather than crossing him: {label}");
@@ -665,13 +696,13 @@ mod tests {
             assert!(welcome(&still, start), "{bearing} rad, {distance} m is inside its bounds");
             let mut floor = Floor::new(turned(0.4, start));
             let poses = walk_for(&mut floor, |_| still, 60.0);
-            assert!(poses.iter().all(|pose| pose.t == start), "it never steps at {bearing} rad, {distance} m");
+            assert!(poses.iter().all(|pose| across(&Pose { t: start, ..still }, pose.t) <= 2.0 * STANDING_FEET[1][0] + 1e-4), "it never steps at {bearing} rad, {distance} m, only turns about a foot");
             assert!(angles(&still, poses.last().unwrap()).0 < 0.05, "it turns in place to face him");
         }
         let head = |time: f32| headset(if time < 10.0 { 0.0 } else { std::f32::consts::PI }, 0.0, [0.0, 1.6, 0.0]);
         let mut floor = Floor::new(turned(0.0, [0.3, 0.0, -1.2]));
         let poses = walk_for(&mut floor, head, 60.0);
-        assert!(poses[..10 * 90].iter().all(|pose| pose.t == poses[0].t), "still while he is");
+        assert!(poses[..10 * 90].iter().all(|pose| across(&Pose { t: poses[0].t, ..still }, pose.t) <= 2.0 * STANDING_FEET[1][0] + 1e-4), "still while he is");
         assert!(poses[10 * 90..].iter().all(|pose| across(&head(30.0), pose.t) >= NEAREST * 0.9), "it walks round him, not through him");
         assert!(poses[40 * 90..].iter().all(|pose| welcome(&head(60.0), pose.t)), "in view again within half a minute of his turning round");
         assert!(angles(&head(60.0), poses.last().unwrap()).0 < 0.05, "and stands facing him");

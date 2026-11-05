@@ -260,7 +260,7 @@ pub fn walk(args: &[String]) -> Result<(), String> {
     let (mut points, mut depth_log) = (create("points.tsv")?, create("depths.tsv")?);
     let steps = (WALKED / DELTA).round() as usize;
     for number in 0..steps {
-        let (worlds, body, _) = puppet.step(DELTA, |_, _| stand, 1.0, head, &[], 0.0, &mut pointing, std::time::Instant::now(), |_| None);
+        let (worlds, body, _) = puppet.step(DELTA, |_| stand, 1.0, head, &[], 0.0, &mut pointing, std::time::Instant::now(), |_| None);
         if number % 3 != 0 {
             continue;
         }
@@ -313,7 +313,7 @@ fn worked(puppet: &mut Puppet, control: &Control, board: &mut Board, index: usiz
         board.set_values(puppet.settings());
         let sway = SWAY * (std::f32::consts::TAU * number as f32 * CLOCK / SWAY_PERIOD).sin();
         let stand = Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [sway, 0.0, 0.0]);
-        let (worlds, body, _) = puppet.step(CLOCK, |_, _| stand, 1.0, head, &[], 0.0, &mut pointing, std::time::Instant::now(), |_| None);
+        let (worlds, body, _) = puppet.step(CLOCK, |_| stand, 1.0, head, &[], 0.0, &mut pointing, std::time::Instant::now(), |_| None);
         let local = facing(stand.apply([0.0, -FLOOR, 0.0]), head).inverse();
         puppet.draw(&worlds, local.mat4() * body);
         let eye = local.apply(head);

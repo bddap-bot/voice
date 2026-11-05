@@ -229,7 +229,7 @@ fn dressed(model: Model, mut clips: HashMap<String, Clip>, id: &str, renderer: &
 }
 
 impl Puppet {
-    fn step(&mut self, delta: f32, place: impl FnOnce(Option<[Vec3; 2]>, bool) -> Pose, size: f32, head: Vec3, hands: &[spring::Hand], mouth: f32, pointing: &mut point::Pointing, now: Instant, locate: impl FnOnce(&str) -> Option<Vec3>) -> (Vec<glam::Mat4>, glam::Mat4, Pose) {
+    fn step(&mut self, delta: f32, place: impl FnOnce(Option<[Vec3; 2]>) -> Pose, size: f32, head: Vec3, hands: &[spring::Hand], mouth: f32, pointing: &mut point::Pointing, now: Instant, locate: impl FnOnce(&str) -> Option<Vec3>) -> (Vec<glam::Mat4>, glam::Mat4, Pose) {
         if let Some(clip) = self.animator.update(delta) {
             tracing::info!("loop {clip}");
         }
@@ -238,7 +238,7 @@ impl Puppet {
         let mut worlds = self.model.worlds(&pose);
         let fitted = self.fit.placement(&self.model, &worlds, 0.0);
         let feet = self.model.feet(&worlds).map(|feet| feet.map(|foot| fitted.transform_point3(foot).to_array()));
-        let stand = place(feet, self.animator.walking());
+        let stand = place(feet);
         let body = stand.mat4() * glam::Mat4::from_scale(glam::Vec3::splat(size)) * fitted;
         let to_model = body.inverse();
         if let Some((target, weight)) = pointing.step(now, delta, mouth, locate) {
@@ -762,10 +762,10 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         let delta = interval.as_secs_f32().min(0.05);
         puppet.animator.walk(matches!(&anchor, Anchor::Grounded(floor) if floor.going()) && size == puppet.full);
         let full = puppet.full;
-        let (posed, body, stand) = puppet.step(delta, |feet, walking| {
+        let (posed, body, stand) = puppet.step(delta, |feet| {
             match &mut anchor {
                 Anchor::Grounded(floor) => {
-                    let placed = floor.step(feet.map(|feet| feet.map(|foot| placement::scale(foot, full))), walking && size == full, &head, delta);
+                    let placed = floor.step(feet.filter(|_| size == full).map(|feet| feet.map(|foot| placement::scale(foot, full))), &head, delta);
                     if size == full { placed } else { stand }
                 }
                 _ => stand,

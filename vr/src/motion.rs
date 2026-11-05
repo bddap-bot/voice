@@ -226,10 +226,6 @@ impl Animator {
         if self.gesture.is_none() { self.play_loop(); }
     }
 
-    pub fn walking(&self) -> bool {
-        self.actions.iter().any(|action| action.weight > 0.0 && family(&action.clip) == WALK)
-    }
-
     /// Shows a mood as the page's `mood` does: its face, and once its body clip when it changes and no gesture plays.
     pub fn mood(&mut self, name: &str) {
         if self.mood.as_deref() == Some(name) {
@@ -349,6 +345,10 @@ impl Animator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn walking(animator: &Animator) -> bool {
+        animator.actions.iter().any(|action| action.weight > 0.0 && family(&action.clip) == WALK)
+    }
 
     fn motion(turns: &[f32], hips: Option<&[f32]>) -> Vec<u8> {
         let times: Vec<f32> = (0..turns.len()).map(|key| key as f32).collect();
@@ -482,13 +482,13 @@ mod tests {
         let clip = Clip::parse(include_bytes!("../motions/walk.json"), Version::One, Some(Vec3::Y)).unwrap();
         let mut animator = animator(&["idle", "wave"]);
         animator.clips.insert(WALK.to_owned(), clip);
-        for _ in 0..1000 { animator.update(0.05); assert!(!animator.walking(), "standing unless asked"); }
+        for _ in 0..1000 { animator.update(0.05); assert!(!walking(&animator), "standing unless asked"); }
         animator.walk(true);
         animator.update(IDLE_FADE);
-        for _ in 0..1000 { animator.update(0.05); assert!(animator.walking(), "the stride loops while asked"); }
+        for _ in 0..1000 { animator.update(0.05); assert!(walking(&animator), "the stride loops while asked"); }
         animator.walk(false);
         animator.update(IDLE_FADE + 0.01);
-        for _ in 0..1000 { animator.update(0.05); assert!(!animator.walking()); }
+        for _ in 0..1000 { animator.update(0.05); assert!(!walking(&animator)); }
     }
 
     #[test]
@@ -496,16 +496,16 @@ mod tests {
         let mut animator = animator(&["idle", "walk", "wave"]);
         animator.walk(true);
         animator.update(IDLE_FADE);
-        assert!(animator.walking());
+        assert!(walking(&animator));
         animator.gesture("wave");
         animator.update(GESTURE_FADE);
-        assert!(!animator.walking());
+        assert!(!walking(&animator));
         animator.update(20.0);
         animator.update(IDLE_FADE);
-        assert!(animator.walking());
+        assert!(walking(&animator));
         animator.walk(false);
         animator.update(IDLE_FADE + 0.01);
-        assert!(!animator.walking());
+        assert!(!walking(&animator));
         assert_eq!(animator.loop_clip.as_deref(), Some("idle"));
     }
 

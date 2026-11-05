@@ -165,6 +165,8 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
         let mut log = String::new();
         let mut contacts = Contacts::default();
         let mut clock = 0usize;
+        // Held in its standing pose, so only a touch moves what it touches.
+        let acting = std::mem::replace(&mut puppet.animator, crate::motion::Animator::new(HashMap::new(), Vec::new(), crate::motion::Random::seeded()));
         for (probe, &(start, toward)) in PROBES.iter().enumerate() {
             let toward = glam::Vec3::from(toward);
             let across = toward.any_orthonormal_vector();
@@ -247,6 +249,7 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
                 };
             }
         }
+        puppet.animator = acting;
         std::fs::write(pictures.join("contact.csv"), rows).map_err(|error| format!("{}: {error}", pictures.display()))?;
         std::fs::write(pictures.join("contact.log"), &log).map_err(|error| format!("{}: {error}", pictures.display()))?;
         print!("{}: contact\n{log}", avatar.id);

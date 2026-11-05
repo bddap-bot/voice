@@ -181,13 +181,20 @@ impl Floor {
     }
 
     /// Moves it by the stride of `feet` while `walking`, then turns it toward where it is going, or toward `head` once there.
+    /// It holds the lower foot because the fit stands it on that one, so the foot on the floor is the one that does not slide; a foot
+    /// touching down while still swinging forward would pull the body back, so then the body waits and that foot slides the remainder.
     pub fn step(&mut self, feet: Option<[Vec3; 2]>, walking: bool, head: &Pose, delta: f32) -> Pose {
         let previous = self.feet;
         self.feet = feet;
+        let mut planted = None;
         if let (true, Some(previous), Some(feet)) = (walking, previous, feet) {
-            let support = usize::from(previous[1][2] - feet[1][2] > previous[0][2] - feet[0][2]);
-            self.pose.t = add(self.pose.t, self.pose.rotate(sub(previous[support], feet[support])));
-            self.pose.t[1] = 0.0;
+            let support = usize::from(feet[1][1] < feet[0][1]);
+            let [x, _, z] = sub(previous[support], feet[support]);
+            if z > 0.0 {
+                self.pose.t = add(self.pose.t, self.pose.rotate([x, 0.0, z]));
+                self.pose.t[1] = 0.0;
+            }
+            planted = Some((feet[support], self.pose.apply(feet[support])));
         }
         let at = self.pose.t;
         if self.goal.is_some_and(|goal| !welcome(head, goal) || length(level(sub(goal, at))) < ARRIVED) {
@@ -203,6 +210,9 @@ impl Floor {
             let turn = self.heading.clamp(-TURN * delta, TURN * delta);
             if turn != 0.0 {
                 self.pose = upright(at, add(at, yawed(forward, turn)), forward);
+                if let Some((foot, world)) = planted {
+                    self.pose.t = add(self.pose.t, level(sub(world, self.pose.apply(foot))));
+                }
             }
         }
         self.pose
@@ -462,7 +472,7 @@ mod tests {
         let mut feet = [[-0.1, 0.0, 0.0], [0.1, 0.0, 0.0]];
         feet[support][2] = 0.25 - 0.5 * phase;
         feet[1 - support][2] = -feet[support][2];
-        feet[1 - support][1] = 0.15 * (phase * std::f32::consts::PI).sin();
+        feet[1 - support][1] = 0.01 + 0.15 * (phase * std::f32::consts::PI).sin();
         feet
     }
 
@@ -475,14 +485,19 @@ mod tests {
                 floor.step(Some(previous), true, &STILL, 0.0);
                 for frame in 1..=rate {
                     let feet = walking_feet(frame as f32 / rate as f32).map(|f| scale(f, size));
-                    let support = usize::from(previous[1][2] - feet[1][2] > previous[0][2] - feet[0][2]);
-                    let planted = floor.pose.apply(previous[support]);
+                    let support = usize::from(feet[1][1] < feet[0][1]);
+                    let (before, planted) = (floor.pose.t, floor.pose.apply(previous[support]));
                     let next = floor.step(Some(feet), true, &STILL, 0.0);
-                    let moved = sub(next.apply(feet[support]), planted);
-                    assert!(length([moved[0], 0.0, moved[2]]) < 1e-5);
+                    if feet[support][2] <= previous[support][2] {
+                        let moved = sub(next.apply(feet[support]), planted);
+                        assert!(length([moved[0], 0.0, moved[2]]) < 1e-5);
+                    } else {
+                        assert_eq!(next.t, before, "a foot landing while it swings forward never pulls the body back");
+                    }
                     previous = feet;
                 }
-                assert!((floor.pose.t[2] - size).abs() < 0.04, "stride comes from foot travel, scaled with the model: {:?}", floor.pose.t);
+                let touchdowns = 2.0 * size / rate as f32;
+                assert!((floor.pose.t[2] - size).abs() <= touchdowns + 1e-4, "stride comes from foot travel, scaled with the model, less the frames its feet land in: {:?}", floor.pose.t);
             }
         }
     }
@@ -525,6 +540,56 @@ mod tests {
                 if let Some(before) = previous { assert!(hips >= before - 1e-6, "rate {rate} frame {frame}: {before} -> {hips}"); }
                 previous = Some(hips);
             }
+        }
+    }
+
+    #[test]
+    fn turning_while_walking_pivots_on_the_held_foot() {
+        let head = headset(0.0, 0.0, VIEWER);
+        let mut floor = Floor::new(turned(0.0, [2.5, 0.0, -3.0]));
+        let mut previous = walking_feet(0.0);
+        floor.step(Some(previous), true, &head, 1.0 / 90.0);
+        let start = floor.pose.axis(2);
+        for frame in 1..270 {
+            let feet = walking_feet(frame as f32 / 90.0);
+            let support = usize::from(feet[1][1] < feet[0][1]);
+            let planted = floor.pose.apply(previous[support]);
+            let next = floor.step(Some(feet), true, &head, 1.0 / 90.0);
+            if feet[support][2] <= previous[support][2] {
+                let moved = sub(next.apply(feet[support]), planted);
+                assert!(length([moved[0], 0.0, moved[2]]) < 1e-5, "frame {frame}: {moved:?}");
+            }
+            previous = feet;
+        }
+        assert!(dot(floor.pose.axis(2), start) < 0.99, "it turned on the way");
+    }
+
+    #[test]
+    fn the_bundled_stride_slides_no_foot_far_while_it_touches_the_floor() {
+        use crate::{motion::Clip, vrm::{Model, Fit}};
+        let model = Model::parse(include_bytes!("../golden/figure.vrm")).unwrap();
+        let fit = Fit::new(&model, &model.skinned().unwrap(), 1.67);
+        let clip = Clip::parse(include_bytes!("../motions/walk.json"), model.version, model.rest_hips()).unwrap();
+        let mut floor = Floor::new(turned(0.0, [0.0; 3]));
+        let placed: Vec<[Vec3; 2]> = (0..90 * 10).map(|frame| {
+            let worlds = model.worlds(&model.pose(&clip.sample((frame as f32 / 90.0) % clip.duration())));
+            let fitted = fit.placement(&model, &worlds, 0.0);
+            let feet = model.feet(&worlds).unwrap().map(|foot| fitted.transform_point3(foot).to_array());
+            let stand = floor.step(Some(feet), true, &STILL, 0.0);
+            feet.map(|foot| stand.apply(foot))
+        }).collect();
+        let ground = placed.iter().flatten().map(|foot| foot[1]).fold(f32::INFINITY, f32::min);
+        for foot in 0..2 {
+            let mut slides = vec![0.0f32];
+            for pair in placed.windows(2) {
+                if pair[0][foot][1] < ground + 0.003 && pair[1][foot][1] < ground + 0.003 {
+                    *slides.last_mut().unwrap() += length(level(sub(pair[1][foot], pair[0][foot])));
+                } else if *slides.last().unwrap() > 0.0 {
+                    slides.push(0.0);
+                }
+            }
+            let steps = slides.get(1..slides.len().saturating_sub(1)).unwrap_or_default();
+            assert!(steps.len() >= 4 && steps.iter().all(|slide| *slide < 0.036), "foot {foot} slides per step on the floor: {steps:?}");
         }
     }
 

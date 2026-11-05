@@ -137,6 +137,14 @@ class Publishing(unittest.TestCase):
         self.assertEqual(without_arms(self.catalog.read_bytes()), publisher.document(new.read_bytes()))
         self.assertEqual((self.root / '.previous' / 'avatar.vrm').read_bytes(), before)
 
+    def test_republishing_in_place_re_measures_it_and_keeps_the_replaced_file(self):
+        before = self.catalog.read_bytes()
+        publisher.publish(self.candidate(lambda doc: doc['extensionsUsed'].append('VRMC_vrm')), self.catalog)
+        count = len(measured)
+        publisher.publish(self.catalog, self.catalog)
+        self.assertEqual(len(measured), count + 1)
+        self.assertEqual((self.root / '.previous' / 'avatar.vrm').read_bytes(), before)
+
     def test_a_named_removal_installs(self):
         new = self.candidate(lambda doc: doc['meshes'][0]['extras'].update(targetNames=['smile']))
         publisher.publish(new, self.catalog, ['morph:Body:blink'])

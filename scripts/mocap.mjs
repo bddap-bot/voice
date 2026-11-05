@@ -1,9 +1,11 @@
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import * as THREE from 'three';
 
 const root = path.resolve(import.meta.dirname, '..');
+const PUBLISH = path.join(root, 'scripts/publish-avatar.py');
 const cache = process.env.VOICE_MOCAP_CACHE ?? path.join(root, 'node_modules/.cache/mocap');
 const FPS = 30;
 const SEAM = 0.5;
@@ -200,7 +202,7 @@ async function fetchPinned(url, sha256) {
 }
 
 async function main() {
-  const [command, out] = process.argv.slice(2);
+  const [command, out, catalog] = process.argv.slice(2);
   const sources = JSON.parse(fs.readFileSync(path.join(root, 'docs/poses/mocap.json'), 'utf8'));
   if (command === 'pin') {
     for (const take of Object.values(sources.takes)) {
@@ -213,26 +215,35 @@ async function main() {
     fs.writeFileSync(path.join(root, 'docs/poses/mocap.json'), `${JSON.stringify(sources, null, 2)}\n`);
     return;
   }
-  if (command !== 'write' || !out) throw new Error('usage: node scripts/mocap.mjs write <clip dir> | pin');
+  if (command !== 'write' || !out || !catalog) throw new Error('usage: node scripts/mocap.mjs write <clip dir> <catalog dir> | pin');
   if (path.resolve(out).startsWith(root + path.sep)) throw new Error('the clips are written outside the repository');
-  const manifestFile = path.join(out, 'clips.manifest.json');
-  const manifest = fs.existsSync(manifestFile) ? JSON.parse(fs.readFileSync(manifestFile, 'utf8')) : { clips: [] };
-  const written = new Set();
-  const entries = [];
+  const clips = [];
   for (const clip of sources.clips) {
     const take = sources.takes[clip.take];
     const asf = await fetchPinned(sources.url.replace('{subject}', take.subject).replace('{file}', `${take.subject}.asf`), take.asf);
     const amc = await fetchPinned(sources.url.replace('{subject}', take.subject).replace('{file}', `${take.id}.amc`), take.amc);
-    const file = `${clip.action}.motion`;
-    fs.writeFileSync(path.join(out, file), JSON.stringify(motion(asf, amc, { name: clip.action, rate: take.rate, from: clip.from, to: clip.to, loop: clip.action.replace(/-\d+$/, '') === 'idle' })));
-    written.add(file);
-    entries.push({ action: clip.action, name: file, source: `${sources.source} ${take.id} (${take.description}), ${clip.from ?? 0}–${clip.to ?? 'end'} s`, licence: sources.licence });
+    clips.push({
+      entry: { action: clip.action, name: `${clip.action}.motion`, source: `${sources.source} ${take.id} (${take.description}), ${clip.from ?? 0}–${clip.to ?? 'end'} s`, licence: sources.licence },
+      motion: motion(asf, amc, { name: clip.action, rate: take.rate, from: clip.from, to: clip.to, loop: clip.action.replace(/-\d+$/, '') === 'idle' }),
+    });
   }
-  const own = (entry) => entry.source?.startsWith(`${sources.source} `);
+  install(out, catalog, sources.source, clips);
+  console.log(`${clips.length} clips written to ${out}`);
+}
+
+export function install(out, catalog, source, clips) {
+  const figures = fs.readdirSync(catalog, { withFileTypes: true }).filter((entry) => entry.isFile() && !entry.name.startsWith('.') && entry.name.endsWith('.vrm')).map((entry) => entry.name).sort();
+  const manifestFile = path.join(out, 'clips.manifest.json');
+  const manifest = fs.existsSync(manifestFile) ? JSON.parse(fs.readFileSync(manifestFile, 'utf8')) : { clips: [] };
+  const written = new Set(clips.map(({ entry }) => entry.name));
+  for (const { entry, motion } of clips) fs.writeFileSync(path.join(out, entry.name), JSON.stringify(motion));
+  const own = (entry) => entry.source?.startsWith(`${source} `);
   for (const entry of manifest.clips.filter((entry) => own(entry) && !written.has(entry.name))) fs.rmSync(path.join(out, entry.name), { force: true });
+  const entries = clips.map(({ entry }) => entry);
   manifest.clips = [...manifest.clips.filter((entry) => !own(entry) && !written.has(entry.name) && !entries.some((mine) => mine.action === entry.action)), ...entries];
   fs.writeFileSync(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`);
-  console.log(`${entries.length} clips written to ${out}`);
+  const failed = figures.filter((name) => spawnSync('python3', [PUBLISH, path.join(catalog, name), path.join(catalog, name)], { stdio: 'inherit' }).status !== 0);
+  if (failed.length) throw new Error(`${failed.length} of ${figures.length} catalog figures were not re-measured against the clips written, so the overlay refuses them until a write re-measures them: ${failed.join(', ')}`);
 }
 
 if (process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(new URL(import.meta.url))) {

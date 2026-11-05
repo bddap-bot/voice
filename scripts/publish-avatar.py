@@ -9,7 +9,7 @@ removal. A target effect or look field the overlay's vr/src/vrm/effects.json doe
 would leave it still. So is a look without its material's lighting, which the overlay refuses to load. The installed
 file carries VOICE_arms, the arm spread `voice-vr arms` (the binary $VOICE_VR names, else voice-vr on PATH) measures on
 its body against the clips the server plays; the overlay refuses a figure without it.
-The replaced file stays beside the catalog in .previous/."""
+The replaced file stays beside the catalog in .previous/, unless NEW is CATALOG: republishing a file in place re-measures it."""
 import argparse
 from collections import Counter
 import hashlib
@@ -139,9 +139,10 @@ def publish(new_path, catalog_path, drops=()):
         gone = lost(inventory(document(catalog.read_bytes())), inventory(document(data)), drops)
         if gone:
             raise SystemExit(f'{new_path} would lose {len(gone)} part(s) {catalog} carries; name intended ones with --drop:\n' + '\n'.join('  ' + k for k in gone))
-        previous = catalog.parent / '.previous'
-        previous.mkdir(exist_ok=True)
-        shutil.copy2(catalog, previous / catalog.name)
+        if not catalog.samefile(new_path):
+            previous = catalog.parent / '.previous'
+            previous.mkdir(exist_ok=True)
+            shutil.copy2(catalog, previous / catalog.name)
     data = with_arms(data, spread)
     with tempfile.NamedTemporaryFile(dir=catalog.parent, prefix='.' + catalog.name, delete=False) as out:
         out.write(data)

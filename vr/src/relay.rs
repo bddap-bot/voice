@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 const ALPN: &[u8] = b"voice-web/1";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// The longest a transfer may wait for its start or its next chunk: a large asset over a slow link takes longer than this in all.
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_FRAME: usize = 32 << 20;
 const MAX_ASSET: usize = 256 << 20;
@@ -277,7 +278,7 @@ impl Relay {
     /// The transfer of `id` the server answers with, which is the file it holds now: a catalog read before a republish names an older hash.
     /// Its error says whether the server ended the transfer.
     fn receive(&mut self, kind: &str, id: &str, extension: &str) -> Result<Vec<u8>, (bool, String)> {
-        let deadline = Instant::now() + TRANSFER_TIMEOUT;
+        let mut deadline = Instant::now() + TRANSFER_TIMEOUT;
         let mut start: Option<Start> = None;
         let mut compressed = Vec::new();
         loop {
@@ -295,6 +296,7 @@ impl Relay {
                     }
                     compressed.reserve(value.size);
                     start = Some(value);
+                    deadline = Instant::now() + TRANSFER_TIMEOUT;
                 }
                 "chunk" => {
                     let (chunk_id, chunk) = split(body);
@@ -303,6 +305,9 @@ impl Relay {
                     }
                     let size = start.as_ref().ok_or_else(|| (false, format!("{kind} {id}: chunk before start")))?.size;
                     compressed.extend_from_slice(chunk);
+                    if !chunk.is_empty() {
+                        deadline = Instant::now() + TRANSFER_TIMEOUT;
+                    }
                     if compressed.len() > size {
                         return Err((false, format!("{kind} {id}: exceeds its advertised size")));
                     }
@@ -479,6 +484,43 @@ mod tests {
         let read_before = Avatar { id: "a".into(), content_hash: "0123abcd".into() };
         assert_eq!(relay.puppet(&read_before).unwrap(), b"republished");
         assert_eq!(std::fs::read(cache.join(format!("{hash}.vrm"))).unwrap(), b"republished", "cached under the hash it was served with");
+        std::fs::remove_dir_all(&cache).unwrap();
+    }
+
+    #[test]
+    fn a_transfer_waits_its_timeout_again_after_each_chunk_of_its_own_not_in_all() {
+        struct Timed {
+            frames: std::collections::VecDeque<Vec<u8>>,
+            deadlines: Arc<std::sync::Mutex<Vec<Instant>>>,
+        }
+        impl Wire for Timed {
+            fn send(&mut self, _: &[u8]) -> Result<(), String> {
+                Ok(())
+            }
+            fn recv(&mut self, deadline: Instant) -> Result<Vec<u8>, String> {
+                self.deadlines.lock().unwrap().push(deadline);
+                std::thread::sleep(Duration::from_millis(5));
+                self.frames.pop_front().ok_or_else(|| "the relay went quiet".to_owned())
+            }
+            fn listen(&mut self) -> mpsc::Receiver<Result<Vec<u8>, String>> {
+                mpsc::channel().1
+            }
+        }
+        let cache = std::env::temp_dir().join(format!("voice-vr-relay-timed-{}", std::process::id()));
+        std::fs::create_dir_all(&cache).unwrap();
+        let (hash, mut frames) = served("puppet", "a", &(0..4000u64).scan(1u64, |x, _| { *x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); Some((*x >> 56) as u8) }).collect::<Vec<_>>());
+        frames.insert(2, b"puppet-chunk
+b
+other".to_vec());
+        let chunks = frames.len() - 3;
+        let deadlines = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut relay = Relay { wire: Box::new(Timed { frames: frames.into(), deadlines: deadlines.clone() }), cache: cache.clone(), broken: false };
+        relay.puppet(&Avatar { id: "a".into(), content_hash: hash }).unwrap();
+        let deadlines = deadlines.lock().unwrap();
+        assert!(chunks >= 2 && deadlines.len() == chunks + 3);
+        assert!(deadlines[1] > deadlines[0], "the start waits anew");
+        assert_eq!(deadlines[3], deadlines[2], "another transfer's chunk does not");
+        assert!(deadlines[4] > deadlines[3], "a chunk of its own does");
         std::fs::remove_dir_all(&cache).unwrap();
     }
 

@@ -12,6 +12,9 @@ pub const EXTENSION: &str = "VRCHAT_expressions";
 const READ: &str = include_str!("effects.json");
 /// Instant transitions followed in one layer in one frame, so a cycle of them cannot hold the frame.
 const HOPS: usize = 8;
+/// The widest atlas the converter packs (libwebp's widest image), so the layers drawn over it fit; PNG's own buffers stay
+/// bounded by what a 16-bit RGBA image that wide decodes into.
+const WIDEST: u32 = 16383;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -540,7 +543,13 @@ pub struct Expressions {
 fn image(encoded: &str) -> Result<Image, String> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|error| error.to_string())?;
-    let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png).map_err(|error| error.to_string())?.into_rgba8();
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::Png);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(WIDEST);
+    limits.max_image_height = Some(WIDEST);
+    limits.max_alloc = Some(u64::from(WIDEST).pow(2) * 8);
+    reader.limits(limits);
+    let image = reader.decode().map_err(|error| error.to_string())?.into_rgba8();
     Ok(Image { width: image.width(), height: image.height(), rgba: image.into_raw() })
 }
 
@@ -981,6 +990,19 @@ fn two_d(positions: &[[f32; 2]], at: [f32; 2]) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn png(width: u32) -> String {
+        use base64::Engine;
+        let mut bytes = Vec::new();
+        image::RgbaImage::new(width, 1).write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png).unwrap();
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[test]
+    fn a_layer_decodes_as_wide_as_an_atlas_and_no_wider() {
+        assert_eq!(image(&png(WIDEST)).unwrap().width, WIDEST);
+        assert!(image(&png(WIDEST + 1)).is_err());
+    }
 
     fn toggle(write_defaults: bool) -> Expressions {
         let off = if write_defaults { serde_json::json!({}) } else { serde_json::json!({"clip": 1}) };

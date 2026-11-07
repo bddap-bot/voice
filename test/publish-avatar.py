@@ -1,14 +1,44 @@
 import copy
 import importlib.util
 import json
+import os
 from pathlib import Path
 import struct
+import subprocess
 import tempfile
 import unittest
 
 spec = importlib.util.spec_from_file_location('publisher', Path(__file__).resolve().parents[1] / 'scripts/publish-avatar.py')
 publisher = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(publisher)
+
+
+CONVERTER = tempfile.TemporaryDirectory()
+REPO = Path(CONVERTER.name) / 'converter'
+os.environ.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='core.hooksPath', GIT_CONFIG_VALUE_0='/dev/null', GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@t', GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@t')
+
+
+def git(*args):
+    return subprocess.run(['git', '-C', str(REPO), *args], check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+
+
+subprocess.run(['git', 'init', '--quiet', '--bare', '--initial-branch=main', str(REPO.with_name('origin'))], check=True)
+subprocess.run(['git', 'clone', '--quiet', str(REPO.with_name('origin')), str(REPO)], check=True, stderr=subprocess.DEVNULL)
+for _ in range(3):
+    git('commit', '--quiet', '--allow-empty', '-m', 'c')
+    git('push', '--quiet', 'origin', 'HEAD:main')
+OLDER, LANDED = git('rev-parse', 'HEAD~1'), git('rev-parse', 'HEAD')
+git('commit', '--quiet', '--allow-empty', '-m', 'unlanded')
+UNLANDED = git('rev-parse', 'HEAD')
+git('reset', '--quiet', '--hard', LANDED)
+
+
+def publish(new, catalog, drops=(), **flags):
+    return publisher.publish(new, catalog, REPO, drops, **flags)
+
+
+def stamped(commit, dirty=False):
+    return lambda doc: doc['asset'].update(extras={'converter': {'commit': commit, 'dirty': dirty}})
 
 
 def glb(doc):
@@ -18,7 +48,7 @@ def glb(doc):
 
 
 AVATAR = {
-    'asset': {'version': '2.0'},
+    'asset': {'version': '2.0', 'extras': {'converter': {'commit': LANDED, 'dirty': False}}},
     'extensionsUsed': ['VRCHAT_expressions'],
     'nodes': [{'name': 'Root', 'children': [1, 2, 3]}, {'name': 'Body', 'mesh': 0}, {'name': 'Hair'}, {'name': 'Head'}],
     'images': [{'name': 'atlas', 'mimeType': 'image/webp', 'bufferView': 0}],
@@ -78,7 +108,7 @@ class Publishing(unittest.TestCase):
             del x['hueMask']
         before = self.catalog.read_bytes()
         with self.assertRaises(SystemExit) as refused:
-            publisher.publish(self.candidate(strip), self.catalog)
+            publish(self.candidate(strip), self.catalog)
         for part in ['target:hue:Body', 'curve:hue:Body', 'layer:Hue', 'expressions:hueMask']:
             self.assertIn(part, str(refused.exception))
         self.assertEqual(self.catalog.read_bytes(), before)
@@ -90,14 +120,14 @@ class Publishing(unittest.TestCase):
 
         def as_look(doc):
             doc['extensions']['VRCHAT_expressions']['targets'][0]['effect'] = {'look': [{'field': 'decal', 'node': 1, 'rect': [0, 0, 1, 1], 'slot': 0}]}
-        publisher.publish(self.candidate(as_look), self.catalog)
+        publish(self.candidate(as_look), self.catalog)
 
     def test_an_effect_or_look_field_the_overlay_does_not_read_is_refused(self):
         look = lambda field: {'node': 1, 'rect': [0, 0, 1, 1], 'field': field, 'slot': 0}
         for effect, part in [({'glow': [{'node': 1}]}, 'effect:glow'), ('blink', 'effect:blink'), ({'look': [look('decal'), look('sparkle')]}, 'look:sparkle')]:
             before = self.catalog.read_bytes()
             with self.assertRaises(SystemExit) as refused:
-                publisher.publish(self.candidate(lambda doc: doc['extensions']['VRCHAT_expressions']['targets'].append({'default': 0, 'effect': effect})), self.catalog)
+                publish(self.candidate(lambda doc: doc['extensions']['VRCHAT_expressions']['targets'].append({'default': 0, 'effect': effect})), self.catalog)
             self.assertIn(part, str(refused.exception))
             self.assertEqual(self.catalog.read_bytes(), before)
 
@@ -105,15 +135,15 @@ class Publishing(unittest.TestCase):
         look = {'decals': [None] * 4, 'matcaps': [None] * 4, 'emission': None}
         before = self.catalog.read_bytes()
         with self.assertRaises(SystemExit) as refused:
-            publisher.publish(self.candidate(lambda doc: doc['extensions']['VRCHAT_expressions'].update(looks={'index': 'iVBOR', 'materials': [look]})), self.catalog)
+            publish(self.candidate(lambda doc: doc['extensions']['VRCHAT_expressions'].update(looks={'index': 'iVBOR', 'materials': [look]})), self.catalog)
         self.assertIn('lighting', str(refused.exception))
         self.assertEqual(self.catalog.read_bytes(), before)
-        publisher.publish(self.candidate(lambda doc: doc['extensions']['VRCHAT_expressions'].update(looks={'index': 'iVBOR', 'materials': [look | {'lighting': {'model': 'flat'}}]})), self.catalog)
+        publish(self.candidate(lambda doc: doc['extensions']['VRCHAT_expressions'].update(looks={'index': 'iVBOR', 'materials': [look | {'lighting': {'model': 'flat'}}]})), self.catalog)
 
     def test_every_look_field_and_effect_the_overlay_lists_publishes(self):
         targets = [{'effect': kind if kind == 'switch' else {kind: []}} for kind in publisher.READ['effects']]
         targets.append({'effect': {'look': [{'node': 1, 'rect': [0, 0, 1, 1], 'field': field, 'slot': 0} for field in publisher.READ['looks']]}})
-        publisher.publish(self.candidate(lambda doc: doc['extensions']['VRCHAT_expressions']['targets'].extend(targets)), self.catalog)
+        publish(self.candidate(lambda doc: doc['extensions']['VRCHAT_expressions']['targets'].extend(targets)), self.catalog)
 
     def test_a_lost_parameter_menu_control_morph_image_or_collider_is_refused(self):
         for change, part in [
@@ -127,39 +157,42 @@ class Publishing(unittest.TestCase):
             (lambda doc: doc['extensions']['VRCHAT_expressions'].update(colliders=[]), 'switched-collider:Head'),
         ]:
             with self.assertRaises(SystemExit) as refused:
-                publisher.publish(self.candidate(change), self.catalog)
+                publish(self.candidate(change), self.catalog)
             self.assertIn(part, str(refused.exception))
 
     def test_a_superset_installs_and_keeps_the_replaced_file(self):
         before = self.catalog.read_bytes()
         new = self.candidate(lambda doc: doc['extensionsUsed'].append('VRMC_vrm'))
-        publisher.publish(new, self.catalog)
+        publish(new, self.catalog)
         self.assertEqual(without_arms(self.catalog.read_bytes()), publisher.document(new.read_bytes()))
         self.assertEqual((self.root / '.previous' / 'avatar.vrm').read_bytes(), before)
 
     def test_republishing_in_place_re_measures_it_and_keeps_the_replaced_file(self):
         before = self.catalog.read_bytes()
-        publisher.publish(self.candidate(lambda doc: doc['extensionsUsed'].append('VRMC_vrm')), self.catalog)
+        publish(self.candidate(lambda doc: doc['extensionsUsed'].append('VRMC_vrm')), self.catalog)
         count = len(measured)
-        publisher.publish(self.catalog, self.catalog)
+        publish(self.catalog, self.catalog)
         self.assertEqual(len(measured), count + 1)
         self.assertEqual((self.root / '.previous' / 'avatar.vrm').read_bytes(), before)
+        self.catalog.write_bytes(self.candidate(lambda doc: doc['asset'].pop('extras')).read_bytes())
+        publisher.publish(self.catalog, self.catalog)
+        self.assertEqual(len(measured), count + 2)
 
     def test_a_fresh_conversion_installs_over_a_catalog_file_carrying_its_spread(self):
-        publisher.publish(self.candidate(lambda doc: None), self.catalog)
+        publish(self.candidate(lambda doc: None), self.catalog)
         new = self.candidate(lambda doc: None)
-        publisher.publish(new, self.catalog)
+        publish(new, self.catalog)
         self.assertEqual(without_arms(self.catalog.read_bytes()), publisher.document(new.read_bytes()))
 
     def test_a_named_removal_installs(self):
         new = self.candidate(lambda doc: doc['meshes'][0]['extras'].update(targetNames=['smile']))
-        publisher.publish(new, self.catalog, ['morph:Body:blink'])
+        publish(new, self.catalog, ['morph:Body:blink'])
         self.assertEqual(without_arms(self.catalog.read_bytes()), publisher.document(new.read_bytes()))
 
     def test_a_new_catalog_entry_installs(self):
         new = self.candidate(lambda doc: None)
         target = self.root / 'fresh.vrm'
-        publisher.publish(new, target)
+        publish(new, target)
         self.assertEqual(without_arms(target.read_bytes()), publisher.document(new.read_bytes()))
 
     def test_a_figure_whose_spread_cannot_be_measured_leaves_the_catalog_and_its_backup_untouched(self):
@@ -170,11 +203,38 @@ class Publishing(unittest.TestCase):
         measure, publisher.measure = publisher.measure, refuse
         try:
             with self.assertRaises(RuntimeError):
-                publisher.publish(new, self.catalog)
+                publish(new, self.catalog)
         finally:
             publisher.measure = measure
         self.assertEqual(self.catalog.read_bytes(), before)
         self.assertFalse((self.root / '.previous').exists())
+
+    def test_a_file_no_landed_converter_wrote_is_refused_unless_named(self):
+        for change, part in [
+            (lambda doc: doc['asset'].pop('extras'), 'names no converter commit'),
+            (stamped(LANDED, dirty=True), 'differs from'),
+            (stamped(UNLANDED), 'does not contain'),
+            (stamped('0' * 40), 'does not contain'),
+        ]:
+            before = self.catalog.read_bytes()
+            with self.assertRaises(SystemExit) as refused:
+                publish(self.candidate(change), self.catalog)
+            self.assertIn(part, str(refused.exception))
+            self.assertEqual(self.catalog.read_bytes(), before)
+            publish(self.candidate(change), self.catalog, unlanded_ok=True)
+            self.catalog.write_bytes(before)
+        with self.assertRaises(SystemExit) as refused:
+            publisher.publish(self.candidate(lambda doc: None), self.catalog, unlanded_ok=True)
+        self.assertIn('--converter', str(refused.exception))
+
+    def test_a_file_from_an_older_converter_commit_is_refused_over_a_newer_one_unless_a_rollback(self):
+        before = self.catalog.read_bytes()
+        with self.assertRaises(SystemExit) as refused:
+            publish(self.candidate(stamped(OLDER)), self.catalog)
+        self.assertIn(f'{OLDER} is older than {LANDED}', str(refused.exception))
+        self.assertEqual(self.catalog.read_bytes(), before)
+        publish(self.candidate(stamped(OLDER)), self.catalog, rollback_ok=True)
+        publish(self.candidate(stamped(LANDED)), self.catalog)
 
     def test_the_installed_file_carries_the_spread_measured_on_it_with_its_binary_untouched(self):
         body = b'BODY'
@@ -182,7 +242,7 @@ class Publishing(unittest.TestCase):
         new = self.root / 'new.vrm'
         new.write_bytes(data[:8] + struct.pack('<I', len(data) + 8 + len(body)) + data[12:] + struct.pack('<I4s', len(body), b'BIN\0') + body)
         measured.clear()
-        publisher.publish(new, self.catalog)
+        publish(new, self.catalog)
         installed = self.catalog.read_bytes()
         self.assertEqual(measured, [new.read_bytes()])
         self.assertEqual(without_arms(installed), AVATAR)

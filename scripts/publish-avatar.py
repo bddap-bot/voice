@@ -1,6 +1,6 @@
 """Install a converted puppet over the catalog file it replaces, refusing one that carries less.
 
-usage: publish-avatar.py NEW.vrm CATALOG.vrm [--drop PREFIX ...]
+usage: publish-avatar.py NEW.vrm CATALOG.vrm [--converter DIR] [--drop PREFIX ...] [--unlanded] [--rollback]
 
 Every node, image, morph target, material, spring joint, collider a spring collides with, VRM expression and avatar
 expression part (parameter, layer, menu control, material target, curve, shown node, switched spring or collider,
@@ -9,7 +9,10 @@ removal. A target effect or look field the overlay's vr/src/vrm/effects.json doe
 would leave it still. So is a look without its material's lighting, which the overlay refuses to load. The installed
 file carries VOICE_arms, the arm spread `voice-vr arms` (the binary $VOICE_VR names, else voice-vr on PATH) measures on
 its body against the clips the server plays; the overlay refuses a figure without it.
-The replaced file stays beside the catalog in .previous/, unless NEW is CATALOG: republishing a file in place re-measures it."""
+The replaced file stays beside the catalog in .previous/, unless NEW is CATALOG: republishing a file in place re-measures it.
+Otherwise NEW must name in its asset extras the clean converter commit that wrote it, one origin/main of DIR, the
+converter's repository, contains once fetched, unless --unlanded names it an intended exception; and that commit may
+not be a strict ancestor of the one the catalog file names, unless --rollback names it an intended rollback."""
 import argparse
 from collections import Counter
 import hashlib
@@ -119,13 +122,48 @@ def unread(doc):
     return sorted(out)
 
 
+def converter(doc):
+    return doc.get('asset', {}).get('extras', {}).get('converter') or {}
+
+
+def git(repo, *args):
+    return subprocess.run(['git', '-C', str(repo), *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+
+def unlanded(stamp, repo):
+    commit = stamp.get('commit')
+    if not commit:
+        return 'names no converter commit'
+    if stamp.get('dirty') is not False:
+        return f'was converted from a tree that differs from {commit}'
+    if not git(repo, 'fetch', '--quiet', 'origin'):
+        raise SystemExit(f'cannot fetch origin in {repo}')
+    if not git(repo, 'merge-base', '--is-ancestor', commit, 'origin/main'):
+        return f"names converter commit {commit}, which {repo}'s origin/main does not contain"
+
+
 def lost(old, new, drops):
     missing = old - new
     return sorted(k for k in missing.elements() if not any(k.startswith(d) for d in drops))
 
 
-def publish(new_path, catalog_path, drops=()):
+def landed(new_path, catalog, repo, unlanded_ok, rollback_ok):
+    if repo is None:
+        raise SystemExit(f'name the repository of the converter that wrote {new_path} with --converter')
+    stamp = converter(document(Path(new_path).read_bytes()))
+    why = unlanded(stamp, repo)
+    if why and not unlanded_ok:
+        raise SystemExit(f'{new_path} {why}; convert it from the converter\'s main, or name the exception with --unlanded')
+    replaced = converter(document(catalog.read_bytes())).get('commit') if catalog.exists() else None
+    if replaced and stamp.get('commit') not in (None, replaced) and git(repo, 'merge-base', '--is-ancestor', stamp['commit'], replaced) and not rollback_ok:
+        raise SystemExit(f"{new_path}'s converter commit {stamp['commit']} is older than {replaced}, which wrote {catalog}; convert it from the converter's main, or name the rollback with --rollback")
+
+
+def publish(new_path, catalog_path, repo=None, drops=(), unlanded_ok=False, rollback_ok=False):
     data = Path(new_path).read_bytes()
+    catalog = Path(catalog_path)
+    if not (catalog.exists() and catalog.samefile(new_path)):
+        landed(new_path, catalog, repo, unlanded_ok, rollback_ok)
     unknown = unread(document(data))
     if unknown:
         raise SystemExit(f'{new_path} carries expression parts the overlay does not read; teach voice-vr them and list them in vr/src/vrm/effects.json:\n' + '\n'.join('  ' + k for k in unknown))
@@ -134,7 +172,6 @@ def publish(new_path, catalog_path, drops=()):
     if unlit:
         raise SystemExit(f'{new_path} has looks without the lighting the overlay reads (materials {unlit}); reconvert it with the current converter')
     data = with_arms(data, measure(new_path))
-    catalog = Path(catalog_path)
     if catalog.exists():
         gone = lost(inventory(document(catalog.read_bytes())), inventory(document(data)), drops)
         if gone:
@@ -154,6 +191,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('new')
     parser.add_argument('catalog')
+    parser.add_argument('--converter')
     parser.add_argument('--drop', action='append', default=[])
+    parser.add_argument('--unlanded', action='store_true')
+    parser.add_argument('--rollback', action='store_true')
     args = parser.parse_args()
-    print(publish(args.new, args.catalog, args.drop), args.catalog)
+    print(publish(args.new, args.catalog, args.converter, args.drop, args.unlanded, args.rollback), args.catalog)

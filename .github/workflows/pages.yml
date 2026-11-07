@@ -29,6 +29,3 @@ jobs:
           path: docs
       - id: deployment
         uses: actions/deploy-pages@v4
-        # The build version names the Pages deployment; a commit's cancelled deployment stalls every redeploy that reuses its sha.
-        env:
-          GITHUB_SHA: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}

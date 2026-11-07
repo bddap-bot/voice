@@ -133,7 +133,7 @@ def publish(new_path, catalog_path, drops=()):
     unlit = [i for i, look in enumerate(looks) if 'lighting' not in look]
     if unlit:
         raise SystemExit(f'{new_path} has looks without the lighting the overlay reads (materials {unlit}); reconvert it with the current converter')
-    spread = measure(new_path)
+    data = with_arms(data, measure(new_path))
     catalog = Path(catalog_path)
     if catalog.exists():
         gone = lost(inventory(document(catalog.read_bytes())), inventory(document(data)), drops)
@@ -143,7 +143,6 @@ def publish(new_path, catalog_path, drops=()):
             previous = catalog.parent / '.previous'
             previous.mkdir(exist_ok=True)
             shutil.copy2(catalog, previous / catalog.name)
-    data = with_arms(data, spread)
     with tempfile.NamedTemporaryFile(dir=catalog.parent, prefix='.' + catalog.name, delete=False) as out:
         out.write(data)
     os.replace(out.name, catalog)

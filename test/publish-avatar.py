@@ -145,6 +145,12 @@ class Publishing(unittest.TestCase):
         self.assertEqual(len(measured), count + 1)
         self.assertEqual((self.root / '.previous' / 'avatar.vrm').read_bytes(), before)
 
+    def test_a_fresh_conversion_installs_over_a_catalog_file_carrying_its_spread(self):
+        publisher.publish(self.candidate(lambda doc: None), self.catalog)
+        new = self.candidate(lambda doc: None)
+        publisher.publish(new, self.catalog)
+        self.assertEqual(without_arms(self.catalog.read_bytes()), publisher.document(new.read_bytes()))
+
     def test_a_named_removal_installs(self):
         new = self.candidate(lambda doc: doc['meshes'][0]['extras'].update(targetNames=['smile']))
         publisher.publish(new, self.catalog, ['morph:Body:blink'])

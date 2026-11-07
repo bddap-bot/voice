@@ -98,6 +98,23 @@ struct Look {
     light_cap: f32,
     themes: array<Theme, 4>,
     emission_theme: i32,
+    shadowed: u32,
+    shadow_border: f32,
+    shadow_blur: f32,
+    shadow_strength: f32,
+    second_border: f32,
+    second_blur: f32,
+    second_weight: f32,
+    edge_color: vec3<f32>,
+    edge_range: f32,
+    rim_color: vec3<f32>,
+    rim_strength: f32,
+    rim_main: f32,
+    rim_border: f32,
+    rim_blur: f32,
+    rim_power: f32,
+    rim_lit: f32,
+    rim_shadow_mask: f32,
     matcaps: array<Matcap, 4>,
     ramp: array<vec4<f32>, 4>,
     ramped: u32,
@@ -111,6 +128,7 @@ struct Look {
 @group(0) @binding(14) var emission_map: texture_2d<f32>;
 @group(0) @binding(15) var edge_sampler: sampler;
 @group(0) @binding(17) var clearcoat_maps: texture_2d_array<f32>;
+@group(0) @binding(18) var shade_layers: texture_2d_array<f32>;
 
 // Rows of Surface.look, in the order of expressions::Field.
 const DECAL = 0u;
@@ -232,6 +250,14 @@ fn untinted(uv: vec2<f32>, gradient: mat2x2<f32>) -> vec3<f32> {
         }
     }
     return vec3<f32>(1.0);
+}
+
+// lilToon's toon step of `v` across `border`, `blur` wide and widened by `width` (v's screen derivative) so it never
+// aliases; `reach` lowers its low end alone. The floor keeps an unblurred step on a flat surface from dividing by zero.
+fn band(v: f32, width: f32, border: f32, blur: f32, reach: f32) -> f32 {
+    let low = saturate(border - 0.5 * blur - reach);
+    let high = saturate(border + 0.5 * blur);
+    return saturate((v - low) / max(saturate(high - low + width), 1e-5));
 }
 
 fn hue(color: vec3<f32>, settings: vec4<f32>) -> vec3<f32> {
@@ -542,6 +568,10 @@ fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
     let normal = at.normal;
     let view = at.view;
     let lit = toon(material, normal, KEY_DIRECTION);
+    let toward = saturate(dot(KEY_DIRECTION, normal) * 0.5 + 0.5);
+    let toward_width = fwidth(toward);
+    let fresnel = pow(max(1.0 - abs(dot(normal, view)), 1e-4), looks[look].rim_power);
+    let fresnel_width = fwidth(fresnel);
     var raw = surface.color.rgb;
     if surface.color.a > 0.0 {
         raw *= untinted(input.uv, gradient);
@@ -551,13 +581,27 @@ fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
     let laid = decal_samples(input.surface, look, input.uv);
     var albedo = decals(adjust(mix(sampled.rgb, raw * material.base.rgb, surface.color.a), surface, mask), vec3<f32>(1.0), input.surface, look, laid);
     var shade = decals(adjust(mix(textureSample(shade_texture, texture_sampler, input.uv).rgb, raw, surface.color.a) * material.shade, surface, mask), material.shade, input.surface, look, laid);
-    let glow = matcaps(&albedo, &shade, material.shade, input.surface, look, input.uv, gradient, normal, view, lit);
+    let unshadowed = albedo;
+    var shadowmix = 1.0;
+    var light_mask = lit;
+    if looks[look].shadowed != 0u {
+        let first = textureSampleGrad(shade_layers, texture_sampler, input.uv, 0, gradient[0], gradient[1]);
+        let second = adjust(textureSampleGrad(shade_layers, texture_sampler, input.uv, 1, gradient[0], gradient[1]).rgb, surface, mask);
+        shadowmix = band(toward, toward_width, looks[look].shadow_border, looks[look].shadow_blur, 0.0);
+        light_mask = shadowmix;
+        var dark = mix(adjust(first.rgb, surface, mask), second, looks[look].second_weight * (1.0 - band(toward, toward_width, looks[look].second_border, looks[look].second_blur, 0.0)));
+        dark = min(dark, albedo);
+        dark = mix(dark, albedo, band(toward, toward_width, looks[look].shadow_border, looks[look].shadow_blur, looks[look].edge_range) * looks[look].edge_color);
+        albedo = mix(dark, albedo, mix(1.0, shadowmix, looks[look].shadow_strength * first.a));
+    }
+    let glow = matcaps(&albedo, &shade, material.shade, input.surface, look, input.uv, gradient, normal, view, light_mask);
     let base = vec4<f32>(albedo, sampled.a);
     var light: vec3<f32>;
     // A flat material takes its main light's colour whole, as a Lambert surface square to it would, and the ambient
     // light, whichever way it faces: Unity's base pass, which lights it by the one main directional light.
+    let flat_light = min(KEY_COLOR + 0.5 * (SKY + GROUND), vec3<f32>(looks[look].light_cap));
     if looks[look].flat != 0u {
-        light = min(KEY_COLOR + 0.5 * (SKY + GROUND), vec3<f32>(looks[look].light_cap)) * base.rgb;
+        light = flat_light * base.rgb;
     } else if looks[look].ramped != 0u {
         // Toon Standard's base pass: its main light through its ramp at the half-Lambert term, the shade lent the
         // albedo by its shadow tint, and the ambient, capped where it limits brightness.
@@ -572,7 +616,9 @@ fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
         let hemisphere = mix(GROUND, SKY, 0.5 * normal.y + 0.5);
         light = direct + mix(hemisphere, 0.5 * (SKY + GROUND), material.equalization) * base.rgb;
     }
-    var color = light + glow + emission(input.surface, look, input.uv, gradient, mask.r) + sheen;
+    let rim = band(fresnel, fresnel_width, looks[look].rim_border, looks[look].rim_blur, 0.0) * mix(1.0, shadowmix, looks[look].rim_shadow_mask) * looks[look].rim_strength;
+    let rim_light = looks[look].rim_color * mix(vec3<f32>(1.0), unshadowed, looks[look].rim_main) * mix(vec3<f32>(1.0), flat_light, looks[look].rim_lit) * rim;
+    var color = light + glow + rim_light + emission(input.surface, look, input.uv, gradient, mask.r) + sheen;
     if draw.outline != 0u && material.outline_layered > 0.5 {
         color = textureSampleGrad(outline_width_texture, texture_sampler, input.uv, gradient[0], gradient[1]).rgb * min(KEY_COLOR + 0.5 * (SKY + GROUND), vec3<f32>(1.0));
     } else if draw.outline != 0u {

@@ -440,7 +440,8 @@ fn read_map<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<
 
 /// How a material takes the light: by the angle it meets each light at, through its `ramp` of brightnesses over the
 /// half-Lambert term from 0 to 1 where it has one (VRChat's Toon Standard), its shade lent the albedo by `shadow_tint`;
-/// or `Flat`, by the lights' colour alone. A ramp-lit or flat one is capped at `cap` where its shader caps it.
+/// or `Flat`, by the lights' colour alone, turning to its shade colours past the `shadow`'s border where it has one. A
+/// ramp-lit or flat one is capped at `cap` where its shader caps it.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", tag = "model")]
 pub enum Lighting {
@@ -452,7 +453,49 @@ pub enum Lighting {
         #[serde(default)]
         cap: Option<f32>,
     },
-    Flat { cap: Option<f32> },
+    Flat { cap: Option<f32>, shadow: Option<Shadow> },
+}
+
+/// lilToon's shadow: past `border` (with `blur`) of the half-Lambert term the albedo turns to `Looks::shades`' first
+/// colour, by `strength` under that layer's alpha.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Shadow {
+    pub border: f32,
+    pub blur: f32,
+    pub strength: f32,
+    pub second: Option<SecondShadow>,
+    pub edge: Option<ShadowEdge>,
+}
+
+/// The deeper band, past its own border, turning the first shade towards the second by `weight`.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct SecondShadow {
+    pub border: f32,
+    pub blur: f32,
+    pub weight: f32,
+}
+
+/// A band `range` wide on the lit side of the border, tinted towards the albedo by `color`.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct ShadowEdge {
+    pub color: [f32; 3],
+    pub range: f32,
+}
+
+/// lilToon's rim light, added where the surface turns from the view: `color` times `strength`, towards the albedo by
+/// `main` and the light by `lit`, over the fresnel term raised to `power` past `border` (with `blur`), dimmed in shadow
+/// by `shadow_mask`.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Rim {
+    pub color: [f32; 3],
+    pub strength: f32,
+    pub main: f32,
+    pub border: f32,
+    pub blur: f32,
+    pub power: f32,
+    pub lit: f32,
+    pub shadow_mask: f32,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -463,6 +506,7 @@ pub struct Look {
     pub matcaps: [Option<Matcap>; 4],
     pub emission: Option<Emission>,
     pub lighting: Lighting,
+    pub rim: Option<Rim>,
     /// The global theme colours its emission and matcaps are drawn in, by slot.
     #[serde(default)]
     pub themes: [Option<Theme>; 4],
@@ -490,6 +534,10 @@ struct EncodedLooks {
     outline: Option<usize>,
     #[serde(default)]
     outline_width: Option<f32>,
+    #[serde(default)]
+    shade: Option<usize>,
+    #[serde(default)]
+    shade2: Option<usize>,
 }
 
 /// The inverted hull of the materials whose glTF extras say `outline`, over the atlas UV: its RGB the hull's colour,
@@ -502,7 +550,9 @@ pub struct OutlineLayer {
 
 /// What each atlas texel's material lays over the albedo: `index`'s red channel names a texel's entry in `materials`,
 /// one-based, zero or no index for none. Every layer is a glTF image the extension names by index, each at its own size;
-/// a clear coat map holds linear mask, smoothness, reflection and specular levels in its four channels.
+/// a clear coat map holds linear mask, smoothness, reflection and specular levels in its four channels. `shades` are
+/// the first and second shade colours a shadowed look turns each texel to, each spanning the atlas at its shape but
+/// carried at most as wide as the converter carries a glow map.
 #[derive(Clone, Debug)]
 pub struct Looks {
     pub index: Option<Image>,
@@ -513,6 +563,7 @@ pub struct Looks {
     pub emission: Option<Image>,
     pub clearcoat_maps: Vec<Image>,
     pub outline: Option<OutlineLayer>,
+    pub shades: Option<[Image; 2]>,
 }
 
 /// One component of a node's Unity local rotation: of `rest` read as localEulerAngles in degrees when it has three, a quaternion when four.
@@ -752,8 +803,20 @@ fn looks(encoded: EncodedLooks, image: &impl Fn(usize) -> Result<Image, String>)
             (Some(at), Some(width)) if width.is_finite() && width > 0.0 => Some(OutlineLayer { image: image(at).map_err(|error| format!("{EXTENSION}: outline: {error}"))?, width }),
             (Some(_), _) => return Err(format!("{EXTENSION}: an outline layer without a positive outlineWidth")),
         },
+        shades: match (encoded.shade, encoded.shade2) {
+            (Some(first), Some(second)) => Some([image(first).map_err(|error| format!("{EXTENSION}: shade: {error}"))?, image(second).map_err(|error| format!("{EXTENSION}: shade2: {error}"))?]),
+            (None, None) => None,
+            _ => return Err(format!("{EXTENSION}: a shade layer without the other")),
+        },
         materials,
     };
+    let shadowed = looks.materials.iter().any(|look| matches!(look.lighting, Lighting::Flat { shadow: Some(_), .. }));
+    let over_atlas = |layer: &Image| looks.index.as_ref().is_none_or(|index| (f64::from(layer.height) - f64::from(layer.width) * f64::from(index.height) / f64::from(index.width)).abs() < 1.0);
+    match &looks.shades {
+        None if shadowed => return Err(format!("{EXTENSION}: a shadowed look without its shade layers")),
+        Some([first, second]) if !over_atlas(first) || (first.width, first.height) != (second.width, second.height) => return Err(format!("{EXTENSION}: shade layers not of one size over the atlas")),
+        _ => {}
+    }
     let textures = looks.matcaps.len() as u32;
     let cell = |look: &Look| {
         let [x0, y0, x1, y1] = look.rect;
@@ -1527,6 +1590,36 @@ mod tests {
         assert!(parse(1, serde_json::json!([null, theme, null, null])).is_ok_and(|looks| looks.materials[0].themes[1].is_some()), "a look carrying the theme its emission glows in loads");
         for (slot, themes) in [(0, serde_json::json!([null, theme, null, null])), (4, serde_json::json!([null, theme, null, null])), (1, serde_json::json!(null))] {
             assert!(parse(slot, themes.clone()).is_err(), "an emission in theme {slot} of {themes} is refused");
+        }
+    }
+
+    #[test]
+    fn a_shadowed_look_loads_with_its_shade_layers_and_is_refused_without_them() {
+        let sizes = [(4, 4), (2, 2), (4, 2)];
+        let shadow = serde_json::json!({"border": 0.5, "blur": 0.1, "strength": 1, "second": {"border": 0.15, "blur": 0.1, "weight": 1}, "edge": {"color": [1, 0.1, 0], "range": 0.08}});
+        let rim = serde_json::json!({"color": [0.66, 0.5, 0.48], "strength": 1, "main": 0, "border": 0.5, "blur": 0.65, "power": 3.5, "lit": 1, "shadowMask": 0.5});
+        let parse = |lighting: serde_json::Value, layers: serde_json::Value| {
+            let material = serde_json::json!({"rect": [0, 0, 1, 1], "decals": [null, null, null, null], "matcaps": [null, null, null, null], "emission": null, "lighting": lighting, "rim": rim});
+            let mut encoded = serde_json::json!({"index": 0, "materials": [material]});
+            encoded.as_object_mut().unwrap().extend(layers.as_object().unwrap().clone());
+            looks(serde_json::from_value(encoded).unwrap(), &|at: usize| {
+                let (width, height) = sizes[at];
+                Ok(Image { width, height, rgba: [1, 0, 0, 255].repeat((width * height) as usize) })
+            })
+        };
+        let shaded = parse(serde_json::json!({"model": "flat", "cap": 1, "shadow": shadow}), serde_json::json!({"shade": 1, "shade2": 1})).unwrap();
+        let Lighting::Flat { shadow: Some(read), .. } = &shaded.materials[0].lighting else { panic!("{:?}", shaded.materials[0].lighting) };
+        assert_eq!((read.second.as_ref().map(|second| second.weight), read.edge.as_ref().map(|edge| edge.range)), (Some(1.0), Some(0.08)));
+        assert_eq!(shaded.materials[0].rim.as_ref().map(|rim| rim.shadow_mask), Some(0.5));
+        assert!(shaded.shades.is_some_and(|[first, _]| first.width == 2), "the shade layers load narrower than the atlas");
+        assert!(parse(serde_json::json!({"model": "flat", "cap": 1}), serde_json::json!({})).is_ok_and(|looks| looks.shades.is_none()), "an unshadowed flat look needs no shade layers");
+        for (layers, why) in [
+            (serde_json::json!({}), "no shade layers"),
+            (serde_json::json!({"shade": 0}), "the first alone"),
+            (serde_json::json!({"shade": 0, "shade2": 1}), "layers of two sizes"),
+            (serde_json::json!({"shade": 2, "shade2": 2}), "layers not the atlas's shape"),
+        ] {
+            assert!(parse(serde_json::json!({"model": "flat", "cap": 1, "shadow": shadow}), layers).is_err(), "a shadowed look with {why} is refused");
         }
     }
 

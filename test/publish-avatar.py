@@ -210,9 +210,13 @@ class Publishing(unittest.TestCase):
         self.assertFalse((self.root / '.previous').exists())
 
     def test_a_file_no_landed_converter_wrote_is_refused_unless_named(self):
+        self.catalog.write_bytes(self.candidate(lambda doc: doc['asset'].pop('extras')).read_bytes())
         for change, part in [
             (lambda doc: doc['asset'].pop('extras'), 'names no converter commit'),
+            (lambda doc: doc['asset'].update(extras={'converter': 'main'}), 'names no converter commit'),
+            (stamped('main'), 'names no converter commit'),
             (stamped(LANDED, dirty=True), 'differs from'),
+            (lambda doc: doc['asset']['extras']['converter'].pop('dirty'), 'differs from'),
             (stamped(UNLANDED), 'does not contain'),
             (stamped('0' * 40), 'does not contain'),
         ]:
@@ -232,9 +236,25 @@ class Publishing(unittest.TestCase):
         with self.assertRaises(SystemExit) as refused:
             publish(self.candidate(stamped(OLDER)), self.catalog)
         self.assertIn(f'{OLDER} is older than {LANDED}', str(refused.exception))
+        self.assertNotIn('cannot tell', str(refused.exception))
         self.assertEqual(self.catalog.read_bytes(), before)
         publish(self.candidate(stamped(OLDER)), self.catalog, rollback_ok=True)
         publish(self.candidate(stamped(LANDED)), self.catalog)
+
+    def test_a_commit_landed_since_the_converter_checkout_last_fetched_publishes(self):
+        elsewhere = REPO.with_name('elsewhere')
+        subprocess.run(['git', 'clone', '--quiet', str(REPO.with_name('origin')), str(elsewhere)], check=True)
+        subprocess.run(['git', '-C', str(elsewhere), 'commit', '--quiet', '--allow-empty', '-m', 'c'], check=True)
+        subprocess.run(['git', '-C', str(elsewhere), 'push', '--quiet', 'origin', 'HEAD:main'], check=True)
+        commit = subprocess.run(['git', '-C', str(elsewhere), 'rev-parse', 'HEAD'], check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+        publish(self.candidate(stamped(commit)), self.catalog)
+
+    def test_a_catalog_file_from_a_commit_the_converter_does_not_know_is_replaced_only_as_a_rollback(self):
+        self.catalog.write_bytes(self.candidate(stamped('1' * 40)).read_bytes())
+        with self.assertRaises(SystemExit) as refused:
+            publish(self.candidate(lambda doc: None), self.catalog)
+        self.assertIn('cannot tell', str(refused.exception))
+        publish(self.candidate(lambda doc: None), self.catalog, rollback_ok=True)
 
     def test_the_installed_file_carries_the_spread_measured_on_it_with_its_binary_untouched(self):
         body = b'BODY'

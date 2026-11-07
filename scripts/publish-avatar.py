@@ -12,12 +12,14 @@ its body against the clips the server plays; the overlay refuses a figure withou
 The replaced file stays beside the catalog in .previous/, unless NEW is CATALOG: republishing a file in place re-measures it.
 Otherwise NEW must name in its asset extras the clean converter commit that wrote it, one origin/main of DIR, the
 converter's repository, contains once fetched, unless --unlanded names it an intended exception; and that commit may
-not be a strict ancestor of the one the catalog file names, unless --rollback names it an intended rollback."""
+not be a strict ancestor of the one the catalog file names, or one DIR cannot compare with it, unless --rollback names
+it an intended rollback."""
 import argparse
 from collections import Counter
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import struct
@@ -122,23 +124,23 @@ def unread(doc):
     return sorted(out)
 
 
-def converter(doc):
-    return doc.get('asset', {}).get('extras', {}).get('converter') or {}
+def stamp_of(doc):
+    extras = doc.get('asset', {}).get('extras')
+    stamp = extras.get('converter') if isinstance(extras, dict) else None
+    return stamp if isinstance(stamp, dict) else {}
 
 
 def git(repo, *args):
-    return subprocess.run(['git', '-C', str(repo), *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    return subprocess.run(['git', '-C', str(repo), *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
 
 
 def unlanded(stamp, repo):
     commit = stamp.get('commit')
-    if not commit:
+    if not isinstance(commit, str) or not re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', commit):
         return 'names no converter commit'
     if stamp.get('dirty') is not False:
         return f'was converted from a tree that differs from {commit}'
-    if not git(repo, 'fetch', '--quiet', 'origin'):
-        raise SystemExit(f'cannot fetch origin in {repo}')
-    if not git(repo, 'merge-base', '--is-ancestor', commit, 'origin/main'):
+    if git(repo, 'merge-base', '--is-ancestor', commit, 'origin/main'):
         return f"names converter commit {commit}, which {repo}'s origin/main does not contain"
 
 
@@ -147,23 +149,32 @@ def lost(old, new, drops):
     return sorted(k for k in missing.elements() if not any(k.startswith(d) for d in drops))
 
 
-def landed(new_path, catalog, repo, unlanded_ok, rollback_ok):
+def provenance(new_path, catalog, repo, unlanded_ok, rollback_ok):
     if repo is None:
         raise SystemExit(f'name the repository of the converter that wrote {new_path} with --converter')
-    stamp = converter(document(Path(new_path).read_bytes()))
+    if git(repo, 'fetch', '--quiet', 'origin'):
+        raise SystemExit(f'cannot fetch origin in {repo}')
+    stamp = stamp_of(document(Path(new_path).read_bytes()))
+    commit = stamp.get('commit')
     why = unlanded(stamp, repo)
     if why and not unlanded_ok:
         raise SystemExit(f'{new_path} {why}; convert it from the converter\'s main, or name the exception with --unlanded')
-    replaced = converter(document(catalog.read_bytes())).get('commit') if catalog.exists() else None
-    if replaced and stamp.get('commit') not in (None, replaced) and git(repo, 'merge-base', '--is-ancestor', stamp['commit'], replaced) and not rollback_ok:
-        raise SystemExit(f"{new_path}'s converter commit {stamp['commit']} is older than {replaced}, which wrote {catalog}; convert it from the converter's main, or name the rollback with --rollback")
+    replaced = stamp_of(document(catalog.read_bytes())).get('commit') if catalog.exists() else None
+    if rollback_ok or not replaced or commit == replaced:
+        return
+    older = git(repo, 'merge-base', '--is-ancestor', str(commit), str(replaced))
+    if older == 0:
+        raise SystemExit(f"{new_path}'s converter commit {commit} is older than {replaced}, which wrote {catalog}; convert it from the converter's main, or name the rollback with --rollback")
+    if older != 1:
+        raise SystemExit(f"{repo} cannot tell whether {new_path}'s converter commit {commit} is older than {replaced}, which wrote {catalog}; name an intended rollback with --rollback")
 
 
 def publish(new_path, catalog_path, repo=None, drops=(), unlanded_ok=False, rollback_ok=False):
     data = Path(new_path).read_bytes()
     catalog = Path(catalog_path)
-    if not (catalog.exists() and catalog.samefile(new_path)):
-        landed(new_path, catalog, repo, unlanded_ok, rollback_ok)
+    in_place = catalog.exists() and catalog.samefile(new_path)
+    if not in_place:
+        provenance(new_path, catalog, repo, unlanded_ok, rollback_ok)
     unknown = unread(document(data))
     if unknown:
         raise SystemExit(f'{new_path} carries expression parts the overlay does not read; teach voice-vr them and list them in vr/src/vrm/effects.json:\n' + '\n'.join('  ' + k for k in unknown))
@@ -176,7 +187,7 @@ def publish(new_path, catalog_path, repo=None, drops=(), unlanded_ok=False, roll
         gone = lost(inventory(document(catalog.read_bytes())), inventory(document(data)), drops)
         if gone:
             raise SystemExit(f'{new_path} would lose {len(gone)} part(s) {catalog} carries; name intended ones with --drop:\n' + '\n'.join('  ' + k for k in gone))
-        if not catalog.samefile(new_path):
+        if not in_place:
             previous = catalog.parent / '.previous'
             previous.mkdir(exist_ok=True)
             shutil.copy2(catalog, previous / catalog.name)

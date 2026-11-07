@@ -39,8 +39,13 @@ struct Push {
     outline: u32,
     outline_scale: f32,
     focal: f32,
-    pad: f32,
+    /// Seconds the figure's expressions have run, wrapped at THEME_WRAP, which turns a theme colour's hue at its speed.
+    seconds: f32,
 }
+
+/// The seconds a figure has shown wrap at this before the shader reads them as an f32, which past a day would step them
+/// too coarsely to turn a theme colour's hue; a whole turn at any speed in thousandths.
+const THEME_WRAP: f64 = 20_000.0;
 
 /// Where the eye whose view and projection make `view_projection` sits: the point every clip coordinate but depth
 /// leaves at zero.
@@ -72,7 +77,8 @@ struct MatcapData {
     emission: f32,
     circle_border: f32,
     circle_blur: f32,
-    pad: [f32; 3],
+    theme: i32,
+    pad: [f32; 2],
 }
 
 #[repr(C)]
@@ -91,7 +97,20 @@ struct LookData {
     shifts_hue: f32,
     flat: u32,
     light_cap: f32,
+    /// Each global theme colour the look's emission or matcaps are drawn in, by slot.
+    themes: [ThemeData; 4],
+    /// The slot of the theme colour the emission is drawn in, or -1 for its own colour.
+    emission_theme: i32,
+    pad: [f32; 3],
     matcaps: [MatcapData; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ThemeData {
+    offsets: [f32; 4],
+    hsv: [f32; 3],
+    exposure: f32,
 }
 
 fn look_data(look: &crate::vrm::expressions::Look, places: &[Place]) -> LookData {
@@ -110,6 +129,9 @@ fn look_data(look: &crate::vrm::expressions::Look, places: &[Place]) -> LookData
         emission_strength: emission.map_or(0.0, |emission| emission.strength),
         emission_hue: emission.map_or(0.0, |emission| emission.hue),
         shifts_hue: emission.is_some_and(|emission| emission.shifts_hue) as u32 as f32,
+        themes: look.themes.each_ref().map(|theme| theme.as_ref().map_or_else(ThemeData::default, |theme| ThemeData { offsets: [theme.hue, theme.saturation, theme.value, theme.speed], hsv: theme.hsv, exposure: theme.exposure })),
+        emission_theme: emission.and_then(|emission| emission.theme).map_or(-1, |slot| slot as i32),
+        pad: [0.0; 3],
         flat: matches!(look.lighting, Lighting::Flat { .. }) as u32,
         light_cap: match look.lighting {
             Lighting::Flat { cap: Some(cap) } => cap,
@@ -135,7 +157,8 @@ fn look_data(look: &crate::vrm::expressions::Look, places: &[Place]) -> LookData
             emission: m.emission,
             circle_border: m.circle.as_ref().map_or(0.0, |circle| circle.border),
             circle_blur: m.circle.as_ref().map_or(0.0, |circle| circle.blur),
-            pad: [0.0; 3],
+            theme: m.theme.map_or(-1, |slot| slot as i32),
+            pad: [0.0; 2],
         })),
     }
 }
@@ -307,6 +330,8 @@ pub struct Appearance {
     looks: Buffer,
     drawn: Vec<DrawCall>,
     pub hidden: std::collections::HashSet<usize>,
+    /// Seconds the figure's expressions have run, which turns a theme colour's hue at its speed.
+    pub seconds: f64,
     /// The fence of the last frame drawn from these buffers, which `update` waits on before it rewrites them.
     drawing: std::cell::Cell<Option<vk::Fence>>,
 }
@@ -479,6 +504,7 @@ impl Renderer {
             looks: upload(bytes_of(&look_data), vk::BufferUsageFlags::STORAGE_BUFFER)?,
             drawn: Vec::new(),
             hidden: Default::default(),
+            seconds: 0.0,
             drawing: Default::default(),
         };
         for image in &model.images {
@@ -756,7 +782,7 @@ impl Renderer {
                     let shown = || appearance.drawn.iter().filter(|drawn| drawn.switched.is_none_or(|node| !appearance.hidden.contains(&node)));
                     let depths = shown().filter_map(|drawn| Some((drawn, drawn.depth?)));
                     for (drawn, pipeline) in depths.chain(shown().map(|drawn| (drawn, drawn.pipeline))) {
-                        let push = Push { view_projection: view_projection.to_cols_array(), camera: camera(view_projection).to_array(), material: drawn.material, outline: drawn.outline as u32, outline_scale: self.outline_scale, focal: projection.y_axis.y, pad: 0.0 };
+                        let push = Push { view_projection: view_projection.to_cols_array(), camera: camera(view_projection).to_array(), material: drawn.material, outline: drawn.outline as u32, outline_scale: self.outline_scale, focal: projection.y_axis.y, seconds: (appearance.seconds % THEME_WRAP) as f32 };
                         let bytes = std::slice::from_raw_parts(&push as *const Push as *const u8, std::mem::size_of::<Push>());
                         device.cmd_bind_pipeline(target.commands, vk::PipelineBindPoint::GRAPHICS, pipeline);
                         device.cmd_bind_descriptor_sets(target.commands, vk::PipelineBindPoint::GRAPHICS, self.layout, 0, &[drawn.set], &[]);
@@ -1109,13 +1135,17 @@ mod tests {
         use crate::vrm::expressions::{Lighting, Look, Mapping, Matcap, HueShift};
 
         pub fn look() -> Look {
-            Look { rect: [0.0, 0.0, 1.0, 1.0], decals: [None, None, None, None], matcaps: [None, None, None, None], emission: None, lighting: Lighting::Lit }
+            Look { rect: [0.0, 0.0, 1.0, 1.0], decals: [None, None, None, None], matcaps: [None, None, None, None], emission: None, lighting: Lighting::Lit, themes: Default::default() }
         }
 
         pub fn matcap() -> Matcap {
-            Matcap { texture: Some(0), mode: Mapping::Normal, border: 0.5, color: [1.0; 4], intensity: 1.0, base_mix: 0.0, replace: 1.0, multiply: 0.0, add: 0.0, screen: 0.0, mixed: 0.0, light_add: 0.0, emission: 0.0, light_mask: 0.0, hue: Some(HueShift { shift: 0.0, space: 0.0, select: 1.0 }), circle: None }
+            Matcap { texture: Some(0), mode: Mapping::Normal, border: 0.5, color: [1.0; 4], intensity: 1.0, base_mix: 0.0, replace: 1.0, multiply: 0.0, add: 0.0, screen: 0.0, mixed: 0.0, light_add: 0.0, emission: 0.0, light_mask: 0.0, hue: Some(HueShift { shift: 0.0, space: 0.0, select: 1.0 }), circle: None, theme: None }
         }
     }
+
+    /// How long after its first capture `look_drawn` takes its second: a third of the twenty seconds a theme colour's
+    /// hue turns once in at a speed of one.
+    const LATER: f64 = 20.0 / 3.0;
 
     /// Two quads over the left and right texels of a 2x1 atlas of `rgba`, the left one's material carrying `look`, drawn
     /// before and after its one target `effect` moves from `rest` to `value`: the left quad's pixel each time, and whether
@@ -1151,15 +1181,16 @@ mod tests {
         let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [32, 32], crate::HEIGHT / PAGE_HEIGHT).unwrap();
         let mut appearance = renderer.appearance(&model, &skinned).unwrap();
         let eyes = [eye_projection(Vec3::new(0.0, 0.0, 0.4), 0.2, 0.2), None];
-        let mut capture = |skinned: &Skinned| {
+        let mut capture = |skinned: &Skinned, seconds: f64| {
+            appearance.seconds = seconds;
             appearance.update(&palette, skinned, &[]);
             renderer.render(&appearance, eyes, Mat4::IDENTITY, 32).unwrap();
             renderer.read().unwrap()
         };
-        let before = capture(&skinned);
+        let before = capture(&skinned, 0.0);
         let targets = model.menu.as_ref().unwrap().targets.len();
         skinned.surface_values(model.menu.as_ref().unwrap(), &vec![value; targets]);
-        let after = capture(&skinned);
+        let after = capture(&skinned, LATER);
         (pixel(&before, 64, 8, 16), pixel(&after, 64, 8, 16), pixel(&before, 64, 24, 16) == pixel(&after, 64, 24, 16))
     }
 
@@ -1285,12 +1316,57 @@ mod tests {
     #[test]
     fn emission_glows_unlit_and_turns_by_its_hue() {
         let mut look = looks_test::look();
-        look.emission = Some(crate::vrm::expressions::Emission { color: [1.0, 0.0, 0.0], strength: 1.0, hue: 0.0, shifts_hue: true });
+        look.emission = Some(crate::vrm::expressions::Emission { color: [1.0, 0.0, 0.0], strength: 1.0, hue: 0.0, shifts_hue: true, theme: None });
         let effect = serde_json::json!({"look": [{"node": 0, "rect": [0.0, 0.0, 1.0, 1.0], "field": "emissionHue", "slot": 0}]});
         let (red, green, right) = look_drawn([0, 0, 0, 255], look, Some(effect), 0.0, std::f32::consts::TAU / 3.0, Vec::new());
         assert!(red[0] > 200 && red[1] < 40, "a black albedo glows its emission colour: {red:?}");
         assert!(green[1] > 200 && green[0] < 40, "a third of a turn takes red to green: {green:?}");
         assert!(right, "a texel of a material without emission stays dark");
+    }
+
+    #[test]
+    fn a_theme_colours_offsets_recolour_the_emission_drawn_in_it() {
+        let theme = |hue: f32, speed: f32| crate::vrm::expressions::Theme { hsv: [0.0, 1.0, 0.5], exposure: 2.0, hue, saturation: 0.0, value: 0.0, speed };
+        let themed = |theme: crate::vrm::expressions::Theme| {
+            let mut look = looks_test::look();
+            look.emission = Some(crate::vrm::expressions::Emission { color: [1.0, 0.0, 0.0], strength: 1.0, hue: 0.0, shifts_hue: false, theme: Some(2) });
+            look.themes[2] = Some(theme);
+            look
+        };
+        let look = themed(theme(0.0, 0.0));
+        let effect = |field: &str| serde_json::json!({"look": [{"node": 0, "rect": [0.0, 0.0, 1.0, 1.0], "field": field, "slot": 2}]});
+        let (red, green, right) = look_drawn([0, 0, 0, 255], look.clone(), Some(effect("themeHue")), 0.0, 1.0 / 3.0, Vec::new());
+        assert!(red[0] > 200 && red[1] < 40, "a black albedo glows its theme colour, at its exposure: {red:?}");
+        assert!(green[1] > 200 && green[0] < 40, "a third of a turn of the theme's hue takes red to green: {green:?}");
+        assert!(right, "a texel of a material without emission stays dark");
+        let (_, grey, _) = look_drawn([0, 0, 0, 255], look.clone(), Some(effect("themeSaturation")), 0.0, -1.0, Vec::new());
+        assert!(grey[0] > 200 && grey[1] > 200 && grey[2] > 200, "the theme's saturation taken to nothing makes it white: {grey:?}");
+        let (_, dark, _) = look_drawn([0, 0, 0, 255], look.clone(), Some(effect("themeValue")), 0.0, -0.5, Vec::new());
+        assert!(dark[0] < 24, "the theme's value taken down by its own makes it dark: {dark:?}");
+        let (_, turned, _) = look_drawn([0, 0, 0, 255], look.clone(), Some(effect("themeSpeed")), 0.0, 1.0, Vec::new());
+        assert!(turned[1] > 200 && turned[0] < 40, "a hue speed of one turns it a third in a third of twenty seconds: {turned:?}");
+        let (_, kept, _) = look_drawn([0, 0, 0, 255], look, Some(serde_json::json!({"look": [{"node": 0, "rect": [0.0, 0.0, 1.0, 1.0], "field": "themeHue", "slot": 1}]})), 0.0, 1.0 / 3.0, Vec::new());
+        assert!(kept[0] > 200 && kept[1] < 40, "another theme's hue leaves it: {kept:?}");
+        let (shifted, _, _) = look_drawn([0, 0, 0, 255], themed(theme(1.0 / 3.0, 0.0)), None, 0.0, 0.0, Vec::new());
+        assert!(shifted[1] > 200 && shifted[0] < 40, "a theme resting a third of a turn round glows green with no clip: {shifted:?}");
+        let (start, later, _) = look_drawn([0, 0, 0, 255], themed(theme(0.0, 1.0)), None, 0.0, 0.0, Vec::new());
+        assert!(start[0] > 200 && start[1] < 40 && later[1] > 200 && later[0] < 40, "a theme turning at rest turns with no clip: {start:?} then {later:?}");
+    }
+
+    #[test]
+    fn a_matcap_in_a_theme_colour_takes_its_offsets() {
+        let mut look = looks_test::look();
+        let mut matcap = looks_test::matcap();
+        matcap.hue = None;
+        matcap.theme = Some(1);
+        look.matcaps[0] = Some(matcap);
+        look.themes[1] = Some(crate::vrm::expressions::Theme { hsv: [1.0 / 3.0, 1.0, 1.0], exposure: 1.0, hue: 0.0, saturation: 0.0, value: 0.0, speed: 0.0 });
+        let effect = serde_json::json!({"look": [{"node": 0, "rect": [0.0, 0.0, 1.0, 1.0], "field": "themeHue", "slot": 1}]});
+        let white = vec![crate::vrm::Image { width: 1, height: 1, rgba: vec![255; 4] }];
+        let (before, after, right) = look_drawn([255, 0, 0, 255], look, Some(effect), 0.0, 1.0 / 3.0, white);
+        assert!(before[1] > 2 * before[0] && before[1] > 2 * before[2], "a white matcap in a green theme colour replaces red with green: {before:?}");
+        assert!(after[2] > 2 * after[0] && after[2] > 2 * after[1], "a third of a turn of the theme's hue takes it to blue: {after:?}");
+        assert!(right, "the matcap stays on its material's texels");
     }
 
     #[test]

@@ -282,6 +282,7 @@ impl Puppet {
             values = controller.step(menu, delta);
         }
         self.drawn.hidden = menu.apply(&values, pose);
+        self.drawn.seconds += steps as f64 * delta as f64;
         self.skinned.surface_values(menu, &values);
         let retextured = menu.materials(&values).flat_map(|(node, moved)| self.skinned.retexture(node, moved)).collect();
         (retextured, menu.idle(&values))

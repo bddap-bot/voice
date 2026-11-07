@@ -5,6 +5,7 @@ struct Draw {
     outline: u32,
     outline_scale: f32,
     focal: f32,
+    seconds: f32,
 }
 
 struct Material {
@@ -30,7 +31,7 @@ struct Surface {
     hue: vec4<f32>,
     color: vec4<f32>,
     tone: vec4<f32>,
-    look: array<vec4<f32>, 11>,
+    look: array<vec4<f32>, 15>,
     animated: vec4<u32>,
 }
 @group(0) @binding(7) var<storage, read> surfaces: array<Surface>;
@@ -57,6 +58,12 @@ struct Matcap {
     emission: f32,
     circle_border: f32,
     circle_blur: f32,
+    theme: i32,
+}
+struct Theme {
+    offsets: vec4<f32>,
+    hsv: vec3<f32>,
+    exposure: f32,
 }
 struct Look {
     decal: vec4<f32>,
@@ -72,6 +79,8 @@ struct Look {
     shifts_hue: f32,
     flat: u32,
     light_cap: f32,
+    themes: array<Theme, 4>,
+    emission_theme: i32,
     matcaps: array<Matcap, 4>,
 }
 @group(0) @binding(10) var look_index: texture_2d<f32>;
@@ -93,6 +102,10 @@ const MATCAP_MULTIPLY = 7u;
 const MATCAP_ADD = 8u;
 const MATCAP_MIXED = 9u;
 const DECAL_HUE = 10u;
+const THEME_HUE = 11u;
+const THEME_SATURATION = 12u;
+const THEME_VALUE = 13u;
+const THEME_SPEED = 14u;
 
 @group(0) @binding(2) var texture_sampler: sampler;
 @group(0) @binding(3) var outline_width_texture: texture_2d<f32>;
@@ -274,7 +287,9 @@ fn matcaps(base: ptr<function, vec3<f32>>, shade: ptr<function, vec3<f32>>, tint
         let mixed_at = value(at, MATCAP_MIXED, slot, matcap.mixed);
         if replace_at == 0.0 && multiply_at == 0.0 && add_at == 0.0 && mixed_at == 0.0 && matcap.screen == 0.0 && matcap.light_add + matcap.emission == 0.0 { continue; }
         let mapped = select(vec2<f32>(dot(right, normal), dot(up, normal)), reflected.xy, matcap.reflection != 0u) * matcap.border + 0.5;
-        let sampled = select(vec4<f32>(1.0), textureSampleLevel(matcap_textures, texture_sampler, mapped, max(matcap.texture, 0), 0.0), matcap.texture >= 0) * matcap.color;
+        var color = matcap.color;
+        if matcap.theme >= 0 { color = vec4<f32>(theme(at, look, u32(matcap.theme)), color.a); }
+        let sampled = select(vec4<f32>(1.0), textureSampleLevel(matcap_textures, texture_sampler, mapped, max(matcap.texture, 0), 0.0), matcap.texture >= 0) * color;
         let light = sampled.rgb * value(at, MATCAP_INTENSITY, slot, matcap.intensity);
         var mask = masks[slot] * mix(1.0, lit, matcap.light_mask);
         if matcap.circled != 0u {
@@ -304,11 +319,26 @@ fn blend(color: vec3<f32>, light: vec3<f32>, tint: vec3<f32>, strengths: vec4<f3
     return mix(result, result + result * light, mixed);
 }
 
-// VRChat Toon Standard's emission, turned by its hue shift under the hue mask.
+// A Poiyomi global theme colour moved by its offsets as Poiyomi's ModifyViaHSV moves it, its hue also turning at its
+// speed a turn every twenty seconds, as Unity's _Time.x counts them, and its exposure put back.
+fn theme(at: u32, look: u32, slot: u32) -> vec3<f32> {
+    let rest = looks[look].themes[slot].offsets;
+    let turn = value(at, THEME_HUE, slot, rest.x) + value(at, THEME_SPEED, slot, rest.w) * draw.seconds / 20.0;
+    let hsv = looks[look].themes[slot].hsv;
+    let h = fract(hsv.x + fract(turn));
+    let s = saturate(hsv.y + value(at, THEME_SATURATION, slot, rest.y));
+    let v = saturate(hsv.z + value(at, THEME_VALUE, slot, rest.z));
+    let rgb = clamp(abs(fract(vec3<f32>(h) + vec3<f32>(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0, vec3<f32>(0.0), vec3<f32>(1.0));
+    return v * mix(vec3<f32>(1.0), rgb, s) * looks[look].themes[slot].exposure;
+}
+
+// VRChat Toon Standard's emission, turned by its hue shift under the hue mask, or Poiyomi's in its theme colour.
 fn emission(at: u32, look: u32, uv: vec2<f32>, gradient: mat2x2<f32>, mask: f32) -> vec3<f32> {
     let strength = value(at, EMISSION, 0u, looks[look].emission_strength);
     if strength == 0.0 { return vec3<f32>(0.0); }
-    let glow = textureSampleGrad(emission_map, texture_sampler, uv, gradient[0], gradient[1]).rgb * looks[look].emission_color * strength;
+    var color = looks[look].emission_color;
+    if looks[look].emission_theme >= 0 { color = theme(at, look, u32(looks[look].emission_theme)); }
+    let glow = textureSampleGrad(emission_map, texture_sampler, uv, gradient[0], gradient[1]).rgb * color * strength;
     return mix(glow, hue(glow, vec4<f32>(value(at, EMISSION_HUE, 0u, looks[look].emission_hue), 2.0, 0.0, 1.0)), mask * looks[look].shifts_hue);
 }
 

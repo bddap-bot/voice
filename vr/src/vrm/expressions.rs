@@ -277,9 +277,13 @@ pub enum Field {
     MatcapAdd,
     MatcapMixed,
     DecalHue,
+    ThemeHue,
+    ThemeSaturation,
+    ThemeValue,
+    ThemeSpeed,
 }
 
-pub const FIELDS: usize = Field::DecalHue as usize + 1;
+pub const FIELDS: usize = Field::ThemeSpeed as usize + 1;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct LookRegion {
@@ -330,6 +334,9 @@ pub struct Matcap {
     pub light_mask: f32,
     pub hue: Option<HueShift>,
     pub circle: Option<Circle>,
+    /// The slot in `Look::themes` of the Poiyomi global theme colour its colour is, where it is one.
+    #[serde(default)]
+    pub theme: Option<usize>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -350,6 +357,22 @@ pub struct Emission {
     pub strength: f32,
     pub hue: f32,
     pub shifts_hue: bool,
+    /// The slot in `Look::themes` of the Poiyomi global theme colour it glows in, where it glows in one.
+    #[serde(default)]
+    pub theme: Option<usize>,
+}
+
+/// A Poiyomi global theme colour an emission or matcap is drawn in: `hsv`, its colour's hue, saturation and value in
+/// linear light below its `exposure`, and the offsets it rests at, which the `Theme*` fields of its slot move. The hue
+/// also turns `speed` times every twenty seconds.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Theme {
+    pub hsv: [f32; 3],
+    pub exposure: f32,
+    pub hue: f32,
+    pub saturation: f32,
+    pub value: f32,
+    pub speed: f32,
 }
 
 /// How a material takes the light: by the angle it meets each light at, or `Flat`, by the lights' colour alone, capped
@@ -369,6 +392,9 @@ pub struct Look {
     pub matcaps: [Option<Matcap>; 4],
     pub emission: Option<Emission>,
     pub lighting: Lighting,
+    /// The global theme colours its emission and matcaps are drawn in, by slot.
+    #[serde(default)]
+    pub themes: [Option<Theme>; 4],
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -574,6 +600,10 @@ fn looks(encoded: EncodedLooks, images: usize, decal: impl Fn(usize) -> Result<I
     };
     if !looks.materials.iter().all(cell) {
         return Err(format!("{EXTENSION}: a look's cell is not a rectangle of the atlas"));
+    }
+    let themed = |look: &Look| look.emission.iter().map(|emission| emission.theme).chain(look.matcaps.iter().flatten().map(|matcap| matcap.theme)).flatten().all(|slot| look.themes.get(slot).is_some_and(Option::is_some));
+    if !looks.materials.iter().all(themed) {
+        return Err(format!("{EXTENSION}: a look's emission or matcap is drawn in a theme colour the look does not carry"));
     }
     if looks.materials.iter().flat_map(|look| look.decals.iter().flatten()).any(|decal| decal.image >= looks.decals.len()) || looks.index.rgba.chunks_exact(4).any(|texel| texel[0] as usize > looks.materials.len()) || looks.materials.iter().flat_map(|look| look.matcaps.iter().flatten()).any(|matcap| matcap.texture.is_some_and(|texture| texture >= textures)) {
         return Err(format!("{EXTENSION}: a look names a decal, material or matcap it does not have"));
@@ -1291,6 +1321,27 @@ mod tests {
 
     fn switched(springs: serde_json::Value, colliders: serde_json::Value) -> Result<Expressions, String> {
         Expressions::parse(&serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": [{"effect": "switch", "default": 1}, {"effect": "switch"}], "springs": springs, "colliders": colliders}))
+    }
+
+    #[test]
+    fn a_look_drawn_in_a_theme_colour_it_does_not_carry_is_refused() {
+        use base64::Engine;
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 0, 0, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let index = base64::engine::general_purpose::STANDARD.encode(png);
+        let theme = serde_json::json!({"slot": 1, "hsv": [0.0, 1.0, 1.0], "exposure": 1.0, "hue": 0.0, "saturation": 0.0, "value": 0.0, "speed": 0.0});
+        let parse = |slot: usize, themes: serde_json::Value| {
+            let mut material = serde_json::json!({"rect": [0, 0, 1, 1], "decals": [null, null, null, null], "matcaps": [null, null, null, null], "lighting": {"model": "lit"}, "themes": themes,
+                "emission": {"color": [1, 0, 0], "strength": 1, "hue": 0, "shiftsHue": false, "theme": slot}});
+            if material["themes"].is_null() {
+                material.as_object_mut().unwrap().remove("themes");
+            }
+            looks(serde_json::from_value(serde_json::json!({"index": index, "materials": [material]})).unwrap(), 0, |_| Err("no decals".into()))
+        };
+        assert!(parse(1, serde_json::json!([null, theme, null, null])).is_ok_and(|looks| looks.materials[0].themes[1].is_some()), "a look carrying the theme its emission glows in loads");
+        for (slot, themes) in [(0, serde_json::json!([null, theme, null, null])), (4, serde_json::json!([null, theme, null, null])), (1, serde_json::json!(null))] {
+            assert!(parse(slot, themes.clone()).is_err(), "an emission in theme {slot} of {themes} is refused");
+        }
     }
 
     #[test]

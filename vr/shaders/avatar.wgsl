@@ -68,7 +68,7 @@ struct Theme {
 struct Look {
     decal: vec4<f32>,
     intensity: vec4<f32>,
-    multiply: vec4<f32>,
+    blend: vec4<f32>,
     rect: vec4<f32>,
     page: vec4<i32>,
     layer: vec4<u32>,
@@ -255,6 +255,24 @@ fn decal_samples(at: u32, look: u32, uv: vec2<f32>) -> array<vec4<f32>, 4> {
     return samples;
 }
 
+// Poiyomi's decal Color Blend Mode `mode` (its _DecalBlendType) of `laid` over `base`, a colour times `tint`, as
+// that colour blended and then times `tint`: the albedo's tint is one, the shade's its own, so each mode is written
+// without dividing the tint back out.
+fn decal_blend(base: vec3<f32>, laid: vec3<f32>, tint: vec3<f32>, mode: u32) -> vec3<f32> {
+    let over = laid * tint;
+    switch mode {
+        case 1u: { return min(base, over); }
+        case 2u: { return base * laid; }
+        case 5u: { return max(base, over); }
+        case 6u: { return base + over - base * laid; }
+        case 7u: { return max(base - over, vec3<f32>(0.0)); }
+        case 8u: { return base + over; }
+        case 9u: { return select(tint - 2.0 * (tint - base) * (1.0 - laid), 2.0 * base * laid, base < 0.5 * tint); }
+        case 20u: { return base + base * laid; }
+        default: { return over; }
+    }
+}
+
 // Poiyomi lays its decals over the adjusted albedo in slot order; the shade takes them through its own tint.
 fn decals(color: vec3<f32>, tint: vec3<f32>, at: u32, look: u32, samples: array<vec4<f32>, 4>) -> vec3<f32> {
     var result = color;
@@ -262,7 +280,7 @@ fn decals(color: vec3<f32>, tint: vec3<f32>, at: u32, look: u32, samples: array<
         let layer = samples[slot];
         let turn = looks[look].decal_hue[slot];
         let colour = hue(layer.rgb, vec4<f32>(value(at, DECAL_HUE, slot, turn.x), turn.yzw));
-        let laid = mix(colour * tint, result * colour, looks[look].multiply[slot]);
+        let laid = decal_blend(result, colour, tint, u32(looks[look].blend[slot] + 0.5));
         let alpha = value(at, DECAL, slot, looks[look].decal[slot]) * value(at, DECAL_INTENSITY, slot, looks[look].intensity[slot]);
         result = mix(result, laid, clamp(layer.a * alpha, 0.0, 1.0));
     }

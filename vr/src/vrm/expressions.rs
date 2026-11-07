@@ -339,11 +339,47 @@ pub struct Matcap {
     pub theme: Option<usize>,
 }
 
+/// Poiyomi's decal Color Blend Modes, numbered as its `_DecalBlendType`; any other number its shader draws black.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[serde(try_from = "u8")]
+pub enum DecalBlend {
+    Replace = 0,
+    Darken = 1,
+    Multiply = 2,
+    Lighten = 5,
+    Screen = 6,
+    Subtract = 7,
+    Add = 8,
+    Overlay = 9,
+    Mixed = 20,
+}
+
+impl TryFrom<u8> for DecalBlend {
+    type Error = String;
+
+    fn try_from(number: u8) -> Result<Self, String> {
+        use DecalBlend::*;
+        Ok(match number {
+            0 => Replace,
+            1 => Darken,
+            2 => Multiply,
+            5 => Lighten,
+            6 => Screen,
+            7 => Subtract,
+            8 => Add,
+            9 => Overlay,
+            20 => Mixed,
+            _ => return Err(format!("no decal blend mode {number}")),
+        })
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct Decal {
     pub alpha: f32,
     pub intensity: f32,
-    pub multiply: bool,
+    pub color_blend: DecalBlend,
     /// Its place in `Looks::decals`, not a glTF image index.
     pub image: usize,
     /// Set where a clip turns the decal's hue, so its image holds it unturned.
@@ -1322,6 +1358,14 @@ mod tests {
     }
 
     #[test]
+    fn a_decal_names_one_of_poiyomis_blend_modes() {
+        let decal = |mode: &str| serde_json::from_str::<Decal>(&format!(r#"{{"alpha": 1, "intensity": 1, "image": 0, "hue": null, {mode}}}"#));
+        assert_eq!(decal(r#""colorBlend": 20"#).unwrap().color_blend, DecalBlend::Mixed);
+        assert!(decal(r#""colorBlend": 3"#).is_err(), "a number Poiyomi draws black is refused");
+        assert!(decal(r#""multiply": true"#).is_err(), "a decal converted before decals named their mode is refused, not drawn replacing");
+    }
+
+    #[test]
     fn a_translation_moves_its_node_by_the_value_along_its_direction() {
         let expressions = effects(serde_json::json!([{"effect": {"translation": {"node": 1, "direction": [0, 0.5, -0.01]}}}]));
         let mut pose = unposed(2);
@@ -1358,7 +1402,7 @@ mod tests {
 
     #[test]
     fn an_avatar_with_cairnfold_look_targets_loads() {
-        let look = |field: &str| serde_json::json!({"node": 0, "rect": [0, 0, 1, 1], "field": field, "slot": 1, "multiply": true, "alpha": 0.5, "intensity": 1});
+        let look = |field: &str| serde_json::json!({"node": 0, "rect": [0, 0, 1, 1], "field": field, "slot": 1, "colorBlend": 2, "alpha": 0.5, "intensity": 1});
         let parsed = Expressions::parse(&serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": [
             {"effect": {"look": [look("decal")]}, "default": 0.5}, {"effect": {"look": [look("matcapIntensity"), look("emissionHue")]}}
         ]}));

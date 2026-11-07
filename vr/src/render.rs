@@ -86,7 +86,7 @@ struct MatcapData {
 struct LookData {
     decal: [f32; 4],
     intensity: [f32; 4],
-    multiply: [f32; 4],
+    blend: [f32; 4],
     rect: [f32; 4],
     page: [i32; 4],
     layer: [u32; 4],
@@ -120,7 +120,7 @@ fn look_data(look: &crate::vrm::expressions::Look, places: &[Place]) -> LookData
     LookData {
         decal: decal(|decal| decal.alpha),
         intensity: decal(|decal| decal.intensity),
-        multiply: decal(|decal| decal.multiply as u32 as f32),
+        blend: decal(|decal| decal.color_blend as u8 as f32),
         rect: look.rect,
         page: look.decals.each_ref().map(|decal| decal.as_ref().map_or(-1, |decal| places[decal.image].page as i32)),
         layer: look.decals.each_ref().map(|decal| decal.as_ref().map_or(0, |decal| places[decal.image].layer)),
@@ -969,6 +969,7 @@ fn layered(gpu: &Gpu, width: u32, height: u32, layers: u32, rgba: &[u8], format:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vrm::expressions::DecalBlend;
     use crate::vrm::{tests::figure, Version};
 
     const COVERAGE: f32 = 0.95;
@@ -1068,9 +1069,9 @@ mod tests {
         builder.set("meshes", serde_json::json!([{"primitives": [{"attributes": {"POSITION": position, "NORMAL": normal, "TEXCOORD_0": uv}, "indices": indices, "material": 0}]}]));
         builder.set("materials", serde_json::json!([{"pbrMetallicRoughness": {"baseColorFactor": [1.0, 1.0, 1.0, 1.0]}}]));
         let data = builder.glb();
-        for (space, value) in [(1.0, 1.0 / 3.0), (0.0, 0.5), (2.0, std::f32::consts::TAU / 3.0), (3.0, 1.0), (4.0, 2.0), (5.0, -1.0), (6.0, 1.0), (7.0, 1.0), (8.0, 1.0)] {
+        for (space, value) in [(1.0, 1.0 / 3.0), (0.0, 0.5), (2.0, std::f32::consts::TAU / 3.0), (3.0, 1.0), (4.0, 2.0), (5.0, -1.0), (6.0, 1.0), (7.0, 1.0), (8.0, 1.0), (9.0, 1.0), (10.0, 1.0)] {
             let mut model = Model::parse(&data).unwrap();
-            model.images.push(crate::vrm::Image { width: 1, height: 1, rgba: if (4.0..7.0).contains(&space) { vec![128, 64, 32, 255] } else { vec![255, 0, 0, 255] } });
+            model.images.push(crate::vrm::Image { width: 1, height: 1, rgba: if (4.0..7.0).contains(&space) || space == 10.0 { vec![128, 64, 32, 255] } else { vec![255, 0, 0, 255] } });
             model.materials[0].base_image = Some(0);
             model.materials[0].shade_image = Some(0);
             let rect = [0.0, 0.0, if space == 2.0 || space >= 4.0 { 1.0 } else { 0.5 }, 1.0];
@@ -1096,8 +1097,8 @@ mod tests {
             menu.hue_mask = Some(crate::vrm::Image { width: 2, height: 1, rgba: mask });
             menu.color_atlas = Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![255; 4] });
             let mut look = looks_test::look();
-            look.decals[1] = Some(crate::vrm::expressions::Decal { alpha: 0.0, intensity: 1.0, multiply: space == 8.0, image: 0, hue: None });
-            menu.looks = Some(crate::vrm::expressions::Looks { index: crate::vrm::Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }, materials: vec![look], decals: vec![crate::vrm::Image { width: 2, height: 1, rgba: vec![0, 255, 0, 255, 0, 0, 0, 0] }], matcaps: Vec::new(), matcap_masks: None, emission: None });
+            look.decals[1] = Some(crate::vrm::expressions::Decal { alpha: 0.0, intensity: 1.0, color_blend: [(8.0, DecalBlend::Multiply), (9.0, DecalBlend::Lighten), (10.0, DecalBlend::Darken)].into_iter().find(|(at, _)| *at == space).map_or(DecalBlend::Replace, |(_, blend)| blend), image: 0, hue: None });
+            menu.looks = Some(crate::vrm::expressions::Looks { index: crate::vrm::Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }, materials: vec![look], decals: vec![crate::vrm::Image { width: 2, height: 1, rgba: if space == 10.0 { vec![64, 255, 255, 255, 0, 0, 0, 0] } else { vec![0, 255, 0, 255, 0, 0, 0, 0] } }], matcaps: Vec::new(), matcap_masks: None, emission: None });
             model.menu = Some(menu);
             let mut skinned = model.skinned().unwrap();
             let original_vertices = bytes_of(&skinned.vertices).to_vec();
@@ -1124,6 +1125,8 @@ mod tests {
             else if space == 5.0 { assert!(center[0] < initial[0] && center[1] > initial[1], "desaturation moves red toward luminance"); }
             else if space == 6.0 { assert!(center[0] > initial[0], "brightness raises the midtone"); }
             else if space == 8.0 { assert!(center[0] < initial[0] / 4 && center[1] < 8, "multiplying red by green leaves black: {center:?}"); }
+            else if space == 9.0 { assert!(center[0].abs_diff(initial[0]) <= 2 && center[1] > initial[0] / 2, "lightening red by green keeps the red and lays the green, yellow: {center:?}"); }
+            else if space == 10.0 { assert!(center[0] > initial[0] / 3 && center[0] < initial[0] - initial[0] / 4 && center[1].abs_diff(initial[1]) <= 2 && center[2].abs_diff(initial[2]) <= 2, "darkening brown by cyan keeps the darker red, the cyan's, and the brown's green and blue: {initial:?} to {center:?}"); }
             else { assert!(center[1] > center[0], "material control {space} produces green: {center:?}"); }
             skinned.surface_values(model.menu.as_ref().unwrap(), &[rest]);
             let again = capture(&skinned);
@@ -1210,7 +1213,7 @@ mod tests {
     #[test]
     fn a_decal_no_clip_animates_draws_at_its_saved_alpha() {
         let mut look = looks_test::look();
-        look.decals[1] = Some(crate::vrm::expressions::Decal { alpha: 1.0, intensity: 1.0, multiply: false, image: 0, hue: None });
+        look.decals[1] = Some(crate::vrm::expressions::Decal { alpha: 1.0, intensity: 1.0, color_blend: DecalBlend::Replace, image: 0, hue: None });
         let (shown, _, _) = look_drawn([255, 0, 0, 255], look.clone(), None, 0.0, 0.0, Vec::new());
         assert!(shown[1] > shown[0], "the texel's material lays its decal on with no surface value: {shown:?}");
         let (hidden, _, _) = look_drawn([255, 0, 0, 255], looks_test::look(), None, 0.0, 0.0, Vec::new());
@@ -1225,7 +1228,7 @@ mod tests {
     fn a_clip_turns_a_decals_hue_and_its_rest_turn_holds_without_one() {
         let mut look = looks_test::look();
         let hue = crate::vrm::expressions::HueShift { shift: 0.0, space: 1.0, select: 1.0 };
-        look.decals[1] = Some(crate::vrm::expressions::Decal { alpha: 1.0, intensity: 1.0, multiply: false, image: 0, hue: Some(hue.clone()) });
+        look.decals[1] = Some(crate::vrm::expressions::Decal { alpha: 1.0, intensity: 1.0, color_blend: DecalBlend::Replace, image: 0, hue: Some(hue.clone()) });
         let effect = serde_json::json!({"look": [{"node": 0, "rect": [0.0, 0.0, 1.0, 1.0], "field": "decalHue", "slot": 1}]});
         let (rest, turned, _) = look_drawn([0, 0, 0, 255], look.clone(), Some(effect), 0.0, 1.0 / 3.0, Vec::new());
         assert!(rest[1] > 2 * rest[2], "at its rest turn the green decal stays green: {rest:?}");
@@ -1253,7 +1256,7 @@ mod tests {
         let mut menu = crate::vrm::expressions::Expressions::parse(&serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": []})).unwrap();
         let mut look = looks_test::look();
         look.rect = [0.5, 0.0, 1.0, 0.5];
-        look.decals[0] = Some(crate::vrm::expressions::Decal { alpha: 1.0, intensity: 1.0, multiply: false, image: 1, hue: None });
+        look.decals[0] = Some(crate::vrm::expressions::Decal { alpha: 1.0, intensity: 1.0, color_blend: DecalBlend::Replace, image: 1, hue: None });
         let index = (0..64).flat_map(|at| [(at % 8 >= 4 && at / 8 < 4) as u8, 0, 0, 255]).collect();
         let unused = crate::vrm::Image { width: 3, height: 5, rgba: vec![255; 60] };
         menu.looks = Some(crate::vrm::expressions::Looks { index: crate::vrm::Image { width: 8, height: 8, rgba: index }, materials: vec![look], decals: vec![unused, decal], matcaps: Vec::new(), matcap_masks: None, emission: None });

@@ -17,9 +17,10 @@
       ],
       "tests": [
         "python3 test/publish-avatar.py",
-        "nix-build vr/default.nix --no-out-link"
+        "nix-build vr/default.nix --no-out-link",
+        "bash vr/check-catalog.sh"
       ],
-      "why": "the effect and look-field names the overlay's expression reader admits are the ones the catalog's publish guard admits: the reader's build checks each is a variant it reads, the guard's test that it refuses any other"
+      "why": "the effect and look-field names the overlay's expression reader admits are the ones the catalog's publish guard admits: the reader's build checks each is a variant it reads, the guard's test that it refuses any other; the effects the reader admits decide whether each live catalog figure still parses, so every one must load through the overlay host this tree builds"
     },
     {
       "paths": [
@@ -27,11 +28,12 @@
       ],
       "tests": [
         "nix-build vr/default.nix --no-out-link",
+        "bash vr/check-catalog.sh",
         "nix-build vr/default.nix -A bundle --no-out-link",
         "nix-build vr/default.nix -A simulatedController --no-out-link",
         "nix-build vr/default.nix -A harness --no-out-link"
       ],
-      "why": "the overlay host's build runs its unit tests and offscreen-render tests on a software Vulkan device, and wraps the runtime libraries SteamVR's client needs; the headset bundle's build checks its architecture, loader, libraries and glibc floor; the simulated controller driver builds"
+      "why": "the overlay host's build runs its unit tests and offscreen-render tests on a software Vulkan device, and wraps the runtime libraries SteamVR's client needs; the headset bundle's build checks its architecture, loader, libraries and glibc floor; the simulated controller driver builds; every live catalog figure must still load through the overlay host this tree builds, or the deploy would refuse it"
     },
     {
       "paths": [
@@ -174,10 +176,11 @@
         "npm test",
         "npm run smoke:ci",
         "nix-build vr/default.nix --no-out-link",
+        "bash vr/check-catalog.sh",
         "nix-build vr/default.nix -A bundle --no-out-link",
         "nix-build vr/default.nix -A simulatedController --no-out-link"
       ],
-      "why": "the rest pose and the moods' faces are read by the page and compiled into the native overlay host"
+      "why": "the rest pose and the moods' faces are read by the page and compiled into the native overlay host; both go into dressing each figure, so every live catalog figure must still load through the overlay host this tree builds"
     },
     {
       "paths": [
@@ -291,5 +294,8 @@
       "tests": [],
       "why": "prose"
     }
+  ],
+  "exclusive": [
+    "bash vr/check-catalog.sh"
   ]
 }

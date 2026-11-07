@@ -442,7 +442,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
     let mut picking: Option<Picking> = None;
     let mut reveal = Reveal::new(HEIGHT);
     let mut board_image = vulkan::Flat::new(gpu.clone());
-    let mut overlay = runtime.create_overlay("voice.puppet", "Puppet", QUAD, true)?;
+    let mut overlay = openvr::Handoff::new([runtime.create_overlay("voice.puppet", "Puppet", QUAD, true)?, runtime.create_overlay("voice.puppet.handoff", "Puppet", QUAD, true)?]);
     let mut board_overlay = runtime.create_overlay("voice.board", "Board", board::WIDTH, false)?;
     let mut marker_overlay = runtime.create_overlay("voice.marker", "Fingertip", board::MARKER_WIDTH, false)?;
     marker_overlay.above_others();

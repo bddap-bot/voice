@@ -287,6 +287,7 @@ fn split(buffer: &[std::os::raw::c_char]) -> Vec<CString> {
     unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_string_lossy().split_whitespace().map(|name| CString::new(name).unwrap()).collect()
 }
 
+#[derive(Clone, Copy, PartialEq)]
 pub enum Place {
     World(Pose),
     On(u32, Pose),
@@ -310,6 +311,64 @@ pub trait Surface {
         self.part(part);
         self.show();
         Ok(())
+    }
+}
+
+/// Two surfaces taking turns to show one figure. SteamVR may show the previous image on a quad just moved, which
+/// displaces the whole figure for a frame, so a quad that moves once and then holds is set on the hidden surface first
+/// and shown a frame later, once the image drawn for it is in. A quad moving every frame moves in place. The texture
+/// bounds change in place: a held window's texels follow the eye's distance and the drawing budget, and a frame's
+/// late image only scales the figure by that step.
+pub struct Handoff<S> {
+    surfaces: [S; 2],
+    quads: [Option<(Place, f32)>; 2],
+    phase: Phase,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Phase {
+    Holding,
+    Staged,
+    Moving,
+}
+
+impl<S: Surface> Handoff<S> {
+    pub fn new(surfaces: [S; 2]) -> Handoff<S> {
+        Handoff { surfaces, quads: [None; 2], phase: Phase::Holding }
+    }
+
+    pub fn present(&mut self, texture: &mut sys::VRVulkanTextureData_t, place: &Place, width: f32, part: f32) -> Result<(), String> {
+        let quad = Some((*place, width));
+        self.phase = match self.phase {
+            _ if self.quads[0] == quad => Phase::Holding,
+            Phase::Staged if self.quads[1] == quad => {
+                self.surfaces[1].present(texture, place, width, part)?;
+                self.surfaces[0].hide();
+                self.surfaces.swap(0, 1);
+                self.quads.swap(0, 1);
+                self.phase = Phase::Holding;
+                return Ok(());
+            }
+            Phase::Holding => {
+                let back = &mut self.surfaces[1];
+                back.texture(texture)?;
+                back.place(place);
+                back.resize(width);
+                back.part(part);
+                self.quads[1] = quad;
+                self.phase = Phase::Staged;
+                return Ok(());
+            }
+            Phase::Staged | Phase::Moving => Phase::Moving,
+        };
+        self.quads[0] = quad;
+        self.surfaces[0].present(texture, place, width, part)
+    }
+
+    pub fn hide(&mut self) {
+        self.phase = Phase::Holding;
+        self.quads = [None; 2];
+        self.surfaces.iter_mut().for_each(Surface::hide);
     }
 }
 
@@ -439,5 +498,88 @@ mod tests {
         let mut texture: sys::VRVulkanTextureData_t = unsafe { std::mem::zeroed() };
         surface.present(&mut texture, &Place::World(Pose { r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], t: [0.0; 3] }), 1.0, 0.5).unwrap();
         assert_eq!(surface.0.into_inner(), ["texture", "place", "resize", "part", "show"]);
+    }
+
+    /// An overlay as the compositor sees it: the quad as last set, and each image given with the frame it was drawn in.
+    #[derive(Default)]
+    struct Composited {
+        place: Option<Place>,
+        given: Vec<u64>,
+        shown: bool,
+    }
+
+    struct Shared(std::rc::Rc<std::cell::RefCell<Composited>>);
+
+    impl Surface for Shared {
+        fn texture(&self, texture: &mut sys::VRVulkanTextureData_t) -> Result<(), String> {
+            self.0.borrow_mut().given.push(texture.m_nImage);
+            Ok(())
+        }
+        fn place(&self, place: &Place) {
+            self.0.borrow_mut().place = Some(*place);
+        }
+        fn show(&mut self) {
+            self.0.borrow_mut().shown = true;
+        }
+        fn hide(&mut self) {
+            self.0.borrow_mut().shown = false;
+        }
+    }
+
+    fn at(x: f32) -> Place {
+        Place::World(Pose { r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], t: [x, 1.0, -1.0] })
+    }
+
+    /// Presents a window at each of `quads` in turn, one frame each (`None` hides it), its texture bounds changing every
+    /// frame as a held window's texels do, and gives what the compositor could show on each frame when it latches images
+    /// `lag` frames late: per shown surface, the frame its image was drawn in and the quad it is on.
+    fn composite(quads: &[Option<f32>], lag: usize) -> Vec<Vec<(u64, Place)>> {
+        let surfaces = [(); 2].map(|_| std::rc::Rc::new(std::cell::RefCell::new(Composited::default())));
+        let mut handoff = Handoff::new(surfaces.clone().map(Shared));
+        quads.iter().enumerate().map(|(frame, &x)| {
+            let mut texture: sys::VRVulkanTextureData_t = unsafe { std::mem::zeroed() };
+            texture.m_nImage = frame as u64;
+            match x {
+                Some(x) => handoff.present(&mut texture, &at(x), 1.0, 1.0 - frame as f32 * 1e-3).unwrap(),
+                None => handoff.hide(),
+            }
+            surfaces.iter().map(|surface| surface.borrow()).filter(|surface| surface.shown).filter_map(|surface| {
+                let latched = surface.given.iter().rev().find(|&&given| given as usize + lag <= frame).or(surface.given.first())?;
+                Some((*latched, surface.place?))
+            }).collect()
+        }).collect()
+    }
+
+    /// Asserts that from `from` on, every shown image is on the quad it was drawn for and at most one frame older than
+    /// the latch allows, and that the figure is shown on every frame but the one after a hidden figure reappears.
+    fn paired(quads: &[Option<f32>], from: usize) {
+        for lag in [0, 1] {
+            for (frame, shown) in composite(quads, lag).iter().enumerate().skip(from) {
+                if quads[frame].is_none() {
+                    assert!(shown.is_empty(), "lag {lag}, frame {frame}: shown while hidden");
+                    continue;
+                }
+                assert!(!shown.is_empty() || quads[frame - 1].is_none(), "lag {lag}, frame {frame}: nothing shown");
+                for &(drawn, place) in shown {
+                    assert!(quads[drawn as usize].map(at) == Some(place), "lag {lag}, frame {frame}: the image drawn in frame {drawn} for {:?} is on another quad", quads[drawn as usize]);
+                    assert!(drawn as usize + 1 + lag >= frame, "lag {lag}, frame {frame}: the figure froze on frame {drawn}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_refitted_window_never_shows_an_image_drawn_for_another_quad() {
+        let quads: Vec<Option<f32>> = [0.0, 0.3, -0.2, 0.25].iter().flat_map(|&x| [Some(x); 6]).chain([None, None]).chain([Some(0.25); 6]).chain([None]).chain([Some(0.4); 6]).collect();
+        paired(&quads, 1);
+    }
+
+    #[test]
+    fn a_window_moving_every_frame_keeps_showing_the_latest_image_and_hands_off_once_it_holds() {
+        let quads: Vec<Option<f32>> = (0..20).map(|frame| Some(frame as f32 * 0.01)).chain([None]).chain([Some(0.5); 6]).collect();
+        for (frame, shown) in composite(&quads, 0).iter().enumerate().take(20).skip(2) {
+            assert_eq!(shown.iter().map(|&(drawn, _)| drawn).collect::<Vec<_>>(), [frame as u64], "frame {frame}");
+        }
+        paired(&quads, 20);
     }
 }

@@ -1,6 +1,6 @@
 """Install a converted puppet over the catalog file it replaces, refusing one that carries less.
 
-usage: publish-avatar.py NEW.vrm CATALOG.vrm [--converter DIR] [--drop PREFIX ...] [--unlanded] [--rollback]
+usage: publish-avatar.py NEW.vrm CATALOG.vrm [--converter DIR] [--drop PREFIX ...] [--unlanded] [--rollback] [--clips DIR] [--out PATH]
 
 Every node, image, morph target, material, spring joint, collider a spring collides with, VRM expression and avatar
 expression part (parameter, layer, menu control, material target, curve, shown node, switched spring or collider,
@@ -13,7 +13,9 @@ The replaced file stays beside the catalog in .previous/, unless NEW is CATALOG:
 Otherwise NEW must name in its asset extras the clean converter commit that wrote it, one origin/main of DIR, the
 converter's repository, contains once fetched, unless --unlanded names it an intended exception; and that commit may
 not be a strict ancestor of the one the catalog file names, or one DIR cannot compare with it, unless --rollback names
-it an intended rollback."""
+it an intended rollback.
+--clips measures the spread against the clips the server would serve from that clip directory instead, and --out writes
+the result there instead of over CATALOG, so a clip write can re-measure the catalog before it installs its clips."""
 import argparse
 from collections import Counter
 import hashlib
@@ -96,8 +98,8 @@ READ = json.loads((Path(__file__).resolve().parents[1] / 'vr/src/vrm/effects.jso
 ARMS = 'VOICE_arms'
 
 
-def measure(path):
-    run = subprocess.run([os.environ.get('VOICE_VR', 'voice-vr'), 'arms', str(path)], check=True, stdout=subprocess.PIPE, text=True)
+def measure(path, clips=None):
+    run = subprocess.run([os.environ.get('VOICE_VR', 'voice-vr'), 'arms', *(['--clips', str(clips)] if clips else []), str(path)], check=True, stdout=subprocess.PIPE, text=True)
     return json.loads(run.stdout)
 
 
@@ -169,7 +171,7 @@ def provenance(new_path, catalog, repo, unlanded_ok, rollback_ok):
         raise SystemExit(f"{repo} cannot tell whether {new_path}'s converter commit {commit} is older than {replaced}, which wrote {catalog}; name an intended rollback with --rollback")
 
 
-def publish(new_path, catalog_path, repo=None, drops=(), unlanded_ok=False, rollback_ok=False):
+def publish(new_path, catalog_path, repo=None, drops=(), unlanded_ok=False, rollback_ok=False, clips=None, out_path=None):
     data = Path(new_path).read_bytes()
     catalog = Path(catalog_path)
     in_place = catalog.exists() and catalog.samefile(new_path)
@@ -182,7 +184,7 @@ def publish(new_path, catalog_path, repo=None, drops=(), unlanded_ok=False, roll
     unlit = [i for i, look in enumerate(looks) if 'lighting' not in look]
     if unlit:
         raise SystemExit(f'{new_path} has looks without the lighting the overlay reads (materials {unlit}); reconvert it with the current converter')
-    data = with_arms(data, measure(new_path))
+    data = with_arms(data, measure(new_path, clips))
     if catalog.exists():
         gone = lost(inventory(document(catalog.read_bytes())), inventory(document(data)), drops)
         if gone:
@@ -191,10 +193,11 @@ def publish(new_path, catalog_path, repo=None, drops=(), unlanded_ok=False, roll
             previous = catalog.parent / '.previous'
             previous.mkdir(exist_ok=True)
             shutil.copy2(catalog, previous / catalog.name)
-    with tempfile.NamedTemporaryFile(dir=catalog.parent, prefix='.' + catalog.name, delete=False) as out:
+    target = Path(out_path) if out_path else catalog
+    with tempfile.NamedTemporaryFile(dir=target.parent, prefix='.' + target.name, delete=False) as out:
         out.write(data)
-    os.replace(out.name, catalog)
-    os.chmod(catalog, 0o644)
+    os.replace(out.name, target)
+    os.chmod(target, 0o644)
     return hashlib.sha256(data).hexdigest()
 
 
@@ -206,5 +209,7 @@ if __name__ == '__main__':
     parser.add_argument('--drop', action='append', default=[])
     parser.add_argument('--unlanded', action='store_true')
     parser.add_argument('--rollback', action='store_true')
+    parser.add_argument('--clips')
+    parser.add_argument('--out')
     args = parser.parse_args()
-    print(publish(args.new, args.catalog, args.converter, args.drop, args.unlanded, args.rollback), args.catalog)
+    print(publish(args.new, args.catalog, args.converter, args.drop, args.unlanded, args.rollback, args.clips, args.out), args.out or args.catalog)

@@ -181,10 +181,16 @@ fn fetch(relay: &mut Relay, id: &str) -> Result<Fetched, String> {
 
 /// The catalog clips the overlay plays on `model`, read for it; the digest of those an arm spread is measured against, named by the catalog whether or not each read; and those of them that did not read.
 fn served(relay: &mut Relay, model: &Model) -> Result<(HashMap<String, Clip>, String, Vec<String>), String> {
+    let entries = relay.clips()?;
+    played_clips(&entries, |entry| relay.motion(entry), model)
+}
+
+/// The clips of catalog `entries` the overlay plays on `model`, each motion read by `read`, with the digest and unread clips as `served` returns them.
+fn played_clips(entries: &[relay::ClipEntry], mut read: impl FnMut(&relay::ClipEntry) -> Result<Vec<u8>, String>, model: &Model) -> Result<(HashMap<String, Clip>, String, Vec<String>), String> {
     let mut clips = HashMap::new();
     let mut sources = vec![(motion::WALK.to_owned(), vrm::arms::walk_source())];
     let mut unread = Vec::new();
-    for entry in relay.clips()?.iter().filter(|entry| played(&entry.action)) {
+    for entry in entries.iter().filter(|entry| played(&entry.action)) {
         if !["fbx", "motion"].contains(&entry.format.as_str()) {
             tracing::info!("{}: {} clips are not played natively", entry.name, entry.format);
             continue;
@@ -193,7 +199,7 @@ fn served(relay: &mut Relay, model: &Model) -> Result<(HashMap<String, Clip>, St
         if reference {
             sources.push((entry.action.clone(), entry.content_hash.clone()));
         }
-        match relay.motion(entry).and_then(|bytes| Clip::parse(&bytes, model.version, model.rest_hips())) {
+        match read(entry).and_then(|bytes| Clip::parse(&bytes, model.version, model.rest_hips())) {
             Ok(clip) => {
                 clips.insert(entry.action.clone(), clip);
             }

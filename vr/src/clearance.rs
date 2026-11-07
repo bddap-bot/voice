@@ -5,7 +5,7 @@ use std::time::Instant;
 use glam::{Mat4, Quat, Vec3};
 
 use crate::motion::{family, Clip, IDLE, WALK};
-use crate::relay::{Relay, Token};
+use crate::relay::{ClipEntry, Relay, Token};
 use crate::render::{eye_projection, Renderer, PAGE_HEIGHT};
 use crate::vrm::arms::{self, Clearance, Spread, RATE, TOUCH};
 use crate::vrm::{Fit, Model};
@@ -20,9 +20,15 @@ pub fn reference(name: &str) -> bool {
     matches!(family(name), IDLE | WALK)
 }
 
-/// The clips a spread is measured against, as the server serves them for `model`, in name order, with their digest.
-fn clips(relay: &mut Relay, model: &Model) -> Result<(Vec<(String, Clip)>, String), String> {
-    let (served, digest, unread) = crate::served(relay, model)?;
+/// The clips a spread is measured against, as the server serves them for `model`, or would serve them from the clip directory `staged`, in name order, with their digest.
+fn clips(relay: &mut Relay, model: &Model, staged: Option<&Path>) -> Result<(Vec<(String, Clip)>, String), String> {
+    let (served, digest, unread) = match staged {
+        None => crate::served(relay, model)?,
+        Some(dir) => {
+            let entries = staged_entries(dir)?;
+            crate::played_clips(&entries, |entry| if entry.format == "motion" { std::fs::read(dir.join(&entry.name)).map_err(|error| format!("{}: {error}", entry.name)) } else { relay.motion(entry) }, model)?
+        }
+    };
     if !unread.is_empty() {
         return Err(format!("clips a spread is measured against did not read: {}", unread.join("; ")));
     }
@@ -32,6 +38,26 @@ fn clips(relay: &mut Relay, model: &Model) -> Result<(Vec<(String, Clip)>, Strin
     Ok((clips, digest))
 }
 
+/// The clip catalog the server's `clipCatalog` would list from directory `dir`, read by its rules: a motion clip is served as written, and any other is fetched from the server, which must already serve it.
+fn staged_entries(dir: &Path) -> Result<Vec<ClipEntry>, String> {
+    let manifest = dir.join("clips.manifest.json");
+    let source: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest).map_err(|error| format!("{}: {error}", manifest.display()))?).map_err(|error| format!("{}: {error}", manifest.display()))?;
+    let mut entries = Vec::new();
+    for item in source["clips"].as_array().ok_or(format!("{}: no clips", manifest.display()))? {
+        let (Some(action), Some(name)) = (item["action"].as_str().filter(|action| !action.is_empty()), item["name"].as_str()) else { continue };
+        let Some((_, extension)) = name.rsplit_once('.').filter(|(stem, extension)| !stem.is_empty() && !name.contains(['/', '\\']) && ["fbx", "vrma", "motion"].contains(&extension.to_ascii_lowercase().as_str())) else { continue };
+        let Ok(bytes) = std::fs::read(dir.join(name)) else { continue };
+        if bytes.is_empty() {
+            continue;
+        }
+        entries.push(ClipEntry { action: action.to_owned(), name: name.to_owned(), format: extension.to_ascii_lowercase(), content_hash: arms::source_hash(&bytes) });
+    }
+    if entries.is_empty() {
+        return Err(format!("{}: no usable clips, so the server would serve none", manifest.display()));
+    }
+    Ok(entries)
+}
+
 fn figure(path: &str) -> Result<(Vec<u8>, Model), String> {
     let bytes = std::fs::read(path).map_err(|error| format!("{path}: {error}"))?;
     let model = Model::parse(&bytes).map_err(|error| format!("{path}: {error}"))?;
@@ -39,31 +65,34 @@ fn figure(path: &str) -> Result<(Vec<u8>, Model), String> {
 }
 
 /// Measures a figure's arm spread against the standing idles the server plays now and the bundled walk, printing the extension that carries it.
-/// usage: voice-vr arms <figure.vrm>
+/// usage: voice-vr arms [--clips <dir>] <figure.vrm>, with `--clips` against those the server would play from that clip directory instead.
 /// usage: voice-vr arms --table <out-dir> <figure.vrm>... scores each of those clips on each figure with no spread and with its measured one, and captures each figure's deepest frame both ways.
 pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
     let mut relay = Relay::connect(token, &state.join("assets"))?;
     match args {
         [flag, out, figures @ ..] if flag == "--table" && !figures.is_empty() => table(&mut relay, Path::new(out), figures),
-        [path] => {
-            let (bytes, model) = figure(path)?;
-            let (clips, digest) = clips(&mut relay, &model)?;
-            let skinned = model.skinned()?;
-            let started = Instant::now();
-            let needs = arms::needs(&model, &skinned, &clips.iter().map(|(_, clip)| clip).collect::<Vec<_>>())?;
-            let angle = arms::spread(&needs);
-            for ((name, _), need) in clips.iter().zip(&needs) {
-                if need.is_none() {
-                    eprintln!("{path}: no spread up to the widest keeps {name} out of the thighs; it lays the hands on the body");
-                }
-            }
-            eprintln!("{path}: spread {:.2}° measured over {} clips in {:.1} s", angle.to_degrees(), clips.len(), started.elapsed().as_secs_f64());
-            let spread = Spread { angle, body: arms::body_of(&bytes)?, clips: digest, revision: arms::REVISION };
-            println!("{}", spread.json());
-            Ok(())
-        }
-        _ => Err("usage: voice-vr arms <figure.vrm> | voice-vr arms --table <out-dir> <figure.vrm>...".into()),
+        [flag, dir, path] if flag == "--clips" => measure(&mut relay, path, Some(Path::new(dir))),
+        [path] => measure(&mut relay, path, None),
+        _ => Err("usage: voice-vr arms [--clips <dir>] <figure.vrm> | voice-vr arms --table <out-dir> <figure.vrm>...".into()),
     }
+}
+
+fn measure(relay: &mut Relay, path: &str, staged: Option<&Path>) -> Result<(), String> {
+    let (bytes, model) = figure(path)?;
+    let (clips, digest) = clips(relay, &model, staged)?;
+    let skinned = model.skinned()?;
+    let started = Instant::now();
+    let needs = arms::needs(&model, &skinned, &clips.iter().map(|(_, clip)| clip).collect::<Vec<_>>())?;
+    let angle = arms::spread(&needs);
+    for ((name, _), need) in clips.iter().zip(&needs) {
+        if need.is_none() {
+            eprintln!("{path}: no spread up to the widest keeps {name} out of the thighs; it lays the hands on the body");
+        }
+    }
+    eprintln!("{path}: spread {:.2}° measured over {} clips in {:.1} s", angle.to_degrees(), clips.len(), started.elapsed().as_secs_f64());
+    let spread = Spread { angle, body: arms::body_of(&bytes)?, clips: digest, revision: arms::REVISION };
+    println!("{}", spread.json());
+    Ok(())
 }
 
 struct Scored {
@@ -84,7 +113,7 @@ fn table(relay: &mut Relay, out: &Path, figures: &[String]) -> Result<(), String
     for path in figures {
         let id = Path::new(path).file_stem().and_then(|stem| stem.to_str()).unwrap_or(path).to_owned();
         let (_, model) = figure(path)?;
-        let (clips, digest) = clips(relay, &model)?;
+        let (clips, digest) = clips(relay, &model, None)?;
         let skinned = model.skinned()?;
         let carried = model.arms.clone();
         let started = Instant::now();
@@ -157,4 +186,39 @@ fn film(renderer: &mut Renderer, path: &str, clip: &Clip, at: f32, angle: f32, o
         image::imageops::replace(&mut row, panel, index as i64 * TEXELS as i64, 0);
     }
     row.save(out).map_err(|error| format!("{}: {error}", out.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_staged_clip_directory_lists_what_the_server_would_serve_from_it_hashed_as_it_hashes() {
+        let dir = std::env::temp_dir().join(format!("voice-vr-staged-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, bytes) in [("idle-1.motion", &b"one"[..]), ("Wave.FBX", b"wave"), ("empty.motion", b""), ("notes.txt", b"x")] {
+            std::fs::write(dir.join(name), bytes).unwrap();
+        }
+        let manifest = serde_json::json!({"clips": [
+            {"action": "idle-1", "name": "idle-1.motion"}, {"action": "wave", "name": "Wave.FBX"}, {"action": "idle-2", "name": "gone.motion"},
+            {"action": "idle-3", "name": "empty.motion"}, {"action": "", "name": "idle-1.motion"}, {"action": "note", "name": "notes.txt"}, {"action": "up", "name": "../idle-1.motion"},
+        ]});
+        std::fs::write(dir.join("clips.manifest.json"), manifest.to_string()).unwrap();
+        let entries = staged_entries(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let listed: Vec<_> = entries.iter().map(|entry| (entry.action.as_str(), entry.name.as_str(), entry.format.as_str(), entry.content_hash.as_str())).collect();
+        let one = arms::source_hash(b"one");
+        let wave = arms::source_hash(b"wave");
+        assert_eq!(listed, [("idle-1", "idle-1.motion", "motion", one.as_str()), ("wave", "Wave.FBX", "fbx", wave.as_str())]);
+    }
+
+    #[test]
+    fn a_staged_clip_directory_the_server_would_serve_nothing_from_is_refused() {
+        let dir = std::env::temp_dir().join(format!("voice-vr-staged-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("clips.manifest.json"), r#"{"clips": [{"action": "idle", "name": "gone.motion"}]}"#).unwrap();
+        let refused = staged_entries(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(matches!(refused, Err(why) if why.contains("no usable clips")));
+    }
 }

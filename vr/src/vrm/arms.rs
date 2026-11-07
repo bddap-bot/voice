@@ -85,9 +85,14 @@ pub fn clips_digest<'a>(clips: impl IntoIterator<Item = (&'a str, &'a str)>) -> 
     hex(&hasher.finalize())
 }
 
-/// The content hash of the walk bundled with the host, as the catalog hashes a clip's source.
+/// The content hash of a clip's source, as the catalog hashes it.
+pub fn source_hash(bytes: &[u8]) -> String {
+    hex(&Sha256::digest(bytes))
+}
+
+/// The content hash of the walk bundled with the host.
 pub fn walk_source() -> String {
-    hex(&Sha256::digest(WALK))
+    source_hash(WALK)
 }
 
 pub const WALK: &[u8] = include_bytes!("../../motions/walk.json");

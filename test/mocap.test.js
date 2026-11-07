@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -95,7 +96,7 @@ const spreadOf = (file) => {
   return JSON.parse(bytes.subarray(20, 20 + bytes.readUInt32LE(12))).extensions?.VOICE_arms;
 };
 
-test('every clip write re-measures every catalog figure against the clips written, and one it could not is re-measured by the next', (t) => {
+test('a clip write installs its clips and every catalog figure re-measured against them together, or nothing', (t) => {
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? os.tmpdir(), 'mocap-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const [clips, catalog] = ['clips', 'catalog'].map((name) => path.join(root, name));
@@ -107,9 +108,11 @@ test('every clip write re-measures every catalog figure against the clips writte
   for (const figure of [...figures, path.join(catalog, '.hidden.vrm')]) fs.writeFileSync(figure, glb({ asset: { version: '2.0' }, nodes: [{ name: 'Root' }] }));
   const voiceVr = path.join(root, 'voice-vr');
   const calls = path.join(root, 'calls');
-  const measuring = `#!/bin/sh\necho "$2" >> '${calls}'\nprintf '{"angle":0.1,"body":"b","clips":"%s","revision":1}' "$(cat '${clips}'/*.motion | sha256sum | cut -c1-64)"\n`;
+  const measuring = (refused = '') => `#!/bin/sh\n[ "$2" = --clips ] || exit 2\necho "$4" >> '${calls}'\ncase "$4" in *'${refused || '-'}') exit 1;; esac\nprintf '{"angle":0.1,"body":"b","clips":"%s","revision":1}' "$(cat "$3"/*.motion "$3"/*.fbx | sha256sum | cut -c1-64)"\n`;
+  const served = () => execFileSync('sh', ['-c', `cat '${clips}'/*.motion '${clips}'/*.fbx | sha256sum | cut -c1-64`], { encoding: 'utf8' }).trim();
   const measured = () => fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').split('\n').filter(Boolean).map((file) => path.basename(file)) : [];
-  fs.writeFileSync(voiceVr, measuring, { mode: 0o755 });
+  const state = () => [clips, catalog].map((dir) => fs.readdirSync(dir).sort().map((name) => [name, fs.statSync(path.join(dir, name)).isFile() ? fs.readFileSync(path.join(dir, name), 'utf8') : 'dir']));
+  fs.writeFileSync(voiceVr, measuring(), { mode: 0o755 });
   const previous = process.env.VOICE_VR;
   process.env.VOICE_VR = voiceVr;
   t.after(() => { if (previous === undefined) delete process.env.VOICE_VR; else process.env.VOICE_VR = previous; });
@@ -118,18 +121,26 @@ test('every clip write re-measures every catalog figure against the clips writte
   install(clips, catalog, 'Capture', [idle('idle-1', 1), idle('idle-2', 2)]);
   assert.deepEqual(measured(), ['a.vrm', 'b.vrm'], 'every catalog figure is measured, nothing else in the catalog');
   const first = figures.map(spreadOf);
-  assert.ok(first.every((spread) => spread?.clips === first[0].clips && spread.clips));
+  assert.ok(first.every((spread) => spread?.clips === served()), 'each figure is measured against exactly the clips the write leaves served');
 
   install(clips, catalog, 'Capture', [idle('idle-1', 1)]);
   assert.ok(!fs.existsSync(path.join(clips, 'idle-2.motion')), 'a dropped clip leaves the served set');
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(clips, 'clips.manifest.json'), 'utf8')).clips.map((entry) => entry.name), ['wave.fbx', 'idle-1.motion']);
   assert.equal(measured().length, 4);
-  for (const spread of figures.map(spreadOf)) assert.notEqual(spread.clips, first[0].clips, 'dropping a clip re-measures every figure against the clips left');
+  for (const spread of figures.map(spreadOf)) assert.equal(spread.clips, served(), 'dropping a clip re-measures every figure against the clips left');
+  assert.notEqual(served(), first[0].clips);
 
-  fs.writeFileSync(voiceVr, '#!/bin/sh\nexit 1\n');
-  assert.throws(() => install(clips, catalog, 'Capture', [idle('idle-1', 3)]), /2 of 2 catalog figures were not re-measured.*a\.vrm, b\.vrm/);
-  fs.writeFileSync(voiceVr, measuring);
-  const stale = figures.map(spreadOf);
-  install(clips, catalog, 'Capture', [idle('idle-1', 3)]);
-  for (const [index, spread] of figures.map(spreadOf).entries()) assert.notEqual(spread.clips, stale[index].clips, 'a rerun of the same write re-measures what the failed one left');
+  const republishing = `#!/bin/sh\ncase "$4" in *a.vrm) printf ' ' >> "$4";; esac\n` + measuring().split('\n').slice(1).join('\n');
+  for (const [stub, refusal] of [[measuring('b.vrm'), /1 of 2 catalog figures could not be measured.*no clip and no figure changed: b\.vrm/], ['#!/bin/sh\nexit 1\n', /2 of 2 .*a\.vrm, b\.vrm/], [republishing, /a\.vrm changed while the write measured them/]]) {
+    fs.writeFileSync(voiceVr, stub);
+    const [before, a] = [state(), fs.readFileSync(figures[0])];
+    assert.throws(() => install(clips, catalog, 'Capture', [idle('idle-1', 3), idle('idle-3', 4)]), refusal);
+    if (stub === republishing) fs.writeFileSync(figures[0], a);
+    assert.deepEqual(state(), before, 'a write that cannot re-measure every figure changes no clip, no figure and leaves nothing staged');
+    for (const spread of figures.map(spreadOf)) assert.equal(spread.clips, served(), 'so the catalog still serves');
+  }
+  fs.writeFileSync(voiceVr, measuring());
+  install(clips, catalog, 'Capture', [idle('idle-1', 3), idle('idle-3', 4)]);
+  assert.ok(fs.existsSync(path.join(clips, 'idle-3.motion')));
+  for (const spread of figures.map(spreadOf)) assert.equal(spread.clips, served(), 'a rerun installs the write');
 });

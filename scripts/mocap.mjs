@@ -231,19 +231,39 @@ async function main() {
   console.log(`${clips.length} clips written to ${out}`);
 }
 
+const plain = (name) => typeof name === 'string' && /^[^/\\]+\.(fbx|vrma|motion)$/i.test(name);
+const digest = (file) => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+
 export function install(out, catalog, source, clips) {
   const figures = fs.readdirSync(catalog, { withFileTypes: true }).filter((entry) => entry.isFile() && !entry.name.startsWith('.') && entry.name.endsWith('.vrm')).map((entry) => entry.name).sort();
+  const before = new Map(figures.map((name) => [name, digest(path.join(catalog, name))]));
   const manifestFile = path.join(out, 'clips.manifest.json');
   const manifest = fs.existsSync(manifestFile) ? JSON.parse(fs.readFileSync(manifestFile, 'utf8')) : { clips: [] };
   const written = new Set(clips.map(({ entry }) => entry.name));
-  for (const { entry, motion } of clips) fs.writeFileSync(path.join(out, entry.name), JSON.stringify(motion));
   const own = (entry) => entry.source?.startsWith(`${source} `);
-  for (const entry of manifest.clips.filter((entry) => own(entry) && !written.has(entry.name))) fs.rmSync(path.join(out, entry.name), { force: true });
   const entries = clips.map(({ entry }) => entry);
-  manifest.clips = [...manifest.clips.filter((entry) => !own(entry) && !written.has(entry.name) && !entries.some((mine) => mine.action === entry.action)), ...entries];
-  fs.writeFileSync(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`);
-  const failed = figures.filter((name) => spawnSync('python3', [PUBLISH, path.join(catalog, name), path.join(catalog, name)], { stdio: 'inherit' }).status !== 0);
-  if (failed.length) throw new Error(`${failed.length} of ${figures.length} catalog figures were not re-measured against the clips written, so the overlay refuses them until a write re-measures them: ${failed.join(', ')}`);
+  const kept = manifest.clips.filter((entry) => !own(entry) && !written.has(entry.name) && !entries.some((mine) => mine.action === entry.action));
+  const served = new Set([...kept, ...entries].map((entry) => entry.name));
+  const dropped = manifest.clips.filter((entry) => own(entry) && !served.has(entry.name));
+  const staged = fs.mkdtempSync(path.join(out, '.staged-'));
+  const measured = fs.mkdtempSync(path.join(catalog, '.staged-'));
+  try {
+    for (const entry of kept) {
+      if (plain(entry.name) && fs.existsSync(path.join(out, entry.name))) fs.copyFileSync(path.join(out, entry.name), path.join(staged, entry.name));
+    }
+    for (const { entry, motion } of clips) fs.writeFileSync(path.join(staged, entry.name), JSON.stringify(motion));
+    fs.writeFileSync(path.join(staged, 'clips.manifest.json'), `${JSON.stringify({ ...manifest, clips: [...kept, ...entries] }, null, 2)}\n`);
+    const failed = figures.filter((name) => spawnSync('python3', [PUBLISH, path.join(catalog, name), path.join(catalog, name), '--clips', staged, '--out', path.join(measured, name)], { stdio: 'inherit' }).status !== 0);
+    if (failed.length) throw new Error(`${failed.length} of ${figures.length} catalog figures could not be measured against the clips to be written, so no clip and no figure changed: ${failed.join(', ')}`);
+    const changed = figures.filter((name) => digest(path.join(catalog, name)) !== before.get(name));
+    if (changed.length) throw new Error(`${changed.join(', ')} changed while the write measured them, so no clip and no figure changed: run it again`);
+    for (const { entry } of clips) fs.renameSync(path.join(staged, entry.name), path.join(out, entry.name));
+    fs.renameSync(path.join(staged, 'clips.manifest.json'), manifestFile);
+    for (const name of figures) fs.renameSync(path.join(measured, name), path.join(catalog, name));
+    for (const entry of dropped.filter((entry) => plain(entry.name))) fs.rmSync(path.join(out, entry.name), { force: true });
+  } finally {
+    for (const dir of [staged, measured]) fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 if (process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(new URL(import.meta.url))) {

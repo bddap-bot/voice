@@ -72,7 +72,7 @@ AVATAR = {
 
 SPREAD = {'angle': 0.1, 'body': 'b', 'clips': 'c', 'revision': 1}
 measured = []
-publisher.measure = lambda path: measured.append(Path(path).read_bytes()) or SPREAD
+publisher.measure = lambda path, clips=None: measured.append(Path(path).read_bytes()) or SPREAD
 
 
 def without_arms(data):
@@ -198,7 +198,7 @@ class Publishing(unittest.TestCase):
     def test_a_figure_whose_spread_cannot_be_measured_leaves_the_catalog_and_its_backup_untouched(self):
         before = self.catalog.read_bytes()
         new = self.candidate(lambda doc: doc['extensionsUsed'].append('VRMC_vrm'))
-        def refuse(path):
+        def refuse(path, clips=None):
             raise RuntimeError('no drawn left thigh skin to measure')
         measure, publisher.measure = publisher.measure, refuse
         try:
@@ -255,6 +255,21 @@ class Publishing(unittest.TestCase):
             publish(self.candidate(lambda doc: None), self.catalog)
         self.assertIn('cannot tell', str(refused.exception))
         publish(self.candidate(lambda doc: None), self.catalog, rollback_ok=True)
+
+    def test_an_in_place_republish_measured_against_a_clip_directory_writes_where_named_and_leaves_the_catalog(self):
+        against = []
+        before = self.catalog.read_bytes()
+        staged = self.root / '.staged' / self.catalog.name
+        staged.parent.mkdir()
+        measure, publisher.measure = publisher.measure, lambda path, clips=None: against.append(clips) or SPREAD
+        try:
+            publisher.publish(self.catalog, self.catalog, clips='next-clips', out_path=staged)
+        finally:
+            publisher.measure = measure
+        self.assertEqual(against, ['next-clips'])
+        self.assertEqual(self.catalog.read_bytes(), before)
+        self.assertEqual(staged.read_bytes(), publisher.with_arms(before, SPREAD))
+        self.assertFalse((self.root / '.previous').exists())
 
     def test_the_installed_file_carries_the_spread_measured_on_it_with_its_binary_untouched(self):
         body = b'BODY'

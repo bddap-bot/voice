@@ -69,14 +69,17 @@ const DORMANT_POLL: Duration = Duration::from_micros(11_111);
 const SPOTTER_RETRY: Duration = Duration::from_secs(10);
 
 fn grown_window(skinned: &Skinned, hidden: &HashSet<usize>, worlds: &[glam::Mat4], body: glam::Mat4, head: &Pose, eyes: &[Vec3], view: f32) -> (Pose, f32) {
+    window(&posed_corners(skinned, hidden, worlds, body, head), head, eyes, view)
+}
+
+/// The posed mesh's bounds in the view's axes, with room for its outline. A bone's reach sphere can spend most of the
+/// texture on empty space around the figure.
+fn posed_corners(skinned: &Skinned, hidden: &HashSet<usize>, worlds: &[glam::Mat4], body: glam::Mat4, head: &Pose) -> Vec<Vec3> {
     let (low, high) = skinned.bounds(&skinned.palette(worlds, head.inverse().mat4() * body), hidden);
-    // Bound the posed mesh in the view's axes, with room for its outline. A bone's
-    // reach sphere can spend most of the texture on empty space around the figure.
-    let corners: Vec<Vec3> = (0..8).map(|corner| {
+    (0..8).map(|corner| {
         let point = std::array::from_fn(|axis| if corner & (1 << axis) == 0 { low[axis] - MARGIN } else { high[axis] + MARGIN });
         head.apply(point)
-    }).collect();
-    window(&corners, head, eyes, view)
+    }).collect()
 }
 
 /// The skinning placement and the map from it into `window`: the shader's lights are fixed in the frame it skins into,
@@ -448,6 +451,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
     let view = runtime.view();
     tracing::info!("the eyes see {:.0}° off the head's axis at the widest", view.atan().to_degrees());
     let mut meter = Meter::default();
+    let mut window = placement::Window::default();
     let epoch = Instant::now();
     let mut last = epoch;
     let mut pressing: Option<(u32, Vec3)> = None;
@@ -790,7 +794,11 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         objects.step(started, &object::View { stand, size, head, eyes: eye_offsets, tip: right.map(|(right, _)| right.apply(tip)) });
         let animated = Instant::now();
         let eye_points = eye_offsets.map(|eye: Pose| head.then(&eye).t);
-        let (quad, half) = if size > 1.0 { grown_window(&puppet.skinned, &puppet.drawn.hidden, &posed, body, &head, &eye_points, view) } else { (figure, QUAD / 2.0) };
+        let (quad, half) = match anchor {
+            _ if size <= 1.0 => (figure, QUAD / 2.0),
+            Anchor::Stuck(_) | Anchor::Grounded(_) => window.fit(&posed_corners(&puppet.skinned, &puppet.drawn.hidden, &posed, body, &head), &head, &eye_points, view),
+            _ => grown_window(&puppet.skinned, &puppet.drawn.hidden, &posed, body, &head, &eye_points, view),
+        };
         let bounded = Instant::now();
         let local = quad.inverse();
         let (skin, to_window) = lit(&quad, &figure, body);

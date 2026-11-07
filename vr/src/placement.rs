@@ -334,6 +334,16 @@ pub fn window(points: &[Vec3], head: &Pose, eyes: &[Vec3], view: f32) -> (Pose, 
     let (low, high) = points.iter().fold(([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]), |(low, high), point| (std::array::from_fn(|axis| low[axis].min(point[axis])), std::array::from_fn(|axis| high[axis].max(point[axis]))));
     let depth = dot(sub(scale(add(low, high), 0.5), head.t), scale(head.axis(2), -1.0)).max(CLOSEST);
     let plane = Pose { r: head.r, t: head.apply([0.0, 0.0, -depth]) };
+    let (mut low, mut high) = seen(points, &plane, eyes, view);
+    if low[0] > high[0] {
+        (low, high) = ([-view * depth; 2], [view * depth; 2]);
+    }
+    let half = (0..2).map(|axis| (high[axis] - low[axis]) / 2.0).fold(0.0, f32::max);
+    (Pose { t: plane.apply([(low[0] + high[0]) / 2.0, (low[1] + high[1]) / 2.0, 0.0]), ..plane }, half)
+}
+
+/// Where the eyes see `points` cross `plane`, clipped to the headset's view: empty (low above high) when they see none.
+fn seen(points: &[Vec3], plane: &Pose, eyes: &[Vec3], view: f32) -> ([f32; 2], [f32; 2]) {
     let local = plane.inverse();
     let (mut low, mut high) = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);
     for eye in eyes.iter().map(|&eye| local.apply(eye)) {
@@ -360,11 +370,34 @@ pub fn window(points: &[Vec3], head: &Pose, eyes: &[Vec3], view: f32) -> (Pose, 
             }
         }
     }
-    if low[0] > high[0] {
-        (low, high) = ([-view * depth; 2], [view * depth; 2]);
+    (low, high)
+}
+
+const SPARE: f32 = 1.4;
+const FILLED: f32 = 0.5;
+const ASKEW: f32 = 0.7;
+
+/// The window a figure is drawn into, held still across frames: SteamVR may show one frame's image on another frame's
+/// quad, which moves the whole figure for that frame unless the quad stays put.
+#[derive(Default)]
+pub struct Window(Option<(Pose, f32)>);
+
+impl Window {
+    pub fn fit(&mut self, points: &[Vec3], head: &Pose, eyes: &[Vec3], view: f32) -> (Pose, f32) {
+        if let Some((held, half)) = self.0 {
+            let local = held.inverse();
+            let facing = dot(head.axis(2), held.axis(2)) >= ASKEW.cos();
+            let (low, high) = seen(points, &held, eyes, view);
+            let reach = (0..2).map(|axis| low[axis].abs().max(high[axis].abs())).fold(0.0, f32::max);
+            let span = (0..2).map(|axis| (high[axis] - low[axis]) / 2.0).fold(0.0, f32::max);
+            if facing && eyes.iter().all(|&eye| local.apply(eye)[2] > CLOSEST / 2.0) && low[0] <= high[0] && reach <= half && span >= FILLED * half {
+                return (held, half);
+            }
+        }
+        let (fresh, half) = window(points, head, eyes, view);
+        self.0 = Some((fresh, half * SPARE));
+        (fresh, half * SPARE)
     }
-    let half = (0..2).map(|axis| (high[axis] - low[axis]) / 2.0).fold(0.0, f32::max);
-    (Pose { t: plane.apply([(low[0] + high[0]) / 2.0, (low[1] + high[1]) / 2.0, 0.0]), ..plane }, half)
 }
 
 /// Where the right controller's touch point is in the board's frame.
@@ -823,6 +856,34 @@ mod tests {
         assert!(bare.abs() < 1e-6);
         let (window, around) = window(&[[0.0, 1.0, 2.9], [0.0, 1.0, 3.1]], &head, &[head.t], view);
         assert!((around - view * CLOSEST).abs() < 1e-5 && close(window.t, head.apply([0.0, 0.0, -CLOSEST])), "bounds around the eye fill the view: {around}");
+    }
+
+    #[test]
+    fn a_held_window_stays_put_while_its_figure_sways_and_the_head_drifts_inside_it() {
+        let view = 1.4;
+        let figure = |sway: f32| -> Vec<Vec3> { (0..8).map(|k| [if k & 1 == 0 { -0.4 + sway } else { 0.4 + sway }, if k & 2 == 0 { 0.0 } else { 1.7 }, if k & 4 == 0 { -0.2 } else { 0.2 }]).collect() };
+        let at = |drift: f32| looking([drift, 1.6, 1.5], [drift * 0.5, 1.0, 0.0]);
+        let eyes = |head: &Pose| [head.apply([-0.032, 0.0, 0.0]), head.apply([0.032, 0.0, 0.0])];
+        let mut held = Window::default();
+        let (first, half) = held.fit(&figure(0.0), &at(0.0), &eyes(&at(0.0)), view);
+        for step in 1..60 {
+            let phase = step as f32 * 0.3;
+            let head = at(0.01 * phase.cos());
+            let (window, size) = held.fit(&figure(0.02 * phase.sin()), &head, &eyes(&head), view);
+            assert!(window.t == first.t && window.r == first.r && size == half, "step {step}: the window moved to {:?} at {size}", window.t);
+        }
+        let (stepped, _) = held.fit(&figure(2.0), &at(0.0), &eyes(&at(0.0)), view);
+        assert!(!close(stepped.t, first.t), "a figure that leaves its window takes a new one");
+        let mut held = Window::default();
+        let (first, half) = held.fit(&figure(0.0), &at(0.0), &eyes(&at(0.0)), view);
+        let turned = looking([0.0, 1.6, 1.5], [1.5, 1.0, 0.0]);
+        let (faced, _) = held.fit(&figure(0.0), &turned, &eyes(&turned), view);
+        assert!(!close(faced.axis(2), first.axis(2)) && close(faced.axis(2), turned.axis(2)), "a head turned well away gets a window square to it again");
+        let mut held = Window::default();
+        held.fit(&figure(0.0), &at(0.0), &eyes(&at(0.0)), view);
+        let speck: Vec<Vec3> = figure(0.0).iter().map(|&[x, y, z]| [x * 0.2, 0.8 + (y - 0.8) * 0.2, z * 0.2]).collect();
+        let (_, shrunk) = held.fit(&speck, &at(0.0), &eyes(&at(0.0)), view);
+        assert!(shrunk < half / 2.0, "a figure filling little of its window gets a smaller one: {shrunk} against {half}");
     }
 
     #[test]

@@ -257,7 +257,7 @@ fn untinted(uv: vec2<f32>, gradient: mat2x2<f32>) -> vec3<f32> {
 fn band(v: f32, width: f32, border: f32, blur: f32, reach: f32) -> f32 {
     let low = saturate(border - 0.5 * blur - reach);
     let high = saturate(border + 0.5 * blur);
-    return saturate((v - low) / max(saturate(high - low + width), 1e-5));
+    return saturate((v - low) / max(saturate(high - low + width), 1e-4));
 }
 
 fn hue(color: vec3<f32>, settings: vec4<f32>) -> vec3<f32> {
@@ -384,7 +384,7 @@ fn matcaps(base: ptr<function, vec3<f32>>, shade: ptr<function, vec3<f32>>, tint
     if (looks[look].matcaps[0].on | looks[look].matcaps[1].on | looks[look].matcaps[2].on | looks[look].matcaps[3].on) == 0u { return glow; }
     let masks = textureSampleGrad(matcap_masks, texture_sampler, uv, gradient[0], gradient[1]);
     let up = normalize(vec3<f32>(0.0, 1.0, 0.0) - view * dot(view, vec3<f32>(0.0, 1.0, 0.0)));
-    let right = normalize(cross(view, up));
+    let right = normalize(cross(up, view));
     let reflected = reflect(-view, normal);
     for (var slot = 0u; slot < 4u; slot++) {
         let matcap = looks[look].matcaps[slot];
@@ -394,7 +394,8 @@ fn matcaps(base: ptr<function, vec3<f32>>, shade: ptr<function, vec3<f32>>, tint
         let add_at = value(at, MATCAP_ADD, slot, matcap.add);
         let mixed_at = value(at, MATCAP_MIXED, slot, matcap.mixed);
         if replace_at == 0.0 && multiply_at == 0.0 && add_at == 0.0 && mixed_at == 0.0 && matcap.screen == 0.0 && matcap.light_add + matcap.emission == 0.0 { continue; }
-        let mapped = select(vec2<f32>(dot(right, normal), dot(up, normal)), reflected.xy, matcap.reflection != 0u) * matcap.border + 0.5;
+        // A matcap image's first row is its top, where Unity's v of one samples it.
+        let mapped = select(vec2<f32>(dot(right, normal), dot(up, normal)), reflected.xy, matcap.reflection != 0u) * vec2<f32>(1.0, -1.0) * matcap.border + 0.5;
         var color = matcap.color;
         if matcap.theme >= 0 { color = vec4<f32>(theme(at, look, u32(matcap.theme)), color.a); }
         let sampled = select(vec4<f32>(1.0), textureSampleLevel(matcap_textures, texture_sampler, mapped, max(matcap.texture, 0), 0.0), matcap.texture >= 0) * color;

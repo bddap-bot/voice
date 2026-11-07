@@ -5,6 +5,7 @@ use serde_json::Value;
 
 pub mod arms;
 pub mod constraint;
+pub mod contact;
 pub mod expressions;
 pub mod spring;
 

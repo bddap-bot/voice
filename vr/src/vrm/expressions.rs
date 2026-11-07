@@ -462,6 +462,8 @@ pub enum Effect {
     Translation { node: usize, direction: [f32; 3] },
     Material { node: usize, choices: Vec<[f32; 4]> },
     Constraint { node: usize },
+    /// The controller's own parameter, which the animator writes every step from the clips animating it.
+    Parameter(String),
     /// An effect a newer converter writes: its target holds still rather than refusing the avatar.
     #[serde(skip)]
     Unread(String),
@@ -529,7 +531,7 @@ pub struct SwitchedCollider {
     pub when: Vec<(usize, f32)>,
 }
 
-fn off(when: &[(usize, f32)], values: &[f32]) -> bool {
+pub(super) fn off(when: &[(usize, f32)], values: &[f32]) -> bool {
     when.iter().any(|&(target, value)| (values[target] - value).abs() >= 0.5)
 }
 
@@ -548,6 +550,8 @@ pub struct Expressions {
     springs: Vec<SwitchedSpring>,
     #[serde(default)]
     colliders: Vec<SwitchedCollider>,
+    #[serde(default)]
+    pub contacts: Vec<super::contact::Contact>,
     #[serde(default, rename = "icons")]
     encoded_icons: Vec<String>,
     #[serde(skip)]
@@ -655,9 +659,9 @@ impl Expressions {
             }
         }
         if expressions.clips.iter().flat_map(|clip| &clip.curves).any(|curve| curve.target >= targets) 
-            || expressions.shown.iter().flat_map(|shown| &shown.when).chain(expressions.springs.iter().flat_map(|spring| &spring.when)).chain(expressions.colliders.iter().flat_map(|collider| &collider.when)).any(|&(target, _)| target >= targets)
+            || expressions.shown.iter().flat_map(|shown| &shown.when).chain(expressions.springs.iter().flat_map(|spring| &spring.when)).chain(expressions.colliders.iter().flat_map(|collider| &collider.when)).chain(expressions.contacts.iter().flat_map(|contact| &contact.when)).any(|&(target, _)| target >= targets)
         {
-            return Err(format!("{EXTENSION}: a curve or switched node, spring or collider names a target it does not have"));
+            return Err(format!("{EXTENSION}: a curve or switched node, spring, collider or contact names a target it does not have"));
         }
         Ok(expressions)
     }
@@ -680,10 +684,12 @@ impl Expressions {
                 && self.targets.iter().all(|other| !matches!(&other.effect, Effect::Rotation(other) if other.node == rotation.node && other.rest != rotation.rest)),
             Effect::Translation { node, direction } => *node < nodes && direction.iter().all(|v| v.is_finite()),
             Effect::Constraint { node } => *node < nodes,
+            Effect::Parameter(_) => true,
             Effect::Material { node, choices } => *node < nodes && !choices.is_empty(),
         });
-        if !fits || self.shown.iter().any(|shown| shown.node >= nodes) || self.springs.iter().flat_map(|spring| &spring.joints).any(|&joint| joint >= nodes) {
-            return Err(format!("{EXTENSION}: a target, shown node or switched spring names a node, mesh or blend shape the model does not have"));
+        let contacts_fit = self.contacts.iter().all(|contact| contact.node < nodes && contact.shape.radius.is_finite() && contact.shape.radius >= 0.0 && contact.shape.offset.iter().chain(contact.shape.tail.iter().flatten()).all(|v| v.is_finite()));
+        if !fits || !contacts_fit || self.shown.iter().any(|shown| shown.node >= nodes) || self.springs.iter().flat_map(|spring| &spring.joints).any(|&joint| joint >= nodes) {
+            return Err(format!("{EXTENSION}: a target, shown node, switched spring or contact names a node, mesh or blend shape the model does not have"));
         }
         Ok(())
     }
@@ -724,7 +730,7 @@ impl Expressions {
                 Effect::Rotation(rotation) => turned.entry(rotation.node).or_insert_with(|| (rotation, rotation.rest.clone())).1[rotation.axis] = value,
                 Effect::Translation { node, direction } => pose.translations[*node] += value * Vec3::from(*direction),
                 Effect::Constraint { node } => { pose.constraint_weights.insert(*node, value.clamp(0.0, 1.0)); }
-                Effect::Material { .. } | Effect::Hue(_) | Effect::Color(_) | Effect::Tone(_) | Effect::Look(_) | Effect::Unread(_) => {}
+                Effect::Parameter(_) | Effect::Material { .. } | Effect::Hue(_) | Effect::Color(_) | Effect::Tone(_) | Effect::Look(_) | Effect::Unread(_) => {}
             }
         }
         for (node, (rotation, components)) in turned {
@@ -885,6 +891,12 @@ impl Controller {
             };
             for (target, value) in values {
                 out[target] += (value - out[target]) * weight;
+            }
+        }
+        for (target, &value) in expressions.targets.iter().zip(&out) {
+            if let Effect::Parameter(name) = &target.effect {
+                let integral = self.index.get(name).is_some_and(|&at| expressions.parameters[at].kind != ValueType::Float);
+                self.set(name, if integral { value.round() } else { value });
             }
         }
         out

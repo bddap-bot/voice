@@ -155,6 +155,11 @@ struct Puppet {
     /// The vertices the last step's morph moved.
     changed: Vec<u32>,
     controller: Option<Controller>,
+    /// What the menu's contact receivers touched, the targets' values and each node's place in the room at the last step,
+    /// from which the next senses.
+    touch: vrm::contact::Touch,
+    values: Vec<f32>,
+    felt: Vec<glam::Mat4>,
 }
 
 /// Colours across a radial's bar, enough that each authored step of a stepped one shows.
@@ -249,7 +254,7 @@ fn dressed(model: Model, mut clips: HashMap<String, Clip>, id: &str, renderer: &
     tracing::info!("appearance {} stands {height:.2} m full size", id);
     let drawn = renderer.appearance(&model, &skinned)?;
     let controller = model.menu.as_ref().map(|menu| Controller::new(menu, remembered));
-    Ok(Puppet { model, skinned, fit, full: height / HEIGHT, standing, animator: Animator::new(clips, own, Random::seeded()), gaze: Gaze::default(), springs: Springs::default(), reach: Vec::new(), contacts: spring::Contacts::default(), constraints: vrm::constraint::Constraints::default(), drawn, changed: Vec::new(), controller })
+    Ok(Puppet { model, skinned, fit, full: height / HEIGHT, standing, animator: Animator::new(clips, own, Random::seeded()), gaze: Gaze::default(), springs: Springs::default(), reach: Vec::new(), contacts: spring::Contacts::default(), constraints: vrm::constraint::Constraints::default(), drawn, changed: Vec::new(), controller, touch: Default::default(), values: Vec::new(), felt: Vec::new() })
 }
 
 impl Puppet {
@@ -258,6 +263,7 @@ impl Puppet {
             tracing::info!("loop {clip}");
         }
         let mut pose = self.model.pose(&self.animator.humanoid(&self.standing, self.model.rest_hips()));
+        self.sense(hands, delta);
         let (retextured, idle) = self.express(&mut pose, 1, delta);
         let mut worlds = self.model.worlds(&pose);
         let fitted = self.fit.placement(&self.model, &worlds, 0.0);
@@ -280,7 +286,28 @@ impl Puppet {
         self.settle(&mut pose, body, hands, delta, &idle);
         self.changed = self.skinned.morph(&pose.weights);
         self.changed.extend(retextured);
-        (self.model.worlds(&pose), body, stand)
+        let worlds = self.model.worlds(&pose);
+        self.felt = worlds.iter().map(|world| body * *world).collect();
+        (worlds, body, stand)
+    }
+
+    /// Sets the menu's contact receivers from the wearer's `hands` and the figure's own senders, where it stood at the last step.
+    fn sense(&mut self, hands: &[spring::Hand], delta: f32) {
+        let (Some(menu), Some(controller)) = (&self.model.menu, &mut self.controller) else { return };
+        if menu.contacts.is_empty() || self.felt.is_empty() || self.values.len() != menu.targets.len() {
+            return;
+        }
+        let mut senders = vrm::contact::Touch::own(menu, &self.values, &self.felt);
+        senders.extend(hands.iter().filter_map(|hand| {
+            let (key, tags) = match hand.name {
+                "left controller" => (0, vrm::contact::HAND[0]),
+                "right controller" => (1, vrm::contact::HAND[1]),
+                FINGERTIP => (2, vrm::contact::FINGER),
+                _ => return None,
+            };
+            Some(vrm::contact::worn(menu.contacts.len() + key, hand.from, hand.to, hand.radius, tags))
+        }));
+        self.touch.sense(menu, &self.values, &self.felt, &senders, controller, delta);
     }
 
     /// Runs the menu's controller `steps` times and applies its last values to `pose`; the vertices it retextured.
@@ -290,6 +317,7 @@ impl Puppet {
         for _ in 0..steps {
             values = controller.step(menu, delta);
         }
+        self.values.clone_from(&values);
         self.drawn.hidden = menu.apply(&values, pose);
         self.drawn.seconds += steps as f64 * delta as f64;
         self.skinned.surface_values(menu, &values);

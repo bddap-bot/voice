@@ -472,7 +472,9 @@ pub struct Look {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EncodedLooks {
-    index: usize,
+    #[serde(default)]
+    index: Option<usize>,
+    #[serde(default)]
     materials: Vec<Look>,
     #[serde(default)]
     decals: Vec<usize>,
@@ -484,20 +486,33 @@ struct EncodedLooks {
     emission: Option<usize>,
     #[serde(default)]
     clearcoat_maps: Vec<usize>,
+    #[serde(default)]
+    outline: Option<usize>,
+    #[serde(default)]
+    outline_width: Option<f32>,
+}
+
+/// The inverted hull of the materials whose glTF extras say `outline`, over the atlas UV: its RGB the hull's colour,
+/// its alpha the hull's width there as a share of `width`, in the model's own units.
+#[derive(Clone, Debug)]
+pub struct OutlineLayer {
+    pub image: Image,
+    pub width: f32,
 }
 
 /// What each atlas texel's material lays over the albedo: `index`'s red channel names a texel's entry in `materials`,
-/// one-based, zero for none. Every layer is a glTF image the extension names by index, each at its own size;
+/// one-based, zero or no index for none. Every layer is a glTF image the extension names by index, each at its own size;
 /// a clear coat map holds linear mask, smoothness, reflection and specular levels in its four channels.
 #[derive(Clone, Debug)]
 pub struct Looks {
-    pub index: Image,
+    pub index: Option<Image>,
     pub materials: Vec<Look>,
     pub decals: Vec<Image>,
     pub matcaps: Vec<Image>,
     pub matcap_masks: Option<Image>,
     pub emission: Option<Image>,
     pub clearcoat_maps: Vec<Image>,
+    pub outline: Option<OutlineLayer>,
 }
 
 /// One component of a node's Unity local rotation: of `rest` read as localEulerAngles in degrees when it has three, a quaternion when four.
@@ -726,12 +741,17 @@ fn looks(encoded: EncodedLooks, image: &impl Fn(usize) -> Result<Image, String>)
         coat.map = coat.map.filter(|&map| map < clearcoat_maps.len());
     }
     let looks = Looks {
-        index: image(encoded.index).map_err(|error| format!("{EXTENSION}: look index: {error}"))?,
+        index: encoded.index.map(|at| image(at)).transpose().map_err(|error| format!("{EXTENSION}: look index: {error}"))?,
         decals: encoded.decals.iter().map(|&at| image(at)).collect::<Result<_, _>>().map_err(|error| format!("{EXTENSION}: a decal: {error}"))?,
         matcaps,
         matcap_masks: encoded.matcap_masks.map(|at| image(at)).transpose().map_err(|error| format!("{EXTENSION}: matcap masks: {error}"))?,
         emission: encoded.emission.map(|at| image(at)).transpose().map_err(|error| format!("{EXTENSION}: emission: {error}"))?,
         clearcoat_maps,
+        outline: match (encoded.outline, encoded.outline_width) {
+            (None, _) => None,
+            (Some(at), Some(width)) if width.is_finite() && width > 0.0 => Some(OutlineLayer { image: image(at).map_err(|error| format!("{EXTENSION}: outline: {error}"))?, width }),
+            (Some(_), _) => return Err(format!("{EXTENSION}: an outline layer without a positive outlineWidth")),
+        },
         materials,
     };
     let textures = looks.matcaps.len() as u32;
@@ -747,7 +767,7 @@ fn looks(encoded: EncodedLooks, image: &impl Fn(usize) -> Result<Image, String>)
     if !looks.materials.iter().all(themed) {
         return Err(format!("{EXTENSION}: a look's emission or matcap is drawn in a theme colour the look does not carry"));
     }
-    if looks.materials.iter().flat_map(|look| look.decals.iter().flatten()).any(|decal| decal.image >= looks.decals.len()) || looks.index.rgba.chunks_exact(4).any(|texel| texel[0] as usize > looks.materials.len()) || looks.materials.iter().flat_map(|look| look.matcaps.iter().flatten()).any(|matcap| matcap.texture.is_some_and(|texture| texture >= textures)) {
+    if looks.materials.iter().flat_map(|look| look.decals.iter().flatten()).any(|decal| decal.image >= looks.decals.len()) || looks.index.iter().flat_map(|index| index.rgba.chunks_exact(4)).any(|texel| texel[0] as usize > looks.materials.len()) || looks.materials.iter().flat_map(|look| look.matcaps.iter().flatten()).any(|matcap| matcap.texture.is_some_and(|texture| texture >= textures)) {
         return Err(format!("{EXTENSION}: a look names a decal, material or matcap it does not have"));
     }
     Ok(looks)

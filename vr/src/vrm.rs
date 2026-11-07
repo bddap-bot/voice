@@ -48,6 +48,9 @@ pub struct Outline {
     pub width_image: Option<usize>,
     pub color: [f32; 3],
     pub lighting_mix: f32,
+    /// The width image is a looks outline layer: its RGB the hull's flat-lit colour, its alpha the width, rather than
+    /// MToon's width in green under `color`.
+    pub layered: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -629,6 +632,7 @@ fn material_zero(document: &Document, material: &Value, properties: &Value) -> M
             width_image: texture("_OutlineWidthTexture"),
             color: [outline_r, outline_g, outline_b],
             lighting_mix: if float("_OutlineColorMode", 0.0) as i32 == 1 { float("_OutlineLightingMix", 1.0) } else { 0.0 },
+            layered: false,
         }),
     }
 }
@@ -680,6 +684,7 @@ fn material_one(document: &Document, material: &Value) -> Material {
             width_image: document.texture_image(&toon["outlineWidthMultiplyTexture"]["index"]),
             color: floats(&toon["outlineColorFactor"], [0.0; 3]),
             lighting_mix: number(&toon["outlineLightingMixFactor"], 1.0),
+            layered: false,
         }),
     }
 }
@@ -947,6 +952,15 @@ impl Model {
         };
         if let Some(menu) = &menu {
             menu.check(nodes.len(), &meshes)?;
+        }
+        if let Some(layer) = menu.as_ref().and_then(|menu| menu.looks.as_ref()?.outline.as_ref()) {
+            let image = images.len();
+            images.push(layer.image.clone());
+            for (material, json) in materials.iter_mut().zip(list("materials")) {
+                if json["extras"]["outline"].as_bool() == Some(true) {
+                    material.outline = Some(Outline { width: OutlineWidth::World, factor: layer.width, width_image: Some(image), color: [1.0; 3], lighting_mix: 0.0, layered: true });
+                }
+            }
         }
         let arms = if object { Err("an object has no arms".to_owned()) } else { arms::parse(json, document.binary) };
         let mut model = Model { version, nodes, meshes, skins, materials, images, humanoid, expressions, own, look_at, rest_turns: Vec::new(), rig, constraints, particles, program, spreads, menu, arms };
@@ -2039,7 +2053,7 @@ pub mod tests {
         assert_eq!(menu.hue_mask.as_ref().map(size), Some((3, 1)));
         let untinted = menu.untinted.as_ref().unwrap();
         assert_eq!((size(&untinted.image), untinted.cells.len()), ((4, 1), 1));
-        assert_eq!((size(&looks.index), looks.matcaps.iter().map(size).collect::<Vec<_>>(), looks.matcap_masks.as_ref().map(size), looks.emission.as_ref().map(size), looks.decals.iter().map(size).collect::<Vec<_>>()),
+        assert_eq!((size(looks.index.as_ref().unwrap()), looks.matcaps.iter().map(size).collect::<Vec<_>>(), looks.matcap_masks.as_ref().map(size), looks.emission.as_ref().map(size), looks.decals.iter().map(size).collect::<Vec<_>>()),
             ((1, 1), vec![(2, 2)], Some((5, 1)), Some((6, 1)), vec![(7, 1)]));
         assert_eq!(menu.icons[0].rgba, [1, 2, 3, 255, 1, 2, 3, 255], "an opaque icon keeps its colour as it premultiplies");
     }
@@ -2258,6 +2272,27 @@ pub mod tests {
         let outline = cutout.outline.unwrap();
         assert!(cutout.depth_write && outline.width == OutlineWidth::Screen && outline.lighting_mix == 0.0);
         assert!((outline.color[1] - srgb_to_linear(0.5)).abs() < 1e-6, "the v0 outline colour is sRGB");
+    }
+
+    #[test]
+    fn a_material_whose_extras_say_outline_draws_the_looks_outline_layer() {
+        let read = |layered: bool| {
+            let mut builder = Builder::new(serde_json::json!({ "VRMC_vrm": { "humanoid": { "humanBones": {} } } }));
+            let looks = if layered { serde_json::json!({ "outline": builder.webp(2, 1, &[40, 20, 10, 128, 40, 20, 10, 128]), "outlineWidth": 0.002 }) } else { serde_json::json!({}) };
+            builder.json["extensions"]["VRCHAT_expressions"] = serde_json::json!({ "menu": [], "parameters": [], "layers": [], "clips": [], "targets": [], "shown": [], "icons": [], "looks": looks });
+            let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+            builder.set("nodes", serde_json::json!([{ "mesh": 0 }]));
+            builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position }, "material": 0 }] }]));
+            builder.set("materials", serde_json::json!([{ "extras": { "outline": true, "depthWrite": true } }, {}]));
+            Model::parse(&builder.glb()).unwrap()
+        };
+        let model = read(true);
+        let outline = model.materials[0].outline.clone().expect("the extras' material draws the layer");
+        assert!(outline.layered && outline.width == OutlineWidth::World && outline.factor == 0.002);
+        let image = &model.images[outline.width_image.unwrap()];
+        assert_eq!((image.width, image.height, &image.rgba[..4]), (2, 1, &[40, 20, 10, 128][..]));
+        assert!(model.materials[1].outline.is_none(), "a material without the extras draws no hull");
+        assert!(read(false).materials[0].outline.is_none(), "without a layer the extras draw nothing");
     }
 
     #[test]

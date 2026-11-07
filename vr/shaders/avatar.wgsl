@@ -20,6 +20,7 @@ struct Material {
     outline_lighting_mix: f32,
     outline_width: f32,
     outline_screen: f32,
+    outline_layered: f32,
 }
 
 var<push_constant> draw: Draw;
@@ -178,7 +179,8 @@ fn skin(input: Vertex) -> Varying {
     var out: Varying;
     if draw.outline != 0u {
         let material = materials[draw.material];
-        var width = material.outline_width * textureSampleLevel(outline_width_texture, texture_sampler, input.uv, 0.0).g;
+        let sampled = textureSampleLevel(outline_width_texture, texture_sampler, input.uv, 0.0);
+        var width = material.outline_width * select(sampled.g, sampled.a, material.outline_layered > 0.5);
         if material.outline_screen > 0.5 {
             width *= (draw.view_projection * vec4<f32>(position, 1.0)).w / abs(draw.focal);
         } else {
@@ -190,6 +192,10 @@ fn skin(input: Vertex) -> Varying {
     if draw.outline != 0u {
         // The hull sits a hair behind the surface it outlines, as three-vrm draws it.
         out.clip.z += 1e-6 * out.clip.w;
+        // A layer's zero-width vertex drops its triangles, as lilToon deletes them, so no back face shows there.
+        if materials[draw.material].outline_layered > 0.5 && textureSampleLevel(outline_width_texture, texture_sampler, input.uv, 0.0).a == 0.0 {
+            out.clip = vec4<f32>(bitcast<f32>(0x7fc00000u));
+        }
     }
     out.normal = normal;
     out.uv = input.uv;
@@ -567,7 +573,9 @@ fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
         light = direct + mix(hemisphere, 0.5 * (SKY + GROUND), material.equalization) * base.rgb;
     }
     var color = light + glow + emission(input.surface, look, input.uv, gradient, mask.r) + sheen;
-    if draw.outline != 0u {
+    if draw.outline != 0u && material.outline_layered > 0.5 {
+        color = textureSampleGrad(outline_width_texture, texture_sampler, input.uv, gradient[0], gradient[1]).rgb * min(KEY_COLOR + 0.5 * (SKY + GROUND), vec3<f32>(1.0));
+    } else if draw.outline != 0u {
         color = material.outline_color * mix(vec3<f32>(1.0), color, material.outline_lighting_mix);
     }
     let alpha = select(1.0, base.a, material.blend > 0.5);

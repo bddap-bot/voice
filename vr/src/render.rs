@@ -315,7 +315,8 @@ struct MaterialData {
     outline_lighting_mix: f32,
     outline_width: f32,
     outline_screen: f32,
-    padding: [f32; 2],
+    outline_layered: f32,
+    padding: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -561,7 +562,7 @@ impl Renderer {
             vk::DescriptorSetLayoutBinding::default().binding(0).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(1).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(2).descriptor_type(vk::DescriptorType::SAMPLER).descriptor_count(1).stage_flags(both),
-            vk::DescriptorSetLayoutBinding::default().binding(3).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX),
+            vk::DescriptorSetLayoutBinding::default().binding(3).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(both),
             vk::DescriptorSetLayoutBinding::default().binding(4).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX),
             vk::DescriptorSetLayoutBinding::default().binding(5).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(both),
             vk::DescriptorSetLayoutBinding::default().binding(6).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
@@ -750,7 +751,7 @@ impl Renderer {
             appearance.textures.push(texture(gpu, image.width, image.height, &image.rgba, format)?);
             Ok(Some(appearance.textures.len() - 1))
         };
-        let look_index = single(looks.map(|looks| crate::vrm::Image { width: looks.index.width, height: looks.index.height, rgba: looks.index.rgba.iter().step_by(4).copied().collect() }).as_ref(), vk::Format::R8_UNORM)?;
+        let look_index = single(looks.and_then(|looks| looks.index.as_ref()).map(|index| crate::vrm::Image { width: index.width, height: index.height, rgba: index.rgba.iter().step_by(4).copied().collect() }).as_ref(), vk::Format::R8_UNORM)?;
         let matcap_masks = single(looks.and_then(|looks| looks.matcap_masks.as_ref()), vk::Format::R8G8B8A8_UNORM)?;
         let emission = single(looks.and_then(|looks| looks.emission.as_ref()), FORMAT)?;
         let white = appearance.textures.len();
@@ -1193,7 +1194,8 @@ fn material_data(material: &crate::vrm::Material) -> MaterialData {
         outline_lighting_mix: outline.map_or(0.0, |outline| outline.lighting_mix),
         outline_width: outline.map_or(0.0, |outline| outline.factor),
         outline_screen: outline.is_some_and(|outline| outline.width == OutlineWidth::Screen) as u8 as f32,
-        padding: [0.0; 2],
+        outline_layered: outline.is_some_and(|outline| outline.layered) as u8 as f32,
+        padding: 0.0,
     }
 }
 
@@ -1506,7 +1508,7 @@ mod tests {
             menu.untinted = Some(crate::vrm::expressions::Untinted { image: crate::vrm::Image { width: 4, height: 1, rgba: [[255, 0, 0, 255], [255, 0, 0, 255], [255; 4], [255; 4]].concat() }, cells: vec![[0.0, 0.0, 1.0, 1.0, 0.5, 0.0, 1.0, 1.0]] });
             let mut look = looks_test::look();
             look.decals[1] = Some(crate::vrm::expressions::Decal { alpha: 0.0, intensity: 1.0, color_blend: [(8.0, DecalBlend::Multiply), (9.0, DecalBlend::Lighten), (10.0, DecalBlend::Darken)].into_iter().find(|(at, _)| *at == space).map_or(DecalBlend::Replace, |(_, blend)| blend), image: 0, hue: None });
-            menu.looks = Some(crate::vrm::expressions::Looks { index: crate::vrm::Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }, materials: vec![look], decals: vec![crate::vrm::Image { width: 2, height: 1, rgba: if space == 10.0 { vec![64, 255, 255, 255, 0, 0, 0, 0] } else { vec![0, 255, 0, 255, 0, 0, 0, 0] } }], matcaps: Vec::new(), matcap_masks: None, emission: None, clearcoat_maps: Vec::new() });
+            menu.looks = Some(crate::vrm::expressions::Looks { index: Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }), materials: vec![look], decals: vec![crate::vrm::Image { width: 2, height: 1, rgba: if space == 10.0 { vec![64, 255, 255, 255, 0, 0, 0, 0] } else { vec![0, 255, 0, 255, 0, 0, 0, 0] } }], matcaps: Vec::new(), matcap_masks: None, emission: None, clearcoat_maps: Vec::new(), outline: None });
             model.menu = Some(menu);
             let mut skinned = model.skinned().unwrap();
             let original_vertices = bytes_of(&skinned.vertices).to_vec();
@@ -1582,13 +1584,14 @@ mod tests {
         let targets: Vec<serde_json::Value> = effect.into_iter().map(|effect| serde_json::json!({"effect": effect, "default": rest})).collect();
         let mut menu = crate::vrm::expressions::Expressions::parse(&serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": targets})).unwrap();
         menu.looks = Some(crate::vrm::expressions::Looks {
-            index: crate::vrm::Image { width: 2, height: 1, rgba: vec![1, 0, 0, 255, 0, 0, 0, 255] },
+            index: Some(crate::vrm::Image { width: 2, height: 1, rgba: vec![1, 0, 0, 255, 0, 0, 0, 255] }),
             materials: vec![look],
             decals: vec![crate::vrm::Image { width: 1, height: 1, rgba: vec![0, 255, 0, 255] }],
             matcaps,
             matcap_masks: None,
             emission: Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![255; 4] }),
             clearcoat_maps,
+            outline: None,
         });
         model.menu = Some(menu);
         let mut skinned = model.skinned().unwrap();
@@ -1689,7 +1692,7 @@ mod tests {
         look.decals[0] = Some(crate::vrm::expressions::Decal { alpha: 1.0, intensity: 1.0, color_blend: DecalBlend::Replace, image: 1, hue: None });
         let index = (0..64).flat_map(|at| [(at % 8 >= 4 && at / 8 < 4) as u8, 0, 0, 255]).collect();
         let unused = crate::vrm::Image { width: 3, height: 5, rgba: vec![255; 60] };
-        menu.looks = Some(crate::vrm::expressions::Looks { index: crate::vrm::Image { width: 8, height: 8, rgba: index }, materials: vec![look], decals: vec![unused, decal], matcaps: Vec::new(), matcap_masks: None, emission: None, clearcoat_maps: Vec::new() });
+        menu.looks = Some(crate::vrm::expressions::Looks { index: Some(crate::vrm::Image { width: 8, height: 8, rgba: index }), materials: vec![look], decals: vec![unused, decal], matcaps: Vec::new(), matcap_masks: None, emission: None, clearcoat_maps: Vec::new(), outline: None });
         model.menu = Some(menu);
         let skinned = model.skinned().unwrap();
         let worlds = model.worlds(&model.rest());
@@ -1865,7 +1868,7 @@ mod tests {
             builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position, "NORMAL": normal }, "indices": indices, "material": 0 }] }]));
             builder.set("materials", serde_json::json!([{ "doubleSided": true, "pbrMetallicRoughness": { "baseColorFactor": [1.0, 1.0, 1.0, 1.0] } }]));
             let mut model = Model::parse(&builder.glb()).unwrap();
-            model.materials[0].outline = Some(crate::vrm::Outline { width: crate::vrm::OutlineWidth::Screen, factor, width_image: None, color: [0.0; 3], lighting_mix: 0.0 });
+            model.materials[0].outline = Some(crate::vrm::Outline { width: crate::vrm::OutlineWidth::Screen, factor, width_image: None, color: [0.0; 3], lighting_mix: 0.0, layered: false });
             let skinned = model.skinned().unwrap();
             let worlds = model.worlds(&model.rest());
             let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [64, 64], crate::HEIGHT / PAGE_HEIGHT).unwrap();
@@ -1941,6 +1944,59 @@ mod tests {
         renderer.render(&appearance, [eye_projection(Vec3::new(0.0, 0.0, 3.0), 1.5, 1.5), None], Mat4::IDENTITY, 64).unwrap();
         let cleared = renderer.read().unwrap();
         assert_eq!(pixel(&cleared, 128, ((-0.8 * 1.2 + 1.5) / 3.0 * 64.0) as u32, ((1.5 + 0.6 * 1.2) / 3.0 * 64.0) as u32), [0; 4], "cleared particles draw nothing");
+    }
+
+    #[test]
+    fn a_layered_outline_takes_its_colour_from_the_layer_lit_flat() {
+        let corners = [[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0]];
+        let drawn = |share: u8| {
+            let mut builder = crate::vrm::tests::Builder::new(serde_json::json!({ "VRMC_vrm": { "humanoid": { "humanBones": {} } } }));
+            let position = builder.accessor("VEC3", corners.as_flattened());
+            let normal = builder.accessor("VEC3", corners.as_flattened());
+            let indices = builder.indices(&[0, 2, 4, 2, 1, 4, 1, 3, 4, 3, 0, 4, 2, 0, 5, 1, 2, 5, 3, 1, 5, 0, 3, 5]);
+            builder.set("nodes", serde_json::json!([{ "mesh": 0 }]));
+            builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position, "NORMAL": normal }, "indices": indices, "material": 0 }] }]));
+            builder.set("materials", serde_json::json!([{ "pbrMetallicRoughness": { "baseColorFactor": [1.0, 0.0, 0.0, 1.0] } }]));
+            let mut model = Model::parse(&builder.glb()).unwrap();
+            model.images.push(crate::vrm::Image { width: 1, height: 1, rgba: vec![0, 255, 0, share] });
+            model.materials[0].outline = Some(crate::vrm::Outline { width: crate::vrm::OutlineWidth::World, factor: 0.2, width_image: Some(0), color: [1.0; 3], lighting_mix: 0.0, layered: true });
+            let skinned = model.skinned().unwrap();
+            let worlds = model.worlds(&model.rest());
+            let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [64, 64], crate::HEIGHT / PAGE_HEIGHT).unwrap();
+            let mut appearance = renderer.appearance(&model, &skinned).unwrap();
+            appearance.update(&skinned.palette(&worlds, Mat4::from_scale(Vec3::splat(0.08))), &skinned, &[]);
+            renderer.render(&appearance, [eye_projection(Vec3::new(0.05, 0.15, 0.4), 0.2, 0.2), None], Mat4::IDENTITY, 64).unwrap();
+            renderer.read().unwrap().chunks_exact(4).map(|texel| [texel[0], texel[1], texel[2], texel[3]]).collect::<Vec<[u8; 4]>>()
+        };
+        let bare = drawn(0);
+        let outlined = drawn(255);
+        let hull: Vec<[u8; 4]> = bare.iter().zip(&outlined).filter(|(bare, _)| bare[3] == 0).map(|(_, outlined)| *outlined).filter(|texel| texel[3] == 255).collect();
+        assert!(hull.len() > 100, "the layer's alpha widens the figure by {} texels", hull.len());
+        assert!(hull.iter().all(|texel| texel[0] < 8 && texel[1] > 240), "the hull is the layer's green, lit flat to white and not by the red albedo: {:?}", &hull[..4]);
+    }
+
+    #[test]
+    fn a_layered_outline_draws_no_hull_where_the_layer_gives_no_width() {
+        let drawn = |share: u8| {
+            let mut builder = crate::vrm::tests::Builder::new(serde_json::json!({ "VRMC_vrm": { "humanoid": { "humanBones": {} } } }));
+            let position = builder.accessor("VEC3", &[-1.0, -1.0, 0.0, 0.0, 1.0, 0.0, 1.0, -1.0, 0.0]);
+            let normal = builder.accessor("VEC3", &[0.0, 0.0, -1.0, 0.0, 0.0, -1.0, 0.0, 0.0, -1.0]);
+            builder.set("nodes", serde_json::json!([{ "mesh": 0 }]));
+            builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position, "NORMAL": normal }, "material": 0 }] }]));
+            builder.set("materials", serde_json::json!([{ "pbrMetallicRoughness": { "baseColorFactor": [1.0, 1.0, 1.0, 1.0] } }]));
+            let mut model = Model::parse(&builder.glb()).unwrap();
+            model.images.push(crate::vrm::Image { width: 1, height: 1, rgba: vec![0, 255, 0, share] });
+            model.materials[0].outline = Some(crate::vrm::Outline { width: crate::vrm::OutlineWidth::World, factor: 0.2, width_image: Some(0), color: [1.0; 3], lighting_mix: 0.0, layered: true });
+            let skinned = model.skinned().unwrap();
+            let worlds = model.worlds(&model.rest());
+            let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [32, 32], crate::HEIGHT / PAGE_HEIGHT).unwrap();
+            let mut appearance = renderer.appearance(&model, &skinned).unwrap();
+            appearance.update(&skinned.palette(&worlds, Mat4::from_scale(Vec3::splat(0.08))), &skinned, &[]);
+            renderer.render(&appearance, [eye_projection(Vec3::new(0.0, 0.0, 0.4), 0.2, 0.2), None], Mat4::IDENTITY, 32).unwrap();
+            renderer.read().unwrap().chunks_exact(4).filter(|texel| texel[3] != 0).count()
+        };
+        assert!(drawn(1) > 0, "a hull of any width shows its back face where the surface culls its own");
+        assert_eq!(drawn(0), 0, "a zero-width vertex drops the hull's triangles");
     }
 
     #[test]

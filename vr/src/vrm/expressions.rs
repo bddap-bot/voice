@@ -375,7 +375,7 @@ impl TryFrom<u8> for DecalBlend {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", try_from = "EncodedDecal")]
 pub struct Decal {
     pub alpha: f32,
     pub intensity: f32,
@@ -384,6 +384,28 @@ pub struct Decal {
     pub image: usize,
     /// Set where a clip turns the decal's hue, so its image holds it unturned.
     pub hue: Option<HueShift>,
+}
+
+/// A catalog file converted before decals named their mode says only whether it multiplies; read until the catalog
+/// is republished.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EncodedDecal {
+    alpha: f32,
+    intensity: f32,
+    color_blend: Option<DecalBlend>,
+    multiply: Option<bool>,
+    image: usize,
+    hue: Option<HueShift>,
+}
+
+impl TryFrom<EncodedDecal> for Decal {
+    type Error = String;
+
+    fn try_from(d: EncodedDecal) -> Result<Self, String> {
+        let color_blend = d.color_blend.or(d.multiply.map(|multiply| if multiply { DecalBlend::Multiply } else { DecalBlend::Replace })).ok_or("a decal names no colorBlend")?;
+        Ok(Decal { alpha: d.alpha, intensity: d.intensity, color_blend, image: d.image, hue: d.hue })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -1362,7 +1384,8 @@ mod tests {
         let decal = |mode: &str| serde_json::from_str::<Decal>(&format!(r#"{{"alpha": 1, "intensity": 1, "image": 0, "hue": null, {mode}}}"#));
         assert_eq!(decal(r#""colorBlend": 20"#).unwrap().color_blend, DecalBlend::Mixed);
         assert!(decal(r#""colorBlend": 3"#).is_err(), "a number Poiyomi draws black is refused");
-        assert!(decal(r#""multiply": true"#).is_err(), "a decal converted before decals named their mode is refused, not drawn replacing");
+        assert_eq!(decal(r#""multiply": true"#).unwrap().color_blend, DecalBlend::Multiply, "a decal converted before decals named their mode still multiplies");
+        assert!(decal(r#""unused": 0"#).is_err(), "a decal naming no mode is refused");
     }
 
     #[test]

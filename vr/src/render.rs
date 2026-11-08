@@ -103,6 +103,27 @@ struct LookData {
     emission_theme: i32,
     pad: [f32; 3],
     matcaps: [MatcapData; 4],
+    ramp: [[f32; 4]; RAMP / 4],
+    ramped: u32,
+    shadow_tint: f32,
+    ramp_pad: [f32; 2],
+}
+
+/// The points a ramp-lit look's ramp is held at, as many as the avatar shader reads.
+const RAMP: usize = 16;
+
+/// The look's ramp at RAMP evenly spaced points, read linearly between its own.
+fn ramp_points(ramp: &[f32]) -> [[f32; 4]; RAMP / 4] {
+    let mut out = [[1.0; 4]; RAMP / 4];
+    if ramp.len() < 2 {
+        return out;
+    }
+    for i in 0..RAMP {
+        let at = i as f32 * (ramp.len() - 1) as f32 / (RAMP - 1) as f32;
+        let (low, high) = (ramp[at.floor() as usize], ramp[at.ceil() as usize]);
+        out[i / 4][i % 4] = low + (high - low) * at.fract();
+    }
+    out
 }
 
 #[repr(C)]
@@ -134,9 +155,19 @@ fn look_data(look: &crate::vrm::expressions::Look, places: &[Place]) -> LookData
         pad: [0.0; 3],
         flat: matches!(look.lighting, Lighting::Flat { .. }) as u32,
         light_cap: match look.lighting {
-            Lighting::Flat { cap: Some(cap) } => cap,
+            Lighting::Flat { cap: Some(cap) } | Lighting::Lit { ramp: Some(_), cap: Some(cap), .. } => cap,
             _ => f32::MAX,
         },
+        ramp: match &look.lighting {
+            Lighting::Lit { ramp: Some(ramp), .. } => ramp_points(ramp),
+            _ => [[1.0; 4]; RAMP / 4],
+        },
+        ramped: matches!(&look.lighting, Lighting::Lit { ramp: Some(ramp), .. } if ramp.len() >= 2) as u32,
+        shadow_tint: match look.lighting {
+            Lighting::Lit { shadow_tint, .. } => shadow_tint,
+            _ => 0.0,
+        },
+        ramp_pad: [0.0; 2],
         matcaps: look.matcaps.each_ref().map(|matcap| matcap.as_ref().map_or_else(MatcapData::default, |m| MatcapData {
             color: m.color,
             hue: m.hue.as_ref().map_or([0.0; 4], |hue| [hue.shift, hue.space, hue.select, 1.0]),
@@ -1138,7 +1169,7 @@ mod tests {
         use crate::vrm::expressions::{Lighting, Look, Mapping, Matcap, HueShift};
 
         pub fn look() -> Look {
-            Look { rect: [0.0, 0.0, 1.0, 1.0], decals: [None, None, None, None], matcaps: [None, None, None, None], emission: None, lighting: Lighting::Lit, themes: Default::default() }
+            Look { rect: [0.0, 0.0, 1.0, 1.0], decals: [None, None, None, None], matcaps: [None, None, None, None], emission: None, lighting: Lighting::Lit { ramp: None, shadow_tint: 0.0, cap: None }, themes: Default::default() }
         }
 
         pub fn matcap() -> Matcap {
@@ -1208,6 +1239,22 @@ mod tests {
         flat.lighting = crate::vrm::expressions::Lighting::Flat { cap: None };
         let (uncapped, _, _) = look_drawn([128, 64, 32, 255], flat, None, 0.0, 0.0, Vec::new());
         assert!(uncapped[0] > 140, "uncapped, it takes its main and ambient light whole: {uncapped:?}");
+    }
+
+    #[test]
+    fn a_ramp_lit_material_takes_its_main_light_through_its_ramp() {
+        let lighting = |json: serde_json::Value| serde_json::from_value::<crate::vrm::expressions::Lighting>(json).unwrap();
+        let mut look = looks_test::look();
+        look.lighting = lighting(serde_json::json!({"model": "lit", "ramp": [1.0, 1.0], "shadowTint": 0.5, "cap": 1.0}));
+        let (whole, _, _) = look_drawn([128, 64, 32, 255], look.clone(), None, 0.0, 0.0, Vec::new());
+        assert!(whole[..3].iter().zip([128, 64, 32]).all(|(&a, b)| a.abs_diff(b) <= 2), "a ramp whole at every angle, capped at 1, draws the albedo as a flat one does: {whole:?}");
+        look.lighting = lighting(serde_json::json!({"model": "lit", "ramp": [0.0, 0.0]}));
+        let (dark, _, _) = look_drawn([128, 64, 32, 255], look.clone(), None, 0.0, 0.0, Vec::new());
+        assert!(dark[0] < 100, "a ramp dark at every angle with no shadow tint leaves the ambient alone: {dark:?}");
+        look.lighting = lighting(serde_json::json!({"model": "lit", "ramp": [0.0, 0.0], "shadowTint": 1.0}));
+        let (tinted, _, _) = look_drawn([128, 64, 32, 255], look, None, 0.0, 0.0, Vec::new());
+        assert!(tinted[0] > dark[0] + 4 && tinted[2] <= dark[2] + 2, "a whole shadow tint lends the shade the albedo, its red more than its blue: {tinted:?} over {dark:?}");
+        assert_eq!(lighting(serde_json::json!({"model": "lit"})), crate::vrm::expressions::Lighting::Lit { ramp: None, shadow_tint: 0.0, cap: None }, "a lit material without a ramp is lit by angle");
     }
 
     #[test]

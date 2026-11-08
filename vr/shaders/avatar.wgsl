@@ -82,6 +82,9 @@ struct Look {
     themes: array<Theme, 4>,
     emission_theme: i32,
     matcaps: array<Matcap, 4>,
+    ramp: array<vec4<f32>, 4>,
+    ramped: u32,
+    shadow_tint: f32,
 }
 @group(0) @binding(10) var look_index: texture_2d<f32>;
 @group(0) @binding(11) var<storage, read> looks: array<Look>;
@@ -158,6 +161,8 @@ fn vertex(input: Vertex) -> Varying {
 }
 
 // The page's lights, divided by pi as three.js's Lambert term does.
+// The points a ramp-lit look's ramp holds, render.rs RAMP.
+const RAMP = 16u;
 const KEY_DIRECTION = vec3<f32>(0.4685, 0.7496, 0.5622);
 const KEY_COLOR = vec3<f32>(0.987, 0.685, 0.514);
 const RIM_DIRECTION = vec3<f32>(-0.7276, 0.4851, -0.4851);
@@ -412,6 +417,15 @@ fn shaded(input: Varying, front: bool) -> vec4<f32> {
     // light, whichever way it faces: Unity's base pass, which lights it by the one main directional light.
     if looks[look].flat != 0u {
         light = min(KEY_COLOR + 0.5 * (SKY + GROUND), vec3<f32>(looks[look].light_cap)) * base.rgb;
+    } else if looks[look].ramped != 0u {
+        // Toon Standard's base pass: its main light through its ramp at the half-Lambert term, the shade lent the
+        // albedo by its shadow tint, and the ambient, capped where it limits brightness.
+        let x = clamp(dot(normal, KEY_DIRECTION) * 0.5 + 0.5, 0.0, 1.0) * f32(RAMP - 1u);
+        let i = min(u32(x), RAMP - 2u);
+        let j = i + 1u;
+        let ramp = mix(looks[look].ramp[i / 4u][i % 4u], looks[look].ramp[j / 4u][j % 4u], x - f32(i));
+        let level = ramp + (1.0 - ramp) * looks[look].shadow_tint * base.rgb;
+        light = min(level * KEY_COLOR + 0.5 * (SKY + GROUND), vec3<f32>(looks[look].light_cap)) * base.rgb;
     } else {
         let direct = mix(shade, base.rgb, lit) * KEY_COLOR + mix(shade, base.rgb, toon(material, normal, RIM_DIRECTION)) * RIM_COLOR;
         let hemisphere = mix(GROUND, SKY, 0.5 * normal.y + 0.5);

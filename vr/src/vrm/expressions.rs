@@ -411,12 +411,20 @@ pub struct Theme {
     pub speed: f32,
 }
 
-/// How a material takes the light: by the angle it meets each light at, or `Flat`, by the lights' colour alone, capped
-/// at `cap` where its shader caps it.
+/// How a material takes the light: by the angle it meets each light at, through its `ramp` of brightnesses over the
+/// half-Lambert term from 0 to 1 where it has one (VRChat's Toon Standard), its shade lent the albedo by `shadow_tint`;
+/// or `Flat`, by the lights' colour alone. A ramp-lit or flat one is capped at `cap` where its shader caps it.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", tag = "model")]
 pub enum Lighting {
-    Lit,
+    Lit {
+        #[serde(default)]
+        ramp: Option<Vec<f32>>,
+        #[serde(default, rename = "shadowTint")]
+        shadow_tint: f32,
+        #[serde(default)]
+        cap: Option<f32>,
+    },
     Flat { cap: Option<f32> },
 }
 

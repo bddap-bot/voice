@@ -63,7 +63,7 @@ AVATAR = {
         'menu': [{'name': 'Hue', 'type': 'radial', 'parameter': 'Hue', 'controls': []}],
         'targets': [{'default': 0, 'effect': {'hue': [{'node': 1, 'rect': [0, 0, 1, 1]}]}}],
         'clips': [{'curves': [{'target': 0, 'keys': [[0, 0], [1, 1]]}]}],
-        'hueMask': 'iVBOR',
+        'hueMask': 0,
         'springs': [{'joints': [2], 'when': [[0, 1]]}],
         'colliders': [{'collider': 0, 'when': [[0, 1]]}],
     }},
@@ -113,6 +113,15 @@ class Publishing(unittest.TestCase):
             self.assertIn(part, str(refused.exception))
         self.assertEqual(self.catalog.read_bytes(), before)
 
+    def test_untinted_colours_moved_from_a_whole_atlas_to_their_cells_are_kept(self):
+        self.catalog.write_bytes(self.candidate(lambda doc: doc['extensions']['VRCHAT_expressions'].update(colorAtlas='iVBOR')).read_bytes())
+        publish(self.candidate(lambda doc: doc['extensions']['VRCHAT_expressions'].update(untinted={'image': 0, 'cells': [[0, 0, 1, 1, 0, 0, 1, 1]]})), self.catalog)
+        for old in [{'colorAtlas': 'iVBOR'}, {'untinted': {'image': 0, 'cells': [[0, 0, 1, 1, 0, 0, 1, 1]]}}]:
+            self.catalog.write_bytes(self.candidate(lambda doc: doc['extensions']['VRCHAT_expressions'].update(old)).read_bytes())
+            with self.assertRaises(SystemExit) as refused:
+                publish(self.candidate(lambda doc: None), self.catalog)
+            self.assertIn('expressions:untinted', str(refused.exception))
+
     def test_a_decal_effect_carried_as_a_look_is_kept(self):
         def as_decal(doc):
             doc['extensions']['VRCHAT_expressions']['targets'][0]['effect'] = {'decal': [{'node': 1, 'rect': [0, 0, 1, 1], 'slot': 0}]}
@@ -135,10 +144,10 @@ class Publishing(unittest.TestCase):
         look = {'decals': [None] * 4, 'matcaps': [None] * 4, 'emission': None}
         before = self.catalog.read_bytes()
         with self.assertRaises(SystemExit) as refused:
-            publish(self.candidate(lambda doc: doc['extensions']['VRCHAT_expressions'].update(looks={'index': 'iVBOR', 'materials': [look]})), self.catalog)
+            publish(self.candidate(lambda doc: doc['extensions']['VRCHAT_expressions'].update(looks={'index': 0, 'materials': [look]})), self.catalog)
         self.assertIn('lighting', str(refused.exception))
         self.assertEqual(self.catalog.read_bytes(), before)
-        publish(self.candidate(lambda doc: doc['extensions']['VRCHAT_expressions'].update(looks={'index': 'iVBOR', 'materials': [look | {'lighting': {'model': 'flat'}}]})), self.catalog)
+        publish(self.candidate(lambda doc: doc['extensions']['VRCHAT_expressions'].update(looks={'index': 0, 'materials': [look | {'lighting': {'model': 'flat'}}]})), self.catalog)
 
     def test_every_look_field_and_effect_the_overlay_lists_publishes(self):
         targets = [{'effect': kind if kind == 'switch' else {kind: []}} for kind in publisher.READ['effects']]

@@ -12,9 +12,6 @@ pub const EXTENSION: &str = "VRCHAT_expressions";
 const READ: &str = include_str!("effects.json");
 /// Instant transitions followed in one layer in one frame, so a cycle of them cannot hold the frame.
 const HOPS: usize = 8;
-/// The widest atlas the converter packs (libwebp's widest image), so the layers drawn over it fit; PNG's own buffers stay
-/// bounded by what a 16-bit RGBA image that wide decodes into.
-const WIDEST: u32 = 16383;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -444,20 +441,20 @@ pub struct Look {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EncodedLooks {
-    index: String,
+    index: usize,
     materials: Vec<Look>,
     #[serde(default)]
     decals: Vec<usize>,
     #[serde(default)]
-    matcaps: Vec<String>,
+    matcaps: Vec<usize>,
     #[serde(default)]
-    matcap_masks: Option<String>,
+    matcap_masks: Option<usize>,
     #[serde(default)]
-    emission: Option<String>,
+    emission: Option<usize>,
 }
 
 /// What each atlas texel's material lays over the albedo: `index`'s red channel names a texel's entry in `materials`,
-/// one-based, zero for none. `decals` are the glTF images the extension names, each at its own size.
+/// one-based, zero for none. Every layer is a glTF image the extension names by index, each at its own size.
 #[derive(Clone, Debug)]
 pub struct Looks {
     pub index: Image,
@@ -597,47 +594,57 @@ pub struct Expressions {
     #[serde(default)]
     pub contacts: Vec<super::contact::Contact>,
     #[serde(default, rename = "icons")]
-    encoded_icons: Vec<String>,
+    encoded_icons: Vec<usize>,
     #[serde(skip)]
     pub icons: Vec<Image>,
     #[serde(default, rename = "hueMask")]
-    encoded_hue_mask: Option<String>,
+    encoded_hue_mask: Option<usize>,
     #[serde(skip)]
     pub hue_mask: Option<Image>,
-    #[serde(default, rename = "colorAtlas")]
-    encoded_color_atlas: Option<String>,
+    #[serde(default, rename = "untinted")]
+    encoded_untinted: Option<EncodedUntinted>,
     #[serde(skip)]
-    pub color_atlas: Option<Image>,
+    pub untinted: Option<Untinted>,
     #[serde(default, rename = "looks")]
     encoded_looks: Option<EncodedLooks>,
     #[serde(skip)]
     pub looks: Option<Looks>,
 }
 
-fn image(encoded: &str) -> Result<Image, String> {
-    use base64::Engine;
-    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|error| error.to_string())?;
-    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::Png);
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(WIDEST);
-    limits.max_image_height = Some(WIDEST);
-    limits.max_alloc = Some(u64::from(WIDEST).pow(2) * 8);
-    reader.limits(limits);
-    let image = reader.decode().map_err(|error| error.to_string())?.into_rgba8();
-    Ok(Image { width: image.width(), height: image.height(), rgba: image.into_raw() })
+#[derive(Clone, Debug, Deserialize)]
+struct EncodedUntinted {
+    image: Option<usize>,
+    #[serde(default)]
+    cells: Vec<[f32; 8]>,
 }
 
-fn looks(encoded: EncodedLooks, images: usize, decal: impl Fn(usize) -> Result<Image, String>) -> Result<Looks, String> {
-    let matcaps: Vec<Image> = encoded.matcaps.iter().map(|encoded| image(encoded)).collect::<Result<_, _>>().map_err(|error| format!("{EXTENSION}: matcaps: {error}"))?;
+/// The untinted colours of the cells a colour control recolours, laid in their own image: each cell its padded rect in
+/// atlas UV then its rect in `image`'s UV, both `[x0, y0, x1, y1]`.
+#[derive(Clone, Debug)]
+pub struct Untinted {
+    pub image: Image,
+    pub cells: Vec<[f32; 8]>,
+}
+
+impl Untinted {
+    /// Where the atlas's `uv` lies in `image`, through the first cell holding it; None outside every cell.
+    pub fn at(&self, [u, v]: [f32; 2]) -> Option<[f32; 2]> {
+        self.cells.iter().find(|cell| u >= cell[0] && v >= cell[1] && u <= cell[2] && v <= cell[3])
+            .map(|cell| [cell[4] + (u - cell[0]) * (cell[6] - cell[4]) / (cell[2] - cell[0]), cell[5] + (v - cell[1]) * (cell[7] - cell[5]) / (cell[3] - cell[1])])
+    }
+}
+
+fn looks(encoded: EncodedLooks, image: &impl Fn(usize) -> Result<Image, String>) -> Result<Looks, String> {
+    let matcaps: Vec<Image> = encoded.matcaps.iter().map(|&at| image(at)).collect::<Result<_, _>>().map_err(|error| format!("{EXTENSION}: matcaps: {error}"))?;
     if matcaps.iter().any(|layer| (layer.width, layer.height) != (matcaps[0].width, matcaps[0].height)) {
         return Err(format!("{EXTENSION}: matcaps of differing sizes"));
     }
     let looks = Looks {
-        index: image(&encoded.index).map_err(|error| format!("{EXTENSION}: look index: {error}"))?,
-        decals: encoded.decals.iter().map(|&image| if image < images { decal(image) } else { Err(format!("image {image} is not in the file")) }).collect::<Result<_, _>>().map_err(|error| format!("{EXTENSION}: a decal: {error}"))?,
+        index: image(encoded.index).map_err(|error| format!("{EXTENSION}: look index: {error}"))?,
+        decals: encoded.decals.iter().map(|&at| image(at)).collect::<Result<_, _>>().map_err(|error| format!("{EXTENSION}: a decal: {error}"))?,
         matcaps,
-        matcap_masks: encoded.matcap_masks.as_deref().map(image).transpose().map_err(|error| format!("{EXTENSION}: matcap masks: {error}"))?,
-        emission: encoded.emission.as_deref().map(image).transpose().map_err(|error| format!("{EXTENSION}: emission: {error}"))?,
+        matcap_masks: encoded.matcap_masks.map(|at| image(at)).transpose().map_err(|error| format!("{EXTENSION}: matcap masks: {error}"))?,
+        emission: encoded.emission.map(|at| image(at)).transpose().map_err(|error| format!("{EXTENSION}: emission: {error}"))?,
         materials: encoded.materials,
     };
     let textures = looks.matcaps.len() as u32;
@@ -659,8 +666,17 @@ fn looks(encoded: EncodedLooks, images: usize, decal: impl Fn(usize) -> Result<I
     Ok(looks)
 }
 
-fn icon(encoded: &str) -> Result<Image, String> {
-    let mut image = image(encoded)?;
+fn untinted(encoded: EncodedUntinted, image: &impl Fn(usize) -> Result<Image, String>) -> Result<Option<Untinted>, String> {
+    let Some(at) = encoded.image else { return Ok(None) };
+    let spans = |cell: &[f32; 8]| cell.iter().all(|v| v.is_finite()) && cell[0] < cell[2] && cell[1] < cell[3] && cell[4] < cell[6] && cell[5] < cell[7];
+    if encoded.cells.len() > 255 || !encoded.cells.iter().all(spans) {
+        return Err(format!("{EXTENSION}: untinted cells are more than 255 or not each a rectangle of the atlas and of their image"));
+    }
+    Ok(Some(Untinted { image: image(at).map_err(|error| format!("{EXTENSION}: untinted: {error}"))?, cells: encoded.cells }))
+}
+
+fn icon(at: usize, image: &impl Fn(usize) -> Result<Image, String>) -> Result<Image, String> {
+    let mut image = image(at)?;
     for pixel in image.rgba.chunks_exact_mut(4) {
         for channel in 0..3 {
             pixel[channel] = (pixel[channel] as u32 * pixel[3] as u32 / 255) as u8;
@@ -673,10 +689,6 @@ impl Expressions {
     pub fn parse(value: &serde_json::Value) -> Result<Expressions, String> {
         let mut expressions = Expressions::deserialize(value).map_err(|error| format!("{EXTENSION}: {error}"))?;
         expressions.source = format!("{:x}", Sha256::digest(value.to_string().as_bytes()));
-        expressions.icons = expressions.encoded_icons.iter().map(|encoded| icon(encoded)).collect::<Result<_, _>>().map_err(|error| format!("{EXTENSION}: an icon: {error}"))?;
-        expressions.encoded_icons.clear();
-        expressions.hue_mask = expressions.encoded_hue_mask.take().map(|encoded| image(&encoded)).transpose().map_err(|error| format!("{EXTENSION}: hue mask: {error}"))?;
-        expressions.color_atlas = expressions.encoded_color_atlas.take().map(|encoded| image(&encoded)).transpose().map_err(|error| format!("{EXTENSION}: color atlas: {error}"))?;
         let unread: BTreeSet<&str> = expressions.targets.iter().filter_map(|target| match &target.effect { Effect::Unread(name) => Some(name.as_str()), _ => None }).collect();
         if !unread.is_empty() {
             tracing::warn!("{EXTENSION}: targets of effects the overlay does not read hold still: {unread:?}");
@@ -684,7 +696,7 @@ impl Expressions {
         fn icons_valid(controls: &[Control], icons: usize) -> bool {
             controls.iter().all(|control| control.icon.is_none_or(|icon| icon < icons) && icons_valid(&control.controls, icons))
         }
-        if !icons_valid(&expressions.menu, expressions.icons.len()) {
+        if !icons_valid(&expressions.menu, expressions.encoded_icons.len()) {
             return Err(format!("{EXTENSION}: a control names an icon it does not have"));
         }
         let clips = expressions.clips.len();
@@ -710,8 +722,12 @@ impl Expressions {
         Ok(expressions)
     }
 
-    pub(super) fn read_looks(&mut self, images: usize, decal: impl Fn(usize) -> Result<Image, String>) -> Result<(), String> {
-        self.looks = self.encoded_looks.take().map(|encoded| looks(encoded, images, decal)).transpose()?;
+    /// Decodes each layer from the glTF image the extension names.
+    pub(super) fn read_layers(&mut self, image: impl Fn(usize) -> Result<Image, String>) -> Result<(), String> {
+        self.icons = std::mem::take(&mut self.encoded_icons).into_iter().map(|at| icon(at, &image)).collect::<Result<_, _>>().map_err(|error| format!("{EXTENSION}: an icon: {error}"))?;
+        self.hue_mask = self.encoded_hue_mask.take().map(|at| image(at)).transpose().map_err(|error| format!("{EXTENSION}: hue mask: {error}"))?;
+        self.untinted = self.encoded_untinted.take().map(|encoded| untinted(encoded, &image)).transpose()?.flatten();
+        self.looks = self.encoded_looks.take().map(|encoded| looks(encoded, &image)).transpose()?;
         Ok(())
     }
 
@@ -1077,17 +1093,12 @@ fn two_d(positions: &[[f32; 2]], at: [f32; 2]) -> Vec<f32> {
 mod tests {
     use super::*;
 
-    fn png(width: u32) -> String {
-        use base64::Engine;
-        let mut bytes = Vec::new();
-        image::RgbaImage::new(width, 1).write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png).unwrap();
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    }
-
     #[test]
-    fn a_layer_decodes_as_wide_as_an_atlas_and_no_wider() {
-        assert_eq!(image(&png(WIDEST)).unwrap().width, WIDEST);
-        assert!(image(&png(WIDEST + 1)).is_err());
+    fn an_atlas_uv_reaches_the_untinted_colours_through_its_cell() {
+        let untinted = Untinted { image: Image { width: 1, height: 1, rgba: vec![0; 4] }, cells: vec![[0.5, 0.0, 1.0, 0.5, 0.0, 0.5, 0.25, 1.0], [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.1, 0.1]] };
+        assert_eq!(untinted.at([0.75, 0.25]), Some([0.125, 0.75]), "the first cell holding a texel maps it");
+        assert_eq!(untinted.at([0.25, 0.75]), Some([0.025, 0.075]));
+        assert_eq!(Untinted { cells: vec![[0.5, 0.0, 1.0, 0.5, 0.0, 0.0, 1.0, 1.0]], ..untinted }.at([0.25, 0.25]), None, "a texel outside every cell has no untinted colour");
     }
 
     fn toggle(write_defaults: bool) -> Expressions {
@@ -1389,10 +1400,6 @@ mod tests {
 
     #[test]
     fn a_look_drawn_in_a_theme_colour_it_does_not_carry_is_refused() {
-        use base64::Engine;
-        let mut png = Vec::new();
-        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 0, 0, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
-        let index = base64::engine::general_purpose::STANDARD.encode(png);
         let theme = serde_json::json!({"slot": 1, "hsv": [0.0, 1.0, 1.0], "exposure": 1.0, "hue": 0.0, "saturation": 0.0, "value": 0.0, "speed": 0.0});
         let parse = |slot: usize, themes: serde_json::Value| {
             let mut material = serde_json::json!({"rect": [0, 0, 1, 1], "decals": [null, null, null, null], "matcaps": [null, null, null, null], "lighting": {"model": "lit"}, "themes": themes,
@@ -1400,7 +1407,7 @@ mod tests {
             if material["themes"].is_null() {
                 material.as_object_mut().unwrap().remove("themes");
             }
-            looks(serde_json::from_value(serde_json::json!({"index": index, "materials": [material]})).unwrap(), 0, |_| Err("no decals".into()))
+            looks(serde_json::from_value(serde_json::json!({"index": 0, "materials": [material]})).unwrap(), &|_| Ok(Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }))
         };
         assert!(parse(1, serde_json::json!([null, theme, null, null])).is_ok_and(|looks| looks.materials[0].themes[1].is_some()), "a look carrying the theme its emission glows in loads");
         for (slot, themes) in [(0, serde_json::json!([null, theme, null, null])), (4, serde_json::json!([null, theme, null, null])), (1, serde_json::json!(null))] {

@@ -359,6 +359,7 @@ pub struct Appearance {
     materials: Buffer,
     surfaces: Buffer,
     looks: Buffer,
+    untinted_cells: Buffer,
     drawn: Vec<DrawCall>,
     pub hidden: std::collections::HashSet<usize>,
     /// Seconds the figure's expressions have run, which turns a theme colour's hue at its speed.
@@ -425,6 +426,7 @@ impl Renderer {
             vk::DescriptorSetLayoutBinding::default().binding(13).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(14).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(15).descriptor_type(vk::DescriptorType::SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default().binding(16).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
         ];
         let set_layout = unsafe { device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None) }.map_err(vk_error("vkCreateDescriptorSetLayout"))?;
         let set_layouts = [set_layout];
@@ -511,7 +513,7 @@ impl Renderer {
         let sizes = [
             vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: (9 + DECAL_PAGES as u32) * set_count },
             vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLER, descriptor_count: 2 * set_count },
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 4 * set_count },
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 5 * set_count },
         ];
         let descriptors = unsafe { device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(set_count).pool_sizes(&sizes), None) }.map_err(vk_error("vkCreateDescriptorPool"))?;
         let upload = |bytes: &[u8], usage| -> Result<Buffer, String> {
@@ -522,6 +524,11 @@ impl Renderer {
         let joints = skinned.joints();
         let material_data: Vec<MaterialData> = model.materials.iter().map(material_data).collect();
         let look_data: Vec<LookData> = std::iter::once(LookData { page: [-1; 4], ..LookData::default() }).chain(looks.into_iter().flat_map(|looks| looks.materials.iter().map(|look| look_data(look, &places)))).collect();
+        let untinted = model.menu.as_ref().and_then(|menu| menu.untinted.as_ref());
+        let untinted_cells: Vec<[f32; 8]> = match untinted.map(|untinted| &untinted.cells[..]) {
+            Some(cells) if !cells.is_empty() => cells.to_vec(),
+            _ => vec![[1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0]],
+        };
         let mut appearance = Appearance {
             gpu: gpu.clone(),
             descriptors,
@@ -533,6 +540,7 @@ impl Renderer {
             materials: upload(bytes_of(&material_data), vk::BufferUsageFlags::STORAGE_BUFFER)?,
             surfaces: upload(bytes_of(&skinned.surfaces), vk::BufferUsageFlags::STORAGE_BUFFER)?,
             looks: upload(bytes_of(&look_data), vk::BufferUsageFlags::STORAGE_BUFFER)?,
+            untinted_cells: upload(bytes_of(&untinted_cells), vk::BufferUsageFlags::STORAGE_BUFFER)?,
             drawn: Vec::new(),
             hidden: Default::default(),
             seconds: 0.0,
@@ -546,9 +554,9 @@ impl Renderer {
             appearance.textures.push(texture(gpu, mask.width, mask.height, &mask.rgba, vk::Format::R8G8B8A8_UNORM)?);
             Some(index)
         } else { None };
-        let color_atlas = if let Some(atlas) = model.menu.as_ref().and_then(|menu| menu.color_atlas.as_ref()) {
+        let untinted = if let Some(untinted) = untinted {
             let index = appearance.textures.len();
-            appearance.textures.push(texture(gpu, atlas.width, atlas.height, &atlas.rgba, FORMAT)?);
+            appearance.textures.push(texture(gpu, untinted.image.width, untinted.image.height, &untinted.image.rgba, FORMAT)?);
             Some(index)
         } else { None };
         let mut array = |layers: &[&crate::vrm::Image], empty: [u8; 4]| -> Result<usize, String> {
@@ -583,11 +591,12 @@ impl Renderer {
             let image = |index: Option<usize>| [vk::DescriptorImageInfo::default().image_view(appearance.textures[index.unwrap_or(white)].view).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
             let (base, shade, width) = (image(material.base_image), image(material.shade_image), image(material.outline.as_ref().and_then(|outline| outline.width_image)));
             let mask = image(hue_mask);
-            let color = image(color_atlas);
+            let untinted = image(untinted);
             let decal: Vec<_> = decal_textures.iter().map(|&texture| vk::DescriptorImageInfo::default().image_view(appearance.textures[texture].view).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)).collect();
             let (index, matcap, masks, glow) = (image(Some(look_index.unwrap_or(black))), image(Some(matcaps)), image(matcap_masks), image(Some(emission.unwrap_or(black))));
             let surfaces = [vk::DescriptorBufferInfo::default().buffer(appearance.surfaces.0).range(vk::WHOLE_SIZE)];
             let looks = [vk::DescriptorBufferInfo::default().buffer(appearance.looks.0).range(vk::WHOLE_SIZE)];
+            let cells = [vk::DescriptorBufferInfo::default().buffer(appearance.untinted_cells.0).range(vk::WHOLE_SIZE)];
             let sampler = [vk::DescriptorImageInfo::default().sampler(self.sampler)];
             let edge_sampler = [vk::DescriptorImageInfo::default().sampler(self.edge_sampler)];
             let palette = [vk::DescriptorBufferInfo::default().buffer(appearance.palette.0).range(vk::WHOLE_SIZE)];
@@ -601,7 +610,7 @@ impl Renderer {
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(5).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&materials),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(6).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&mask),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(7).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&surfaces),
-                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(8).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&color),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(8).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&untinted),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(9).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&decal),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(10).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&index),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(11).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&looks),
@@ -609,6 +618,7 @@ impl Renderer {
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(13).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&masks),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(14).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&glow),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(15).descriptor_type(vk::DescriptorType::SAMPLER).image_info(&edge_sampler),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(16).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&cells),
             ];
             unsafe { device.update_descriptor_sets(&writes, &[]) };
         }
@@ -908,7 +918,7 @@ impl Drop for Appearance {
         let device = &self.gpu.device;
         unsafe {
             let _ = device.device_wait_idle();
-            for buffer in [self.vertices, self.indices, self.palette, self.materials, self.surfaces, self.looks] {
+            for buffer in [self.vertices, self.indices, self.palette, self.materials, self.surfaces, self.looks, self.untinted_cells] {
                 self.gpu.free_buffer(buffer);
             }
             for texture in &self.textures {
@@ -1126,7 +1136,7 @@ mod tests {
                 mask[4 + channel] = 0;
             }
             menu.hue_mask = Some(crate::vrm::Image { width: 2, height: 1, rgba: mask });
-            menu.color_atlas = Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![255; 4] });
+            menu.untinted = Some(crate::vrm::expressions::Untinted { image: crate::vrm::Image { width: 4, height: 1, rgba: [[255, 0, 0, 255], [255, 0, 0, 255], [255; 4], [255; 4]].concat() }, cells: vec![[0.0, 0.0, 1.0, 1.0, 0.5, 0.0, 1.0, 1.0]] });
             let mut look = looks_test::look();
             look.decals[1] = Some(crate::vrm::expressions::Decal { alpha: 0.0, intensity: 1.0, color_blend: [(8.0, DecalBlend::Multiply), (9.0, DecalBlend::Lighten), (10.0, DecalBlend::Darken)].into_iter().find(|(at, _)| *at == space).map_or(DecalBlend::Replace, |(_, blend)| blend), image: 0, hue: None });
             menu.looks = Some(crate::vrm::expressions::Looks { index: crate::vrm::Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }, materials: vec![look], decals: vec![crate::vrm::Image { width: 2, height: 1, rgba: if space == 10.0 { vec![64, 255, 255, 255, 0, 0, 0, 0] } else { vec![0, 255, 0, 255, 0, 0, 0, 0] } }], matcaps: Vec::new(), matcap_masks: None, emission: None });

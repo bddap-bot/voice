@@ -35,7 +35,12 @@ struct Surface {
     animated: vec4<u32>,
 }
 @group(0) @binding(7) var<storage, read> surfaces: array<Surface>;
-@group(0) @binding(8) var color_texture: texture_2d<f32>;
+@group(0) @binding(8) var untinted_texture: texture_2d<f32>;
+struct UntintedCell {
+    atlas: vec4<f32>,
+    image: vec4<f32>,
+}
+@group(0) @binding(16) var<storage, read> untinted_cells: array<UntintedCell>;
 @group(0) @binding(9) var decal_pages: binding_array<texture_2d_array<f32>, 8>;
 
 struct Matcap {
@@ -173,6 +178,17 @@ const GROUND = vec3<f32>(0.0064, 0.0048, 0.0106);
 fn toon(material: Material, normal: vec3<f32>, direction: vec3<f32>) -> f32 {
     let toony = material.shading_toony;
     return clamp((dot(normal, direction) + material.shading_shift - (-1.0 + toony)) / max(2.0 - 2.0 * toony, 1e-4), 0.0, 1.0);
+}
+
+fn untinted(uv: vec2<f32>, gradient: mat2x2<f32>) -> vec3<f32> {
+    for (var i = 0u; i < arrayLength(&untinted_cells); i++) {
+        let cell = untinted_cells[i];
+        if all(uv >= cell.atlas.xy) && all(uv <= cell.atlas.zw) {
+            let to = (cell.image.zw - cell.image.xy) / (cell.atlas.zw - cell.atlas.xy);
+            return textureSampleGrad(untinted_texture, texture_sampler, cell.image.xy + (uv - cell.atlas.xy) * to, gradient[0] * to, gradient[1] * to).rgb;
+        }
+    }
+    return vec3<f32>(1.0);
 }
 
 fn hue(color: vec3<f32>, settings: vec4<f32>) -> vec3<f32> {
@@ -404,7 +420,10 @@ fn shaded(input: Varying, front: bool) -> vec4<f32> {
     }
     let view = normalize(draw.camera - input.world);
     let lit = toon(material, normal, KEY_DIRECTION);
-    let raw = textureSample(color_texture, texture_sampler, input.uv).rgb * surface.color.rgb;
+    var raw = surface.color.rgb;
+    if surface.color.a > 0.0 {
+        raw *= untinted(input.uv, gradient);
+    }
     let sampled = textureSample(base_texture, texture_sampler, input.uv) * material.base;
     let mask = textureSample(hue_mask, texture_sampler, input.uv);
     let laid = decal_samples(input.surface, look, input.uv);

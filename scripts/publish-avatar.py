@@ -88,10 +88,12 @@ def inventory(doc):
     out.update('switched-spring:' + ','.join(name(j) for j in s['joints']) for s in x.get('springs', []))
     out.update('switched-collider:' + (name(colliders[s['collider']]['node']) if s['collider'] < len(colliders) else str(s['collider'])) for s in x.get('colliders', []))
     out.update(f'icon:{i}' for i, _ in enumerate(x.get('icons', [])))
-    out.update('expressions:' + k for k, v in x.items() if isinstance(v, str) and v)
+    out.update('expressions:' + LAYERS[k] for k, v in x.items() if k in LAYERS and v not in (None, '', {}))
     return out
 
 
+# Each single expression layer by the name the inventory counts it under: the untinted colours were a whole atlas once.
+LAYERS = {'hueMask': 'hueMask', 'colorAtlas': 'untinted', 'untinted': 'untinted'}
 READ = json.loads((Path(__file__).resolve().parents[1] / 'vr/src/vrm/effects.json').read_text())
 
 

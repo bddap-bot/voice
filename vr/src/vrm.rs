@@ -923,7 +923,7 @@ impl Model {
         let menu = match extensions.get(expressions::EXTENSION) {
             Some(value) => {
                 let mut menu = Expressions::parse(value)?;
-                menu.read_looks(document.json["images"].as_array().map_or(0, Vec::len), |image| document.image(image))?;
+                menu.read_layers(|image| document.image(image))?;
                 Some(menu)
             }
             None => None,
@@ -1337,7 +1337,7 @@ impl Skinned {
                     let uv = [u * sx + ox, v * sy + oy];
                     let surface = &surfaces[self.vertices[vertex].surface as usize];
                     let sampled = material.base_image.map_or([1.0; 4], |image| texel(&model.images[image], uv));
-                    let raw = menu.color_atlas.as_ref().map_or([1.0; 4], |atlas| texel(atlas, uv));
+                    let raw = menu.untinted.as_ref().and_then(|untinted| untinted.at(uv).map(|at| texel(&untinted.image, at))).unwrap_or([1.0; 4]);
                     let mask = menu.hue_mask.as_ref().map_or(1.0, |mask| texel(mask, uv)[0]);
                     let base: [f32; 3] = std::array::from_fn(|c| {
                         let tinted = sampled[c] * material.base[c];
@@ -1961,6 +1961,56 @@ pub mod tests {
         assert!((fit.scale - 0.2).abs() < 1e-6, "sized from the floor to the top: {}", fit.scale);
         let placement = fit.placement(&model, &model.worlds(&model.rest()), -0.17);
         assert!((placement.transform_point3(Vec3::ZERO).y + 0.17).abs() < 1e-6, "the origin is on the floor");
+    }
+
+    fn layered(layers: impl FnOnce(&[usize]) -> Value) -> Vec<u8> {
+        let mut builder = Builder::new(Value::Null);
+        let images: Vec<usize> = [(2, 1), (3, 1), (4, 1), (1, 1), (2, 2), (5, 1), (6, 1), (7, 1), (1, 2)].into_iter().map(|(width, height)| {
+            let rgba: Vec<u8> = (0..width * height).flat_map(|_| [1, 2, 3, 255]).collect();
+            builder.webp(width, height, &rgba)
+        }).collect();
+        let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        builder.set("extensions", serde_json::json!({"VRMC_vrm": {"humanoid": {"humanBones": {}}}, "VRCHAT_expressions": layers(&images)}));
+        builder.set("nodes", serde_json::json!([{"mesh": 0}]));
+        builder.set("meshes", serde_json::json!([{"primitives": [{"attributes": {"POSITION": position}}]}]));
+        builder.glb()
+    }
+
+    fn layers(images: &[usize]) -> Value {
+        let look = serde_json::json!({"rect": [0, 0, 1, 1], "decals": [null, null, null, null], "matcaps": [null, null, null, null], "lighting": {"model": "lit"}});
+        serde_json::json!({
+            "menu": [{"name": "Icon", "type": "button", "parameter": "Icon", "icon": 0}], "parameters": [], "layers": [], "clips": [], "targets": [],
+            "icons": [images[8]], "hueMask": images[1],
+            "untinted": {"image": images[2], "cells": [[0.0, 0.0, 0.5, 1.0, 0.0, 0.0, 1.0, 1.0]]},
+            "looks": {"index": images[3], "materials": [look], "matcaps": [images[4]], "matcapMasks": images[5], "emission": images[6], "decals": [images[7]]}
+        })
+    }
+
+    #[test]
+    fn expression_layers_are_read_from_the_glb_images_they_name() {
+        let model = Model::parse(&layered(layers)).unwrap();
+        let menu = model.menu.as_ref().unwrap();
+        let looks = menu.looks.as_ref().unwrap();
+        let size = |image: &Image| (image.width, image.height);
+        assert_eq!(menu.icons.iter().map(size).collect::<Vec<_>>(), [(1, 2)]);
+        assert_eq!(menu.hue_mask.as_ref().map(size), Some((3, 1)));
+        let untinted = menu.untinted.as_ref().unwrap();
+        assert_eq!((size(&untinted.image), untinted.cells.len()), ((4, 1), 1));
+        assert_eq!((size(&looks.index), looks.matcaps.iter().map(size).collect::<Vec<_>>(), looks.matcap_masks.as_ref().map(size), looks.emission.as_ref().map(size), looks.decals.iter().map(size).collect::<Vec<_>>()),
+            ((1, 1), vec![(2, 2)], Some((5, 1)), Some((6, 1)), vec![(7, 1)]));
+        assert_eq!(menu.icons[0].rgba, [1, 2, 3, 255, 1, 2, 3, 255], "an opaque icon keeps its colour as it premultiplies");
+    }
+
+    #[test]
+    fn a_layer_naming_an_image_the_file_lacks_or_a_broken_cell_is_refused() {
+        for (layer, broken) in [("hueMask", serde_json::json!(9)), ("untinted", serde_json::json!({"image": 9, "cells": []})), ("untinted", serde_json::json!({"image": 2, "cells": [[0.5, 0.0, 0.5, 1.0, 0.0, 0.0, 1.0, 1.0]]}))] {
+            let error = Model::parse(&layered(|images| {
+                let mut layers = layers(images);
+                layers[layer] = broken.clone();
+                layers
+            })).err();
+            assert!(error.as_ref().is_some_and(|error| error.contains(expressions::EXTENSION)), "{layer} {broken}: {error:?}");
+        }
     }
 
     #[test]

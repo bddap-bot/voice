@@ -31,7 +31,7 @@ struct Surface {
     hue: vec4<f32>,
     color: vec4<f32>,
     tone: vec4<f32>,
-    look: array<vec4<f32>, 15>,
+    look: array<vec4<f32>, 16>,
     animated: vec4<u32>,
 }
 @group(0) @binding(7) var<storage, read> surfaces: array<Surface>;
@@ -70,6 +70,17 @@ struct Theme {
     hsv: vec3<f32>,
     exposure: f32,
 }
+struct ClearCoat {
+    levels: vec4<f32>,
+    inverts: vec4<f32>,
+    st: vec4<f32>,
+    specular_tint: vec3<f32>,
+    fresnel: f32,
+    reflection_tint: vec3<f32>,
+    map: i32,
+    gsaa: vec2<f32>,
+    on: u32,
+}
 struct Look {
     decal: vec4<f32>,
     intensity: vec4<f32>,
@@ -90,6 +101,7 @@ struct Look {
     ramp: array<vec4<f32>, 4>,
     ramped: u32,
     shadow_tint: f32,
+    coat: ClearCoat,
 }
 @group(0) @binding(10) var look_index: texture_2d<f32>;
 @group(0) @binding(11) var<storage, read> looks: array<Look>;
@@ -97,6 +109,7 @@ struct Look {
 @group(0) @binding(13) var matcap_masks: texture_2d<f32>;
 @group(0) @binding(14) var emission_map: texture_2d<f32>;
 @group(0) @binding(15) var edge_sampler: sampler;
+@group(0) @binding(17) var clearcoat_maps: texture_2d_array<f32>;
 
 // Rows of Surface.look, in the order of expressions::Field.
 const DECAL = 0u;
@@ -114,6 +127,7 @@ const THEME_HUE = 11u;
 const THEME_SATURATION = 12u;
 const THEME_VALUE = 13u;
 const THEME_SPEED = 14u;
+const CLEARCOAT_ST = 15u;
 
 @group(0) @binding(2) var texture_sampler: sampler;
 @group(0) @binding(3) var outline_width_texture: texture_2d<f32>;
@@ -137,8 +151,27 @@ struct Varying {
     @location(3) world: vec3<f32>,
 }
 
+struct CoatedVarying {
+    @builtin(position) @invariant clip: vec4<f32>,
+    @location(0) normal: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) @interpolate(flat) surface: u32,
+    @location(3) world: vec3<f32>,
+    @location(4) coat_uv: vec2<f32>,
+}
+
 @vertex
 fn vertex(input: Vertex) -> Varying {
+    return skin(input);
+}
+
+@vertex
+fn coated_vertex(input: Vertex, @location(6) coat_uv: vec2<f32>) -> CoatedVarying {
+    let out = skin(input);
+    return CoatedVarying(out.clip, out.normal, out.uv, out.surface, out.world, coat_uv);
+}
+
+fn skin(input: Vertex) -> Varying {
     let skin = palette[input.joints.x] * input.weights.x + palette[input.joints.y] * input.weights.y + palette[input.joints.z] * input.weights.z + palette[input.joints.w] * input.weights.w;
     var position = (skin * vec4<f32>(input.position, 1.0)).xyz;
     let normal = normalize((skin * vec4<f32>(input.normal, 0.0)).xyz);
@@ -163,6 +196,10 @@ fn vertex(input: Vertex) -> Varying {
     out.surface = input.surface;
     out.world = position;
     return out;
+}
+
+fn uncoated(input: CoatedVarying) -> Varying {
+    return Varying(input.clip, input.normal, input.uv, input.surface, input.world);
 }
 
 // The page's lights, divided by pi as three.js's Lambert term does.
@@ -381,11 +418,56 @@ fn emission(at: u32, look: u32, uv: vec2<f32>, gradient: mat2x2<f32>, mask: f32)
     return mix(glow, hue(glow, vec4<f32>(value(at, EMISSION_HUE, 0u, looks[look].emission_hue), 2.0, 0.0, 1.0)), mask * looks[look].shifts_hue);
 }
 
+const DIELECTRIC = 0.220916301;
+
+fn pow5(x: f32) -> f32 {
+    let square = x * x;
+    return square * square * x;
+}
+
+// Poiyomi's clear coat: GGX's highlight of the key light and a reflection of the sky and ground, blurred toward their mean
+// as it roughens in place of Unity's reflection probe.
+fn coat(at: u32, look: u32, uv: vec2<f32>, gradient: mat2x2<f32>, normal: vec3<f32>, curvature: f32, view: vec3<f32>) -> vec3<f32> {
+    let layer = looks[look].coat;
+    if layer.on == 0u { return vec3<f32>(0.0); }
+    var levels = layer.levels;
+    if layer.map >= 0 {
+        let st = vec4<f32>(value(at, CLEARCOAT_ST, 0u, layer.st.x), value(at, CLEARCOAT_ST, 1u, layer.st.y), value(at, CLEARCOAT_ST, 2u, layer.st.z), value(at, CLEARCOAT_ST, 3u, layer.st.w));
+        let unity = vec2<f32>(uv.x, 1.0 - uv.y) * st.xy + st.zw;
+        levels *= textureSampleGrad(clearcoat_maps, texture_sampler, vec2<f32>(unity.x, 1.0 - unity.y), layer.map, gradient[0] * st.xy, gradient[1] * st.xy);
+    }
+    levels = mix(levels, 1.0 - levels, layer.inverts);
+    let perceptual = 1.0 - levels.y;
+    // Filament's geometric specular antialiasing: roughness widened by the normal's change across the pixel.
+    let kernel = min(2.0 * layer.gsaa.x * curvature, layer.gsaa.y);
+    let widened = sqrt(sqrt(saturate(perceptual * perceptual * perceptual * perceptual + kernel)));
+    let rough = max(widened * widened, 0.002);
+    let half_way = normalize(KEY_DIRECTION + view);
+    let nl = saturate(dot(normal, KEY_DIRECTION));
+    let nv = saturate(dot(normal, view));
+    let nh = saturate(dot(normal, half_way));
+    let lh = saturate(dot(KEY_DIRECTION, half_way));
+    var ggx = 0.0;
+    if nl > 0.0 {
+        let r2 = rough * rough;
+        let visible = 0.5 / (nl * (nv * (1.0 - rough) + rough) + nv * (nl * (1.0 - rough) + rough) + 1e-5);
+        let d = (nh * r2 - nh) * nh + 1.0;
+        ggx = visible * r2 / (d * d + 1e-7);
+    }
+    let fresnel = DIELECTRIC + (1.0 - DIELECTRIC) * pow5(1.0 - lh);
+    let highlight = KEY_COLOR * max(0.0, ggx * max(1e-5, nl)) * fresnel * levels.w * layer.specular_tint * nl;
+    let reflected = reflect(-view, normal);
+    let environment = mix(mix(GROUND, SKY, 0.5 * reflected.y + 0.5), 0.5 * (SKY + GROUND), perceptual * (1.7 - 0.7 * perceptual));
+    let glancing = mix(DIELECTRIC, saturate(levels.y + 0.04), pow5(1.0 - nv));
+    let reflection = environment / (rough * rough + 1.0) * mix(1.0, glancing, layer.fresnel) * layer.reflection_tint * levels.z;
+    return saturate((highlight + reflection) * levels.x);
+}
+
 // A fragment shader that may discard runs before its depth test, so shading never discards: an alpha-tested surface
 // that writes depth is drawn first by `depth`, then shaded where its own depth is the nearest.
 @fragment
 fn fragment(input: Varying, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
-    return shaded(input, front);
+    return shaded(input, facing(input, front), vec3<f32>(0.0));
 }
 
 @fragment
@@ -400,25 +482,59 @@ fn cutout(input: Varying, @builtin(front_facing) front: bool) -> @location(0) ve
     if covered(input) < materials[draw.material].cutoff {
         discard;
     }
-    return shaded(input, front);
+    return shaded(input, facing(input, front), vec3<f32>(0.0));
+}
+
+@fragment
+fn coated_fragment(input: CoatedVarying, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    return coated(input, front);
+}
+
+@fragment
+fn coated_cutout(input: CoatedVarying, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    if covered(uncoated(input)) < materials[draw.material].cutoff {
+        discard;
+    }
+    return coated(input, front);
+}
+
+fn coated(input: CoatedVarying, front: bool) -> vec4<f32> {
+    let gradient = mat2x2<f32>(dpdx(input.coat_uv), dpdy(input.coat_uv));
+    let plain = uncoated(input);
+    let at = facing(plain, front);
+    let du = dpdx(at.normal);
+    let dv = dpdy(at.normal);
+    return shaded(plain, at, coat(input.surface, at.look, input.coat_uv, gradient, at.normal, dot(du, du) + dot(dv, dv), at.view));
 }
 
 fn covered(input: Varying) -> f32 {
     return textureSample(base_texture, texture_sampler, input.uv).a * materials[draw.material].base.a;
 }
 
-fn shaded(input: Varying, front: bool) -> vec4<f32> {
-    // Taken before any branch on the look, which differs within a quad along a look's edge.
-    let gradient = mat2x2<f32>(dpdx(input.uv), dpdy(input.uv));
-    let material = materials[draw.material];
-    let surface = surfaces[input.surface];
+struct Facing {
+    look: u32,
+    normal: vec3<f32>,
+    view: vec3<f32>,
+}
+
+fn facing(input: Varying, front: bool) -> Facing {
     let indices = vec2<f32>(textureDimensions(look_index));
     let look = u32(round(textureLoad(look_index, vec2<i32>(clamp(input.uv * indices, vec2<f32>(0.0), indices - 1.0)), 0).r * 255.0));
     var normal = normalize(input.normal);
     if !front {
         normal = -normal;
     }
-    let view = normalize(draw.camera - input.world);
+    return Facing(look, normal, normalize(draw.camera - input.world));
+}
+
+fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
+    // Taken before any branch on the look, which differs within a quad along a look's edge.
+    let gradient = mat2x2<f32>(dpdx(input.uv), dpdy(input.uv));
+    let material = materials[draw.material];
+    let surface = surfaces[input.surface];
+    let look = at.look;
+    let normal = at.normal;
+    let view = at.view;
     let lit = toon(material, normal, KEY_DIRECTION);
     var raw = surface.color.rgb;
     if surface.color.a > 0.0 {
@@ -450,7 +566,7 @@ fn shaded(input: Varying, front: bool) -> vec4<f32> {
         let hemisphere = mix(GROUND, SKY, 0.5 * normal.y + 0.5);
         light = direct + mix(hemisphere, 0.5 * (SKY + GROUND), material.equalization) * base.rgb;
     }
-    var color = light + glow + emission(input.surface, look, input.uv, gradient, mask.r);
+    var color = light + glow + emission(input.surface, look, input.uv, gradient, mask.r) + sheen;
     if draw.outline != 0u {
         color = material.outline_color * mix(vec3<f32>(1.0), color, material.outline_lighting_mix);
     }

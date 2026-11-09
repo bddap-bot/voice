@@ -278,9 +278,11 @@ pub enum Field {
     ThemeSaturation,
     ThemeValue,
     ThemeSpeed,
+    #[serde(rename = "clearcoatST")]
+    ClearCoatSt,
 }
 
-pub const FIELDS: usize = Field::ThemeSpeed as usize + 1;
+pub const FIELDS: usize = Field::ClearCoatSt as usize + 1;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct LookRegion {
@@ -408,6 +410,34 @@ pub struct Theme {
     pub speed: f32,
 }
 
+/// Poiyomi's clear coat: a dielectric layer over the material whose highlight of the main light and reflection of its
+/// surroundings add to its light.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearCoat {
+    pub strength: f32,
+    pub smoothness: f32,
+    pub reflection: f32,
+    pub specular: f32,
+    pub fresnel: f32,
+    pub specular_tint: [f32; 3],
+    pub reflection_tint: [f32; 3],
+    pub st: [f32; 4],
+    pub inverts: [bool; 4],
+    pub gsaa: [f32; 2],
+    /// Its place in `Looks::clearcoat_maps`, read through the mesh's second UV; a place past the maps reads as none.
+    #[serde(deserialize_with = "read_map")]
+    pub map: Option<usize>,
+}
+
+fn read_map<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<usize>, D::Error> {
+    match i64::deserialize(deserializer)? {
+        -1 => Ok(None),
+        map if map >= 0 => Ok(Some(map as usize)),
+        map => Err(serde::de::Error::custom(format!("a clear coat's map is -1 or a place in clearcoatMaps, got {map}"))),
+    }
+}
+
 /// How a material takes the light: by the angle it meets each light at, through its `ramp` of brightnesses over the
 /// half-Lambert term from 0 to 1 where it has one (VRChat's Toon Standard), its shade lent the albedo by `shadow_tint`;
 /// or `Flat`, by the lights' colour alone. A ramp-lit or flat one is capped at `cap` where its shader caps it.
@@ -436,6 +466,7 @@ pub struct Look {
     /// The global theme colours its emission and matcaps are drawn in, by slot.
     #[serde(default)]
     pub themes: [Option<Theme>; 4],
+    pub clearcoat: Option<ClearCoat>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -451,10 +482,13 @@ struct EncodedLooks {
     matcap_masks: Option<usize>,
     #[serde(default)]
     emission: Option<usize>,
+    #[serde(default)]
+    clearcoat_maps: Vec<usize>,
 }
 
 /// What each atlas texel's material lays over the albedo: `index`'s red channel names a texel's entry in `materials`,
-/// one-based, zero for none. Every layer is a glTF image the extension names by index, each at its own size.
+/// one-based, zero for none. Every layer is a glTF image the extension names by index, each at its own size;
+/// a clear coat map holds linear mask, smoothness, reflection and specular levels in its four channels.
 #[derive(Clone, Debug)]
 pub struct Looks {
     pub index: Image,
@@ -463,6 +497,7 @@ pub struct Looks {
     pub matcaps: Vec<Image>,
     pub matcap_masks: Option<Image>,
     pub emission: Option<Image>,
+    pub clearcoat_maps: Vec<Image>,
 }
 
 /// One component of a node's Unity local rotation: of `rest` read as localEulerAngles in degrees when it has three, a quaternion when four.
@@ -685,13 +720,19 @@ fn looks(encoded: EncodedLooks, image: &impl Fn(usize) -> Result<Image, String>)
     if matcaps.iter().any(|layer| (layer.width, layer.height) != (matcaps[0].width, matcaps[0].height)) {
         return Err(format!("{EXTENSION}: matcaps of differing sizes"));
     }
+    let clearcoat_maps: Vec<Image> = encoded.clearcoat_maps.iter().map(|&at| image(at)).collect::<Result<_, _>>().map_err(|error| format!("{EXTENSION}: a clear coat map: {error}"))?;
+    let mut materials = encoded.materials;
+    for coat in materials.iter_mut().filter_map(|look| look.clearcoat.as_mut()) {
+        coat.map = coat.map.filter(|&map| map < clearcoat_maps.len());
+    }
     let looks = Looks {
         index: image(encoded.index).map_err(|error| format!("{EXTENSION}: look index: {error}"))?,
         decals: encoded.decals.iter().map(|&at| image(at)).collect::<Result<_, _>>().map_err(|error| format!("{EXTENSION}: a decal: {error}"))?,
         matcaps,
         matcap_masks: encoded.matcap_masks.map(|at| image(at)).transpose().map_err(|error| format!("{EXTENSION}: matcap masks: {error}"))?,
         emission: encoded.emission.map(|at| image(at)).transpose().map_err(|error| format!("{EXTENSION}: emission: {error}"))?,
-        materials: encoded.materials,
+        clearcoat_maps,
+        materials,
     };
     let textures = looks.matcaps.len() as u32;
     let cell = |look: &Look| {

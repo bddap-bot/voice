@@ -91,6 +91,7 @@ struct Primitive {
     positions: Vec<Vec3>,
     normals: Vec<Vec3>,
     uvs: Vec<Vec2>,
+    coat_uvs: Option<Vec<Vec2>>,
     joints: Vec<[usize; 4]>,
     weights: Vec<[f32; 4]>,
     indices: Vec<u32>,
@@ -224,6 +225,8 @@ pub struct Draw {
     pub count: u32,
     pub material: usize,
     pub switched: Option<usize>,
+    /// Whether a triangle's UVs reach a clear-coated look's cell: only such draws pay for the coat.
+    pub coated: bool,
 }
 
 struct Delta {
@@ -256,6 +259,8 @@ impl Default for Surface {
 
 pub struct Skinned {
     pub vertices: Vec<Vertex>,
+    /// Each vertex's second UV, empty unless a draw is coated.
+    pub coat_uvs: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
     pub draws: Vec<Draw>,
     joints: Vec<(usize, Mat4)>,
@@ -536,6 +541,10 @@ impl Document<'_> {
         Ok((values, components))
     }
 
+    fn vec2s(&self, accessor: usize) -> Result<Vec<Vec2>, String> {
+        Ok(self.accessor(accessor)?.0.chunks_exact(2).map(|v| Vec2::new(v[0] as f32, v[1] as f32)).collect())
+    }
+
     fn vec3s(&self, accessor: usize) -> Result<Vec<Vec3>, String> {
         let (values, components) = self.accessor(accessor)?;
         if components != 3 {
@@ -753,9 +762,10 @@ impl Model {
                         let count = positions.len();
                         let normals = index(&attributes["NORMAL"]).map(|accessor| document.vec3s(accessor)).transpose()?;
                         let uvs = match index(&attributes["TEXCOORD_0"]) {
-                            Some(accessor) => document.accessor(accessor)?.0.chunks_exact(2).map(|v| Vec2::new(v[0] as f32, v[1] as f32)).collect(),
+                            Some(accessor) => document.vec2s(accessor)?,
                             None => vec![Vec2::ZERO; count],
                         };
+                        let coat_uvs = index(&attributes["TEXCOORD_1"]).map(|accessor| document.vec2s(accessor)).transpose()?;
                         let joints = match index(&attributes["JOINTS_0"]) {
                             Some(accessor) => document.accessor(accessor)?.0.chunks_exact(4).map(|v| std::array::from_fn(|i| v[i] as usize)).collect(),
                             None => Vec::new(),
@@ -768,7 +778,7 @@ impl Model {
                             Some(accessor) => document.accessor(accessor)?.0.into_iter().map(|value| value as u32).collect(),
                             None => (0..count as u32).collect(),
                         };
-                        if indices.iter().any(|&vertex| vertex as usize >= count) || normals.as_ref().is_some_and(|normals| normals.len() != count) || uvs.len() != count {
+                        if indices.iter().any(|&vertex| vertex as usize >= count) || normals.as_ref().is_some_and(|normals| normals.len() != count) || uvs.len() != count || coat_uvs.as_ref().is_some_and(|coat_uvs| coat_uvs.len() != count) {
                             return Err("primitive attributes disagree in length".to_owned());
                         }
                         let normals = normals.unwrap_or_else(|| smooth_normals(&positions, &indices));
@@ -788,7 +798,7 @@ impl Model {
                                 Ok(Target { positions, normals })
                             })
                             .collect::<Result<Vec<_>, String>>()?;
-                        Ok(Primitive { positions, normals, uvs, joints, weights, indices, material: index(&primitive["material"]), targets })
+                        Ok(Primitive { positions, normals, uvs, coat_uvs, joints, weights, indices, material: index(&primitive["material"]), targets })
                     })
                     .collect::<Result<Vec<_>, String>>()?;
                 let targets = primitives.iter().map(|primitive| primitive.targets.len()).max().unwrap_or(0);
@@ -1156,6 +1166,7 @@ impl Model {
     pub fn skinned(&self) -> Result<Skinned, String> {
         let palette_index = |index: usize| u16::try_from(index).map_err(|_| "the model has 65536 or more joints".to_owned());
         let mut vertices = Vec::new();
+        let mut coat_uvs = Vec::new();
         let mut indices = Vec::new();
         let mut draws = Vec::new();
         let mut joints = Vec::new();
@@ -1203,6 +1214,7 @@ impl Model {
                         _ => ([own; 4], [1.0, 0.0, 0.0, 0.0]),
                     };
                     vertices.push(Vertex { position: primitive.positions[vertex].into(), normal: primitive.normals[vertex].into(), uv: primitive.uvs[vertex].into(), joints: slots, weights, surface: 0 });
+                    coat_uvs.push(primitive.coat_uvs.as_ref().map_or([0.0; 2], |uvs| uvs[vertex].into()));
                 }
                 for (target, data) in primitive.targets.iter().enumerate() {
                     let deltas: Vec<Delta> = (0..primitive.positions.len()).filter(|&vertex| data.positions[vertex] != Vec3::ZERO || data.normals[vertex] != Vec3::ZERO).map(|vertex| Delta { slot: base + vertex as u32, position: data.positions[vertex], normal: data.normals[vertex] }).collect();
@@ -1210,7 +1222,7 @@ impl Model {
                         morphs.push(Morph { mesh: mesh_index, target, deltas });
                     }
                 }
-                draws.push(Draw { first: indices.len() as u32, count: primitive.indices.len() as u32, material: primitive.material.unwrap_or(self.materials.len() - 1), switched: switched.contains(&node).then_some(node) });
+                draws.push(Draw { first: indices.len() as u32, count: primitive.indices.len() as u32, material: primitive.material.unwrap_or(self.materials.len() - 1), switched: switched.contains(&node).then_some(node), coated: false });
                 indices.extend(primitive.indices.iter().map(|&vertex| vertex + base));
             }
             spans.insert(node, start..vertices.len());
@@ -1239,6 +1251,24 @@ impl Model {
             }
             joins
         });
+        let coats: Vec<[f32; 4]> = self.menu.iter().filter_map(|menu| menu.looks.as_ref()).flat_map(|looks| &looks.materials).filter(|look| look.clearcoat.is_some()).map(|look| look.rect).collect();
+        let moves: Vec<(std::ops::Range<usize>, &[[f32; 4]])> = self.menu.iter().flat_map(|menu| &menu.targets).filter_map(|target| match &target.effect {
+            expressions::Effect::Material { node, choices } => spans.get(node).map(|span: &std::ops::Range<usize>| (span.clone(), &choices[..])),
+            _ => None,
+        }).collect();
+        for draw in &mut draws {
+            draw.coated = !coats.is_empty() && indices[draw.first as usize..(draw.first + draw.count) as usize].chunks_exact(3).any(|triangle| {
+                let chosen = moves.iter().filter(|(span, _)| span.contains(&(triangle[0] as usize))).flat_map(|(_, choices)| choices.iter());
+                std::iter::once(&[1.0, 1.0, 0.0, 0.0]).chain(chosen).any(|&[sx, sy, ox, oy]| {
+                    let uvs = triangle.iter().map(|&vertex| (Vec2::from(vertices[vertex as usize].uv) * Vec2::new(sx, sy) + Vec2::new(ox, oy)).clamp(Vec2::ZERO, Vec2::ONE));
+                    let (low, high) = uvs.fold((Vec2::ONE, Vec2::ZERO), |(low, high), uv| (low.min(uv), high.max(uv)));
+                    coats.iter().any(|&[x0, y0, x1, y1]| low.x <= x1 && high.x >= x0 && low.y <= y1 && high.y >= y0)
+                })
+            });
+        }
+        if !draws.iter().any(|draw| draw.coated) {
+            coat_uvs.clear();
+        }
         let mut touched: Vec<u32> = morphs.iter().flat_map(|morph| morph.deltas.iter().map(|delta| delta.slot)).collect();
         touched.sort_unstable();
         touched.dedup();
@@ -1260,7 +1290,7 @@ impl Model {
         }
         let base = touched.iter().map(|&vertex| (Vec3::from(vertices[vertex as usize].position), Vec3::from(vertices[vertex as usize].normal))).collect();
         let uvs = vertices.iter().map(|vertex| vertex.uv).collect();
-        let mut skinned = Skinned { vertices, indices, draws, joints, applied: vec![0.0; morphs.len()], stamps: vec![0; touched.len()], morphs, touched, base, offsets, entries, stamp: 0, spans, uvs, moved: HashMap::new(), retextured: Vec::new(), regions: HashMap::new(), surfaces: vec![Surface::default()] };
+        let mut skinned = Skinned { vertices, coat_uvs, indices, draws, joints, applied: vec![0.0; morphs.len()], stamps: vec![0; touched.len()], morphs, touched, base, offsets, entries, stamp: 0, spans, uvs, moved: HashMap::new(), retextured: Vec::new(), regions: HashMap::new(), surfaces: vec![Surface::default()] };
         if let Some(menu) = &self.menu {
             let hues = menu.targets.iter().filter_map(|target| match &target.effect { expressions::Effect::Hue(regions) => Some(regions), _ => None }).flatten().map(|region| (region.node, region.rect));
             let colors = menu.targets.iter().filter_map(|target| match &target.effect { expressions::Effect::Color(regions) => Some(regions), _ => None }).flatten().map(|region| (region.node, region.rect));
@@ -2244,5 +2274,100 @@ pub mod tests {
         let skinned = model.skinned().unwrap();
         assert_eq!(skinned.vertices[1].position, [1.0, 0.0, 0.0]);
         assert_eq!(skinned.vertices[2].position, [0.0, 1.25, 0.0], "the mesh's default weight applies at load");
+    }
+
+    /// Two triangles over the left and right halves of a 2x1 atlas whose look index gives the left half a clear-coated
+    /// material, its look `coat` and the file's looks `extra` keys; the left triangle carries a second UV.
+    fn coated(coat: Value, extra: Value, coat_uvs: &[f32]) -> Result<Model, String> {
+        let mut builder = Builder::new(serde_json::json!({ "VRMC_vrm": { "humanoid": { "humanBones": {} } } }));
+        let index = builder.webp(2, 1, &[1, 0, 0, 255, 0, 0, 0, 255]);
+        let map = builder.webp(2, 2, &checker());
+        let mut looks = serde_json::json!({
+            "index": index,
+            "materials": [{"rect": [0, 0, 0.5, 1], "decals": [null, null, null, null], "matcaps": [null, null, null, null], "lighting": {"model": "lit"}, "clearcoat": coat}, {"rect": [0.5, 0, 1, 1], "decals": [null, null, null, null], "matcaps": [null, null, null, null], "lighting": {"model": "lit"}}],
+            "clearcoatMaps": [map],
+        });
+        looks.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        builder.json["extensions"][expressions::EXTENSION] = serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": [
+            {"effect": {"look": [{"node": 0, "rect": [0, 0, 0.5, 1], "field": "clearcoatST", "slot": 2}]}, "default": 0.25}
+        ], "looks": looks});
+        let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        let left = builder.accessor("VEC2", &[0.1, 0.1, 0.4, 0.1, 0.1, 0.9]);
+        let right = builder.accessor("VEC2", &[0.6, 0.1, 0.9, 0.1, 0.6, 0.9]);
+        let second = builder.accessor("VEC2", coat_uvs);
+        builder.set("nodes", serde_json::json!([{"mesh": 0}, {"mesh": 1}]));
+        builder.set("meshes", serde_json::json!([
+            {"primitives": [{"attributes": {"POSITION": position, "TEXCOORD_0": left, "TEXCOORD_1": second}, "material": 0}]},
+            {"primitives": [{"attributes": {"POSITION": position, "TEXCOORD_0": right}, "material": 1}]}
+        ]));
+        builder.set("materials", serde_json::json!([{}, {}]));
+        Model::parse(&builder.glb())
+    }
+
+    fn coat() -> Value {
+        serde_json::json!({"strength": 0.8, "smoothness": 0.7, "reflection": 0.6, "specular": 0.5, "fresnel": 1, "specularTint": [1, 0.5, 0.25], "reflectionTint": [0.25, 0.5, 1], "st": [2, 3, 0.25, 0.5], "inverts": [false, true, false, false], "gsaa": [0.15, 0.1], "map": 0})
+    }
+
+    #[test]
+    fn a_clear_coat_reads_with_its_map_and_second_uv_and_only_its_draws_are_coated() {
+        let model = coated(coat(), serde_json::json!({}), &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0]).unwrap();
+        let looks = model.menu.as_ref().unwrap().looks.as_ref().unwrap();
+        assert_eq!(looks.materials[0].clearcoat, Some(expressions::ClearCoat { strength: 0.8, smoothness: 0.7, reflection: 0.6, specular: 0.5, fresnel: 1.0, specular_tint: [1.0, 0.5, 0.25], reflection_tint: [0.25, 0.5, 1.0], st: [2.0, 3.0, 0.25, 0.5], inverts: [false, true, false, false], gsaa: [0.15, 0.1], map: Some(0) }));
+        assert_eq!(looks.materials[1].clearcoat, None, "a look without the key has no coat");
+        assert_eq!((looks.clearcoat_maps[0].width, looks.clearcoat_maps[0].height, &looks.clearcoat_maps[0].rgba), (2, 2, &checker()), "the map decodes to its packed levels");
+        let skinned = model.skinned().unwrap();
+        let draws: Vec<(usize, bool)> = skinned.draws.iter().map(|draw| (draw.material, draw.coated)).collect();
+        assert_eq!(draws, vec![(0, true), (1, false)], "only the draw over the coated cell pays for the coat");
+        assert_eq!(skinned.coat_uvs, vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0; 2], [0.0; 2], [0.0; 2]], "a primitive without a second UV reads zeros");
+        let mapless = coated(serde_json::json!(coat().as_object().unwrap().clone().into_iter().map(|(key, value)| if key == "map" { (key, (-1).into()) } else { (key, value) }).collect::<serde_json::Map<_, _>>()), serde_json::json!({}), &[0.0; 6]).unwrap();
+        assert_eq!(mapless.menu.as_ref().unwrap().looks.as_ref().unwrap().materials[0].clearcoat.as_ref().unwrap().map, None);
+        let past = coated(serde_json::json!(coat().as_object().unwrap().clone().into_iter().map(|(key, value)| if key == "map" { (key, 1.into()) } else { (key, value) }).collect::<serde_json::Map<_, _>>()), serde_json::json!({}), &[0.0; 6]).unwrap();
+        assert_eq!(past.menu.as_ref().unwrap().looks.as_ref().unwrap().materials[0].clearcoat.as_ref().unwrap().map, None, "a map past clearcoatMaps reads as none");
+        assert!(coated(Value::Null, serde_json::json!({}), &[0.0; 6]).unwrap().skinned().unwrap().draws.iter().all(|draw| !draw.coated), "a null coat is none");
+    }
+
+    #[test]
+    fn a_draw_a_material_choice_moves_onto_a_coated_cell_is_coated() {
+        let mut model = coated(coat(), serde_json::json!({}), &[0.0; 6]).unwrap();
+        let mut moved = |choices: Vec<[f32; 4]>| {
+            model.menu.as_mut().unwrap().targets.push(expressions::Target { effect: expressions::Effect::Material { node: 1, choices }, default: 0.0 });
+            let draws: Vec<(usize, bool)> = model.skinned().unwrap().draws.iter().map(|draw| (draw.material, draw.coated)).collect();
+            model.menu.as_mut().unwrap().targets.pop();
+            draws
+        };
+        assert_eq!(moved(vec![[1.0, 1.0, 0.05, 0.0]]), vec![(0, true), (1, false)], "a choice that stays on its uncoated cell keeps the draw plain");
+        assert_eq!(moved(vec![[1.0, 1.0, 0.05, 0.0], [1.0, 1.0, -0.5, 0.0]]), vec![(0, true), (1, true)], "a choice onto the coated cell, though not the default, coats the draw");
+    }
+
+    #[test]
+    fn a_malformed_clear_coat_is_refused() {
+        let with = |key: &str, value: Value| { let mut coat = coat(); coat[key] = value; coat };
+        for (coat, extra, why) in [
+            (with("map", (-2).into()), serde_json::json!({}), "a map below -1"),
+            (with("inverts", serde_json::json!([false, true, false])), serde_json::json!({}), "three inverts"),
+            (with("gsaa", serde_json::json!([0.15])), serde_json::json!({}), "a gsaa of one"),
+            ({ let mut coat = coat(); coat.as_object_mut().unwrap().remove("gsaa"); coat }, serde_json::json!({}), "a coat without gsaa"),
+            (with("st", serde_json::json!([1, 1, 0])), serde_json::json!({}), "an st of three"),
+            (with("strength", "wet".into()), serde_json::json!({}), "a strength that is no number"),
+            (coat(), serde_json::json!({"clearcoatMaps": [7]}), "a map image the file lacks"),
+        ] {
+            assert!(coated(coat, extra, &[0.0; 6]).is_err(), "{why} is refused");
+        }
+        assert!(coated(coat(), serde_json::json!({}), &[0.0; 4]).is_err(), "a second UV of another length is refused");
+    }
+
+    #[test]
+    fn an_animated_clear_coat_offset_reaches_its_regions_surface() {
+        let model = coated(coat(), serde_json::json!({}), &[0.0; 6]).unwrap();
+        let menu = model.menu.as_ref().unwrap();
+        let mut skinned = model.skinned().unwrap();
+        let surface = skinned.vertices[0].surface as usize;
+        assert!(surface != 0 && skinned.vertices[3..].iter().all(|vertex| vertex.surface == 0), "the region's vertices take a surface of their own");
+        let row = expressions::Field::ClearCoatSt as usize;
+        let bit = row * 4 + 2;
+        assert_eq!(skinned.surfaces[surface].animated[bit / 32] & (1 << (bit % 32)), 0, "at its default the material's own st holds");
+        skinned.surface_values(menu, &[0.75]);
+        assert_eq!(skinned.surfaces[surface].look[row][2], 0.75);
+        assert_ne!(skinned.surfaces[surface].animated[bit / 32] & (1 << (bit % 32)), 0, "an animated offset x replaces the material's");
     }
 }

@@ -18,9 +18,10 @@ fn main() {
         std::fs::write(out.join(file), words.iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
     };
     write(naga::ShaderStage::Vertex, "vertex", 0, "vertex.spv".into());
+    write(naga::ShaderStage::Vertex, "coated_vertex", 0, "coated_vertex.spv".into());
     write(naga::ShaderStage::Fragment, "depth", 0, "depth.spv".into());
     let mut shaders = format!("const DECAL_PAGES: usize = {pages};\n");
-    for (entry, name) in [("fragment", "FRAGMENT_SHADERS"), ("cutout", "CUTOUT_SHADERS")] {
+    for (entry, name) in [("fragment", "FRAGMENT_SHADERS"), ("cutout", "CUTOUT_SHADERS"), ("coated_fragment", "COATED_FRAGMENT_SHADERS"), ("coated_cutout", "COATED_CUTOUT_SHADERS")] {
         for used in 0..=pages {
             write(naga::ShaderStage::Fragment, entry, used, format!("{entry}-{used}.spv"));
         }

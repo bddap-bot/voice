@@ -1,4 +1,4 @@
 {
   "effects": ["switch", "hue", "color", "tone", "look", "morph", "scale", "rotation", "translation", "material", "constraint", "parameter", "particle"],
-  "looks": ["decal", "decalIntensity", "decalHue", "matcapHueShift", "matcapIntensity", "matcapReplace", "matcapMultiply", "matcapAdd", "matcapMixed", "emission", "emissionHue", "themeHue", "themeSaturation", "themeValue", "themeSpeed"]
+  "looks": ["decal", "decalIntensity", "decalHue", "matcapHueShift", "matcapIntensity", "matcapReplace", "matcapMultiply", "matcapAdd", "matcapMixed", "emission", "emissionHue", "themeHue", "themeSaturation", "themeValue", "themeSpeed", "clearcoatST"]
 }

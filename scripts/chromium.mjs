@@ -1,12 +1,9 @@
 import { spawn } from 'node:child_process';
-import { access, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { access, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { createServer } from 'node:net';
-import { availableParallelism } from 'node:os';
+import { availableParallelism, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const SCRATCH = fileURLToPath(new URL('../.scratch/', import.meta.url));
 
 export async function chromiumExecutable() {
   if (process.env.CHROMIUM_BIN) return process.env.CHROMIUM_BIN;
@@ -59,8 +56,7 @@ export async function launchChromium({ executable, args = [] } = {}) {
 }
 
 async function spawnChromium(executable, args, release) {
-  await mkdir(SCRATCH, { recursive: true });
-  const scratch = await mkdtemp(join(SCRATCH, 'chromium-'));
+  const scratch = await mkdtemp(join(tmpdir(), 'chromium-'));
   const chrome = spawn(executable, [...args, `--user-data-dir=${scratch}`, '--remote-debugging-pipe'], { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'], env: { ...process.env, HOME: scratch, XDG_CONFIG_HOME: scratch, XDG_CACHE_HOME: scratch, TMPDIR: scratch, VK_LOADER_DRIVERS_SELECT: '*swiftshader*' } });
   let stderr = '', failure;
   chrome.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-500); });

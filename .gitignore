@@ -1,5 +1,4 @@
 node_modules/
-.scratch/
 android/build/
 smoke-artifacts/
 docs/puppet.js

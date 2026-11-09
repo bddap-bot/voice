@@ -41,8 +41,8 @@ def stamped(commit, dirty=False):
     return lambda doc: doc['asset'].update(extras={'converter': {'commit': commit, 'dirty': dirty}})
 
 
-def glb(doc):
-    text = json.dumps(doc).encode()
+def glb(doc, spelled=lambda text: text):
+    text = spelled(json.dumps(doc)).encode()
     text += b' ' * (-len(text) % 4)
     return struct.pack('<4sII', b'glTF', 2, 20 + len(text)) + struct.pack('<I4s', len(text), b'JSON') + text
 
@@ -72,7 +72,7 @@ AVATAR = {
 
 SPREAD = {'angle': 0.1, 'body': 'b', 'clips': 'c', 'revision': 1}
 measured = []
-publisher.measure = lambda path, clips=None: measured.append(Path(path).read_bytes()) or SPREAD
+publisher.measure = lambda name, data, clips=None: measured.append(data) or SPREAD
 
 
 def without_arms(data):
@@ -198,7 +198,7 @@ class Publishing(unittest.TestCase):
     def test_a_figure_whose_spread_cannot_be_measured_leaves_the_catalog_and_its_backup_untouched(self):
         before = self.catalog.read_bytes()
         new = self.candidate(lambda doc: doc['extensionsUsed'].append('VRMC_vrm'))
-        def refuse(path, clips=None):
+        def refuse(name, data, clips=None):
             raise RuntimeError('no drawn left thigh skin to measure')
         measure, publisher.measure = publisher.measure, refuse
         try:
@@ -261,7 +261,7 @@ class Publishing(unittest.TestCase):
         before = self.catalog.read_bytes()
         staged = self.root / '.staged' / self.catalog.name
         staged.parent.mkdir()
-        measure, publisher.measure = publisher.measure, lambda path, clips=None: against.append(clips) or SPREAD
+        measure, publisher.measure = publisher.measure, lambda name, data, clips=None: against.append(clips) or SPREAD
         try:
             publisher.publish(self.catalog, self.catalog, clips='next-clips', out_path=staged)
         finally:
@@ -279,10 +279,31 @@ class Publishing(unittest.TestCase):
         measured.clear()
         publish(new, self.catalog)
         installed = self.catalog.read_bytes()
-        self.assertEqual(measured, [new.read_bytes()])
+        self.assertEqual(len(measured), 1)
+        self.assertEqual(installed, publisher.with_arms(measured[0], SPREAD))
         self.assertEqual(without_arms(installed), AVATAR)
         self.assertEqual(installed[-len(body) - 8:], struct.pack('<I4s', len(body), b'BIN\0') + body)
         self.assertEqual(struct.unpack_from('<I', installed, 8)[0], len(installed))
+
+    def test_the_spread_is_measured_on_the_number_spellings_it_installs(self):
+        long, short = '2.6941299438476563e-05', '2.6941299438476562e-05'
+        self.assertEqual(float(long), float(short))
+        doc = copy.deepcopy(AVATAR)
+        doc['accessors'] = [{'max': [0.125]}]
+        new = self.root / 'new.vrm'
+        new.write_bytes(glb(doc, lambda text: text.replace('0.125', long)))
+
+        def body(data):
+            doc = json.loads(data[20:20 + struct.unpack_from('<I', data, 12)[0]], parse_float=str)
+            doc['extensions'].pop(publisher.ARMS, None)
+            return json.dumps([doc[k] for k in ('nodes', 'meshes', 'accessors')])
+        measure, publisher.measure = publisher.measure, lambda name, data, clips=None: {**SPREAD, 'body': body(data)}
+        try:
+            publish(new, self.catalog)
+        finally:
+            publisher.measure = measure
+        installed = self.catalog.read_bytes()
+        self.assertEqual(publisher.document(installed)['extensions'][publisher.ARMS]['body'], body(installed))
 
 
 if __name__ == '__main__':

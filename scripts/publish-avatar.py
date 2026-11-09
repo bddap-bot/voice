@@ -8,7 +8,7 @@ mask) the catalog file carries must survive into the new one, or match a --drop 
 removal. A target effect or look field the overlay's vr/src/vrm/effects.json does not list is refused: the overlay
 would leave it still. So is a look without its material's lighting, which the overlay refuses to load. The installed
 file carries VOICE_arms, the arm spread `voice-vr arms` (the binary $VOICE_VR names, else voice-vr on PATH) measures on
-its body against the clips the server plays; the overlay refuses a figure without it.
+the body it installs against the clips the server plays; the overlay refuses a figure without it.
 The replaced file stays beside the catalog in .previous/, unless NEW is CATALOG: republishing a file in place re-measures it.
 Otherwise NEW must name in its asset extras the clean converter commit that wrote it, one origin/main of DIR, the
 converter's repository, contains once fetched, unless --unlanded names it an intended exception; and that commit may
@@ -98,20 +98,27 @@ READ = json.loads((Path(__file__).resolve().parents[1] / 'vr/src/vrm/effects.jso
 ARMS = 'VOICE_arms'
 
 
-def measure(path, clips=None):
-    run = subprocess.run([os.environ.get('VOICE_VR', 'voice-vr'), 'arms', *(['--clips', str(clips)] if clips else []), str(path)], check=True, stdout=subprocess.PIPE, text=True)
+def measure(name, data, clips=None):
+    with tempfile.TemporaryDirectory() as scratch:
+        path = Path(scratch) / name
+        path.write_bytes(data)
+        run = subprocess.run([os.environ.get('VOICE_VR', 'voice-vr'), 'arms', *(['--clips', str(clips)] if clips else []), str(path)], check=True, stdout=subprocess.PIPE, text=True)
     return json.loads(run.stdout)
 
 
-def with_arms(data, spread):
+def with_json(data, doc):
     size = struct.unpack_from('<I', data, 12)[0]
-    doc = document(data)
-    doc.setdefault('extensions', {})[ARMS] = spread
-    doc['extensionsUsed'] = sorted(set(doc.get('extensionsUsed', [])) | {ARMS})
     text = json.dumps(doc, separators=(',', ':')).encode()
     text += b' ' * (-len(text) % 4)
     rest = data[20 + size:]
     return struct.pack('<4sII', b'glTF', 2, 20 + len(text) + len(rest)) + struct.pack('<I4s', len(text), b'JSON') + text + rest
+
+
+def with_arms(data, spread):
+    doc = document(data)
+    doc.setdefault('extensions', {})[ARMS] = spread
+    doc['extensionsUsed'] = sorted(set(doc.get('extensionsUsed', [])) | {ARMS})
+    return with_json(data, doc)
 
 
 def unread(doc):
@@ -184,7 +191,9 @@ def publish(new_path, catalog_path, repo=None, drops=(), unlanded_ok=False, roll
     unlit = [i for i, look in enumerate(looks) if 'lighting' not in look]
     if unlit:
         raise SystemExit(f'{new_path} has looks without the lighting the overlay reads (materials {unlit}); reconvert it with the current converter')
-    data = with_arms(data, measure(new_path, clips))
+    # The overlay's JSON parser can read two spellings of one number as different doubles; measure the spelling installed.
+    data = with_json(data, document(data))
+    data = with_arms(data, measure(Path(new_path).name, data, clips))
     if catalog.exists():
         gone = lost(inventory(document(catalog.read_bytes())), inventory(document(data)), drops)
         if gone:

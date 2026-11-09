@@ -272,6 +272,7 @@ pub struct Skinned {
     pub surfaces: Vec<Surface>,
     uvs: Vec<[f32; 2]>,
     moved: HashMap<usize, [f32; 4]>,
+    retextured: Vec<u32>,
 }
 
 #[derive(Clone)]
@@ -1259,7 +1260,7 @@ impl Model {
         }
         let base = touched.iter().map(|&vertex| (Vec3::from(vertices[vertex as usize].position), Vec3::from(vertices[vertex as usize].normal))).collect();
         let uvs = vertices.iter().map(|vertex| vertex.uv).collect();
-        let mut skinned = Skinned { vertices, indices, draws, joints, applied: vec![0.0; morphs.len()], stamps: vec![0; touched.len()], morphs, touched, base, offsets, entries, stamp: 0, spans, uvs, moved: HashMap::new(), regions: HashMap::new(), surfaces: vec![Surface::default()] };
+        let mut skinned = Skinned { vertices, indices, draws, joints, applied: vec![0.0; morphs.len()], stamps: vec![0; touched.len()], morphs, touched, base, offsets, entries, stamp: 0, spans, uvs, moved: HashMap::new(), retextured: Vec::new(), regions: HashMap::new(), surfaces: vec![Surface::default()] };
         if let Some(menu) = &self.menu {
             let hues = menu.targets.iter().filter_map(|target| match &target.effect { expressions::Effect::Hue(regions) => Some(regions), _ => None }).flatten().map(|region| (region.node, region.rect));
             let colors = menu.targets.iter().filter_map(|target| match &target.effect { expressions::Effect::Color(regions) => Some(regions), _ => None }).flatten().map(|region| (region.node, region.rect));
@@ -1449,10 +1450,10 @@ fn set_surfaces(surface_of: &HashMap<(usize, [u32; 4]), usize>, surfaces: &mut [
 }
 
 impl Skinned {
-    pub fn retexture(&mut self, node: usize, moved: [f32; 4]) -> Vec<u32> {
-        let Some(span) = self.spans.get(&node).cloned() else { return Vec::new() };
+    pub fn retexture(&mut self, node: usize, moved: [f32; 4]) {
+        let Some(span) = self.spans.get(&node).cloned() else { return };
         if self.moved.get(&node).map_or(moved == [1.0, 1.0, 0.0, 0.0], |&last| last == moved) {
-            return Vec::new();
+            return;
         }
         self.moved.insert(node, moved);
         let [sx, sy, ox, oy] = moved;
@@ -1460,7 +1461,7 @@ impl Skinned {
             let [u, v] = self.uvs[vertex];
             self.vertices[vertex].uv = [u * sx + ox, v * sy + oy];
         }
-        span.map(|vertex| vertex as u32).collect()
+        self.retextured.extend(span.map(|vertex| vertex as u32));
     }
 
     pub fn palette(&self, worlds: &[Mat4], placement: Mat4) -> Vec<Mat4> {
@@ -1501,6 +1502,7 @@ impl Skinned {
         skin(&self.vertices[vertex], palette)
     }
 
+    /// Morphs the vertices to `weights`; the vertices that changed since the last call, a material swap's included.
     pub fn morph(&mut self, weights: &[Vec<f32>]) -> Vec<u32> {
         let current: Vec<f32> = self.morphs.iter().map(|morph| weights[morph.mesh][morph.target]).collect();
         self.stamp += 1;
@@ -1535,6 +1537,7 @@ impl Skinned {
             updated.push(vertex);
         }
         self.applied = current;
+        updated.append(&mut self.retextured);
         updated
     }
 
@@ -1947,13 +1950,17 @@ pub mod tests {
         let mut skinned = model.skinned().unwrap();
         let menu = model.menu.as_ref().unwrap();
         let original: Vec<_> = skinned.vertices.iter().map(|vertex| vertex.uv).collect();
+        let weights = model.rest().weights;
         let (node, moved) = menu.materials(&[1.0]).next().unwrap();
-        assert_eq!(skinned.retexture(node, moved), vec![0, 1, 2]);
+        skinned.retexture(node, moved);
         assert_eq!(skinned.vertices[0].uv, [0.5, 0.0]);
-        assert!(skinned.retexture(node, moved).is_empty());
+        skinned.retexture(node, moved);
+        assert_eq!(skinned.morph(&weights), vec![0, 1, 2], "a swap reaches the next upload, however many steps it waits for it");
+        assert!(skinned.morph(&weights).is_empty());
         let (node, moved) = menu.materials(&[0.0]).next().unwrap();
         skinned.retexture(node, moved);
         assert_eq!(skinned.vertices.iter().map(|vertex| vertex.uv).collect::<Vec<_>>(), original);
+        assert_eq!(skinned.morph(&weights), vec![0, 1, 2]);
     }
 
     #[test]

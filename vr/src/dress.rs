@@ -157,11 +157,10 @@ fn left(renderer: &Renderer) -> Result<Vec<u8>, String> {
 fn posed(puppet: &mut Puppet, head: [f32; 3], settle: usize) -> [Option<glam::Mat4>; 2] {
     let stand = Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0; 3]);
     let mut pose = puppet.model.pose(&puppet.standing);
-    let (retextured, _) = puppet.express(&mut pose, settle, DELTA);
+    puppet.express(&mut pose, settle, DELTA);
     let worlds = puppet.model.worlds(&pose);
     let body = stand.mat4() * puppet.fit.placement(&puppet.model, &worlds, 0.0);
     puppet.changed = puppet.skinned.morph(&pose.weights);
-    puppet.changed.extend(retextured);
     let quad = facing(stand.apply([0.0, -FLOOR, 0.0]), head);
     let local = quad.inverse();
     puppet.draw(&worlds, local.mat4() * body);
@@ -500,7 +499,7 @@ fn replay_reference(recording: &Path, file: &str, out: &Path, meta: &mut serde_j
             }
         }
         let mut pose = puppet.model.pose(&puppet.standing);
-        let (retextured, idle) = puppet.express(&mut pose, 1, RECORDED_DELTA);
+        let idle = puppet.express(&mut pose, 1, RECORDED_DELTA);
         puppet.settle(&mut pose, root * to_root, &[], RECORDED_DELTA, &idle);
         let worlds = puppet.model.worlds(&pose);
         if (window.0..window.1).contains(&frame) {
@@ -511,7 +510,6 @@ fn replay_reference(recording: &Path, file: &str, out: &Path, meta: &mut serde_j
         }
         let Some(names) = renders.get(&frame) else { continue };
         puppet.changed = puppet.skinned.morph(&pose.weights);
-        puppet.changed.extend(retextured);
         puppet.draw(&worlds, to_root);
         renderer.render(&puppet.drawn, [Some(view), None], glam::Mat4::IDENTITY, side)?;
         let picture = left(&renderer)?;

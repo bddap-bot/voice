@@ -266,7 +266,7 @@ impl Puppet {
         }
         let mut pose = self.model.pose(&self.animator.humanoid(&self.standing, self.model.rest_hips()));
         self.sense(hands, delta);
-        let (retextured, idle) = self.express(&mut pose, 1, delta);
+        let idle = self.express(&mut pose, 1, delta);
         let mut worlds = self.model.worlds(&pose);
         let fitted = self.fit.placement(&self.model, &worlds, 0.0);
         let feet = self.model.feet(&worlds).map(|feet| feet.map(|foot| fitted.transform_point3(foot).to_array()));
@@ -287,7 +287,6 @@ impl Puppet {
         self.model.express(&mut pose, "aa", mouth);
         self.settle(&mut pose, body, hands, delta, &idle);
         self.changed = self.skinned.morph(&pose.weights);
-        self.changed.extend(retextured);
         let worlds = self.model.worlds(&pose);
         self.felt = worlds.iter().map(|world| body * *world).collect();
         (worlds, body, stand)
@@ -312,9 +311,9 @@ impl Puppet {
         self.touch.sense(menu, &self.values, &self.felt, &senders, controller, delta);
     }
 
-    /// Runs the menu's controller `steps` times and applies its last values to `pose`; the vertices it retextured.
-    fn express(&mut self, pose: &mut vrm::Pose, steps: usize, delta: f32) -> (Vec<u32>, spring::Idle) {
-        let (Some(menu), Some(controller)) = (&self.model.menu, &mut self.controller) else { return (Vec::new(), spring::Idle::default()) };
+    /// Runs the menu's controller `steps` times and applies its last values to `pose`.
+    fn express(&mut self, pose: &mut vrm::Pose, steps: usize, delta: f32) -> spring::Idle {
+        let (Some(menu), Some(controller)) = (&self.model.menu, &mut self.controller) else { return spring::Idle::default() };
         let mut values = Vec::new();
         for _ in 0..steps {
             values = controller.step(menu, delta);
@@ -324,8 +323,10 @@ impl Puppet {
         self.drawn.seconds += steps as f64 * delta as f64;
         self.particles.apply(&values);
         self.skinned.surface_values(menu, &values);
-        let retextured = menu.materials(&values).flat_map(|(node, moved)| self.skinned.retexture(node, moved)).collect();
-        (retextured, menu.idle(&values))
+        for (node, moved) in menu.materials(&values) {
+            self.skinned.retexture(node, moved);
+        }
+        menu.idle(&values)
     }
 
     /// Moves the constrained and spring-driven nodes of `pose` for the figure placed by `body`, then runs its particles

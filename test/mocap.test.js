@@ -130,7 +130,7 @@ test('a clip write installs its clips and every catalog figure re-measured again
   for (const spread of figures.map(spreadOf)) assert.equal(spread.clips, served(), 'dropping a clip re-measures every figure against the clips left');
   assert.notEqual(served(), first[0].clips);
 
-  const republishing = `#!/bin/sh\ncase "$4" in *a.vrm) printf ' ' >> "$4";; esac\n` + measuring().split('\n').slice(1).join('\n');
+  const republishing = `#!/bin/sh\ncase "$4" in *a.vrm) printf ' ' >> '${figures[0]}';; esac\n` + measuring().split('\n').slice(1).join('\n');
   for (const [stub, refusal] of [[measuring('b.vrm'), /1 of 2 catalog figures could not be measured.*no clip and no figure changed: b\.vrm/], ['#!/bin/sh\nexit 1\n', /2 of 2 .*a\.vrm, b\.vrm/], [republishing, /a\.vrm changed while the write measured them/]]) {
     fs.writeFileSync(voiceVr, stub);
     const [before, a] = [state(), fs.readFileSync(figures[0])];

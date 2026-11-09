@@ -1,12 +1,14 @@
 # Transform constraints
 
 `UNITY_constraints` carries an ordered `constraints` array alongside the VRM
-skeleton. A constraint has a `kind` (`Parent`, `Position`, or `LookAt`), a target
+skeleton. A constraint has a `kind` (`Parent`, `Position`, `Rotation`, or `LookAt`), a target
 `node`, a component `weight`, three-axis boolean `translation` and `rotation`
 masks, local `rest` and `offset` matrices, and weighted `sources`. A
 `VRCHAT_expressions` target whose effect is `{"constraint": {"node": N}}` gives
 every constraint on node `N` its value as weight instead, so its `default` is the
-weight saved with the component.
+weight saved with the component. A `Rotation` constraint turns its node to its
+sources' weighted rotation times its `offset`, masked per axis as `Parent` is, and
+leaves its position.
 
 Each source names either a glTF `node` or an immutable `world` matrix, with its
 own `weight` and `offset` matrix. Matrices are column-major, use glTF coordinates,

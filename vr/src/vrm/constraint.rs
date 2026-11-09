@@ -47,7 +47,7 @@ pub(super) fn parse(value: Option<&Value>, nodes: usize) -> Result<Vec<Constrain
     let mut constraints = Vec::new();
     for c in value["constraints"].as_array().ok_or("constraints must be an array")? {
         let kind = c["kind"].as_str().ok_or("constraint kind missing")?;
-        if !matches!(kind, "Parent" | "Position" | "LookAt") {
+        if !matches!(kind, "Parent" | "Position" | "Rotation" | "LookAt") {
             return Err(format!("unsupported constraint {kind}"));
         }
         let mut sources = Vec::new();
@@ -109,6 +109,7 @@ impl Constraints {
                 match c.kind.as_str() {
                     "Position" => target_position = position + c.offset.w_axis.truncate(),
                     "Parent" => { target_position = position; target_turn = turn; }
+                    "Rotation" => target_turn = turn * rotation(&c.offset),
                     "LookAt" => {
                         if let Some(forward) = (position - current_position).try_normalize() {
                             if let Some(right) = Vec3::Y.cross(forward).try_normalize() {
@@ -119,16 +120,16 @@ impl Constraints {
                     _ => unreachable!(),
                 }
             }
-            let p = if c.kind == "LookAt" { current_position } else { rest_position.lerp(target_position, weight) };
+            let p = if matches!(c.kind.as_str(), "LookAt" | "Rotation") { current_position } else { rest_position.lerp(target_position, weight) };
             let r = if c.kind == "Position" { current_turn } else { rest_turn.slerp(target_turn, weight) };
             let local = parent.inverse() * Mat4::from_scale_rotation_translation(scale, r, p);
             let (_, mut r, mut p) = local.to_scale_rotation_translation();
-            if c.kind != "LookAt" {
+            if !matches!(c.kind.as_str(), "LookAt" | "Rotation") {
                 for axis in 0..3 {
                     if !c.translation[axis] { p[axis] = pose.translations[c.node][axis]; }
                 }
             }
-            if c.kind == "Parent" && c.rotation != [true, true, true] {
+            if matches!(c.kind.as_str(), "Parent" | "Rotation") && c.rotation != [true, true, true] {
                 let (y, x, z) = r.to_euler(glam::EulerRot::YXZ);
                 let (old_y, old_x, old_z) = pose.rotations[c.node].to_euler(glam::EulerRot::YXZ);
                 r = Quat::from_euler(glam::EulerRot::YXZ, if c.rotation[1] { y } else { old_y }, if c.rotation[0] { x } else { old_x }, if c.rotation[2] { z } else { old_z });
@@ -214,6 +215,21 @@ mod tests {
         let desired = (worlds[4].w_axis - worlds[3].w_axis).truncate().normalize();
         assert!((worlds[3].w_axis.truncate() - before).length() < 1e-6);
         assert!((rotation(&worlds[3]) * Vec3::Z - desired).length() < 1e-6);
+    }
+
+    #[test]
+    fn rotation_turns_toward_the_source_and_keeps_its_place() {
+        let mut model = fixture();
+        let identity = Mat4::IDENTITY.to_cols_array();
+        let offset = Mat4::from_quat(Quat::from_rotation_y(0.4));
+        model.constraints = parse(Some(&json!({"constraints": [{"kind": "Rotation", "node": 3, "sources": [{"node": 4, "weight": 1.0, "offset": identity}], "weight": 1.0, "translation": [true, true, true], "rotation": [true, true, true], "rest": identity, "offset": offset.to_cols_array()}]})), model.nodes()).unwrap();
+        let mut pose = model.rest();
+        pose.rotations[4] = Quat::from_rotation_x(1.2);
+        let before = model.worlds(&pose)[3].w_axis.truncate();
+        Constraints::default().step(&model, &mut pose, Mat4::IDENTITY);
+        let worlds = model.worlds(&pose);
+        assert!((worlds[3].w_axis.truncate() - before).length() < 1e-6);
+        assert!(rotation(&worlds[3]).angle_between(rotation(&worlds[4]) * rotation(&offset)) < 1e-5);
     }
 
     #[test]

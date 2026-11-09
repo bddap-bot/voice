@@ -327,8 +327,8 @@ impl Puppet {
 
     /// Moves the constrained and spring-driven nodes of `pose` for the figure placed by `body`.
     fn settle(&mut self, pose: &mut vrm::Pose, body: glam::Mat4, hands: &[spring::Hand], delta: f32, idle: &spring::Idle) {
-        self.springs.restore(&self.model, pose, idle);
-        self.constraints.step(&self.model, pose, body);
+        let constraints = &mut self.constraints;
+        self.springs.constrained(&self.model, pose, idle, |pose| constraints.step(&self.model, pose, body));
         self.reach = self.springs.step(&self.model, pose, body, hands, delta, idle);
         for contact in self.contacts.observe(&self.reach) {
             let bone = |node: Option<usize>| node.and_then(|node| self.model.name(node)).unwrap_or_default();

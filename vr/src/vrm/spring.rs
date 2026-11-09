@@ -704,20 +704,34 @@ impl Springs {
         self.stepped.clear();
     }
 
-    pub fn restore(&self, model: &Model, pose: &mut Pose, idle: &Idle) {
-        if !model.constraints.is_empty() {
-            for (joint, tail) in model.rig.joints.iter().zip(&self.tails).filter(|(joint, _)| !idle.still(joint.node, joint.child)) {
-                pose.rotations[joint.node] = tail.rotation;
-                if let (Some(bone), Some(child)) = (joint.physbone, joint.child) {
-                    if !bone.endpoint {
-                        pose.translations[child] = joint.tail.normalize() * tail.length;
-                    }
+    /// Runs `constrain` over the pose with the last swing of each moving joint no constraint drives in it, as constraints
+    /// read it, then puts back the pose's own transforms, which `step` swings them about.
+    pub fn constrained(&self, model: &Model, pose: &mut Pose, idle: &Idle, constrain: impl FnOnce(&mut Pose)) {
+        if model.constraints.is_empty() {
+            return constrain(pose);
+        }
+        let driven: HashSet<usize> = model.constraints.iter().map(|constraint| constraint.node).collect();
+        let moving: Vec<(&Joint, &Tail)> = model.rig.joints.iter().zip(&self.tails).filter(|(joint, _)| !idle.still(joint.node, joint.child) && !driven.contains(&joint.node)).collect();
+        let animated: Vec<(Quat, Option<Vec3>)> = moving.iter().map(|(joint, _)| (pose.rotations[joint.node], joint.child.map(|child| pose.translations[child]))).collect();
+        for &(joint, tail) in &moving {
+            pose.rotations[joint.node] = tail.rotation;
+            if let (Some(bone), Some(child)) = (joint.physbone, joint.child) {
+                if !bone.endpoint {
+                    pose.translations[child] = joint.tail.normalize() * tail.length;
                 }
+            }
+        }
+        constrain(pose);
+        for ((joint, _), (rotation, translation)) in moving.iter().zip(animated) {
+            pose.rotations[joint.node] = rotation;
+            if let (Some(child), Some(translation)) = (joint.child.filter(|child| !driven.contains(child)), translation) {
+                pose.translations[child] = translation;
             }
         }
     }
 
     /// Swings each joint but the `idle` ones, which keep the pose's rotation and carry their tails along so they set off from it, against every collider but the `idle` ones.
+    /// A joint swings about the rotation the pose gives it, as VRChat swings a PhysBone about the pose the avatar's animator left.
     /// Returns, for each hand, what it reached.
     pub fn step(&mut self, model: &Model, pose: &mut Pose, model_to_world: Mat4, hands: &[Hand], delta: f32, idle: &Idle) -> Vec<Reach> {
         let rig = &model.rig;
@@ -728,6 +742,7 @@ impl Springs {
         let mut worlds: Vec<Mat4> = model.worlds(pose).into_iter().map(|world| model_to_world * world).collect();
         let colliders: Vec<Placed> = rig.colliders.iter().map(|collider| collider.placed(&worlds)).collect();
         let fresh = self.tails.len() != rig.joints.len();
+        let rests: Vec<Quat> = rig.joints.iter().map(|joint| pose.rotations[joint.node]).collect();
         let then = |list: &[Hand], hand: &Hand| list.iter().find(|before| before.name == hand.name).filter(|_| !fresh).map(|before| before.mapped(model_to_world));
         let grips: Vec<Grip> = hands.iter().map(|&hand| Grip { placed: hand.placed(), now: hand, before: then(&self.hands, &hand), stepped: then(&self.stepped, &hand) }).collect();
         let place = model_to_world.w_axis.truncate();
@@ -748,7 +763,7 @@ impl Springs {
             let at = match *unit {
                 Unit::Joint(at) => at,
                 Unit::Chain(chain) => {
-                    self.chain(model, pose, &mut worlds, chain, (place, executions), (&colliders, &grips, &mut reach), idle, fresh);
+                    self.chain(model, pose, &mut worlds, chain, (place, executions), (&colliders, &grips, &mut reach), idle, fresh, &rests);
                     continue;
                 }
             };
@@ -756,12 +771,12 @@ impl Springs {
             let tail = &mut self.tails[at];
             let node = &model.nodes[joint.node];
             let parent = node.parent.map_or(model_to_world, |parent| worlds[parent]);
-            let initial = parent * Mat4::from_scale_rotation_translation(node.scale, node.rotation, pose.translations[joint.node]);
+            let initial = parent * Mat4::from_scale_rotation_translation(node.scale, rests[at], pose.translations[joint.node]);
             let origin = initial.w_axis.truncate();
             let rest = initial.transform_point3(joint.tail);
             let still = idle.still(joint.node, joint.child);
             if fresh {
-                *tail = Tail { now: rest, before: rest, held: joint.tail, rotation: node.rotation, gripped: None, ..*tail };
+                *tail = Tail { now: rest, before: rest, held: joint.tail, rotation: rests[at], gripped: None, ..*tail };
             }
             if still {
                 let now = (parent * model.local(pose, joint.node)).transform_point3(joint.tail);
@@ -804,7 +819,7 @@ impl Springs {
             tail.held = initial.inverse().transform_point3(tail.now);
             if !still {
                 let toward = tail.held.normalize_or(joint.tail.normalize());
-                pose.rotations[joint.node] = (node.rotation * Quat::from_rotation_arc(joint.tail.normalize(), toward)).normalize();
+                pose.rotations[joint.node] = (rests[at] * Quat::from_rotation_arc(joint.tail.normalize(), toward)).normalize();
                 tail.rotation = pose.rotations[joint.node];
             }
             settle(model, pose, &mut worlds, joint, parent);
@@ -825,7 +840,7 @@ impl Springs {
 
     /// Steps one PhysBone chain as VRChat does: whole 60 Hz steps with its anchor moved part way for each, and a part step for time left over that only shows.
     #[allow(clippy::too_many_arguments)]
-    fn chain(&mut self, model: &Model, pose: &mut Pose, worlds: &mut [Mat4], at: usize, (place, executions): (Vec3, f32), (colliders, grips, reach): (&[Placed], &[Grip], &mut [Reach]), idle: &Idle, fresh: bool) {
+    fn chain(&mut self, model: &Model, pose: &mut Pose, worlds: &mut [Mat4], at: usize, (place, executions): (Vec3, f32), (colliders, grips, reach): (&[Placed], &[Grip], &mut [Reach]), idle: &Idle, fresh: bool, rests: &[Quat]) {
         let rig = &model.rig;
         let chain = &rig.chains[at];
         let now = worlds[chain.anchor];
@@ -855,7 +870,7 @@ impl Springs {
                 let local = |rotation: Quat| parent * Mat4::from_scale_rotation_translation(node.scale, rotation, pose.translations[joint.node]);
                 let along = joint.tail.normalize();
                 if fresh || idle.still(joint.node, joint.child) {
-                    let rotation = if fresh { node.rotation } else { pose.rotations[joint.node] };
+                    let rotation = if fresh { rests[at] } else { pose.rotations[joint.node] };
                     let world = local(rotation);
                     let end = world.transform_point3(joint.tail);
                     let felt = match joint.physbone {
@@ -867,7 +882,7 @@ impl Springs {
                 } else if let Some(bone) = joint.physbone {
                     let running = joint.groups.iter().flat_map(|&group| &rig.groups[group]).filter(|&&collider| !idle.colliders.contains(&rig.colliders[collider].source)).map(|&collider| &colliders[collider]);
                     let touching = Touching { grips: if joint.others { grips } else { &[] }, share, reach: &mut *reach, node: joint.node };
-                    tail.rotation = swing(joint, bone, node.rotation, tail, &local, Frames { immobile, carrier }, (ratio, whole), running, touching);
+                    tail.rotation = swing(joint, bone, rests[at], tail, &local, Frames { immobile, carrier }, (ratio, whole), running, touching);
                 }
                 pose.rotations[joint.node] = tail.rotation;
                 if let (Some(child), false) = (joint.child, joint.physbone.is_some_and(|bone| bone.endpoint)) {
@@ -1208,12 +1223,13 @@ mod tests {
             }
             tips.push(model.worlds(&pose)[4].w_axis.truncate());
         }
-        let swing = tips[..90].iter().map(|tip| tip.distance(rest)).fold(0.0f32, f32::max);
-        assert!(swing > 0.01, "free, the strand swings as the figure sways: {swing}");
+        let swing = tips[..90].iter().map(|tip| tip.distance(held)).fold(0.0f32, f32::max);
+        assert!(swing > 0.01, "free, the strand swings about the pose as the figure sways: {swing}");
         assert!(tips[90..180].iter().all(|tip| tip.abs_diff_eq(held, 1e-5)), "stilled, it holds the pose however the figure sways");
         let jump = tips[180].distance(tips[179]);
         assert!(jump < 0.005, "freed, it sets off from the held pose without a fling: {jump}");
-        assert!(tips[269].distance(rest) < tips[180].distance(rest), "and swings back toward rest");
+        let about = tips[180..].iter().sum::<Vec3>() / tips[180..].len() as f32;
+        assert!(about.distance(held) < about.distance(rest), "and swings about the pose, not the bind rotation: {about}");
     }
 
     #[test]
@@ -1690,6 +1706,51 @@ mod tests {
             let tip = rested(&model, &mut springs, chest, Some(hand), 30);
             assert!(tip.distance(Vec3::from(*unity)) < 1e-4, "push {step}: the tip rests at {tip}, VRChat's at {unity:?}");
         }
+    }
+
+    #[test]
+    fn a_physbone_whose_root_the_pose_turns_swings_about_the_turned_root() {
+        let bone = |depth: usize, endpoint: bool| serde_json::json!({ "version": "1.1", "integration": "advanced", "pull": 0.2, "spring": 0.2, "stiffness": 0.2, "gravity": 0.05, "radius": [0.0, 0.0], "depth": depth, "endpoint": endpoint });
+        let tilted = Quat::from_euler(glam::EulerRot::YXZ, 10f32.to_radians(), 80f32.to_radians(), 0.0);
+        let folded = Quat::from_rotation_y(100f32.to_radians()) * tilted;
+        let chain = |root: Quat| physbones(&[([-0.08, 0.0, 0.10], root), ([0.0, 0.05, 0.01], Quat::IDENTITY), ([0.0, 0.019, 0.0], Quat::IDENTITY)], &[bone(0, false), bone(1, true)], None);
+        let chest = from_unity_pose([0.000945, 1.190331, 0.003663], [0.003841, -0.005742, -0.000175, 0.999976]);
+        let tip = |model: &Model, turn: Option<Quat>| {
+            let (mut springs, mut constraints) = (Springs::default(), crate::vrm::constraint::Constraints::default());
+            let mut pose = model.rest();
+            for _ in 0..600 {
+                pose = model.rest();
+                if let Some(turn) = turn {
+                    pose.rotations[1] = turn;
+                }
+                springs.constrained(model, &mut pose, &Idle::default(), |pose| constraints.step(model, pose, chest));
+                springs.step(model, &mut pose, chest, &[], 1.0 / 60.0, &Idle::default());
+            }
+            model.worlds(&pose)[model.nodes.len() - 1].w_axis.truncate()
+        };
+        // A constraint sends each step through the constraint pass, which reads the last swing.
+        let identity = Mat4::IDENTITY.to_cols_array();
+        let constraint = |kind: &str, node: usize, source: Value, offset: Mat4| serde_json::json!({ "constraints": [{ "kind": kind, "node": node, "sources": [source], "weight": 1.0, "translation": [true, true, true], "rotation": [true, true, true], "rest": identity, "offset": offset.to_cols_array() }] });
+        let constrained = |model: &mut Model, constraints: &Value| model.constraints = crate::vrm::constraint::parse(Some(constraints), model.nodes.len()).unwrap();
+        let pinned = constraint("Parent", 0, serde_json::json!({ "world": identity, "offset": identity, "weight": 1.0 }), Mat4::IDENTITY);
+        for constraints in [None, Some(&pinned)] {
+            let (mut bound, mut turned) = (chain(folded), chain(tilted));
+            if let Some(constraints) = constraints {
+                constrained(&mut bound, constraints);
+                constrained(&mut turned, constraints);
+            }
+            let turn = bound.rest().rotations[1];
+            let (want, got) = (tip(&bound, None), tip(&turned, Some(turn)));
+            assert!(got.distance(want) < 1e-4, "with {constraints:?}: the tip rests at {got} with its root turned by the pose, at {want} with it bound there");
+        }
+        // A constraint placing the root joint where it already stands leaves its turn, and so its swing, to the pose.
+        let mut placed = chain(tilted);
+        let turn = chain(folded).rest().rotations[1];
+        let want = tip(&placed, Some(turn));
+        let offset = Mat4::from_translation(chest.transform_vector3(placed.rest().translations[1]));
+        constrained(&mut placed, &constraint("Position", 1, serde_json::json!({ "node": 0, "offset": identity, "weight": 1.0 }), offset));
+        let got = tip(&placed, Some(turn));
+        assert!(got.distance(want) < 1e-4, "the tip rests at {got} with its root placed by a constraint, at {want} without it");
     }
 
     /// How far a PhysBone's tip rises at most from where it rests on the chest, and where it is from there each frame, stepped every `delta`, with a hand pressed into it sliding 4 cm up over a second, or with the chest moving `carried` and the hand with it.

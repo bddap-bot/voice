@@ -15,7 +15,7 @@ pub(super) struct Source {
 }
 
 pub(super) struct Constraint {
-    node: usize,
+    pub(super) node: usize,
     kind: String,
     sources: Vec<Source>,
     weight: f32,

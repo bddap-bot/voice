@@ -7,6 +7,7 @@ pub mod arms;
 pub mod constraint;
 pub mod contact;
 pub mod expressions;
+pub mod particles;
 pub mod spring;
 
 use expressions::Expressions;
@@ -189,6 +190,7 @@ pub struct Model {
     rest_turns: Vec<Quat>,
     rig: Rig,
     constraints: Vec<constraint::Constraint>,
+    pub particles: particles::Definition,
     pub program: Option<ObjectProgram>,
     /// Whether the object's parts spread apart when the pointer pushes deep into it.
     pub spreads: bool,
@@ -911,6 +913,10 @@ impl Model {
         };
         let rig = Rig::parse(version, extensions, &nodes, &children);
         let constraints = constraint::parse(extensions.get(constraint::EXTENSION), nodes.len())?;
+        let particles = particles::parse(extensions.get(particles::EXTENSION), nodes.len(), list("images").len(), |image| document.image(image)).unwrap_or_else(|error| {
+            tracing::warn!("{}: {error}; the avatar draws no particles", particles::EXTENSION);
+            particles::Definition::default()
+        });
         let program = match &extensions[PROGRAM] {
             Value::Null => None,
             program if object => {
@@ -932,7 +938,7 @@ impl Model {
             menu.check(nodes.len(), &meshes)?;
         }
         let arms = if object { Err("an object has no arms".to_owned()) } else { arms::parse(json, document.binary) };
-        let mut model = Model { version, nodes, meshes, skins, materials, images, humanoid, expressions, own, look_at, rest_turns: Vec::new(), rig, constraints, program, spreads, menu, arms };
+        let mut model = Model { version, nodes, meshes, skins, materials, images, humanoid, expressions, own, look_at, rest_turns: Vec::new(), rig, constraints, particles, program, spreads, menu, arms };
         model.rest_turns = model.worlds(&model.rest()).iter().map(rotation).collect();
         Ok(model)
     }

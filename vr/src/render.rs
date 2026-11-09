@@ -4,6 +4,7 @@ use glam::{Mat3, Mat4, Vec3};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::vrm::particles::{Blend, Instance, Mode, Particles};
 use crate::vrm::{Alpha, Model, OutlineWidth, Skinned, Vertex};
 use crate::vulkan::{vk_error, Gpu};
 
@@ -29,6 +30,8 @@ const PAGE_BYTES: u64 = 512 << 20;
 const VERTEX_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vertex.spv"));
 const DEPTH_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/depth.spv"));
 include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
+const PARTICLE_VERTEX_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/particle-vertex.spv"));
+const PARTICLE_FRAGMENT_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/particle-fragment.spv"));
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -46,6 +49,51 @@ struct Push {
 /// The seconds a figure has shown wrap at this before the shader reads them as an f32, which past a day would step them
 /// too coarsely to turn a theme colour's hue; a whole turn at any speed in thousandths.
 const THEME_WRAP: f64 = 20_000.0;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ParticlePush {
+    view_projection: [f32; 16],
+    eye: [f32; 3],
+    now: f32,
+    right: [f32; 3],
+    system: u32,
+    up: [f32; 3],
+    focal: f32,
+}
+
+/// One particle system's values the shader reads, in `particles.wgsl`'s `System` layout.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SystemData {
+    emitter: [f32; 16],
+    tint: [f32; 4],
+    emission: [f32; 3],
+    cutoff: f32,
+    uv: [f32; 4],
+    pivot: [f32; 3],
+    length_scale: f32,
+    speed_ranges: [f32; 4],
+    velocity_scale: f32,
+    noise_frequency: f32,
+    damping: f32,
+    flags: u32,
+    mode: u32,
+    align: u32,
+    blend: u32,
+    max_size: f32,
+}
+
+/// The view's right and up axes in the space `view_projection` maps from, and its focal length up: a perspective's
+/// clip x runs along the view's right and its w against the view's forward.
+fn view_axes(view_projection: Mat4) -> (Vec3, Vec3, f32) {
+    let ahead = view_projection.row(3).truncate();
+    let back = -ahead.normalize();
+    let across = view_projection.row(0).truncate();
+    let right = (across - across.dot(back) * back).normalize();
+    let up = back.cross(right);
+    (right, up, view_projection.row(1).truncate().dot(up).abs() / ahead.length())
+}
 
 /// Where the eye whose view and projection make `view_projection` sits: the point every clip coordinate but depth
 /// leaves at zero.
@@ -343,6 +391,9 @@ pub struct Renderer {
     pub drawing: Option<std::time::Duration>,
     /// The GPU's drawing time, averaged over recent frames so one slow frame moves the density little.
     typical: Option<f32>,
+    particle_set_layout: vk::DescriptorSetLayout,
+    particle_layout: vk::PipelineLayout,
+    particle_pipelines: HashMap<Blend, vk::Pipeline>,
 }
 
 /// The least density `budget` lowers an image to.
@@ -366,6 +417,70 @@ pub struct Appearance {
     pub seconds: f64,
     /// The fence of the last frame drawn from these buffers, which `update` waits on before it rewrites them.
     drawing: std::cell::Cell<Option<vk::Fence>>,
+    particles: Option<ParticleBuffers>,
+}
+
+/// Where a particle system's mesh and instances lie in its appearance's buffers.
+struct SystemDraw {
+    first: u32,
+    count: u32,
+    vertex_offset: i32,
+    instances: u64,
+    max: u32,
+}
+
+struct ParticleBuffers {
+    gpu: Rc<Gpu>,
+    vertices: Buffer,
+    indices: Buffer,
+    instances: Buffer,
+    systems: Buffer,
+    curves: Buffer,
+    descriptors: vk::DescriptorPool,
+    /// A set for untextured materials, then one per image the materials name.
+    sets: Vec<vk::DescriptorSet>,
+    draws: Vec<SystemDraw>,
+    /// What the next frame draws: each system with a particle, solid ones first, by its set, blend and clock.
+    shown: Vec<(usize, vk::DescriptorSet, Blend, f32)>,
+    /// The map from the particles' world into the frame the figure is skinned into.
+    space: Mat4,
+}
+
+impl Drop for ParticleBuffers {
+    fn drop(&mut self) {
+        for buffer in [self.vertices, self.indices, self.instances, self.systems, self.curves] {
+            if buffer.0 != vk::Buffer::null() {
+                self.gpu.free_buffer(buffer);
+            }
+        }
+        unsafe { self.gpu.device.destroy_descriptor_pool(self.descriptors, None) };
+    }
+}
+
+fn upload(gpu: &Gpu, bytes: &[u8], usage: vk::BufferUsageFlags) -> Result<Buffer, String> {
+    let buffer = gpu.host_buffer(bytes.len() as u64, usage)?;
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.2, bytes.len()) };
+    Ok(buffer)
+}
+
+/// A shader module, destroyed however the creation of the pipelines it serves ends.
+struct Module<'a> {
+    device: &'a ash::Device,
+    module: vk::ShaderModule,
+}
+
+impl<'a> Module<'a> {
+    fn new(device: &'a ash::Device, code: &[u8]) -> Result<Module<'a>, String> {
+        let words: Vec<u32> = code.chunks_exact(4).map(|word| u32::from_le_bytes(word.try_into().unwrap())).collect();
+        let module = unsafe { device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None) }.map_err(vk_error("vkCreateShaderModule"))?;
+        Ok(Module { device, module })
+    }
+}
+
+impl Drop for Module<'_> {
+    fn drop(&mut self) {
+        unsafe { self.device.destroy_shader_module(self.module, None) };
+    }
 }
 
 fn color_range(levels: u32) -> vk::ImageSubresourceRange {
@@ -448,6 +563,16 @@ impl Renderer {
         }
         .map_err(vk_error("vkCreateSampler"));
         let (sampler, edge_sampler) = (sampler(vk::SamplerAddressMode::REPEAT)?, sampler(vk::SamplerAddressMode::CLAMP_TO_EDGE)?);
+        let particle_bindings = [
+            vk::DescriptorSetLayoutBinding::default().binding(0).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(both),
+            vk::DescriptorSetLayoutBinding::default().binding(1).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX),
+            vk::DescriptorSetLayoutBinding::default().binding(2).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default().binding(3).descriptor_type(vk::DescriptorType::SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        ];
+        let particle_set_layout = unsafe { device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&particle_bindings), None) }.map_err(vk_error("vkCreateDescriptorSetLayout"))?;
+        let particle_set_layouts = [particle_set_layout];
+        let particle_push = [vk::PushConstantRange::default().stage_flags(both).size(std::mem::size_of::<ParticlePush>() as u32)];
+        let particle_layout = unsafe { device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&particle_set_layouts).push_constant_ranges(&particle_push), None) }.map_err(vk_error("vkCreatePipelineLayout"))?;
         let mut renderer = Renderer {
             depth: Texture { image: vk::Image::null(), memory: vk::DeviceMemory::null(), view: vk::ImageView::null() },
             samples: Texture { image: vk::Image::null(), memory: vk::DeviceMemory::null(), view: vk::ImageView::null() },
@@ -469,6 +594,9 @@ impl Renderer {
             scale: 1.0,
             drawing: None,
             typical: None,
+            particle_set_layout,
+            particle_layout,
+            particle_pipelines: HashMap::new(),
         };
         if renderer.gpu.timestamp.is_some() {
             renderer.timestamps = Some(unsafe { renderer.gpu.device.create_query_pool(&vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::TIMESTAMP).query_count(2 * RING as u32), None) }.map_err(vk_error("vkCreateQueryPool"))?);
@@ -504,8 +632,7 @@ impl Renderer {
             },
         };
         let keys: Vec<PipelineKey> = model.materials.iter().flat_map(|material| [Some(key(material, false, false)), prepassed(material).then(|| key(material, false, true)), material.outline.as_ref().map(|_| key(material, true, false))]).flatten().filter(|key| !self.pipelines.contains_key(key)).collect();
-        let created = self.pipelines(&keys)?;
-        self.pipelines.extend(created);
+        self.pipelines(&keys)?;
 
         let gpu = &self.gpu;
         let device = &gpu.device;
@@ -516,11 +643,6 @@ impl Renderer {
             vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 5 * set_count },
         ];
         let descriptors = unsafe { device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(set_count).pool_sizes(&sizes), None) }.map_err(vk_error("vkCreateDescriptorPool"))?;
-        let upload = |bytes: &[u8], usage| -> Result<Buffer, String> {
-            let buffer = gpu.host_buffer(bytes.len() as u64, usage)?;
-            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.2, bytes.len()) };
-            Ok(buffer)
-        };
         let joints = skinned.joints();
         let material_data: Vec<MaterialData> = model.materials.iter().map(material_data).collect();
         let look_data: Vec<LookData> = std::iter::once(LookData { page: [-1; 4], ..LookData::default() }).chain(looks.into_iter().flat_map(|looks| looks.materials.iter().map(|look| look_data(look, &places)))).collect();
@@ -533,18 +655,19 @@ impl Renderer {
             gpu: gpu.clone(),
             descriptors,
             textures: Vec::new(),
-            vertices: upload(bytes_of(&skinned.vertices), vk::BufferUsageFlags::VERTEX_BUFFER)?,
-            indices: upload(bytes_of(&skinned.indices), vk::BufferUsageFlags::INDEX_BUFFER)?,
+            vertices: upload(gpu, bytes_of(&skinned.vertices), vk::BufferUsageFlags::VERTEX_BUFFER)?,
+            indices: upload(gpu, bytes_of(&skinned.indices), vk::BufferUsageFlags::INDEX_BUFFER)?,
             palette: gpu.host_buffer((joints.max(1) * std::mem::size_of::<Mat4>()) as u64, vk::BufferUsageFlags::STORAGE_BUFFER)?,
             joints,
-            materials: upload(bytes_of(&material_data), vk::BufferUsageFlags::STORAGE_BUFFER)?,
-            surfaces: upload(bytes_of(&skinned.surfaces), vk::BufferUsageFlags::STORAGE_BUFFER)?,
-            looks: upload(bytes_of(&look_data), vk::BufferUsageFlags::STORAGE_BUFFER)?,
-            untinted_cells: upload(bytes_of(&untinted_cells), vk::BufferUsageFlags::STORAGE_BUFFER)?,
+            materials: upload(gpu, bytes_of(&material_data), vk::BufferUsageFlags::STORAGE_BUFFER)?,
+            surfaces: upload(gpu, bytes_of(&skinned.surfaces), vk::BufferUsageFlags::STORAGE_BUFFER)?,
+            looks: upload(gpu, bytes_of(&look_data), vk::BufferUsageFlags::STORAGE_BUFFER)?,
+            untinted_cells: upload(gpu, bytes_of(&untinted_cells), vk::BufferUsageFlags::STORAGE_BUFFER)?,
             drawn: Vec::new(),
             hidden: Default::default(),
             seconds: 0.0,
             drawing: Default::default(),
+            particles: None,
         };
         for image in &model.images {
             appearance.textures.push(texture(gpu, image.width, image.height, &image.rgba, FORMAT)?);
@@ -641,16 +764,131 @@ impl Renderer {
             })
             .flatten()
             .collect();
+        if !model.particles.systems.is_empty() {
+            let blends: Vec<Blend> = model.particles.systems.iter().flat_map(|system| system.renderer.materials.iter().map(|material| material.blend)).filter(|blend| !self.particle_pipelines.contains_key(blend)).collect();
+            self.particle_pipelines(&blends)?;
+            appearance.particles = Some(self.particle_buffers(model, &mut appearance.textures)?);
+        }
         Ok(appearance)
     }
 
-    fn pipelines(&self, keys: &[PipelineKey]) -> Result<HashMap<PipelineKey, vk::Pipeline>, String> {
-        let device = &self.gpu.device;
-        let module = |code: &[u8]| {
-            let words: Vec<u32> = code.chunks_exact(4).map(|word| u32::from_le_bytes(word.try_into().unwrap())).collect();
-            unsafe { device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None) }.map_err(vk_error("vkCreateShaderModule"))
-        };
-        let vertex = module(VERTEX_SHADER)?;
+    fn particle_buffers(&self, model: &Model, textures: &mut Vec<Texture>) -> Result<ParticleBuffers, String> {
+        let gpu = &self.gpu;
+        let device = &gpu.device;
+        let definition = &model.particles;
+        let mut vertices: Vec<[f32; 5]> = vec![[-0.5, 0.5, 0.0, 0.0, 0.0], [0.5, 0.5, 0.0, 1.0, 0.0], [0.5, -0.5, 0.0, 1.0, 1.0], [-0.5, -0.5, 0.0, 0.0, 1.0]];
+        let mut indices: Vec<u32> = vec![0, 1, 2, 0, 2, 3];
+        let mut meshes = Vec::new();
+        for mesh in &definition.meshes {
+            meshes.push((indices.len() as u32, mesh.indices.len() as u32, vertices.len() as i32));
+            vertices.extend(mesh.positions.iter().zip(&mesh.uvs).map(|(p, uv)| [p.x, p.y, p.z, uv.x, uv.y]));
+            indices.extend(&mesh.indices);
+        }
+        let mut instances = 0u64;
+        let draws: Vec<SystemDraw> = definition.systems.iter().map(|system| {
+            let (first, count, vertex_offset) = match system.renderer.mode {
+                Mode::Mesh(mesh) => meshes[mesh],
+                _ => (0, 6, 0),
+            };
+            let draw = SystemDraw { first, count, vertex_offset, instances, max: system.max as u32 };
+            instances += (system.max * std::mem::size_of::<Instance>()) as u64;
+            draw
+        }).collect();
+        let curves: Vec<[f32; 4]> = definition.systems.iter().flat_map(|system| system.curves()).collect();
+        let unborn: Vec<Instance> = definition.systems.iter().flat_map(|system| vec![crate::vrm::particles::EMPTY; system.max]).collect();
+        let first_texture = textures.len();
+        textures.push(texture(gpu, 1, 1, &[255; 4], FORMAT)?);
+        for image in &definition.images {
+            textures.push(texture(gpu, image.width, image.height, &image.rgba, FORMAT)?);
+        }
+        let set_count = 1 + definition.images.len() as u32;
+        let sizes = [
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: set_count },
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLER, descriptor_count: set_count },
+            vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 2 * set_count },
+        ];
+        let none = (vk::Buffer::null(), vk::DeviceMemory::null(), std::ptr::null_mut());
+        let mut buffers = ParticleBuffers { gpu: gpu.clone(), vertices: none, indices: none, instances: none, systems: none, curves: none, descriptors: vk::DescriptorPool::null(), sets: Vec::new(), draws, shown: Vec::new(), space: Mat4::IDENTITY };
+        buffers.vertices = upload(gpu, bytes_of(&vertices), vk::BufferUsageFlags::VERTEX_BUFFER)?;
+        buffers.indices = upload(gpu, bytes_of(&indices), vk::BufferUsageFlags::INDEX_BUFFER)?;
+        buffers.instances = upload(gpu, bytes_of(&unborn), vk::BufferUsageFlags::VERTEX_BUFFER)?;
+        buffers.systems = gpu.host_buffer((definition.systems.len() * std::mem::size_of::<SystemData>()) as u64, vk::BufferUsageFlags::STORAGE_BUFFER)?;
+        buffers.curves = upload(gpu, bytes_of(&curves), vk::BufferUsageFlags::STORAGE_BUFFER)?;
+        buffers.descriptors = unsafe { device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(set_count).pool_sizes(&sizes), None) }.map_err(vk_error("vkCreateDescriptorPool"))?;
+        let layouts = vec![self.particle_set_layout; set_count as usize];
+        buffers.sets = unsafe { device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(buffers.descriptors).set_layouts(&layouts)) }.map_err(vk_error("vkAllocateDescriptorSets"))?;
+        for (at, &set) in buffers.sets.iter().enumerate() {
+            let systems = [vk::DescriptorBufferInfo::default().buffer(buffers.systems.0).range(vk::WHOLE_SIZE)];
+            let curves = [vk::DescriptorBufferInfo::default().buffer(buffers.curves.0).range(vk::WHOLE_SIZE)];
+            let image = [vk::DescriptorImageInfo::default().image_view(textures[first_texture + at].view).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+            let sampler = [vk::DescriptorImageInfo::default().sampler(self.sampler)];
+            let writes = [
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(0).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&systems),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(1).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&curves),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(2).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&image),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(3).descriptor_type(vk::DescriptorType::SAMPLER).image_info(&sampler),
+            ];
+            unsafe { device.update_descriptor_sets(&writes, &[]) };
+        }
+        Ok(buffers)
+    }
+
+    /// Makes a pipeline for each blend of `blends` not yet made, keeping each as it is made so the renderer frees it
+    /// whatever fails after.
+    fn particle_pipelines(&mut self, blends: &[Blend]) -> Result<(), String> {
+        if blends.is_empty() {
+            return Ok(());
+        }
+        let gpu = self.gpu.clone();
+        let (vertex, fragment) = (Module::new(&gpu.device, PARTICLE_VERTEX_SHADER)?, Module::new(&gpu.device, PARTICLE_FRAGMENT_SHADER)?);
+        let bindings = [
+            vk::VertexInputBindingDescription::default().binding(0).stride(20).input_rate(vk::VertexInputRate::VERTEX),
+            vk::VertexInputBindingDescription::default().binding(1).stride(std::mem::size_of::<Instance>() as u32).input_rate(vk::VertexInputRate::INSTANCE),
+        ];
+        let mut attributes = vec![
+            vk::VertexInputAttributeDescription::default().location(0).binding(0).format(vk::Format::R32G32B32_SFLOAT).offset(0),
+            vk::VertexInputAttributeDescription::default().location(1).binding(0).format(vk::Format::R32G32_SFLOAT).offset(12),
+        ];
+        attributes.extend((0..5).map(|at| vk::VertexInputAttributeDescription::default().location(2 + at).binding(1).format(vk::Format::R32G32B32A32_SFLOAT).offset(16 * at)));
+        let input = vk::PipelineVertexInputStateCreateInfo::default().vertex_binding_descriptions(&bindings).vertex_attribute_descriptions(&attributes);
+        let raster = vk::PipelineRasterizationStateCreateInfo::default().polygon_mode(vk::PolygonMode::FILL).cull_mode(vk::CullModeFlags::NONE).line_width(1.0);
+        let stages = [
+            vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vertex.module).name(c"vertex"),
+            vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(fragment.module).name(c"fragment"),
+        ];
+        use vk::BlendFactor as F;
+        for &blend in blends {
+            if self.particle_pipelines.contains_key(&blend) {
+                continue;
+            }
+            let ([color_from, color_to], [alpha_from, alpha_to]) = match blend {
+                Blend::Opaque | Blend::Cutout => ([F::ONE, F::ZERO], [F::ONE, F::ZERO]),
+                Blend::Alpha | Blend::Premultiplied => ([F::ONE, F::ONE_MINUS_SRC_ALPHA], [F::ONE, F::ONE_MINUS_SRC_ALPHA]),
+                Blend::Add => ([F::ONE, F::ONE], [F::ONE, F::ONE]),
+                Blend::Multiply => ([F::DST_COLOR, F::ZERO], [F::ZERO, F::ONE]),
+            };
+            let attachment = [vk::PipelineColorBlendAttachmentState::default()
+                .blend_enable(!blend.solid())
+                .src_color_blend_factor(color_from)
+                .dst_color_blend_factor(color_to)
+                .color_blend_op(vk::BlendOp::ADD)
+                .src_alpha_blend_factor(alpha_from)
+                .dst_alpha_blend_factor(alpha_to)
+                .alpha_blend_op(vk::BlendOp::ADD)
+                .color_write_mask(vk::ColorComponentFlags::RGBA)];
+            let color = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachment);
+            let depth = vk::PipelineDepthStencilStateCreateInfo::default().depth_test_enable(true).depth_write_enable(blend.solid()).depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
+            let pipeline = self.pipeline(self.particle_layout, &stages, &input, &raster, &depth, &color)?;
+            self.particle_pipelines.insert(blend, pipeline);
+        }
+        Ok(())
+    }
+
+    /// Makes a pipeline for each key of `keys` not yet made, keeping each as it is made so the renderer frees it
+    /// whatever fails after.
+    fn pipelines(&mut self, keys: &[PipelineKey]) -> Result<(), String> {
+        let gpu = self.gpu.clone();
+        let vertex = Module::new(&gpu.device, VERTEX_SHADER)?;
         let shader = |key: &PipelineKey| match key.pass {
             Pass::Equal { cutout: false } | Pass::Shade => (FRAGMENT_SHADERS[key.pages], c"fragment"),
             Pass::Depth => (DEPTH_SHADER, c"depth"),
@@ -660,7 +898,7 @@ impl Renderer {
         for key in keys {
             let (code, _) = shader(key);
             if let std::collections::hash_map::Entry::Vacant(entry) = fragments.entry(code.as_ptr()) {
-                entry.insert(module(code)?);
+                entry.insert(Module::new(&gpu.device, code)?);
             }
         }
         let vertex_bindings = [vk::VertexInputBindingDescription::default().stride(std::mem::size_of::<Vertex>() as u32).input_rate(vk::VertexInputRate::VERTEX)];
@@ -673,65 +911,63 @@ impl Renderer {
             vk::VertexInputAttributeDescription::default().location(5).format(vk::Format::R32_UINT).offset(56),
         ];
         let input = vk::PipelineVertexInputStateCreateInfo::default().vertex_binding_descriptions(&vertex_bindings).vertex_attribute_descriptions(&vertex_attributes);
+        for &key in keys {
+            if self.pipelines.contains_key(&key) {
+                continue;
+            }
+            let cull = match key.cull {
+                Cull::None => vk::CullModeFlags::NONE,
+                Cull::Back => vk::CullModeFlags::BACK,
+                Cull::Front => vk::CullModeFlags::FRONT,
+            };
+            let raster = vk::PipelineRasterizationStateCreateInfo::default().polygon_mode(vk::PolygonMode::FILL).cull_mode(cull).front_face(vk::FrontFace::COUNTER_CLOCKWISE).line_width(1.0);
+            let (compare, write) = match key.pass {
+                Pass::Equal { .. } => (vk::CompareOp::EQUAL, false),
+                _ => (vk::CompareOp::LESS_OR_EQUAL, key.depth_write),
+            };
+            let depth = vk::PipelineDepthStencilStateCreateInfo::default().depth_test_enable(true).depth_write_enable(write).depth_compare_op(compare);
+            let attachment = [vk::PipelineColorBlendAttachmentState::default()
+                .blend_enable(key.blend)
+                .src_color_blend_factor(vk::BlendFactor::ONE)
+                .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                .color_blend_op(vk::BlendOp::ADD)
+                .src_alpha_blend_factor(vk::BlendFactor::ONE)
+                .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                .alpha_blend_op(vk::BlendOp::ADD)
+                .color_write_mask(if key.pass == Pass::Depth { vk::ColorComponentFlags::empty() } else { vk::ColorComponentFlags::RGBA })];
+            let color = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachment);
+            let stages = [
+                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vertex.module).name(c"vertex"),
+                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(fragments[&shader(&key).0.as_ptr()].module).name(shader(&key).1),
+            ];
+            let pipeline = self.pipeline(self.layout, &stages, &input, &raster, &depth, &color)?;
+            self.pipelines.insert(key, pipeline);
+        }
+        Ok(())
+    }
+
+    /// A pipeline in the render pass with the state every one shares: triangle lists, a dynamic viewport and scissor,
+    /// and the targets' samples.
+    fn pipeline(&self, layout: vk::PipelineLayout, stages: &[vk::PipelineShaderStageCreateInfo], input: &vk::PipelineVertexInputStateCreateInfo, raster: &vk::PipelineRasterizationStateCreateInfo, depth: &vk::PipelineDepthStencilStateCreateInfo, color: &vk::PipelineColorBlendStateCreateInfo) -> Result<vk::Pipeline, String> {
         let assembly = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
         let viewport = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
         let multisample = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(SAMPLES);
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-        let mut pipelines = HashMap::new();
-        for &key in keys {
-            if pipelines.contains_key(&key) {
-                continue;
-            }
-            {
-                let cull = match key.cull {
-                    Cull::None => vk::CullModeFlags::NONE,
-                    Cull::Back => vk::CullModeFlags::BACK,
-                    Cull::Front => vk::CullModeFlags::FRONT,
-                };
-                let raster = vk::PipelineRasterizationStateCreateInfo::default().polygon_mode(vk::PolygonMode::FILL).cull_mode(cull).front_face(vk::FrontFace::COUNTER_CLOCKWISE).line_width(1.0);
-                let (compare, write) = match key.pass {
-                    Pass::Equal { .. } => (vk::CompareOp::EQUAL, false),
-                    _ => (vk::CompareOp::LESS_OR_EQUAL, key.depth_write),
-                };
-                let depth = vk::PipelineDepthStencilStateCreateInfo::default().depth_test_enable(true).depth_write_enable(write).depth_compare_op(compare);
-                let attachment = [vk::PipelineColorBlendAttachmentState::default()
-                    .blend_enable(key.blend)
-                    .src_color_blend_factor(vk::BlendFactor::ONE)
-                    .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-                    .color_blend_op(vk::BlendOp::ADD)
-                    .src_alpha_blend_factor(vk::BlendFactor::ONE)
-                    .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-                    .alpha_blend_op(vk::BlendOp::ADD)
-                    .color_write_mask(if key.pass == Pass::Depth { vk::ColorComponentFlags::empty() } else { vk::ColorComponentFlags::RGBA })];
-                let color = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachment);
-                let stages = [
-                    vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vertex).name(c"vertex"),
-                    vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(fragments[&shader(&key).0.as_ptr()]).name(shader(&key).1),
-                ];
-                let info = vk::GraphicsPipelineCreateInfo::default()
-                    .stages(&stages)
-                    .vertex_input_state(&input)
-                    .input_assembly_state(&assembly)
-                    .viewport_state(&viewport)
-                    .rasterization_state(&raster)
-                    .multisample_state(&multisample)
-                    .depth_stencil_state(&depth)
-                    .color_blend_state(&color)
-                    .dynamic_state(&dynamic)
-                    .layout(self.layout)
-                    .render_pass(self.render_pass);
-                let created = unsafe { device.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None) }.map_err(|(_, error)| format!("vkCreateGraphicsPipelines: {error}"))?;
-                pipelines.insert(key, created[0]);
-            }
-        }
-        unsafe {
-            device.destroy_shader_module(vertex, None);
-            for &fragment in fragments.values() {
-                device.destroy_shader_module(fragment, None);
-            }
-        }
-        Ok(pipelines)
+        let info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(stages)
+            .vertex_input_state(input)
+            .input_assembly_state(&assembly)
+            .viewport_state(&viewport)
+            .rasterization_state(raster)
+            .multisample_state(&multisample)
+            .depth_stencil_state(depth)
+            .color_blend_state(color)
+            .dynamic_state(&dynamic)
+            .layout(layout)
+            .render_pass(self.render_pass);
+        let created = unsafe { self.gpu.device.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None) }.map_err(|(_, error)| format!("vkCreateGraphicsPipelines: {error}"))?;
+        Ok(created[0])
     }
 
     fn attachment(&self, format: vk::Format, samples: vk::SampleCountFlags, usage: vk::ImageUsageFlags, aspect: vk::ImageAspectFlags) -> Result<Texture, String> {
@@ -812,14 +1048,14 @@ impl Renderer {
                 vk::SubpassContents::INLINE,
             );
             {
-                device.cmd_bind_vertex_buffers(target.commands, 0, &[appearance.vertices.0], &[0]);
-                device.cmd_bind_index_buffer(target.commands, appearance.indices.0, 0, vk::IndexType::UINT32);
                 for (side, projection) in eyes.iter().enumerate() {
                     let Some(projection) = projection else { continue };
                     let view_projection = *projection * space;
                     let x = (side as u32 * texels) as f32;
                     device.cmd_set_viewport(target.commands, 0, &[vk::Viewport { x, y: 0.0, width: texels as f32, height: texels as f32, min_depth: 0.0, max_depth: 1.0 }]);
                     device.cmd_set_scissor(target.commands, 0, &[vk::Rect2D { offset: vk::Offset2D { x: x as i32, y: 0 }, extent: vk::Extent2D { width: texels, height: texels } }]);
+                    device.cmd_bind_vertex_buffers(target.commands, 0, &[appearance.vertices.0], &[0]);
+                    device.cmd_bind_index_buffer(target.commands, appearance.indices.0, 0, vk::IndexType::UINT32);
                     let shown = || appearance.drawn.iter().filter(|drawn| drawn.switched.is_none_or(|node| !appearance.hidden.contains(&node)));
                     let depths = shown().filter_map(|drawn| Some((drawn, drawn.depth?)));
                     for (drawn, pipeline) in depths.chain(shown().map(|drawn| (drawn, drawn.pipeline))) {
@@ -829,6 +1065,20 @@ impl Renderer {
                         device.cmd_bind_descriptor_sets(target.commands, vk::PipelineBindPoint::GRAPHICS, self.layout, 0, &[drawn.set], &[]);
                         device.cmd_push_constants(target.commands, self.layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, bytes);
                         device.cmd_draw_indexed(target.commands, drawn.count, 1, drawn.first, 0, 0);
+                    }
+                    let Some(particles) = &appearance.particles else { continue };
+                    let view_projection = view_projection * particles.space;
+                    let (right, up, focal) = view_axes(view_projection);
+                    device.cmd_bind_index_buffer(target.commands, particles.indices.0, 0, vk::IndexType::UINT32);
+                    for &(system, set, blend, now) in &particles.shown {
+                        let draw = &particles.draws[system];
+                        let push = ParticlePush { view_projection: view_projection.to_cols_array(), eye: camera(view_projection).to_array(), now, right: right.to_array(), system: system as u32, up: up.to_array(), focal };
+                        let bytes = std::slice::from_raw_parts(&push as *const ParticlePush as *const u8, std::mem::size_of::<ParticlePush>());
+                        device.cmd_bind_pipeline(target.commands, vk::PipelineBindPoint::GRAPHICS, self.particle_pipelines[&blend]);
+                        device.cmd_bind_descriptor_sets(target.commands, vk::PipelineBindPoint::GRAPHICS, self.particle_layout, 0, &[set], &[]);
+                        device.cmd_push_constants(target.commands, self.particle_layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, bytes);
+                        device.cmd_bind_vertex_buffers(target.commands, 0, &[particles.vertices.0, particles.instances.0], &[0, draw.instances]);
+                        device.cmd_draw_indexed(target.commands, draw.count, draw.max, draw.first, draw.vertex_offset, 0);
                     }
                 }
             }
@@ -889,11 +1139,15 @@ fn material_data(material: &crate::vrm::Material) -> MaterialData {
 }
 
 impl Appearance {
-    pub fn update(&mut self, palette: &[Mat4], skinned: &Skinned, changed: &[u32]) {
-        assert_eq!(palette.len(), self.joints, "the palette has one matrix per joint");
+    fn settled(&self) {
         if let Some(fence) = self.drawing.take() {
             unsafe { self.gpu.device.wait_for_fences(&[fence], true, u64::MAX) }.expect("vkWaitForFences");
         }
+    }
+
+    pub fn update(&mut self, palette: &[Mat4], skinned: &Skinned, changed: &[u32]) {
+        assert_eq!(palette.len(), self.joints, "the palette has one matrix per joint");
+        self.settled();
         let bytes = bytes_of(palette);
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.palette.2, bytes.len()) };
         let bytes = bytes_of(&skinned.surfaces);
@@ -902,6 +1156,49 @@ impl Appearance {
         for &vertex in changed {
             unsafe { target.add(vertex as usize).write(skinned.vertices[vertex as usize]) };
         }
+    }
+}
+
+impl Appearance {
+    /// Writes the particles born or cleared since the last call and each system's state now; `skin` places the figure
+    /// as the palette's placement does.
+    pub fn place_particles(&mut self, particles: &mut Particles, skin: Mat4) {
+        self.settled();
+        let Some(buffers) = &mut self.particles else { return };
+        let instances = buffers.instances.2;
+        let draws = &buffers.draws;
+        particles.written(|system, slot, instance| unsafe { (instances.add(draws[system].instances as usize) as *mut Instance).add(slot).write(*instance) });
+        let mut shown = Vec::new();
+        for at in 0..particles.len() {
+            let system = particles.system(at);
+            let material = particles.material(at);
+            let renderer = &system.renderer;
+            let data = SystemData {
+                emitter: particles.emitter(at).to_cols_array(),
+                tint: material.color.to_array(),
+                emission: material.emission.to_array(),
+                cutoff: if material.blend == Blend::Cutout { material.cutoff } else { 0.0 },
+                uv: material.uv,
+                pivot: renderer.pivot.to_array(),
+                length_scale: renderer.length,
+                speed_ranges: system.speed_ranges(),
+                velocity_scale: renderer.velocity_scale,
+                noise_frequency: system.noise_frequency(),
+                damping: system.damping(),
+                flags: system.flags(),
+                mode: match renderer.mode { Mode::Billboard => 0, Mode::Stretched => 1, Mode::Horizontal => 2, Mode::Vertical => 3, Mode::Mesh(_) => 4 },
+                align: renderer.align as u32,
+                blend: material.blend as u32,
+                max_size: renderer.max_size,
+            };
+            unsafe { (buffers.systems.2 as *mut SystemData).add(at).write(data) };
+            if particles.shown(at) {
+                shown.push((at, buffers.sets[material.image.map_or(0, |image| image + 1)], material.blend, particles.now(at)));
+            }
+        }
+        shown.sort_by_key(|&(_, _, blend, _)| !blend.solid());
+        buffers.shown = shown;
+        buffers.space = skin * particles.to_model();
     }
 }
 
@@ -945,9 +1242,11 @@ impl Drop for Renderer {
             if let Some(pool) = self.timestamps {
                 device.destroy_query_pool(pool, None);
             }
-            for &pipeline in self.pipelines.values() {
+            for &pipeline in self.pipelines.values().chain(self.particle_pipelines.values()) {
                 device.destroy_pipeline(pipeline, None);
             }
+            device.destroy_pipeline_layout(self.particle_layout, None);
+            device.destroy_descriptor_set_layout(self.particle_set_layout, None);
             device.destroy_sampler(self.sampler, None);
             device.destroy_sampler(self.edge_sampler, None);
             device.destroy_pipeline_layout(self.layout, None);
@@ -1482,6 +1781,63 @@ mod tests {
             let changed = square.iter().zip(&turned).filter(|(a, b)| a != b).count();
             assert!(changed <= 4, "skinning into a frame turned {turn} from the window changes {changed} of {} outlined texels", covered(&square));
         }
+    }
+
+    #[test]
+    fn particle_systems_draw_where_they_are_born_in_their_blend() {
+        let at = |x: f32, z: f32| Mat4::from_translation(Vec3::new(x, -0.6, z)).to_cols_array();
+        let system = |x: f32, z: f32, mode: &str, blend: &str, color: [f32; 4], most: f32| serde_json::json!({
+            "node": 0, "world": true, "loop": false, "bursts": [{"time": 0, "count": {"min": [1], "max": [1], "scale": [1, 1]}}],
+            "speed": {"min": [1], "max": [1], "scale": [0, 0]}, "lifetime": {"min": [1], "max": [1], "scale": [10, 10]},
+            "size": {"min": [1], "max": [1], "scale": [0.3, 0.3]}, "shape": {"type": "point", "matrix": at(x, z)},
+            "renderer": {"draw": true, "mode": mode, "mesh": 0, "align": "world", "maxSize": most, "materials": [{"blend": blend, "color": color}]}
+        });
+        let mut builder = crate::vrm::tests::Builder::new(serde_json::json!({
+            "VRMC_vrm": {"humanoid": {"humanBones": {}}},
+            "UNITY_particles": {
+                "systems": [
+                    system(-0.8, 0.5, "billboard", "opaque", [1.0, 1.0, 1.0, 1.0], 0.5), system(0.0, 0.5, "billboard", "add", [1.0, 0.0, 0.0, 1.0], 0.5), system(0.8, 0.5, "mesh", "cutout", [0.0, 1.0, 0.0, 1.0], 0.5), system(0.4, 0.5, "billboard", "opaque", [1.0, 1.0, 1.0, 1.0], 0.02),
+                    system(-0.4, 0.5, "billboard", "opaque", [1.0, 1.0, 1.0, 1.0], 0.5), system(-0.4, 0.7, "billboard", "multiply", [1.0, 0.0, 0.0, 0.5], 0.5)
+                ],
+                "meshes": [{"positions": [-0.5, -0.5, 0, 0.5, -0.5, 0, 0.5, 0.5, 0, -0.5, 0.5, 0], "uvs": [0, 1, 1, 1, 1, 0, 0, 0], "indices": [0, 1, 2, 0, 2, 3]}]
+            }
+        }));
+        let position = builder.accessor("VEC3", &[-1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, -1.0, 1.0, 0.0]);
+        let indices = builder.indices(&[0, 1, 2, 0, 2, 3]);
+        builder.set("nodes", serde_json::json!([{ "mesh": 0 }]));
+        builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position }, "indices": indices, "material": 0 }] }]));
+        builder.set("materials", serde_json::json!([{ "pbrMetallicRoughness": { "baseColorFactor": [0.2, 0.2, 0.9, 1.0] } }]));
+        let model = Model::parse(&builder.glb()).unwrap();
+        assert_eq!(model.particles.systems.len(), 6);
+        let skinned = model.skinned().unwrap();
+        let worlds = model.worlds(&model.rest());
+        let mut particles = Particles::new(&model.particles, None);
+        particles.step(&worlds, Mat4::IDENTITY, 0.02);
+        let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [64, 64], 1.0).unwrap();
+        let mut appearance = renderer.appearance(&model, &skinned).unwrap();
+        appearance.update(&skinned.palette(&worlds, Mat4::IDENTITY), &skinned, &[]);
+        appearance.place_particles(&mut particles, Mat4::IDENTITY);
+        renderer.render(&appearance, [eye_projection(Vec3::new(0.0, 0.0, 3.0), 1.5, 1.5), None], Mat4::IDENTITY, 64).unwrap();
+        let pixels = renderer.read().unwrap();
+        let column = |x: f32| ((x * 1.2 + 1.5) / 3.0 * 64.0) as u32;
+        let row = ((1.5 + 0.6 * 1.2) / 3.0 * 64.0) as u32;
+        let seen = |x: f32| pixel(&pixels, 128, column(x), row);
+        assert_eq!(seen(-0.8), [255, 255, 255, 255], "an opaque billboard covers its spot");
+        assert_eq!(pixel(&pixels, 128, column(-0.8) + 3, row)[3], 255);
+        assert!(seen(0.4)[3] > 0 && pixel(&pixels, 128, column(0.4) + 3, row)[3] == 0, "a quad past its share of the view's height is held to it");
+        let added = seen(0.0);
+        assert!(added[0] > 250 && added[1] < 5 && added[3] == 0, "an additive one adds its light and no coverage: {added:?}");
+        let cut = seen(0.8);
+        assert!(cut[1] > 250 && cut[0] < 5 && cut[3] == 255, "a cutout mesh covers its spot: {cut:?}");
+        let multiplied = seen(-0.4);
+        assert!(multiplied[0] > 250 && (100..220).contains(&multiplied[1]) && multiplied[1] == multiplied[2] && multiplied[3] == 255, "a half-covering multiply halves the white behind it toward red: {multiplied:?}");
+        assert_eq!(pixel(&pixels, 128, 32, 63), [0; 4], "nothing below them");
+        assert!(pixel(&pixels, 128, 32, 20)[2] > 100, "the figure still draws behind them");
+        particles.reset();
+        appearance.place_particles(&mut particles, Mat4::IDENTITY);
+        renderer.render(&appearance, [eye_projection(Vec3::new(0.0, 0.0, 3.0), 1.5, 1.5), None], Mat4::IDENTITY, 64).unwrap();
+        let cleared = renderer.read().unwrap();
+        assert_eq!(pixel(&cleared, 128, ((-0.8 * 1.2 + 1.5) / 3.0 * 64.0) as u32, ((1.5 + 0.6 * 1.2) / 3.0 * 64.0) as u32), [0; 4], "cleared particles draw nothing");
     }
 
     #[test]

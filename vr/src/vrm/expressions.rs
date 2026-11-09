@@ -505,9 +505,46 @@ pub enum Effect {
     Constraint { node: usize },
     /// The controller's own parameter, which the animator writes every step from the clips animating it.
     Parameter(String),
+    Particle(ParticleEffect),
     /// An effect a newer converter writes: its target holds still rather than refusing the avatar.
     #[serde(skip)]
     Unread(String),
+}
+
+/// The value of one particle system's field a target sets: a curve's scale, a channel of its start colour or of its
+/// materials' colour or emission, or which of its materials it draws with.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct ParticleEffect {
+    pub system: usize,
+    pub field: ParticleField,
+    #[serde(default)]
+    pub end: End,
+    #[serde(default)]
+    pub channel: usize,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ParticleField {
+    Rate,
+    Distance,
+    Speed,
+    Size,
+    Lifetime,
+    Gravity,
+    Color,
+    Material,
+    Tint,
+    Emission,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum End {
+    Min,
+    Max,
+    #[default]
+    Both,
 }
 
 #[derive(Deserialize)]
@@ -572,6 +609,13 @@ pub struct SwitchedCollider {
     pub when: Vec<(usize, f32)>,
 }
 
+/// A particle system the menu switches: it runs only while every switch in `when` is at its value.
+#[derive(Clone, Debug, Deserialize)]
+pub struct SwitchedParticles {
+    pub system: usize,
+    pub when: Vec<(usize, f32)>,
+}
+
 pub(super) fn off(when: &[(usize, f32)], values: &[f32]) -> bool {
     when.iter().any(|&(target, value)| (values[target] - value).abs() >= 0.5)
 }
@@ -593,6 +637,8 @@ pub struct Expressions {
     colliders: Vec<SwitchedCollider>,
     #[serde(default)]
     pub contacts: Vec<super::contact::Contact>,
+    #[serde(default)]
+    pub particles: Vec<SwitchedParticles>,
     #[serde(default, rename = "icons")]
     encoded_icons: Vec<usize>,
     #[serde(skip)]
@@ -715,9 +761,9 @@ impl Expressions {
             }
         }
         if expressions.clips.iter().flat_map(|clip| &clip.curves).any(|curve| curve.target >= targets) 
-            || expressions.shown.iter().flat_map(|shown| &shown.when).chain(expressions.springs.iter().flat_map(|spring| &spring.when)).chain(expressions.colliders.iter().flat_map(|collider| &collider.when)).chain(expressions.contacts.iter().flat_map(|contact| &contact.when)).any(|&(target, _)| target >= targets)
+            || expressions.shown.iter().flat_map(|shown| &shown.when).chain(expressions.springs.iter().flat_map(|spring| &spring.when)).chain(expressions.colliders.iter().flat_map(|collider| &collider.when)).chain(expressions.contacts.iter().flat_map(|contact| &contact.when)).chain(expressions.particles.iter().flat_map(|particles| &particles.when)).any(|&(target, _)| target >= targets)
         {
-            return Err(format!("{EXTENSION}: a curve or switched node, spring, collider or contact names a target it does not have"));
+            return Err(format!("{EXTENSION}: a curve or switched node, spring, collider, contact or particle system names a target it does not have"));
         }
         Ok(expressions)
     }
@@ -746,12 +792,20 @@ impl Expressions {
             Effect::Constraint { node } => *node < nodes,
             Effect::Parameter(_) => true,
             Effect::Material { node, choices } => *node < nodes && !choices.is_empty(),
+            Effect::Particle(effect) => effect.channel < match effect.field { ParticleField::Emission => 3, _ => 4 },
         });
         let contacts_fit = self.contacts.iter().all(|contact| contact.node < nodes && contact.shape.radius.is_finite() && contact.shape.radius >= 0.0 && contact.shape.offset.iter().chain(contact.shape.tail.iter().flatten()).all(|v| v.is_finite()));
         if !fits || !contacts_fit || self.shown.iter().any(|shown| shown.node >= nodes) || self.springs.iter().flat_map(|spring| &spring.joints).any(|&joint| joint >= nodes) {
             return Err(format!("{EXTENSION}: a target, shown node, switched spring or contact names a node, mesh or blend shape the model does not have"));
         }
         Ok(())
+    }
+
+    pub fn particle_effects(&self) -> impl Iterator<Item = (usize, ParticleEffect)> + '_ {
+        self.targets.iter().enumerate().filter_map(|(at, target)| match &target.effect {
+            Effect::Particle(effect) => Some((at, effect.clone())),
+            _ => None,
+        })
     }
 
     pub fn switched(&self) -> impl Iterator<Item = usize> + '_ {
@@ -790,7 +844,7 @@ impl Expressions {
                 Effect::Rotation(rotation) => turned.entry(rotation.node).or_insert_with(|| (rotation, rotation.rest.clone())).1[rotation.axis] = value,
                 Effect::Translation { node, direction } => pose.translations[*node] += value * Vec3::from(*direction),
                 Effect::Constraint { node } => { pose.constraint_weights.insert(*node, value.clamp(0.0, 1.0)); }
-                Effect::Parameter(_) | Effect::Material { .. } | Effect::Hue(_) | Effect::Color(_) | Effect::Tone(_) | Effect::Look(_) | Effect::Unread(_) => {}
+                Effect::Parameter(_) | Effect::Material { .. } | Effect::Hue(_) | Effect::Color(_) | Effect::Tone(_) | Effect::Look(_) | Effect::Particle(_) | Effect::Unread(_) => {}
             }
         }
         for (node, (rotation, components)) in turned {

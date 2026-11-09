@@ -151,6 +151,7 @@ struct Puppet {
     reach: Vec<spring::Reach>,
     contacts: spring::Contacts,
     constraints: vrm::constraint::Constraints,
+    particles: vrm::particles::Particles,
     drawn: Appearance,
     /// The vertices the last step's morph moved.
     changed: Vec<u32>,
@@ -254,7 +255,8 @@ fn dressed(model: Model, mut clips: HashMap<String, Clip>, id: &str, renderer: &
     tracing::info!("appearance {} stands {height:.2} m full size", id);
     let drawn = renderer.appearance(&model, &skinned)?;
     let controller = model.menu.as_ref().map(|menu| Controller::new(menu, remembered));
-    Ok(Puppet { model, skinned, fit, full: height / HEIGHT, standing, animator: Animator::new(clips, own, Random::seeded()), gaze: Gaze::default(), springs: Springs::default(), reach: Vec::new(), contacts: spring::Contacts::default(), constraints: vrm::constraint::Constraints::default(), drawn, changed: Vec::new(), controller, touch: Default::default(), values: Vec::new(), felt: Vec::new() })
+    let particles = vrm::particles::Particles::new(&model.particles, model.menu.as_ref());
+    Ok(Puppet { model, skinned, fit, full: height / HEIGHT, standing, animator: Animator::new(clips, own, Random::seeded()), gaze: Gaze::default(), springs: Springs::default(), reach: Vec::new(), contacts: spring::Contacts::default(), constraints: vrm::constraint::Constraints::default(), particles, drawn, changed: Vec::new(), controller, touch: Default::default(), values: Vec::new(), felt: Vec::new() })
 }
 
 impl Puppet {
@@ -320,12 +322,14 @@ impl Puppet {
         self.values.clone_from(&values);
         self.drawn.hidden = menu.apply(&values, pose);
         self.drawn.seconds += steps as f64 * delta as f64;
+        self.particles.apply(&values);
         self.skinned.surface_values(menu, &values);
         let retextured = menu.materials(&values).flat_map(|(node, moved)| self.skinned.retexture(node, moved)).collect();
         (retextured, menu.idle(&values))
     }
 
-    /// Moves the constrained and spring-driven nodes of `pose` for the figure placed by `body`.
+    /// Moves the constrained and spring-driven nodes of `pose` for the figure placed by `body`, then runs its particles
+    /// from the settled pose.
     fn settle(&mut self, pose: &mut vrm::Pose, body: glam::Mat4, hands: &[spring::Hand], delta: f32, idle: &spring::Idle) {
         let constraints = &mut self.constraints;
         self.springs.constrained(&self.model, pose, idle, |pose| constraints.step(&self.model, pose, body));
@@ -338,11 +342,15 @@ impl Puppet {
                 spring::Contact::Passed { hand, closest, node } => tracing::info!("contact: {hand} passed {} {:.1} mm away without touching", bone(node), closest * 1e3),
             }
         }
+        if !self.particles.is_empty() {
+            self.particles.step(&self.model.worlds(pose), body, delta);
+        }
     }
 
     fn draw(&mut self, posed: &[glam::Mat4], to_window: glam::Mat4) {
         let palette = self.skinned.palette(posed, to_window);
         self.drawn.update(&palette, &self.skinned, &self.changed);
+        self.drawn.place_particles(&mut self.particles, to_window);
     }
 }
 
@@ -615,6 +623,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             reveal.reset();
             puppet.springs.reset();
             puppet.constraints.reset();
+            puppet.particles.reset();
             std::thread::sleep(DORMANT_POLL);
             continue;
         };

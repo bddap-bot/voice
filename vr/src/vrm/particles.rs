@@ -11,7 +11,7 @@ const MAX_SLOTS: usize = 10000;
 const MAX_SLOT_INDICES: usize = 375000;
 const MAX_SAMPLES: usize = 64;
 const MAX_BURSTS: usize = 8;
-const MAX_SUB_EMITTERS: usize = 4;
+const MAX_SUB_EMITTERS: usize = 16;
 const MAX_VERTICES: usize = 4096;
 const MAX_INDICES: usize = 12288;
 const QUAD_INDICES: usize = 6;
@@ -759,9 +759,9 @@ pub struct Particles {
     random: fastrand::Rng,
     /// The map from this world into the avatar's model space at the last step.
     to_model: Mat4,
-    /// The time a step's births may take, and when this step's began.
+    /// The time a step's births may take, and when this step's first began: births alone spend it.
     births: std::time::Duration,
-    births_from: std::time::Instant,
+    births_from: Option<std::time::Instant>,
 }
 
 impl Particles {
@@ -794,7 +794,7 @@ impl Particles {
             }
             effects = menu.particle_effects().filter(|(_, effect)| effect.system < count).collect();
         }
-        Particles { systems, effects, last: Vec::new(), random: fastrand::Rng::with_seed(0x5eed), to_model: Mat4::IDENTITY, births: BIRTHS, births_from: std::time::Instant::now() }
+        Particles { systems, effects, last: Vec::new(), random: fastrand::Rng::with_seed(0x5eed), to_model: Mat4::IDENTITY, births: BIRTHS, births_from: None }
     }
 
     pub fn len(&self) -> usize {
@@ -869,7 +869,7 @@ impl Particles {
 
     /// Runs a step of `delta` seconds with the avatar's nodes at `worlds`, placed in the tracking space by `body`.
     pub fn step(&mut self, worlds: &[Mat4], body: Mat4, delta: f32) {
-        self.births_from = std::time::Instant::now();
+        self.births_from = None;
         let scale = body.x_axis.truncate().length();
         let into = Mat4::from_scale(Vec3::splat(1.0 / scale)) * body;
         self.to_model = into.inverse();
@@ -942,7 +942,10 @@ impl Particles {
     /// full system refused one.
     fn emit_up_to(&mut self, count: usize, mut emit: impl FnMut(&mut Particles) -> bool) -> Option<usize> {
         let mut made = 0;
-        while made < count && self.births_from.elapsed() < self.births {
+        if count > 0 && self.births_from.is_none() {
+            self.births_from = Some(std::time::Instant::now());
+        }
+        while made < count && self.births_from.is_some_and(|from| from.elapsed() < self.births) {
             if !emit(self) {
                 return None;
             }
@@ -968,14 +971,25 @@ impl Particles {
             if f.on == On::Death {
                 if died {
                     let d = &self.systems[child].definition;
+                    // A death's burst is whole whatever the step's budget: nothing would give it later.
                     let count = bursts(&d.bursts, &mut [0; MAX_BURSTS], 0.0, d.max, &mut self.random);
-                    self.emit_up_to(count, |particles| particles.emit(child, frame, Vec3::ZERO, 0.0, Some((parent, inherit))));
+                    for _ in 0..count {
+                        if !self.emit(child, frame, Vec3::ZERO, 0.0, Some((parent, inherit))) {
+                            break;
+                        }
+                    }
                 }
                 return !died;
             }
             let d = &self.systems[child].definition;
             f.time += delta;
             if died || (!d.looped && f.time > d.duration) {
+                // Births a step's budget put off are still owed once their parent is gone.
+                for _ in 0..(f.pending as usize).min(d.max) {
+                    if !self.emit(child, frame, Vec3::ZERO, 1.0, Some((parent, inherit))) {
+                        break;
+                    }
+                }
                 return false;
             }
             let cycle = if d.looped { f.time % d.duration } else { f.time };
@@ -1304,12 +1318,12 @@ mod tests {
         let definition = read(json!({"systems": [
             system(json!({"subEmitters": [sub(1), sub(0)]})),
             system(json!({"subEmitters": [sub(2)]})),
-            system(json!({"subEmitters": [sub(0), sub(3), sub(3), sub(3), sub(3), sub(3)]})),
+            system(json!({"subEmitters": [sub(0), sub(3), sub(3), sub(3), sub(3), sub(3), sub(3), sub(3), sub(3), sub(3), sub(3), sub(3), sub(3), sub(3), sub(3), sub(3), sub(3), sub(3)]})),
             system(json!({}))
         ]})).unwrap();
         let named = |at: usize| definition.systems[at].subs.iter().map(|sub| sub.system).collect::<Vec<_>>();
         assert_eq!(named(0), Vec::<usize>::new(), "itself, and 1, which led back through 2, go");
-        assert_eq!((named(1), named(2)), (vec![2], vec![0, 3, 3, 3]), "once 0 names none it closes no cycle; four at most");
+        assert_eq!((named(1), named(2)), (vec![2], [vec![0], vec![3; 15]].concat()), "once 0 names none it closes no cycle; sixteen at most");
         assert_eq!(definition.systems.iter().map(|s| s.sub).collect::<Vec<_>>(), [true, false, true, true]);
     }
 

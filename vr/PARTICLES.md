@@ -28,7 +28,7 @@ gives where particles start and which way they leave. Over a particle's life,
 (read midway between its ends) each thirtieth of a second, `noise` wanders it, `sizeOverLife`, `spin` and
 `colorOverLife` scale, turn and tint it, and `sizeBySpeed` and `colorBySpeed` read a
 curve or gradient over its speed. `inherit` gives it a share of the emitter's
-velocity. `subEmitters` lists up to four `{"system", "on": "birth" or "death", "inherit"}`. A
+velocity. `subEmitters` lists up to sixteen `{"system", "on": "birth" or "death", "inherit"}`. A
 system another names emits only as its sub-emitter, and a sub-emitter that leads back
 to the system naming it, itself included, is dropped. At a
 particle's birth the child system runs its own rate and bursts from wherever that

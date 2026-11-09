@@ -13,7 +13,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: npm run smoke:ci
       - uses: actions/upload-artifact@v4

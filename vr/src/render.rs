@@ -1171,6 +1171,10 @@ impl Appearance {
         let mut shown = Vec::new();
         for at in 0..particles.len() {
             let system = particles.system(at);
+            // A system that draws nothing, one without a material among them, needs no data on the GPU.
+            if !system.renderer.draw {
+                continue;
+            }
             let material = particles.material(at);
             let renderer = &system.renderer;
             let data = SystemData {
@@ -1797,7 +1801,8 @@ mod tests {
             "UNITY_particles": {
                 "systems": [
                     system(-0.8, 0.5, "billboard", "opaque", [1.0, 1.0, 1.0, 1.0], 0.5), system(0.0, 0.5, "billboard", "add", [1.0, 0.0, 0.0, 1.0], 0.5), system(0.8, 0.5, "mesh", "cutout", [0.0, 1.0, 0.0, 1.0], 0.5), system(0.4, 0.5, "billboard", "opaque", [1.0, 1.0, 1.0, 1.0], 0.02),
-                    system(-0.4, 0.5, "billboard", "opaque", [1.0, 1.0, 1.0, 1.0], 0.5), system(-0.4, 0.7, "billboard", "multiply", [1.0, 0.0, 0.0, 0.5], 0.5)
+                    system(-0.4, 0.5, "billboard", "opaque", [1.0, 1.0, 1.0, 1.0], 0.5), system(-0.4, 0.7, "billboard", "multiply", [1.0, 0.0, 0.0, 0.5], 0.5),
+                    {"node": 0, "renderer": {"draw": true, "materials": []}}
                 ],
                 "meshes": [{"positions": [-0.5, -0.5, 0, 0.5, -0.5, 0, 0.5, 0.5, 0, -0.5, 0.5, 0], "uvs": [0, 1, 1, 1, 1, 0, 0, 0], "indices": [0, 1, 2, 0, 2, 3]}]
             }
@@ -1808,7 +1813,7 @@ mod tests {
         builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position }, "indices": indices, "material": 0 }] }]));
         builder.set("materials", serde_json::json!([{ "pbrMetallicRoughness": { "baseColorFactor": [0.2, 0.2, 0.9, 1.0] } }]));
         let model = Model::parse(&builder.glb()).unwrap();
-        assert_eq!(model.particles.systems.len(), 6);
+        assert_eq!(model.particles.systems.len(), 7, "a system with no material is read, and draws nothing");
         let skinned = model.skinned().unwrap();
         let worlds = model.worlds(&model.rest());
         let mut particles = Particles::new(&model.particles, None);

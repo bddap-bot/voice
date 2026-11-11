@@ -518,6 +518,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
     let mut spotter: Option<wake::Spotter> = None;
     let mut spotter_retry = epoch;
     tracing::info!("dormant");
+    let mut ready = Duration::ZERO;
     loop {
         if let Some(Signal::Quit) = runtime.poll() {
             tracing::info!("SteamVR asked the overlay to quit");
@@ -555,12 +556,15 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         let started = Instant::now();
         let interval = started - last;
         last = started;
-        let poses = runtime.poses();
+        let now = runtime.poses(Duration::ZERO);
+        let poses = runtime.poses(runtime.seen_in(ready));
         let head = runtime.head(&poses);
         let hands = runtime.hands(&poses);
         let hand = |which| hands.iter().find(|hand| hand.hand == which).map(|hand| hand.pose);
         let mut summoned = false;
-        if let (Some(head), Some(left), Some(right)) = (head, hand(Hand::Left), hand(Hand::Right)) {
+        let hands_now = runtime.hands(&now);
+        let hand_now = |which| hands_now.iter().find(|hand| hand.hand == which).map(|hand| hand.pose);
+        if let (Some(head), Some(left), Some(right)) = (runtime.head(&now), hand_now(Hand::Left), hand_now(Hand::Right)) {
             if let Some(verdict) = recognizer.push((started - epoch).as_secs_f64(), &head, left.t, right.t) {
                 let kind = match (verdict.matched, voice.awake()) {
                     (true, false) => "match, waking",
@@ -862,6 +866,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         let mut texture = renderer.render(&puppet.drawn, seen.map(|eye| eye_projection(eye.into(), half, half)), to_window, texels)?;
         let rendered = Instant::now();
         overlay.present(&mut texture, &place, 2.0 * half, texels as f32 / renderer.eye[0] as f32)?;
+        ready = started.elapsed().max(rendered - started + renderer.drawing.unwrap_or_default());
         meter.frame(interval, started, [animated, bounded, drawn, rendered, Instant::now()], &renderer, texels);
         runtime.wait_frames(started);
     }
@@ -980,7 +985,7 @@ fn card(args: &[String]) -> Result<(), String> {
                 tracing::info!("view {view} of {}", card.views());
             }
         }
-        if let Some(head) = runtime.head(&runtime.poses()) {
+        if let Some(head) = runtime.head(&runtime.poses(Duration::ZERO)) {
             let stand = *stand.get_or_insert_with(|| {
                 let ahead = head.apply([0.0, 0.0, -0.6]);
                 let mut stand = facing(ahead, head.t);

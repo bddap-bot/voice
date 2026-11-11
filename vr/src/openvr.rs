@@ -80,10 +80,25 @@ impl Runtime {
         None
     }
 
-    pub fn poses(&self) -> Vec<sys::TrackedDevicePose_t> {
+    pub fn poses(&self, ahead: std::time::Duration) -> Vec<sys::TrackedDevicePose_t> {
         let mut poses: Vec<sys::TrackedDevicePose_t> = vec![unsafe { std::mem::zeroed() }; sys::k_unMaxTrackedDeviceCount as usize];
-        call!(self.system, GetDeviceToAbsoluteTrackingPose, sys::ETrackingUniverseOrigin_TrackingUniverseStanding, 0.0, poses.as_mut_ptr(), poses.len() as u32);
+        call!(self.system, GetDeviceToAbsoluteTrackingPose, sys::ETrackingUniverseOrigin_TrackingUniverseStanding, ahead.as_secs_f32(), poses.as_mut_ptr(), poses.len() as u32);
         poses
+    }
+
+    /// How long until a frame whose image is ready `ready` from now is seen. A frame drawn for the eyes as they are
+    /// now is seen that much later, and whatever of the figure lies off the window's plane swims against the window
+    /// while the head moves.
+    pub fn seen_in(&self, ready: std::time::Duration) -> std::time::Duration {
+        let (mut since, mut counter) = (0.0f32, 0u64);
+        let (Some(rate), true) = (self.display_rate(), call!(self.system, GetTimeSinceLastVsync, &mut since, &mut counter)) else { return std::time::Duration::ZERO };
+        seen_after(since, ready.as_secs_f32(), rate, self.refreshes_per_frame(), self.headset_float(sys::ETrackedDeviceProperty_Prop_SecondsFromVsyncToPhotons_Float).unwrap_or(0.0))
+    }
+
+    fn headset_float(&self, property: sys::ETrackedDeviceProperty) -> Option<f32> {
+        let mut error = 0;
+        let value = call!(self.system, GetFloatTrackedDeviceProperty, sys::k_unTrackedDeviceIndex_Hmd as u32, property, &mut error);
+        (error == 0 && value.is_finite() && value >= 0.0).then_some(value)
     }
 
     pub fn head(&self, poses: &[sys::TrackedDevicePose_t]) -> Option<Pose> {
@@ -114,9 +129,7 @@ impl Runtime {
 
     /// The display's refresh rate, None where SteamVR does not say.
     fn display_rate(&self) -> Option<f32> {
-        let mut error = 0;
-        let rate = call!(self.system, GetFloatTrackedDeviceProperty, sys::k_unTrackedDeviceIndex_Hmd as u32, sys::ETrackedDeviceProperty_Prop_DisplayFrequency_Float, &mut error);
-        (error == 0 && rate > 0.0).then_some(rate)
+        self.headset_float(sys::ETrackedDeviceProperty_Prop_DisplayFrequency_Float).filter(|&rate| rate > 0.0)
     }
 
     /// How many refreshes each overlay frame spans: the compositor shows the last image at every refresh, so a display
@@ -297,6 +310,16 @@ pub enum Place {
     On(u32, Pose),
 }
 
+/// The compositor composes each refresh from the images ready at its vsync and lights it a refresh plus `photons`
+/// later, and a frame holds for `span` refreshes: the time from now, `since` the last vsync, to the middle of them.
+/// A stalled frame's `ready` is held to two spans, so one stall does not throw every pose far ahead.
+fn seen_after(since: f32, ready: f32, rate: f32, span: u32, photons: f32) -> std::time::Duration {
+    let refresh = 1.0 / rate;
+    let held = span.max(1) as f32;
+    let taken = ((since + ready.min(2.0 * held * refresh)) / refresh).ceil() * refresh;
+    std::time::Duration::try_from_secs_f32(taken - since + refresh + photons + (held - 1.0) * refresh / 2.0).unwrap_or_default()
+}
+
 /// Where a rendered image is shown: a SteamVR overlay in the host, a fake in tests.
 pub trait Surface {
     fn texture(&self, texture: &mut sys::VRVulkanTextureData_t) -> Result<(), String>;
@@ -472,6 +495,17 @@ impl Drop for Overlay<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_frame_is_drawn_for_the_eyes_when_it_is_seen() {
+        let refresh = 1.0 / 144.0;
+        let seen = |since: f32, ready: f32| seen_after(since, ready, 144.0, 2, 0.00976).as_secs_f32();
+        assert!((seen(0.0019, 0.0168) - 0.0392).abs() < 0.0005, "the headset's measured mean time from pose to light, 39.2 ms");
+        assert!((seen(0.0019, 0.004) - seen(0.0019, 0.0168) + 2.0 * refresh).abs() < 1e-5, "an image ready two refreshes sooner is seen two refreshes sooner");
+        assert!((seen(0.0, 0.0) - (refresh + 0.00976 + refresh / 2.0)).abs() < 1e-5, "an image ready at a vsync is lit a refresh and the photon delay later, held for two");
+        assert!((seen_after(0.0, 0.0, 144.0, 1, 0.0).as_secs_f32() - refresh).abs() < 1e-5, "a frame held for one refresh is seen at that one");
+        assert_eq!(seen(0.0019, 0.5), seen(0.0019, 4.0 * refresh), "a stalled frame predicts no further than two spans of drawing");
+    }
 
     #[derive(Default)]
     struct Recorded(std::cell::RefCell<Vec<&'static str>>);

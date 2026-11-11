@@ -1185,12 +1185,13 @@ impl Controller {
         let mut targets: Vec<usize> = animated.iter().flat_map(|part| part.keys().copied()).collect();
         targets.sort_unstable();
         targets.dedup();
-        // A child whose motion keys no curve on a target adds nothing to it, as Unity blends: an empty clip in a direct
-        // tree's child does not write the target's default over a sibling's value.
+        let playing: f32 = weights.iter().filter(|&&share| share > 0.0).sum();
+        // A target only children at no weight key is left to the layers below.
         for target in targets {
             let keyed: Vec<(f32, f32)> = animated.iter().zip(&weights).filter(|&(_, &share)| share > 0.0).filter_map(|(part, &share)| part.get(&target).map(|&value| (share, value))).collect();
             if !keyed.is_empty() {
-                *into.entry(target).or_insert(0.0) += weight * keyed.iter().map(|(share, value)| share * value).sum::<f32>();
+                let rest = if blend == Blend::Direct { 0.0 } else { (playing - keyed.iter().map(|(share, _)| share).sum::<f32>()) * expressions.targets[target].default };
+                *into.entry(target).or_insert(0.0) += weight * (keyed.iter().map(|(share, value)| share * value).sum::<f32>() + rest);
             }
         }
     }
@@ -1441,6 +1442,24 @@ mod tests {
         assert_eq!(controller.step(&expressions, 0.1), vec![1.0], "toggle on, loop off: on");
         controller.set("Loop", 1.0);
         assert_eq!(controller.step(&expressions, 0.1), vec![1.0], "toggle on, loop keys it off: the direct tree adds the two");
+    }
+
+    #[test]
+    fn a_1d_tree_blends_from_rest_but_leaves_a_target_only_a_child_at_no_weight_keys_to_the_layer_below() {
+        let expressions = Expressions::parse(&serde_json::json!({
+            "menu": [], "parameters": [{"name": "Green", "type": "float"}],
+            "layers": [
+                {"states": [{"motion": {"clip": 0}}]},
+                {"states": [{"motion": {"blend": "1d", "parameters": ["Green"], "children": [{"motion": {"clip": 2}, "threshold": 0}, {"motion": {"clip": 1}, "threshold": 1}]}}]}
+            ],
+            "clips": [{"length": 1, "curves": [{"target": 0, "keys": [[0, 1]]}]}, {"length": 1, "curves": [{"target": 0, "keys": [[0, 2]]}]}, {"length": 1, "curves": []}],
+            "targets": [{"effect": "switch", "default": 0.5}]
+        }))
+        .unwrap();
+        let mut controller = Controller::new(&expressions, &Configuration::default());
+        assert_eq!(controller.step(&expressions, 0.1), vec![1.0], "off: the lower layer's value stands");
+        controller.set("Green", 0.5);
+        assert_eq!(controller.step(&expressions, 0.1), vec![1.25], "halfway: half the clip's 2, half the default 0.5");
     }
 
     #[test]

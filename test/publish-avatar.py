@@ -169,6 +169,19 @@ class Publishing(unittest.TestCase):
                 publish(self.candidate(change), self.catalog)
             self.assertIn(part, str(refused.exception))
 
+    def test_a_target_s_extra_curves_may_go_but_its_last_may_not(self):
+        x = AVATAR['extensions']['VRCHAT_expressions']
+        self.catalog.write_bytes(glb({**AVATAR, 'extensions': {**AVATAR['extensions'], 'VRCHAT_expressions': {**x, 'clips': x['clips'] + [{'curves': [{'target': 0, 'keys': [[0, 1]]}]}]}}}))
+        publish(self.candidate(lambda doc: None), self.catalog)
+        with self.assertRaises(SystemExit) as refused:
+            publish(self.candidate(lambda doc: doc['extensions']['VRCHAT_expressions'].update(clips=[{'curves': []}])), self.catalog)
+        self.assertIn('curve:hue:Body', str(refused.exception))
+        twin = lambda doc: doc['extensions']['VRCHAT_expressions'].update(targets=x['targets'] * 2, clips=[{'curves': [{'target': 0, 'keys': [[0, 1]]}, {'target': 1, 'keys': [[0, 1]]}]}])
+        self.catalog.write_bytes(self.candidate(twin).read_bytes())
+        with self.assertRaises(SystemExit) as refused:
+            publish(self.candidate(lambda doc: doc['extensions']['VRCHAT_expressions'].update(targets=x['targets'] * 2)), self.catalog)
+        self.assertIn('curve:hue:Body', str(refused.exception))
+
     def test_a_superset_installs_and_keeps_the_replaced_file(self):
         before = self.catalog.read_bytes()
         new = self.candidate(lambda doc: doc['extensionsUsed'].append('VRMC_vrm'))

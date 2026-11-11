@@ -83,7 +83,10 @@ def inventory(doc):
         return kind + ':' + ','.join(sorted({name(p['node']) for p in parts if isinstance(p, dict) and 'node' in p}))
     targets = [target(t) for t in x.get('targets', [])]
     out.update('target:' + t for t in targets)
-    out.update('curve:' + (targets[c['target']] if c['target'] < len(targets) else str(c['target'])) for clip in x.get('clips', []) for c in clip.get('curves', []))
+    # An animated target counts once however many curves move it: the runtimes hold a blend child's unanimated targets
+    # at rest, so a converter may stop writing those copies.
+    animated = {c['target'] for clip in x.get('clips', []) for c in clip.get('curves', [])}
+    out.update('curve:' + (targets[t] if t < len(targets) else str(t)) for t in animated)
     out.update('shown:' + name(s['node']) for s in x.get('shown', []))
     out.update('switched-spring:' + ','.join(name(j) for j in s['joints']) for s in x.get('springs', []))
     out.update('switched-collider:' + (name(colliders[s['collider']]['node']) if s['collider'] < len(colliders) else str(s['collider'])) for s in x.get('colliders', []))

@@ -484,21 +484,102 @@ pub struct Renderer {
     /// Two timestamps a target, bracketing its drawing; None where the queue keeps no time.
     timestamps: Option<vk::QueryPool>,
     timed: [bool; RING],
-    /// The GPU time a drawing may take, None to draw every image at full density.
-    pub budget: Option<std::time::Duration>,
-    /// What texels draws of each eye's full density: the square of what the last drawings' GPU time allows of the budget.
-    pub scale: f32,
+    pub density: Density,
     /// How long the GPU took over the last drawing it finished.
     pub drawing: Option<std::time::Duration>,
-    /// The GPU's drawing time, averaged over recent frames so one slow frame moves the density little.
-    typical: Option<f32>,
     particle_set_layout: SetLayout,
     particle_layout: vk::PipelineLayout,
     particle_pipelines: HashMap<Blend, vk::Pipeline>,
 }
 
-/// The least density `budget` lowers an image to.
-const LEAST_SCALE: f32 = 0.5;
+/// The ratio between neighbouring densities. A window's texels move in whole steps, because each change of them
+/// reaches the headset a frame late through a second overlay (`openvr::Handoff`): texels that followed every
+/// millimetre of the viewer's sway and every scatter of the drawing time would change on every frame.
+const STEP: f32 = 0.9;
+/// The most steps the budget lowers an image, to about half its density.
+const LOWEST: u32 = 6;
+/// How far under a step the wanted texels fall before it is left; it is taken again once they reach it.
+const SLACK: f32 = 1.06;
+/// The drawings a density's time is averaged over before the budget moves it again.
+const SETTLED: u32 = 32;
+/// The share of the budget a drawing one step denser must fit for the density to rise a step.
+const HEADROOM: f32 = 0.85;
+
+/// The texels each eye's image is drawn at, in steps of `STEP` down from the target's size.
+pub struct Density {
+    most: u32,
+    /// Steps down for the viewer's distance, and further steps down for the budget.
+    far: u32,
+    lowered: u32,
+    /// The GPU time a drawing may take, None to draw every image as dense as its distance shows.
+    pub budget: Option<std::time::Duration>,
+    /// The GPU's time over the drawings at this density, the last `SETTLED` of them at most, and their count.
+    typical: f32,
+    timed: u32,
+    /// What a drawing one step denser takes of this density's time, as the last step measured it: a figure's
+    /// vertices cost the same at any density, so its time falls by less than its texels.
+    dearer: f32,
+    /// The time the density took that the last step left, and whether that step fell, until this one's has settled.
+    left: Option<(f32, bool)>,
+}
+
+impl Density {
+    pub fn new(most: u32) -> Density {
+        Density { most, far: 0, lowered: 0, budget: None, typical: 0.0, timed: 0, dearer: 1.0 / (STEP * STEP), left: None }
+    }
+
+    fn step(&self, steps: u32) -> f32 {
+        self.most as f32 * STEP.powi(steps as i32)
+    }
+
+    /// Settles on the texels to draw where the display shows `wanted` of them: the step at or under that, kept
+    /// until `wanted` falls `SLACK` under it or reaches the next, less the budget's steps.
+    pub fn settle(&mut self, wanted: f32) -> u32 {
+        while self.far > 0 && self.step(self.far - 1) <= wanted {
+            self.far -= 1;
+        }
+        while self.step(self.far) > wanted * SLACK && self.step(self.far + self.lowered) > 1.0 {
+            self.far += 1;
+        }
+        (self.step(self.far + self.lowered).round() as u32).max(1)
+    }
+
+    /// What the budget draws of the density the distance shows.
+    pub fn scale(&self) -> f32 {
+        STEP.powi(self.lowered as i32)
+    }
+
+    /// Takes the GPU time of a finished drawing. Once a density's time has settled, it falls a step if that is
+    /// over the budget, and rises one if a drawing a step denser would fit with `HEADROOM`. One drawing counts
+    /// for at most twice the budget, so a lone stall moves nothing.
+    fn time(&mut self, took: std::time::Duration) {
+        let Some(budget) = self.budget.map(|budget| budget.as_secs_f32()) else {
+            *self = Density { far: self.far, ..Density::new(self.most) };
+            return;
+        };
+        self.timed = (self.timed + 1).min(SETTLED);
+        self.typical += (took.as_secs_f32().min(2.0 * budget) - self.typical) / self.timed as f32;
+        if self.timed < SETTLED {
+            return;
+        }
+        if let Some((before, fell)) = self.left.take() {
+            let measured = if fell { before / self.typical } else { self.typical / before };
+            if measured.is_finite() {
+                self.dearer = measured.clamp(1.0, 1.0 / (STEP * STEP));
+            }
+        }
+        let fell = if self.typical > budget && self.lowered < LOWEST {
+            true
+        } else if self.lowered > 0 && self.typical * self.dearer < HEADROOM * budget {
+            false
+        } else {
+            return;
+        };
+        self.left = Some((self.typical, fell));
+        self.lowered = if fell { self.lowered + 1 } else { self.lowered - 1 };
+        (self.typical, self.timed) = (0.0, 0);
+    }
+}
 
 pub struct Appearance {
     gpu: Rc<Gpu>,
@@ -694,10 +775,8 @@ impl Renderer {
             last: None,
             timestamps: None,
             timed: [false; RING],
-            budget: None,
-            scale: 1.0,
+            density: Density::new(eye[0].min(eye[1])),
             drawing: None,
-            typical: None,
             particle_set_layout,
             particle_layout,
             particle_pipelines: HashMap::new(),
@@ -1116,13 +1195,7 @@ impl Renderer {
         Ok(Target { texture, framebuffer, commands, fence })
     }
 
-    /// Texels per eye for a window `width` metres wide seen from `distance`, at most what the target holds.
-    pub fn texels(&self, width: f32, distance: f32) -> u32 {
-        ((eye_texels(width, distance).min(self.eye[0]).min(self.eye[1]) as f32 * self.scale).round() as u32).max(1)
-    }
-
-    /// Reads the GPU time of the drawing `target` finished, and moves the density toward what fits the budget: a
-    /// drawing's cost goes as its texels, the square of the scale.
+    /// Reads the GPU time of the drawing `target` finished.
     fn time_drawing(&mut self, target: usize) -> Result<(), String> {
         let (Some(pool), Some((tick, mask))) = (self.timestamps, self.gpu.timestamp) else { return Ok(()) };
         if !std::mem::take(&mut self.timed[target]) {
@@ -1132,12 +1205,7 @@ impl Renderer {
         unsafe { self.gpu.device.get_query_pool_results(pool, 2 * target as u32, &mut stamps, vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT) }.map_err(vk_error("vkGetQueryPoolResults"))?;
         let took = std::time::Duration::from_nanos(((stamps[1].wrapping_sub(stamps[0]) & mask) as f64 * tick as f64) as u64);
         self.drawing = Some(took);
-        let typical = self.typical.map_or(took.as_secs_f32(), |typical| typical + (took.as_secs_f32() - typical) / 16.0);
-        self.typical = Some(typical);
-        if let Some(budget) = self.budget {
-            let fits = (budget.as_secs_f32() / typical.max(1e-6)).sqrt().clamp(0.99, 1.01);
-            self.scale = (self.scale * fits).clamp(LEAST_SCALE, 1.0);
-        }
+        self.density.time(took);
         Ok(())
     }
 
@@ -1502,6 +1570,139 @@ mod tests {
                 assert!(middle[0] > 0 || middle[1] > 0 || middle[2] > 0);
             }
         }
+    }
+
+    #[test]
+    fn a_windows_texels_hold_while_its_viewer_sways_and_follow_a_real_change_of_distance() {
+        let most = eye_texels(0.4, NEAREST);
+        let mut density = Density::new(most);
+        let edges = (0..12).map(|step| 0.4 * DISPLAY_DENSITY / (most as f32 * STEP.powi(step)));
+        for middle in edges.flat_map(|edge| [edge * 0.98, edge, edge * 1.02, edge * 1.05]) {
+            for approach in [0.5, 2.0] {
+                let mut held = density.settle(eye_texels(0.4, middle * approach) as f32);
+                let mut changes = 0;
+                for step in 0..200 {
+                    let sway = 0.02 * middle * (step as f32 * 0.7).sin();
+                    let texels = density.settle(eye_texels(0.4, middle + sway) as f32);
+                    changes += usize::from(step > 0 && texels != held);
+                    held = texels;
+                }
+                assert!(changes <= 1, "swaying 2% of the distance about {middle} m changed the texels {changes} times");
+            }
+        }
+        let mut changes = 0;
+        let mut last = density.settle(eye_texels(0.4, 0.4) as f32);
+        let there_and_back = (0..3600).map(|step| 0.4 + 0.001 * step as f32).chain((0..3600).rev().map(|step| 0.4 + 0.001 * step as f32));
+        for distance in there_and_back {
+            let (texels, wanted) = (density.settle(eye_texels(0.4, distance) as f32), eye_texels(0.4, distance) as f32);
+            assert!(texels as f32 <= wanted * SLACK + 1.0 && texels as f32 >= wanted * STEP - 1.0, "at {distance} m: {texels} texels where the display sees {wanted}");
+            changes += usize::from(texels != last);
+            last = texels;
+        }
+        let steps = (10.0f32.ln() / -STEP.ln()) as usize;
+        assert!((2 * steps - 4..=2 * steps + 4).contains(&changes), "walking out to ten times the distance and back changes the texels {changes} times, a step at a time: about {steps} each way");
+        assert_eq!(density.settle(most as f32), most, "back near, the target's own size");
+    }
+
+    /// A figure's drawing time at full density, in budgets, and the share of it that stays whatever the texels:
+    /// the rest goes as them.
+    type Figure = (f32, f32);
+
+    fn time_at(density: &Density, (cost, fixed): Figure, lowered: u32) -> f32 {
+        cost * (fixed + (1.0 - fixed) * (density.step(lowered) / density.most as f32).powi(2))
+    }
+
+    /// Feeds `density` `frames` drawings of `figure`, each scattered up to 15% about its time, and returns how
+    /// many of them changed the texels.
+    fn draw_frames(density: &mut Density, figure: Figure, frames: usize, random: &mut crate::motion::Random) -> usize {
+        let budget = density.budget.unwrap();
+        let mut changes = 0;
+        for _ in 0..frames {
+            let texels = density.settle(density.most as f32);
+            density.time(budget.mul_f32(time_at(density, figure, density.lowered) * (0.85 + 0.3 * random.next())));
+            changes += usize::from(density.settle(density.most as f32) != texels);
+        }
+        changes
+    }
+
+    fn budgeted() -> Density {
+        Density { budget: Some(std::time::Duration::from_micros(10_400)), ..Density::new(eye_texels(0.4, NEAREST)) }
+    }
+
+    #[test]
+    fn drawing_times_scattered_about_the_budget_leave_the_texels_alone() {
+        let mut random = crate::motion::Random(0x9E37_79B9_7F4A_7C15);
+        for fixed in [0.0, 0.5] {
+            for cost in [0.8, 1.056, 1.2, 1.45, 1.6, 2.0, 2.7, 3.5, 5.0] {
+                let mut density = budgeted();
+                draw_frames(&mut density, (cost, fixed), 2000, &mut random);
+                let label = format!("a figure taking {cost} budgets at full density, {fixed} of it whatever the texels");
+                let took = time_at(&density, (cost, fixed), density.lowered);
+                assert!(took <= 1.05 || density.lowered == LOWEST, "{label}, settles where it takes {took} of one");
+                assert!(density.lowered == 0 || time_at(&density, (cost, fixed), density.lowered - 1) > HEADROOM - 0.08, "{label}, settles {} steps down, where a step denser would fit", density.lowered);
+                let changes = draw_frames(&mut density, (cost, fixed), 5000, &mut random);
+                assert!(changes <= 1, "{label}, changed its texels on {changes} of 5000 frames after settling");
+            }
+        }
+    }
+
+    #[test]
+    fn one_slow_drawing_does_not_lower_the_texels() {
+        let mut density = budgeted();
+        let budget = density.budget.unwrap();
+        for frame in 0..500 {
+            density.time(if frame % 300 == 0 { budget * 6 } else { budget.mul_f32(0.9) });
+        }
+        assert_eq!(density.settle(density.most as f32), density.most);
+    }
+
+    #[test]
+    fn a_costlier_figure_lowers_the_texels_and_a_lighter_one_returns_them_to_the_targets_size() {
+        let mut random = crate::motion::Random(0x9E37_79B9_7F4A_7C15);
+        let mut density = budgeted();
+        let most = density.most;
+        draw_frames(&mut density, (1.6, 0.0), 1000, &mut random);
+        let settled = density.settle(most as f32);
+        assert!(settled < most, "a figure over its budget draws fewer texels: {settled}");
+        draw_frames(&mut density, (3.0, 0.0), 1000, &mut random);
+        assert!(density.settle(most as f32) < settled, "a costlier one fewer still");
+        draw_frames(&mut density, (100.0, 0.0), 1000, &mut random);
+        let least = (most as f32 * STEP.powi(LOWEST as i32)).round() as u32;
+        assert_eq!(density.settle(most as f32), least, "never under the least density");
+        assert_eq!(density.settle(least as f32), (most as f32 * STEP.powi(2 * LOWEST as i32)).round() as u32, "a window seen from afar is lowered by as many steps");
+        draw_frames(&mut density, (0.5, 0.5), 1000, &mut random);
+        assert_eq!(density.settle(most as f32), most, "a figure that fits at full density returns to it");
+        draw_frames(&mut density, (3.0, 0.0), 1000, &mut random);
+        let budget = density.budget.take().unwrap();
+        density.time(budget * 3);
+        assert_eq!(density.settle(most as f32), most, "without a budget nothing is lowered");
+    }
+
+    #[test]
+    fn the_texels_rise_by_the_cost_a_step_measured_not_by_the_texels_alone() {
+        let mut random = crate::motion::Random(0x9E37_79B9_7F4A_7C15);
+        let mut density = budgeted();
+        draw_frames(&mut density, (1.6, 0.5), 1000, &mut random);
+        assert_eq!(density.lowered, LOWEST, "half of this figure's time stays at any density, so no step fits it");
+        let changes = draw_frames(&mut density, (1.05, 0.5), 2000, &mut random);
+        let took = time_at(&density, (1.05, 0.5), density.lowered);
+        assert!(density.lowered <= 3, "eased to 1.05 budgets it rises until a step denser would not fit, to where it takes {took} of one; by its texels alone it would stay {} steps down", density.lowered);
+        assert!(took <= 1.0);
+        assert_eq!(changes as u32, LOWEST - density.lowered, "each of its rises fitted");
+    }
+
+    #[test]
+    fn a_load_that_lifts_just_after_the_texels_fell_still_lets_them_return() {
+        let mut density = budgeted();
+        let budget = density.budget.unwrap();
+        for _ in 0..SETTLED {
+            density.time(budget.mul_f32(1.2));
+        }
+        assert_eq!(density.lowered, 1);
+        for _ in 0..10 * SETTLED {
+            density.time(budget.mul_f32(0.3));
+        }
+        assert_eq!(density.lowered, 0);
     }
 
     #[test]

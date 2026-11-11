@@ -443,7 +443,7 @@ impl<S: Surface> Object<S> {
         drawn.placed = Mat4::from_translation(center.into()) * turned;
         drawn.appearance.update(&drawn.skinned.palette(&drawn.parts.spread(&drawn.worlds, self.handling.spread), local.mat4() * drawn.placed), &drawn.skinned, &[]);
         let seen = view.eyes.map(|eye| local.apply(view.head.then(&eye).t));
-        let texels = self.renderer.texels(QUAD, seen[0][2].min(seen[1][2]));
+        let texels = eye_texels(QUAD, seen[0][2].min(seen[1][2])).min(self.renderer.eye[0]);
         let part = texels as f32 / self.renderer.eye[0] as f32;
         let started = Instant::now();
         let texture = self.renderer.render(&drawn.appearance, seen.map(|eye| eye_projection(eye.into(), QUAD / 2.0, QUAD / 2.0)), Mat4::IDENTITY, texels)?;

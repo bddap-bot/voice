@@ -309,7 +309,7 @@ fn stand_grounded(puppet: &mut crate::Puppet, renderer: &mut Renderer, distance:
         puppet.draw(&posed, skin);
         let seen = eyes.map(|eye| local.apply(eye));
         let depth = seen[0][2].min(seen[1][2]);
-        let texels = renderer.texels(2.0 * half, depth);
+        let texels = renderer.density.settle(eye_texels(2.0 * half, depth) as f32);
         renderer.render(&puppet.drawn, seen.map(|eye| eye_projection(eye.into(), half, half)), to_window, texels)?;
         shown = (texels, eye_texels(2.0 * half, depth));
     }

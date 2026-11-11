@@ -314,60 +314,60 @@ pub trait Surface {
     }
 }
 
-/// Two surfaces taking turns to show one figure. SteamVR may show the previous image on a quad just moved, which
-/// displaces the whole figure for a frame, so a quad that moves once and then holds is set on the hidden surface first
-/// and shown a frame later, once the image drawn for it is in. A quad moving every frame moves in place. The texture
-/// bounds change in place: a held window's texels follow the eye's distance and the drawing budget, and a frame's
-/// late image only scales the figure by that step.
+/// Two surfaces taking turns to show one figure. SteamVR applies a quad's place, width and texture bounds the moment
+/// they are set but shows the image given with them only once it is drawn, so a shown surface would show the previous
+/// image through them until then. A quad that changes is therefore set on the hidden surface with the image drawn
+/// for it, and that surface is shown a frame later, when its image is in. Only a place that changes on every frame
+/// moves in place, the image a frame behind it: handed over, it would trail the controller it rides.
 pub struct Handoff<S> {
     surfaces: [S; 2],
-    quads: [Option<(Place, f32)>; 2],
-    phase: Phase,
+    shown: Option<Geometry>,
+    staged: Option<Geometry>,
+    /// Whether the last frame's place differed from the one before it.
+    moved: bool,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Phase {
-    Holding,
-    Staged,
-    Moving,
+#[derive(Clone, Copy)]
+struct Geometry {
+    place: Place,
+    width: f32,
+    part: f32,
 }
 
 impl<S: Surface> Handoff<S> {
     pub fn new(surfaces: [S; 2]) -> Handoff<S> {
-        Handoff { surfaces, quads: [None; 2], phase: Phase::Holding }
+        Handoff { surfaces, shown: None, staged: None, moved: false }
     }
 
     pub fn present(&mut self, texture: &mut sys::VRVulkanTextureData_t, place: &Place, width: f32, part: f32) -> Result<(), String> {
-        let quad = Some((*place, width));
-        self.phase = match self.phase {
-            _ if self.quads[0] == quad => Phase::Holding,
-            Phase::Staged if self.quads[1] == quad => {
-                self.surfaces[1].present(texture, place, width, part)?;
-                self.surfaces[0].hide();
-                self.surfaces.swap(0, 1);
-                self.quads.swap(0, 1);
-                self.phase = Phase::Holding;
-                return Ok(());
+        let quad = Geometry { place: *place, width, part };
+        let moved = self.staged.or(self.shown).is_some_and(|last| last.place != *place);
+        let moving = std::mem::replace(&mut self.moved, moved) && moved;
+        if let Some(staged) = self.staged.take() {
+            self.surfaces[1].show();
+            self.surfaces[0].hide();
+            self.surfaces.swap(0, 1);
+            self.shown = Some(staged);
+        }
+        match self.shown {
+            Some(shown) if (shown.width, shown.part) == (width, part) && (shown.place == *place || moving) => {
+                self.surfaces[0].present(texture, place, width, part)?;
+                self.shown = Some(quad);
             }
-            Phase::Holding => {
-                let back = &mut self.surfaces[1];
-                back.texture(texture)?;
-                back.place(place);
-                back.resize(width);
-                back.part(part);
-                self.quads[1] = quad;
-                self.phase = Phase::Staged;
-                return Ok(());
+            _ => {
+                let hidden = &mut self.surfaces[1];
+                hidden.texture(texture)?;
+                hidden.place(place);
+                hidden.resize(width);
+                hidden.part(part);
+                self.staged = Some(quad);
             }
-            Phase::Staged | Phase::Moving => Phase::Moving,
-        };
-        self.quads[0] = quad;
-        self.surfaces[0].present(texture, place, width, part)
+        }
+        Ok(())
     }
 
     pub fn hide(&mut self) {
-        self.phase = Phase::Holding;
-        self.quads = [None; 2];
+        (self.shown, self.staged, self.moved) = (None, None, false);
         self.surfaces.iter_mut().for_each(Surface::hide);
     }
 }
@@ -500,10 +500,12 @@ mod tests {
         assert_eq!(surface.0.into_inner(), ["texture", "place", "resize", "part", "show"]);
     }
 
-    /// An overlay as the compositor sees it: the quad as last set, and each image given with the frame it was drawn in.
+    /// An overlay as the compositor sees it: the quad, width and texture bounds as last set, and each image given
+    /// with the frame it was drawn in.
     #[derive(Default)]
     struct Composited {
         place: Option<Place>,
+        extent: (f32, f32),
         given: Vec<u64>,
         shown: bool,
     }
@@ -518,6 +520,12 @@ mod tests {
         fn place(&self, place: &Place) {
             self.0.borrow_mut().place = Some(*place);
         }
+        fn resize(&mut self, width: f32) {
+            self.0.borrow_mut().extent.0 = width;
+        }
+        fn part(&mut self, part: f32) {
+            self.0.borrow_mut().extent.1 = part;
+        }
         fn show(&mut self) {
             self.0.borrow_mut().shown = true;
         }
@@ -530,39 +538,51 @@ mod tests {
         Place::World(Pose { r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], t: [x, 1.0, -1.0] })
     }
 
-    /// Presents a window at each of `quads` in turn, one frame each (`None` hides it), its texture bounds changing every
-    /// frame as a held window's texels do, and gives what the compositor could show on each frame when it latches images
-    /// `lag` frames late: per shown surface, the frame its image was drawn in and the quad it is on.
-    fn composite(quads: &[Option<f32>], lag: usize) -> Vec<Vec<(u64, Place)>> {
+    /// What a frame asks to show: where its quad stands, and the quad's width and the part of the texture its image
+    /// fills. `None` hides the figure.
+    type Asked = Option<(f32, (f32, f32))>;
+
+    const WHOLE: (f32, f32) = (1.0, 1.0);
+
+    /// Presents each of `frames` in turn and gives what the compositor could show on each when it latches images
+    /// `lag` frames late: per shown surface, the frame its image was drawn in, the quad it is on and the width and
+    /// texture bounds it is seen through.
+    fn composite(frames: &[Asked], lag: usize) -> Vec<Vec<(u64, Place, (f32, f32))>> {
         let surfaces = [(); 2].map(|_| std::rc::Rc::new(std::cell::RefCell::new(Composited::default())));
         let mut handoff = Handoff::new(surfaces.clone().map(Shared));
-        quads.iter().enumerate().map(|(frame, &x)| {
+        frames.iter().enumerate().map(|(frame, &asked)| {
             let mut texture: sys::VRVulkanTextureData_t = unsafe { std::mem::zeroed() };
             texture.m_nImage = frame as u64;
-            match x {
-                Some(x) => handoff.present(&mut texture, &at(x), 1.0, 1.0 - frame as f32 * 1e-3).unwrap(),
+            match asked {
+                Some((x, (width, part))) => handoff.present(&mut texture, &at(x), width, part).unwrap(),
                 None => handoff.hide(),
             }
             surfaces.iter().map(|surface| surface.borrow()).filter(|surface| surface.shown).filter_map(|surface| {
                 let latched = surface.given.iter().rev().find(|&&given| given as usize + lag <= frame).or(surface.given.first())?;
-                Some((*latched, surface.place?))
+                Some((*latched, surface.place?, surface.extent))
             }).collect()
         }).collect()
     }
 
-    /// Asserts that from `from` on, every shown image is on the quad it was drawn for and at most one frame older than
-    /// the latch allows, and that the figure is shown on every frame but the one after a hidden figure reappears.
-    fn paired(quads: &[Option<f32>], from: usize) {
+    /// Asserts that from `from` on, exactly one surface shows the figure on every frame but the first after it was
+    /// hidden, its image seen through the width and texture bounds it was drawn for and at most one frame older
+    /// than the latch allows. The image is on the quad it was drawn for too, or where the place is `moving` on every
+    /// frame, on that quad or the next frame's.
+    fn paired(frames: &[Asked], from: usize, moving: bool) {
         for lag in [0, 1] {
-            for (frame, shown) in composite(quads, lag).iter().enumerate().skip(from) {
-                if quads[frame].is_none() {
+            for (frame, shown) in composite(frames, lag).iter().enumerate().skip(from) {
+                if frames[frame].is_none() {
                     assert!(shown.is_empty(), "lag {lag}, frame {frame}: shown while hidden");
                     continue;
                 }
-                assert!(!shown.is_empty() || quads[frame - 1].is_none(), "lag {lag}, frame {frame}: nothing shown");
-                for &(drawn, place) in shown {
-                    assert!(quads[drawn as usize].map(at) == Some(place), "lag {lag}, frame {frame}: the image drawn in frame {drawn} for {:?} is on another quad", quads[drawn as usize]);
-                    assert!(drawn as usize + 1 + lag >= frame, "lag {lag}, frame {frame}: the figure froze on frame {drawn}");
+                assert!(shown.len() == 1 || (shown.is_empty() && frames[frame - 1].is_none()), "lag {lag}, frame {frame}: {} surfaces shown", shown.len());
+                for &(drawn, place, extent) in shown {
+                    let drawn = drawn as usize;
+                    let (x, asked) = frames[drawn].expect("an image is drawn only for a shown figure");
+                    assert!(asked == extent, "lag {lag}, frame {frame}: the image drawn in frame {drawn} for width and bounds {asked:?} is seen through {extent:?}");
+                    let next = frames.get(drawn + 1).copied().flatten().map(|(x, _)| at(x));
+                    assert!(at(x) == place || (moving && next == Some(place)), "lag {lag}, frame {frame}: the image drawn in frame {drawn} for {x} is on another quad");
+                    assert!(drawn + 1 + lag >= frame, "lag {lag}, frame {frame}: the figure froze on frame {drawn}");
                 }
             }
         }
@@ -570,16 +590,45 @@ mod tests {
 
     #[test]
     fn a_refitted_window_never_shows_an_image_drawn_for_another_quad() {
-        let quads: Vec<Option<f32>> = [0.0, 0.3, -0.2, 0.25].iter().flat_map(|&x| [Some(x); 6]).chain([None, None]).chain([Some(0.25); 6]).chain([None]).chain([Some(0.4); 6]).collect();
-        paired(&quads, 1);
+        let frames: Vec<Asked> = [0.0, 0.3, -0.2, 0.25].iter().flat_map(|&x| [Some((x, WHOLE)); 6]).chain([None, None]).chain([Some((0.25, WHOLE)); 6]).chain([None]).chain([Some((0.4, WHOLE)); 6]).collect();
+        paired(&frames, 1, false);
+        let moved_as_it_appears = [Some((0.0, WHOLE)), Some((0.3, WHOLE)), Some((0.3, WHOLE)), None, Some((0.1, WHOLE)), Some((0.2, WHOLE)), Some((0.2, WHOLE))];
+        paired(&moved_as_it_appears, 1, false);
+        let moved_again_two_frames_on: Vec<Asked> = [Some((0.0, WHOLE)); 4].into_iter().chain([Some((0.3, WHOLE)); 2]).chain([Some((0.6, WHOLE)); 4]).collect();
+        paired(&moved_again_two_frames_on, 1, false);
+        let hidden_as_it_moved: Vec<Asked> = [Some((0.0, WHOLE)); 3].into_iter().chain([Some((0.3, WHOLE)), None, None]).chain([Some((0.3, WHOLE)); 4]).collect();
+        paired(&hidden_as_it_moved, 1, false);
     }
 
     #[test]
-    fn a_window_moving_every_frame_keeps_showing_the_latest_image_and_hands_off_once_it_holds() {
-        let quads: Vec<Option<f32>> = (0..20).map(|frame| Some(frame as f32 * 0.01)).chain([None]).chain([Some(0.5); 6]).collect();
-        for (frame, shown) in composite(&quads, 0).iter().enumerate().take(20).skip(2) {
-            assert_eq!(shown.iter().map(|&(drawn, _)| drawn).collect::<Vec<_>>(), [frame as u64], "frame {frame}");
+    fn a_held_window_never_shows_an_image_through_a_width_or_texture_bounds_it_was_not_drawn_for() {
+        let bounds = [1.0, 0.9, 0.75, 0.9, 1.0].iter().flat_map(|&part| [Some((0.0, (1.0, part))); 5]);
+        let widths = [1.2, 0.8].iter().flat_map(|&width| [Some((0.0, (width, 1.0))); 5]);
+        let after_hiding = [None].into_iter().chain([Some((0.0, (1.0, 0.6))); 4]).chain([Some((0.3, (1.5, 0.5))); 4]);
+        let then_a_move = [Some((0.3, (1.5, 0.4))), Some((0.6, (1.5, 0.4))), Some((0.6, (1.5, 0.4)))];
+        paired(&bounds.chain(widths).chain(after_hiding).chain(then_a_move).collect::<Vec<_>>(), 2, false);
+    }
+
+    #[test]
+    fn a_window_resized_on_every_frame_shows_each_image_through_its_own_width_and_bounds() {
+        let growing: Vec<Asked> = (0..30).map(|frame| Some((0.0, (1.0 + frame as f32 * 0.05, 1.0 - frame as f32 * 0.01)))).chain([Some((0.0, (3.0, 0.5))); 4]).collect();
+        paired(&growing, 2, false);
+        let after_hiding: Vec<Asked> = [Some((0.0, WHOLE)); 4].into_iter().chain([None, Some((0.0, (1.0, 0.9))), Some((0.0, (1.0, 0.8))), Some((0.0, (1.0, 0.8)))]).collect();
+        paired(&after_hiding, 2, false);
+    }
+
+    #[test]
+    fn a_window_moving_every_frame_never_shows_an_image_through_texture_bounds_it_was_not_drawn_for() {
+        let frames: Vec<Asked> = (0..40).map(|frame| Some((frame as f32 * 0.01, (1.0, [1.0, 0.9, 0.75, 0.9][frame / 7 % 4])))).collect();
+        paired(&frames, 2, true);
+    }
+
+    #[test]
+    fn a_window_moving_every_frame_keeps_showing_the_latest_image_and_hands_off_once_it_has_held() {
+        let frames: Vec<Asked> = (0..20).map(|frame| Some((frame as f32 * 0.01, WHOLE))).chain([Some((0.19, WHOLE)); 4]).chain([Some((0.5, WHOLE)); 6]).collect();
+        for (frame, shown) in composite(&frames, 0).iter().enumerate().take(20).skip(2) {
+            assert_eq!(shown.iter().map(|&(drawn, _, _)| drawn).collect::<Vec<_>>(), [frame as u64], "frame {frame}");
         }
-        paired(&quads, 20);
+        paired(&frames, 21, false);
     }
 }

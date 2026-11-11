@@ -484,7 +484,7 @@ pub struct ShadowEdge {
 
 /// lilToon's rim light, added where the surface turns from the view: `color` times `strength`, towards the albedo by
 /// `main` and the light by `lit`, over the fresnel term raised to `power` past `border` (with `blur`), dimmed in shadow
-/// by `shadow_mask`.
+/// by `shadow_mask`; on back faces too only where `backface` says.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Rim {
@@ -496,6 +496,7 @@ pub struct Rim {
     pub power: f32,
     pub lit: f32,
     pub shadow_mask: f32,
+    pub backface: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -551,8 +552,8 @@ pub struct OutlineLayer {
 /// What each atlas texel's material lays over the albedo: `index`'s red channel names a texel's entry in `materials`,
 /// one-based, zero or no index for none. Every layer is a glTF image the extension names by index, each at its own size;
 /// a clear coat map holds linear mask, smoothness, reflection and specular levels in its four channels. `shades` are
-/// the first and second shade colours a shadowed look turns each texel to, each spanning the atlas at its shape but
-/// carried at most as wide as the converter carries a glow map.
+/// the first shade colours a shadowed look turns each texel to and, where some look has a second shade, the second's,
+/// each spanning the atlas at its shape but carried at most as wide as the converter carries a glow map.
 #[derive(Clone, Debug)]
 pub struct Looks {
     pub index: Option<Image>,
@@ -563,7 +564,7 @@ pub struct Looks {
     pub emission: Option<Image>,
     pub clearcoat_maps: Vec<Image>,
     pub outline: Option<OutlineLayer>,
-    pub shades: Option<[Image; 2]>,
+    pub shades: Vec<Image>,
 }
 
 /// One component of a node's Unity local rotation: of `rest` read as localEulerAngles in degrees when it has three, a quaternion when four.
@@ -804,18 +805,23 @@ fn looks(encoded: EncodedLooks, image: &impl Fn(usize) -> Result<Image, String>)
             (Some(_), _) => return Err(format!("{EXTENSION}: an outline layer without a positive outlineWidth")),
         },
         shades: match (encoded.shade, encoded.shade2) {
-            (Some(first), Some(second)) => Some([image(first).map_err(|error| format!("{EXTENSION}: shade: {error}"))?, image(second).map_err(|error| format!("{EXTENSION}: shade2: {error}"))?]),
-            (None, None) => None,
-            _ => return Err(format!("{EXTENSION}: a shade layer without the other")),
+            (Some(first), second) => std::iter::once(image(first).map_err(|error| format!("{EXTENSION}: shade: {error}"))?).chain(second.map(|second| image(second).map_err(|error| format!("{EXTENSION}: shade2: {error}"))).transpose()?).collect(),
+            (None, None) => Vec::new(),
+            (None, Some(_)) => return Err(format!("{EXTENSION}: a second shade layer without the first")),
         },
         materials,
     };
-    let shadowed = looks.materials.iter().any(|look| matches!(look.lighting, Lighting::Flat { shadow: Some(_), .. }));
+    let shadows: Vec<&Shadow> = looks.materials.iter().filter_map(|look| match &look.lighting {
+        Lighting::Flat { shadow, .. } => shadow.as_ref(),
+        Lighting::Lit { .. } => None,
+    }).collect();
+    let needed = if shadows.iter().any(|shadow| shadow.second.is_some()) { 2 } else { usize::from(!shadows.is_empty()) };
+    if looks.shades.len() < needed {
+        return Err(format!("{EXTENSION}: a shadowed look without its shade layers"));
+    }
     let over_atlas = |layer: &Image| looks.index.as_ref().is_none_or(|index| (f64::from(layer.height) - f64::from(layer.width) * f64::from(index.height) / f64::from(index.width)).abs() < 1.0);
-    match &looks.shades {
-        None if shadowed => return Err(format!("{EXTENSION}: a shadowed look without its shade layers")),
-        Some([first, second]) if !over_atlas(first) || (first.width, first.height) != (second.width, second.height) => return Err(format!("{EXTENSION}: shade layers not of one size over the atlas")),
-        _ => {}
+    if looks.shades.first().is_some_and(|first| !over_atlas(first) || looks.shades.iter().any(|layer| (layer.width, layer.height) != (first.width, first.height))) {
+        return Err(format!("{EXTENSION}: shade layers not of one size over the atlas"));
     }
     let textures = looks.matcaps.len() as u32;
     let cell = |look: &Look| {
@@ -1594,10 +1600,10 @@ mod tests {
     }
 
     #[test]
-    fn a_shadowed_look_loads_with_its_shade_layers_and_is_refused_without_them() {
+    fn a_shadowed_look_loads_with_the_shade_layers_its_shades_need_and_is_refused_without_them() {
         let sizes = [(4, 4), (2, 2), (4, 2)];
         let shadow = serde_json::json!({"border": 0.5, "blur": 0.1, "strength": 1, "second": {"border": 0.15, "blur": 0.1, "weight": 1}, "edge": {"color": [1, 0.1, 0], "range": 0.08}});
-        let rim = serde_json::json!({"color": [0.66, 0.5, 0.48], "strength": 1, "main": 0, "border": 0.5, "blur": 0.65, "power": 3.5, "lit": 1, "shadowMask": 0.5});
+        let rim = serde_json::json!({"color": [0.66, 0.5, 0.48], "strength": 1, "main": 0, "border": 0.5, "blur": 0.65, "power": 3.5, "lit": 1, "shadowMask": 0.5, "backface": false});
         let parse = |lighting: serde_json::Value, layers: serde_json::Value| {
             let material = serde_json::json!({"rect": [0, 0, 1, 1], "decals": [null, null, null, null], "matcaps": [null, null, null, null], "emission": null, "lighting": lighting, "rim": rim});
             let mut encoded = serde_json::json!({"index": 0, "materials": [material]});
@@ -1610,12 +1616,15 @@ mod tests {
         let shaded = parse(serde_json::json!({"model": "flat", "cap": 1, "shadow": shadow}), serde_json::json!({"shade": 1, "shade2": 1})).unwrap();
         let Lighting::Flat { shadow: Some(read), .. } = &shaded.materials[0].lighting else { panic!("{:?}", shaded.materials[0].lighting) };
         assert_eq!((read.second.as_ref().map(|second| second.weight), read.edge.as_ref().map(|edge| edge.range)), (Some(1.0), Some(0.08)));
-        assert_eq!(shaded.materials[0].rim.as_ref().map(|rim| rim.shadow_mask), Some(0.5));
-        assert!(shaded.shades.is_some_and(|[first, _]| first.width == 2), "the shade layers load narrower than the atlas");
-        assert!(parse(serde_json::json!({"model": "flat", "cap": 1}), serde_json::json!({})).is_ok_and(|looks| looks.shades.is_none()), "an unshadowed flat look needs no shade layers");
+        assert_eq!(shaded.materials[0].rim.as_ref().map(|rim| (rim.shadow_mask, rim.backface)), Some((0.5, false)));
+        assert!(shaded.shades.len() == 2 && shaded.shades[0].width == 2, "the shade layers load narrower than the atlas");
+        assert!(parse(serde_json::json!({"model": "flat", "cap": 1}), serde_json::json!({})).is_ok_and(|looks| looks.shades.is_empty()), "an unshadowed flat look needs no shade layers");
+        let single = serde_json::json!({"model": "flat", "cap": 1, "shadow": {"border": 0.5, "blur": 0.1, "strength": 1, "second": null, "edge": null}});
+        assert!(parse(single.clone(), serde_json::json!({"shade": 1})).is_ok_and(|looks| looks.shades.len() == 1), "a shadow without a second shade loads with the first shade layer alone");
+        assert!(parse(single, serde_json::json!({"shade2": 1})).is_err(), "a second shade layer without the first is refused");
         for (layers, why) in [
             (serde_json::json!({}), "no shade layers"),
-            (serde_json::json!({"shade": 0}), "the first alone"),
+            (serde_json::json!({"shade": 0}), "the first alone, where it has a second shade"),
             (serde_json::json!({"shade": 0, "shade2": 1}), "layers of two sizes"),
             (serde_json::json!({"shade": 2, "shade2": 2}), "layers not the atlas's shape"),
         ] {

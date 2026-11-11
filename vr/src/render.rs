@@ -182,7 +182,9 @@ struct LookData {
     rim_power: f32,
     rim_lit: f32,
     rim_shadow_mask: f32,
-    pad: [f32; 2],
+    /// Whether the rim draws on back faces.
+    rim_backface: u32,
+    pad: f32,
     matcaps: [MatcapData; 4],
     ramp: [[f32; 4]; RAMP / 4],
     ramped: u32,
@@ -275,7 +277,8 @@ fn look_data(look: &crate::vrm::expressions::Look, places: &[Place]) -> LookData
         rim_power: rim.map_or(0.0, |rim| rim.power),
         rim_lit: rim.map_or(0.0, |rim| rim.lit),
         rim_shadow_mask: rim.map_or(0.0, |rim| rim.shadow_mask),
-        pad: [0.0; 2],
+        rim_backface: rim.is_some_and(|rim| rim.backface) as u32,
+        pad: 0.0,
         matcaps: look.matcaps.each_ref().map(|matcap| matcap.as_ref().map_or_else(MatcapData::default, |m| MatcapData {
             color: m.color,
             hue: m.hue.as_ref().map_or([0.0; 4], |hue| [hue.shift, hue.space, hue.select, 1.0]),
@@ -778,7 +781,7 @@ impl Renderer {
         let no_decal = array(&[], [0; 4])?;
         decal_textures.resize(DECAL_PAGES, no_decal);
         let matcaps = array(&looks.into_iter().flat_map(|looks| &looks.matcaps).collect::<Vec<_>>(), [255; 4])?;
-        let shades = array(&looks.and_then(|looks| looks.shades.as_ref()).map(|shades| shades.each_ref().to_vec()).unwrap_or_default(), [255; 4])?;
+        let shades = array(&looks.into_iter().flat_map(|looks| &looks.shades).collect::<Vec<_>>(), [255; 4])?;
         let coat_maps = {
             let maps = looks.map(|looks| &looks.clearcoat_maps[..]).unwrap_or_default();
             let (width, height) = maps.iter().fold((1, 1), |(width, height), map| (map.width.max(width), map.height.max(height)));
@@ -1552,7 +1555,7 @@ mod tests {
             menu.untinted = Some(crate::vrm::expressions::Untinted { image: crate::vrm::Image { width: 4, height: 1, rgba: [[255, 0, 0, 255], [255, 0, 0, 255], [255; 4], [255; 4]].concat() }, cells: vec![[0.0, 0.0, 1.0, 1.0, 0.5, 0.0, 1.0, 1.0]] });
             let mut look = looks_test::look();
             look.decals[1] = Some(crate::vrm::expressions::Decal { alpha: 0.0, intensity: 1.0, color_blend: [(8.0, DecalBlend::Multiply), (9.0, DecalBlend::Lighten), (10.0, DecalBlend::Darken)].into_iter().find(|(at, _)| *at == space).map_or(DecalBlend::Replace, |(_, blend)| blend), image: 0, hue: None });
-            menu.looks = Some(crate::vrm::expressions::Looks { index: Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }), materials: vec![look], decals: vec![crate::vrm::Image { width: 2, height: 1, rgba: if space == 10.0 { vec![64, 255, 255, 255, 0, 0, 0, 0] } else { vec![0, 255, 0, 255, 0, 0, 0, 0] } }], matcaps: Vec::new(), matcap_masks: None, emission: None, clearcoat_maps: Vec::new(), outline: None, shades: None });
+            menu.looks = Some(crate::vrm::expressions::Looks { index: Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }), materials: vec![look], decals: vec![crate::vrm::Image { width: 2, height: 1, rgba: if space == 10.0 { vec![64, 255, 255, 255, 0, 0, 0, 0] } else { vec![0, 255, 0, 255, 0, 0, 0, 0] } }], matcaps: Vec::new(), matcap_masks: None, emission: None, clearcoat_maps: Vec::new(), outline: None, shades: Vec::new() });
             model.menu = Some(menu);
             let mut skinned = model.skinned().unwrap();
             let original_vertices = bytes_of(&skinned.vertices).to_vec();
@@ -1636,7 +1639,7 @@ mod tests {
             emission: Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![255; 4] }),
             clearcoat_maps,
             outline: None,
-            shades: None,
+            shades: Vec::new(),
         });
         model.menu = Some(menu);
         let mut skinned = model.skinned().unwrap();
@@ -1672,56 +1675,97 @@ mod tests {
         assert!(uncapped[0] > 140, "uncapped, it takes its main and ambient light whole: {uncapped:?}");
     }
 
+    /// What `faces_drawn` lays beyond its look: the looks' matcap images and shade layers, the menu's targets, each at
+    /// its default, and whether the quads turn their back faces to the viewer, drawn two-sided.
+    #[derive(Default)]
+    struct Faces {
+        matcaps: Vec<crate::vrm::Image>,
+        shades: Vec<crate::vrm::Image>,
+        targets: Vec<serde_json::Value>,
+        back: bool,
+    }
+
     /// Two quads facing the viewer whose vertex normals are `normals`, left and right, both of a one-texel atlas of
-    /// `rgba` whose material carries `look`: the pixel at the middle of each.
-    fn faces_drawn(rgba: [u8; 4], look: crate::vrm::expressions::Look, normals: [[f32; 3]; 2], matcaps: Vec<crate::vrm::Image>, shades: Option<[crate::vrm::Image; 2]>) -> [[u8; 4]; 2] {
+    /// `rgba` whose material carries `look`, with `faces`: the pixel at the middle of each.
+    fn faces_drawn(rgba: [u8; 4], look: crate::vrm::expressions::Look, normals: [[f32; 3]; 2], faces: Faces) -> [[u8; 4]; 2] {
         let mut builder = crate::vrm::tests::Builder::new(serde_json::json!({"VRMC_vrm": {"humanoid": {"humanBones": {}}}}));
         let position = builder.accessor("VEC3", &[-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0]);
         let normal = builder.accessor("VEC3", &normals.map(|normal| Vec3::from(normal).normalize().to_array().repeat(4)).concat());
         let uv = builder.accessor("VEC2", &[0.5, 0.5].repeat(8));
-        let indices = builder.indices(&[0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]);
+        let indices = builder.indices(if faces.back { &[0, 2, 1, 0, 3, 2, 4, 6, 5, 4, 7, 6] } else { &[0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7] });
         builder.set("nodes", serde_json::json!([{"mesh": 0}]));
         builder.set("meshes", serde_json::json!([{"primitives": [{"attributes": {"POSITION": position, "NORMAL": normal, "TEXCOORD_0": uv}, "indices": indices, "material": 0}]}]));
-        builder.set("materials", serde_json::json!([{"pbrMetallicRoughness": {"baseColorFactor": [1.0, 1.0, 1.0, 1.0]}}]));
+        builder.set("materials", serde_json::json!([{"doubleSided": faces.back, "pbrMetallicRoughness": {"baseColorFactor": [1.0, 1.0, 1.0, 1.0]}}]));
         let mut model = Model::parse(&builder.glb()).unwrap();
         model.images.push(crate::vrm::Image { width: 1, height: 1, rgba: rgba.to_vec() });
         model.materials[0].base_image = Some(0);
-        let mut menu = crate::vrm::expressions::Expressions::parse(&serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": []})).unwrap();
-        menu.looks = Some(crate::vrm::expressions::Looks { index: Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }), materials: vec![look], decals: Vec::new(), matcaps, matcap_masks: None, emission: None, clearcoat_maps: Vec::new(), outline: None, shades });
+        let mut menu = crate::vrm::expressions::Expressions::parse(&serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": faces.targets})).unwrap();
+        menu.looks = Some(crate::vrm::expressions::Looks { index: Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }), materials: vec![look], decals: Vec::new(), matcaps: faces.matcaps, matcap_masks: None, emission: None, clearcoat_maps: Vec::new(), outline: None, shades: faces.shades });
         model.menu = Some(menu);
         let pixels = draw(&model, &model.rest(), [32, 32], [eye_projection(Vec3::new(0.0, 0.0, 0.4), 0.2, 0.2), None], Vec3::ZERO);
         [8, 24].map(|x| pixel(&pixels, 64, x, 16))
     }
 
+    fn texel(rgb: [u8; 3]) -> crate::vrm::Image {
+        crate::vrm::Image { width: 1, height: 1, rgba: vec![rgb[0], rgb[1], rgb[2], 255] }
+    }
+
     #[test]
     fn a_shadowed_flat_material_takes_its_shade_colour_turned_from_the_key_light() {
         use crate::vrm::expressions::{Lighting, Shadow};
-        let shade = |rgb: [u8; 3]| crate::vrm::Image { width: 1, height: 1, rgba: vec![rgb[0], rgb[1], rgb[2], 255] };
         let mut look = looks_test::look();
         look.lighting = Lighting::Flat { cap: Some(1.0), shadow: Some(Shadow { border: 0.5, blur: 0.1, strength: 1.0, second: None, edge: None }) };
         let [toward, away] = [[0.4685, 0.7496, 0.5622], [-0.4685, -0.7496, 0.5622]];
-        let [lit, dark] = faces_drawn([128, 64, 32, 255], look.clone(), [toward, away], Vec::new(), Some([shade([40, 20, 30]), shade([0, 0, 0])]));
+        let [lit, dark] = faces_drawn([128, 64, 32, 255], look.clone(), [toward, away], Faces { shades: vec![texel([40, 20, 30])], ..Faces::default() });
         assert!(lit[..3].iter().zip([128, 64, 32]).all(|(&a, b)| a.abs_diff(b) <= 2), "the side facing the key light draws the albedo: {lit:?}");
         assert!(dark[..3].iter().zip([40, 20, 30]).all(|(&a, b)| a.abs_diff(b) <= 2), "the side turned from it draws the shade colour: {dark:?}");
-        let [_, brighter] = faces_drawn([128, 64, 32, 255], look, [toward, away], Vec::new(), Some([shade([200, 20, 30]), shade([0, 0, 0])]));
+        let [_, brighter] = faces_drawn([128, 64, 32, 255], look, [toward, away], Faces { shades: vec![texel([200, 20, 30])], ..Faces::default() });
         assert!(brighter[..3].iter().zip([128, 20, 30]).all(|(&a, b)| a.abs_diff(b) <= 2), "a shade never outshines the albedo: {brighter:?}");
     }
 
     #[test]
-    fn a_matcap_shows_its_top_to_a_normal_turned_up_and_its_right_to_one_turned_right() {
-        let side = 8;
+    fn a_colour_region_moves_the_shade_as_it_moves_the_albedo() {
+        use crate::vrm::expressions::{Lighting, Shadow};
+        let mut look = looks_test::look();
+        look.lighting = Lighting::Flat { cap: Some(1.0), shadow: Some(Shadow { border: 0.5, blur: 0.1, strength: 1.0, second: None, edge: None }) };
+        let [toward, away] = [[0.4685, 0.7496, 0.5622], [-0.4685, -0.7496, 0.5622]];
+        let grey = 0.21586;
+        let doubled = serde_json::json!({"effect": {"color": [{"node": 0, "rect": [0, 0, 1, 1], "channel": 0, "color": [grey, grey, grey]}]}, "default": 2.0 * grey});
+        let [lit, dark] = faces_drawn([128, 128, 128, 255], look, [toward, away], Faces { shades: vec![texel([64, 64, 64])], targets: vec![doubled], ..Faces::default() });
+        assert!(lit[0].abs_diff(176) <= 3 && lit[1].abs_diff(128) <= 2, "the region doubles the albedo's linear red: {lit:?}");
+        assert!(dark[0].abs_diff(90) <= 3 && dark[1].abs_diff(64) <= 2, "and the shade's, which a shade the region left would hold at its own: {dark:?}");
+    }
+
+    /// An image of `side` texels, red over its top half, blue over its lower right and green over its lower left.
+    fn quartered(side: u32) -> crate::vrm::Image {
         let rgba = (0..side * side).flat_map(|at| match (at % side, at / side) {
             (_, row) if row < side / 2 => [255, 0, 0, 255],
             (column, _) if column >= side / 2 => [0, 0, 255, 255],
             _ => [0, 255, 0, 255],
         }).collect();
+        crate::vrm::Image { width: side, height: side, rgba }
+    }
+
+    #[test]
+    fn a_matcap_shows_its_top_to_a_normal_turned_up_and_its_right_to_one_turned_right() {
         let mut look = looks_test::look();
         look.lighting = crate::vrm::expressions::Lighting::Flat { cap: Some(1.0), shadow: None };
         look.matcaps[0] = Some(crate::vrm::expressions::Matcap { hue: None, ..looks_test::matcap() });
-        let matcap = vec![crate::vrm::Image { width: side as u32, height: side as u32, rgba }];
-        let [up, right] = faces_drawn([128, 128, 128, 255], look, [[0.0, 0.7, 0.7], [0.7, -0.3, 0.65]], matcap, None);
+        let [up, right] = faces_drawn([128, 128, 128, 255], look, [[0.0, 0.7, 0.7], [0.7, -0.3, 0.65]], Faces { matcaps: vec![quartered(8)], ..Faces::default() });
         assert!(up[0] > 200 && up[1] < 40 && up[2] < 40, "a normal turned up takes the matcap's top, red: {up:?}");
         assert!(right[2] > 200 && right[0] < 40 && right[1] < 40, "a normal turned right takes its lower right, blue: {right:?}");
+    }
+
+    /// Poiyomi's reflection matcap reads the view reflected in Unity's axes, these mirrored through X: a surface turned
+    /// right reflects the view right here, which is left there.
+    #[test]
+    fn a_reflection_matcap_shows_its_top_to_a_normal_turned_up_and_its_left_to_one_turned_right() {
+        let mut look = looks_test::look();
+        look.lighting = crate::vrm::expressions::Lighting::Flat { cap: Some(1.0), shadow: None };
+        look.matcaps[0] = Some(crate::vrm::expressions::Matcap { hue: None, mode: crate::vrm::expressions::Mapping::Reflection, ..looks_test::matcap() });
+        let [up, right] = faces_drawn([128, 128, 128, 255], look, [[0.0, 0.38, 0.92], [0.3, -0.2, 0.93]], Faces { matcaps: vec![quartered(8)], ..Faces::default() });
+        assert!(up[0] > 200 && up[1] < 40 && up[2] < 40, "a normal turned up reflects into the matcap's top, red: {up:?}");
+        assert!(right[1] > 200 && right[0] < 40 && right[2] < 40, "a normal turned right reflects into its lower left, green: {right:?}");
     }
 
     #[test]
@@ -1730,11 +1774,18 @@ mod tests {
         let mut look = looks_test::look();
         look.lighting = Lighting::Flat { cap: Some(1.0), shadow: None };
         let [square, grazing] = [[0.0, 0.0, 1.0], [1.0, 0.0, 0.15]];
-        let plain = faces_drawn([128, 64, 32, 255], look.clone(), [square, grazing], Vec::new(), None);
-        look.rim = Some(Rim { color: [0.0, 0.0, 1.0], strength: 1.0, main: 0.0, border: 0.5, blur: 0.1, power: 1.0, lit: 1.0, shadow_mask: 0.0 });
-        let [facing, rimmed] = faces_drawn([128, 64, 32, 255], look, [square, grazing], Vec::new(), None);
+        let plain = faces_drawn([128, 64, 32, 255], look.clone(), [square, grazing], Faces::default());
+        look.rim = Some(Rim { color: [0.0, 0.0, 1.0], strength: 1.0, main: 0.0, border: 0.5, blur: 0.1, power: 1.0, lit: 1.0, shadow_mask: 0.0, backface: false });
+        let [facing, rimmed] = faces_drawn([128, 64, 32, 255], look.clone(), [square, grazing], Faces::default());
         assert_eq!(facing, plain[0], "a surface square to the view takes no rim");
         assert!(rimmed[2] > plain[1][2] + 100 && rimmed[..2] == plain[1][..2], "the grazing surface adds the rim's colour: {rimmed:?} over {:?}", plain[1]);
+        let behind = [[0.0, 0.0, -1.0], [-1.0, 0.0, -0.15]];
+        let back = || Faces { back: true, ..Faces::default() };
+        let [_, unlit] = faces_drawn([128, 64, 32, 255], crate::vrm::expressions::Look { rim: None, ..look.clone() }, behind, back());
+        let [_, hidden] = faces_drawn([128, 64, 32, 255], look.clone(), behind, back());
+        assert_eq!(hidden, unlit, "a rim hidden on back faces leaves a grazing back face as it was");
+        let [_, shown] = faces_drawn([128, 64, 32, 255], crate::vrm::expressions::Look { rim: look.rim.clone().map(|rim| Rim { backface: true, ..rim }), ..look }, behind, back());
+        assert!(shown[2] > unlit[2] + 100 && shown[..2] == unlit[..2], "one drawn on back faces adds its colour there: {shown:?} over {unlit:?}");
     }
 
     #[test]
@@ -1802,7 +1853,7 @@ mod tests {
         look.decals[0] = Some(crate::vrm::expressions::Decal { alpha: 1.0, intensity: 1.0, color_blend: DecalBlend::Replace, image: 1, hue: None });
         let index = (0..64).flat_map(|at| [(at % 8 >= 4 && at / 8 < 4) as u8, 0, 0, 255]).collect();
         let unused = crate::vrm::Image { width: 3, height: 5, rgba: vec![255; 60] };
-        menu.looks = Some(crate::vrm::expressions::Looks { index: Some(crate::vrm::Image { width: 8, height: 8, rgba: index }), materials: vec![look], decals: vec![unused, decal], matcaps: Vec::new(), matcap_masks: None, emission: None, clearcoat_maps: Vec::new(), outline: None, shades: None });
+        menu.looks = Some(crate::vrm::expressions::Looks { index: Some(crate::vrm::Image { width: 8, height: 8, rgba: index }), materials: vec![look], decals: vec![unused, decal], matcaps: Vec::new(), matcap_masks: None, emission: None, clearcoat_maps: Vec::new(), outline: None, shades: Vec::new() });
         model.menu = Some(menu);
         let skinned = model.skinned().unwrap();
         let worlds = model.worlds(&model.rest());

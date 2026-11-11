@@ -115,6 +115,7 @@ struct Look {
     rim_power: f32,
     rim_lit: f32,
     rim_shadow_mask: f32,
+    rim_backface: u32,
     matcaps: array<Matcap, 4>,
     ramp: array<vec4<f32>, 4>,
     ramped: u32,
@@ -394,8 +395,9 @@ fn matcaps(base: ptr<function, vec3<f32>>, shade: ptr<function, vec3<f32>>, tint
         let add_at = value(at, MATCAP_ADD, slot, matcap.add);
         let mixed_at = value(at, MATCAP_MIXED, slot, matcap.mixed);
         if replace_at == 0.0 && multiply_at == 0.0 && add_at == 0.0 && mixed_at == 0.0 && matcap.screen == 0.0 && matcap.light_add + matcap.emission == 0.0 { continue; }
-        // A matcap image's first row is its top, where Unity's v of one samples it.
-        let mapped = select(vec2<f32>(dot(right, normal), dot(up, normal)), reflected.xy, matcap.reflection != 0u) * vec2<f32>(1.0, -1.0) * matcap.border + 0.5;
+        // A matcap image's first row is its top, where Unity's v of one samples it; Poiyomi reflects in Unity's axes,
+        // these mirrored through X.
+        let mapped = select(vec2<f32>(dot(right, normal), dot(up, normal)), vec2<f32>(-reflected.x, reflected.y), matcap.reflection != 0u) * vec2<f32>(1.0, -1.0) * matcap.border + 0.5;
         var color = matcap.color;
         if matcap.theme >= 0 { color = vec4<f32>(theme(at, look, u32(matcap.theme)), color.a); }
         let sampled = select(vec4<f32>(1.0), textureSampleLevel(matcap_textures, texture_sampler, mapped, max(matcap.texture, 0), 0.0), matcap.texture >= 0) * color;
@@ -548,6 +550,7 @@ struct Facing {
     look: u32,
     normal: vec3<f32>,
     view: vec3<f32>,
+    front: bool,
 }
 
 fn facing(input: Varying, front: bool) -> Facing {
@@ -557,7 +560,7 @@ fn facing(input: Varying, front: bool) -> Facing {
     if !front {
         normal = -normal;
     }
-    return Facing(look, normal, normalize(draw.camera - input.world));
+    return Facing(look, normal, normalize(draw.camera - input.world), front);
 }
 
 fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
@@ -580,17 +583,23 @@ fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
     let sampled = textureSample(base_texture, texture_sampler, input.uv) * material.base;
     let mask = textureSample(hue_mask, texture_sampler, input.uv);
     let laid = decal_samples(input.surface, look, input.uv);
-    var albedo = decals(adjust(mix(sampled.rgb, raw * material.base.rgb, surface.color.a), surface, mask), vec3<f32>(1.0), input.surface, look, laid);
+    let recoloured = mix(sampled.rgb, raw * material.base.rgb, surface.color.a);
+    var albedo = decals(adjust(recoloured, surface, mask), vec3<f32>(1.0), input.surface, look, laid);
     var shade = decals(adjust(mix(textureSample(shade_texture, texture_sampler, input.uv).rgb, raw, surface.color.a) * material.shade, surface, mask), material.shade, input.surface, look, laid);
     let unshadowed = albedo;
     var shadowmix = 1.0;
     var light_mask = lit;
     if looks[look].shadowed != 0u {
+        // A shade made from the albedo moves with it under the material's colour and a colour region.
+        let own = material.base.rgb * recoloured / max(sampled.rgb, vec3<f32>(1e-4));
         let first = textureSampleGrad(shade_layers, texture_sampler, input.uv, 0, gradient[0], gradient[1]);
-        let second = adjust(textureSampleGrad(shade_layers, texture_sampler, input.uv, 1, gradient[0], gradient[1]).rgb, surface, mask);
+        var dark = adjust(first.rgb * own, surface, mask);
+        if looks[look].second_weight > 0.0 {
+            let second = adjust(textureSampleGrad(shade_layers, texture_sampler, input.uv, 1, gradient[0], gradient[1]).rgb * own, surface, mask);
+            dark = mix(dark, second, looks[look].second_weight * (1.0 - band(toward, toward_width, looks[look].second_border, looks[look].second_blur, 0.0)));
+        }
         shadowmix = band(toward, toward_width, looks[look].shadow_border, looks[look].shadow_blur, 0.0);
         light_mask = shadowmix;
-        var dark = mix(adjust(first.rgb, surface, mask), second, looks[look].second_weight * (1.0 - band(toward, toward_width, looks[look].second_border, looks[look].second_blur, 0.0)));
         dark = min(dark, albedo);
         dark = mix(dark, albedo, band(toward, toward_width, looks[look].shadow_border, looks[look].shadow_blur, looks[look].edge_range) * looks[look].edge_color);
         albedo = mix(dark, albedo, mix(1.0, shadowmix, looks[look].shadow_strength * first.a));
@@ -617,7 +626,7 @@ fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
         let hemisphere = mix(GROUND, SKY, 0.5 * normal.y + 0.5);
         light = direct + mix(hemisphere, 0.5 * (SKY + GROUND), material.equalization) * base.rgb;
     }
-    let rim = band(fresnel, fresnel_width, looks[look].rim_border, looks[look].rim_blur, 0.0) * mix(1.0, shadowmix, looks[look].rim_shadow_mask) * looks[look].rim_strength;
+    let rim = band(fresnel, fresnel_width, looks[look].rim_border, looks[look].rim_blur, 0.0) * mix(1.0, shadowmix, looks[look].rim_shadow_mask) * looks[look].rim_strength * f32(at.front || looks[look].rim_backface != 0u);
     let rim_light = looks[look].rim_color * mix(vec3<f32>(1.0), unshadowed, looks[look].rim_main) * mix(vec3<f32>(1.0), flat_light, looks[look].rim_lit) * rim;
     var color = light + glow + rim_light + emission(input.surface, look, input.uv, gradient, mask.r) + sheen;
     if draw.outline != 0u && material.outline_layered > 0.5 {

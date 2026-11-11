@@ -334,7 +334,7 @@ pub fn window(points: &[Vec3], head: &Pose, eyes: &[Vec3], view: f32) -> (Pose, 
     let (low, high) = points.iter().fold(([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]), |(low, high), point| (std::array::from_fn(|axis| low[axis].min(point[axis])), std::array::from_fn(|axis| high[axis].max(point[axis]))));
     let depth = dot(sub(scale(add(low, high), 0.5), head.t), scale(head.axis(2), -1.0)).max(CLOSEST);
     let plane = Pose { r: head.r, t: head.apply([0.0, 0.0, -depth]) };
-    let (mut low, mut high) = seen(points, &plane, eyes, view);
+    let (mut low, mut high) = seen(points, &plane, head, eyes, view);
     if low[0] > high[0] {
         (low, high) = ([-view * depth; 2], [view * depth; 2]);
     }
@@ -342,35 +342,51 @@ pub fn window(points: &[Vec3], head: &Pose, eyes: &[Vec3], view: f32) -> (Pose, 
     (Pose { t: plane.apply([(low[0] + high[0]) / 2.0, (low[1] + high[1]) / 2.0, 0.0]), ..plane }, half)
 }
 
-/// Where the eyes see `points` cross `plane`, clipped to the headset's view: empty (low above high) when they see none.
-fn seen(points: &[Vec3], plane: &Pose, eyes: &[Vec3], view: f32) -> ([f32; 2], [f32; 2]) {
+/// Where the eyes see `points` cross `plane`, clipped to what each sees from `head`: empty (low above high) when they see none,
+/// unbounded when bounds crossing an eye leave its view reaching past the plane's horizon.
+fn seen(points: &[Vec3], plane: &Pose, head: &Pose, eyes: &[Vec3], view: f32) -> ([f32; 2], [f32; 2]) {
     let local = plane.inverse();
+    let [right, up, back] = [0, 1, 2].map(|axis| local.rotate(head.axis(axis)));
+    let sides = [(right, 1.0), (right, -1.0), (up, 1.0), (up, -1.0)].map(|(axis, sign)| add(scale(axis, sign), scale(back, view)));
+    let points: Vec<Vec3> = points.iter().map(|&point| local.apply(point)).collect();
     let (mut low, mut high) = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);
     for eye in eyes.iter().map(|&eye| local.apply(eye)) {
-        let (mut near, mut far) = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);
-        for &center in points {
-            let center = local.apply(center);
-            let ahead = eye[2] - center[2];
-            if ahead <= CLOSEST / 10.0 {
-                (near, far) = ([f32::NEG_INFINITY; 2], [f32::INFINITY; 2]);
-                break;
+        let across = |ray: Vec3| -> [f32; 2] { std::array::from_fn(|axis| eye[axis] - ray[axis] * eye[2] / ray[2]) };
+        let region = if points.iter().any(|point| eye[2] - point[2] <= CLOSEST / 10.0) {
+            let rays = [[1.0, 1.0], [-1.0, 1.0], [-1.0, -1.0], [1.0, -1.0]].map(|[x, y]| sub(add(scale(right, x * view), scale(up, y * view)), back));
+            if rays.iter().any(|ray| ray[2] >= 0.0) {
+                return ([f32::NEG_INFINITY; 2], [f32::INFINITY; 2]);
             }
-            let t = eye[2] / ahead;
+            rays.map(across).to_vec()
+        } else {
+            let (near, far) = points.iter().map(|&point| across(sub(point, eye))).fold(([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]), |(near, far), at| (std::array::from_fn(|axis| near[axis].min(at[axis])), std::array::from_fn(|axis| far[axis].max(at[axis]))));
+            sides.iter().fold(vec![near, [far[0], near[1]], far, [near[0], far[1]]], |region, side| clip(&region, |[x, y]| dot(*side, [x - eye[0], y - eye[1], -eye[2]])))
+        };
+        for at in region {
             for axis in 0..2 {
-                let at = eye[axis] + (center[axis] - eye[axis]) * t;
-                near[axis] = near[axis].min(at);
-                far[axis] = far[axis].max(at);
-            }
-        }
-        let seen: [[f32; 2]; 2] = std::array::from_fn(|axis| [near[axis].max(eye[axis] - view * eye[2]), far[axis].min(eye[axis] + view * eye[2])]);
-        if seen.iter().all(|[from, to]| from <= to) {
-            for axis in 0..2 {
-                low[axis] = low[axis].min(seen[axis][0]);
-                high[axis] = high[axis].max(seen[axis][1]);
+                low[axis] = low[axis].min(at[axis]);
+                high[axis] = high[axis].max(at[axis]);
             }
         }
     }
     (low, high)
+}
+
+/// The part of a convex `polygon` where `outside` is not positive.
+fn clip(polygon: &[[f32; 2]], outside: impl Fn([f32; 2]) -> f32) -> Vec<[f32; 2]> {
+    let mut kept = Vec::new();
+    for (k, &from) in polygon.iter().enumerate() {
+        let to = polygon[(k + 1) % polygon.len()];
+        let (a, b) = (outside(from), outside(to));
+        if a <= 0.0 {
+            kept.push(from);
+        }
+        if (a <= 0.0) != (b <= 0.0) {
+            let t = a / (a - b);
+            kept.push([from[0] + (to[0] - from[0]) * t, from[1] + (to[1] - from[1]) * t]);
+        }
+    }
+    kept
 }
 
 const SPARE: f32 = 1.4;
@@ -387,7 +403,7 @@ impl Window {
         if let Some((held, half)) = self.0 {
             let local = held.inverse();
             let facing = dot(head.axis(2), held.axis(2)) >= ASKEW.cos();
-            let (low, high) = seen(points, &held, eyes, view);
+            let (low, high) = seen(points, &held, head, eyes, view);
             let reach = (0..2).map(|axis| low[axis].abs().max(high[axis].abs())).fold(0.0, f32::max);
             let span = (0..2).map(|axis| (high[axis] - low[axis]) / 2.0).fold(0.0, f32::max);
             if facing && eyes.iter().all(|&eye| local.apply(eye)[2] > CLOSEST / 2.0) && low[0] <= high[0] && reach <= half && span >= FILLED * half {
@@ -884,6 +900,31 @@ mod tests {
         let speck: Vec<Vec3> = figure(0.0).iter().map(|&[x, y, z]| [x * 0.2, 0.8 + (y - 0.8) * 0.2, z * 0.2]).collect();
         let (_, shrunk) = held.fit(&speck, &at(0.0), &eyes(&at(0.0)), view);
         assert!(shrunk < half / 2.0, "a figure filling little of its window gets a smaller one: {shrunk} against {half}");
+    }
+
+    #[test]
+    fn a_held_window_counts_what_a_head_turned_from_it_sees() {
+        let view = 1.4;
+        let figure = |left: f32, right: f32| -> Vec<Vec3> { (0..8).map(|k| [if k & 1 == 0 { left } else { right }, if k & 2 == 0 { 1.0 } else { 2.2 }, if k & 4 == 0 { -0.75 } else { -0.65 }]).collect() };
+        let ahead = looking([0.0, 1.6, 0.0], [0.0, 1.6, -1.0]);
+        let turned = looking([0.0, 1.6, 0.0], [0.5, 1.6, -0.75_f32.sqrt()]);
+        let eyes = |head: &Pose| [head.apply([-0.032, 0.0, 0.0]), head.apply([0.032, 0.0, 0.0])];
+        let sees = |window: &Pose, half: f32, x: f32| {
+            let at = turned.inverse().apply(window.apply([x * half, 0.0, 0.0]));
+            (at[0] / -at[2]).abs() < view
+        };
+
+        let mut held = Window::default();
+        let (first, half) = held.fit(&figure(-0.8, 0.8), &ahead, &eyes(&ahead), view);
+        assert!(sees(&first, half, 1.0), "the turned head sees past the window's far edge");
+        let (refit, _) = held.fit(&figure(-0.2, 1.4), &turned, &eyes(&turned), view);
+        assert!(!close(refit.t, first.t), "a figure running off the far edge in view takes a new window");
+
+        let mut held = Window::default();
+        let (first, half) = held.fit(&figure(-0.45, 0.45), &ahead, &eyes(&ahead), view);
+        assert!(!sees(&first, half, -1.0), "the turned head does not see the window's near edge");
+        let (kept, size) = held.fit(&figure(-0.85, 0.45), &turned, &eyes(&turned), view);
+        assert!(kept == first && size == half, "a figure past the near edge only out of view keeps its window");
     }
 
     #[test]

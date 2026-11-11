@@ -8,7 +8,7 @@ use glam::{Mat4, Quat, Vec3 as V3};
 
 use crate::device;
 use crate::hub::Hold;
-use crate::openvr::{Place, Surface};
+use crate::openvr::{Handoff, Place, Surface};
 use crate::placement::{facing, length, sub, Pose, Vec3};
 use crate::program::{self, Transform};
 use crate::render::{eye_projection, eye_texels, Appearance, Renderer};
@@ -342,10 +342,10 @@ fn transformed(model: &Model, transforms: &[Transform]) -> Vec<Mat4> {
     model.worlds(&pose)
 }
 
-/// One shown object; dropping it closes its overlay, frees its GPU resources and stops its program's thread.
+/// One shown object; dropping it closes its overlays, frees its GPU resources and stops its program's thread.
 pub struct Object<S: Surface> {
-    /// First, so the overlay closes before the textures it shows are freed.
-    surface: S,
+    /// First, so the overlays close before the textures they show are freed.
+    overlay: Handoff<S>,
     /// Which place beside the puppet it stands at.
     place: usize,
     drawn: Option<Drawn>,
@@ -363,16 +363,16 @@ pub struct Object<S: Surface> {
 }
 
 impl<S: Surface> Object<S> {
-    pub fn spawn(surface: S, gpu: Rc<Gpu>, bytes: Vec<u8>, budget: Budget, now: Instant) -> Result<Object<S>, String> {
-        Object::loading(surface, gpu, bytes, WORK, budget, now)
+    pub fn spawn(overlay: Handoff<S>, gpu: Rc<Gpu>, bytes: Vec<u8>, budget: Budget, now: Instant) -> Result<Object<S>, String> {
+        Object::loading(overlay, gpu, bytes, WORK, budget, now)
     }
 
-    fn loading(surface: S, gpu: Rc<Gpu>, bytes: Vec<u8>, work: Work, budget: Budget, now: Instant) -> Result<Object<S>, String> {
-        Ok(Object { place: 0, drawn: None, renderer: Renderer::new(gpu, [eye_texels(QUAD, crate::render::NEAREST); 2], 1.0)?, runner: Runner::start(bytes, work)?, surface, handling: Handling::new(now), data: None, budget, cost: 0.0, worst: 0.0, frames: 0 })
+    fn loading(overlay: Handoff<S>, gpu: Rc<Gpu>, bytes: Vec<u8>, work: Work, budget: Budget, now: Instant) -> Result<Object<S>, String> {
+        Ok(Object { place: 0, drawn: None, renderer: Renderer::new(gpu, [eye_texels(QUAD, crate::render::NEAREST); 2], 1.0)?, runner: Runner::start(bytes, work)?, overlay, handling: Handling::new(now), data: None, budget, cost: 0.0, worst: 0.0, frames: 0 })
     }
 
     pub fn hide(&mut self) {
-        self.surface.hide();
+        self.overlay.hide();
     }
 
     /// Live data for the program; only the newest waiting update is kept.
@@ -443,7 +443,7 @@ impl<S: Surface> Object<S> {
         drawn.placed = Mat4::from_translation(center.into()) * turned;
         drawn.appearance.update(&drawn.skinned.palette(&drawn.parts.spread(&drawn.worlds, self.handling.spread), local.mat4() * drawn.placed), &drawn.skinned, &[]);
         let seen = view.eyes.map(|eye| local.apply(view.head.then(&eye).t));
-        let texels = eye_texels(QUAD, seen[0][2].min(seen[1][2])).min(self.renderer.eye[0]);
+        let texels = self.renderer.density.settle(eye_texels(QUAD, seen[0][2].min(seen[1][2])) as f32);
         let part = texels as f32 / self.renderer.eye[0] as f32;
         let started = Instant::now();
         let texture = self.renderer.render(&drawn.appearance, seen.map(|eye| eye_projection(eye.into(), QUAD / 2.0, QUAD / 2.0)), Mat4::IDENTITY, texels)?;
@@ -466,7 +466,7 @@ impl<S: Surface> Object<S> {
     }
 
     fn show(&mut self, mut texture: openvr_sys::VRVulkanTextureData_t, quad: &Pose, part: f32) -> Result<(), String> {
-        self.surface.present(&mut texture, &Place::World(*quad), QUAD, part)
+        self.overlay.present(&mut texture, &Place::World(*quad), QUAD, part)
     }
 
     /// Its render cost as the budget sees it, for the log.
@@ -603,6 +603,7 @@ impl Surface for Offscreen {
 pub mod tests {
     use super::*;
     use crate::vrm::tests::Builder;
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static SURFACES: AtomicUsize = AtomicUsize::new(0);
@@ -617,6 +618,10 @@ pub mod tests {
             SURFACES.fetch_add(1, Ordering::SeqCst);
             Counted
         }
+    }
+
+    fn counted() -> [Counted; 2] {
+        [Counted::new(), Counted::new()]
     }
 
     impl Drop for Counted {
@@ -709,7 +714,7 @@ pub mod tests {
     }
 
     /// Steps until the program has published and the object is drawn once.
-    fn drawn(object: &mut Object<Counted>, now: Instant) {
+    fn drawn<S: Surface>(object: &mut Object<S>, now: Instant) {
         let deadline = Instant::now() + HANG;
         while object.drawn.is_none() {
             assert!(Instant::now() < deadline, "the program never published");
@@ -719,11 +724,69 @@ pub mod tests {
         object.step(now, &view(None)).unwrap();
     }
 
+    #[derive(Default)]
+    struct Composited {
+        part: f32,
+        shown: bool,
+        given: Vec<u64>,
+    }
+
+    struct Seen(Rc<std::cell::RefCell<Composited>>, Rc<std::cell::Cell<u64>>, Rc<std::cell::RefCell<HashMap<u64, f32>>>);
+
+    impl Surface for Seen {
+        fn place(&self, _: &Place) {}
+        fn texture(&self, _: &mut openvr_sys::VRVulkanTextureData_t) -> Result<(), String> {
+            self.0.borrow_mut().given.push(self.1.get());
+            Ok(())
+        }
+        fn part(&mut self, part: f32) {
+            self.0.borrow_mut().part = part;
+            self.2.borrow_mut().insert(self.1.get(), part);
+        }
+        fn show(&mut self) {
+            self.0.borrow_mut().shown = true;
+        }
+        fn hide(&mut self) {
+            self.0.borrow_mut().shown = false;
+        }
+    }
+
+    #[test]
+    fn an_object_seen_from_a_swaying_head_shows_each_image_through_the_texture_bounds_it_was_drawn_for() {
+        let gpu = Rc::new(Gpu::new(None).unwrap());
+        let now = Instant::now();
+        let (frame, drawn_for) = (Rc::new(std::cell::Cell::new(0)), Rc::new(std::cell::RefCell::new(HashMap::new())));
+        let composited = [(); 2].map(|_| Rc::new(std::cell::RefCell::new(Composited::default())));
+        let mut object = Object::spawn(Handoff::new(composited.clone().map(|seen| Seen(seen, frame.clone(), drawn_for.clone()))), gpu, cube(0.2), UNBUDGETED, now).unwrap();
+        drawn(&mut object, now);
+        let center = view(None).center(0);
+        let (mut changes, mut last) = (0, None);
+        for step in 1..400u64 {
+            frame.set(step);
+            let mut swaying = view(None);
+            let toward = sub(swaying.head.t, center);
+            let along = 1.0 + 0.3 * (step as f32 * 0.05).sin() + 0.01 * (step as f32 * 1.3).sin();
+            swaying.head.t = [center[0] + toward[0] * along, center[1] + toward[1] * along, center[2] + toward[2] * along];
+            object.step(now, &swaying).unwrap();
+            let part = drawn_for.borrow().get(&step).copied();
+            changes += usize::from(last.is_some() && part.is_some() && part != last);
+            last = part.or(last);
+            for lag in [0, 1] {
+                for surface in composited.iter().map(|surface| surface.borrow()).filter(|surface| surface.shown) {
+                    let Some(&latched) = surface.given.iter().rev().find(|&&given| given + lag <= step) else { continue };
+                    let Some(&part) = drawn_for.borrow().get(&latched) else { continue };
+                    assert!(part == surface.part, "frame {step}, latching {lag} late: the image drawn in frame {latched} for texture bounds {part} is seen through {}", surface.part);
+                }
+            }
+        }
+        assert!((2..=100).contains(&changes), "walking 30% nearer and farther, with a 1% sway, changes the texels in steps: {changes} times in 400 frames");
+    }
+
     #[test]
     fn a_plain_gltf_object_is_drawn_in_both_eyes_shaded_and_fit_to_its_size() {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let now = Instant::now();
-        let mut object = Object::spawn(Counted::new(), gpu, cube(3.0), UNBUDGETED, now).unwrap();
+        let mut object = Object::spawn(Handoff::new(counted()), gpu, cube(3.0), UNBUDGETED, now).unwrap();
         drawn(&mut object, now);
         let fit = object.drawn.as_ref().unwrap().radius;
         assert!(fit >= SIZE / 2.0 && fit <= SIZE * 3f32.sqrt() / 2.0, "a turned 3 m cube shows with its largest side at {SIZE} m: radius {fit}");
@@ -741,7 +804,7 @@ pub mod tests {
             }
             assert!(covered.len() >= 4, "eye {half}: textured, lit and shaded faces give several colours, got {covered:?}");
         }
-        let small = Object::spawn(Counted::new(), Rc::new(Gpu::new(None).unwrap()), cube(0.05), UNBUDGETED, now);
+        let small = Object::spawn(Handoff::new(counted()), Rc::new(Gpu::new(None).unwrap()), cube(0.05), UNBUDGETED, now);
         let mut small = small.unwrap();
         drawn(&mut small, now);
         let radius = small.drawn.as_ref().unwrap().radius;
@@ -754,7 +817,7 @@ pub mod tests {
         let now = Instant::now();
         for (bytes, expected) in [(b"not a model".to_vec(), "glTF"), (Builder::new(serde_json::json!({})).glb(), "no mesh")] {
             let mut shelf = Shelf::default();
-            shelf.show(|_| Object::spawn(Counted::new(), gpu.clone(), bytes, UNBUDGETED, now));
+            shelf.show(|_| Object::spawn(Handoff::new(counted()), gpu.clone(), bytes, UNBUDGETED, now));
             let deadline = Instant::now() + HANG;
             let error = loop {
                 assert!(Instant::now() < deadline);
@@ -770,7 +833,7 @@ pub mod tests {
     fn a_program_moves_the_object_from_its_own_thread_by_time_and_touch() {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
-        let mut object = Object::spawn(Counted::new(), gpu, scene(0.2, Some((crate::program::tests::FOLLOW, 4.0))), UNBUDGETED, born).unwrap();
+        let mut object = Object::spawn(Handoff::new(counted()), gpu, scene(0.2, Some((crate::program::tests::FOLLOW, 4.0))), UNBUDGETED, born).unwrap();
         drawn(&mut object, born);
         object.step(born + Duration::from_secs(5), &view(None)).unwrap();
         let deadline = Instant::now() + HANG;
@@ -792,7 +855,7 @@ pub mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
         let nodes = serde_json::json!([{ "mesh": 0, "translation": [-0.06, 0.0, 0.0] }, { "mesh": 0, "translation": [0.06, 0.0, 0.0] }]);
-        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None, true), UNBUDGETED, born).unwrap();
+        let mut object = Object::spawn(Handoff::new(counted()), gpu, built(0.05, nodes, None, true), UNBUDGETED, born).unwrap();
         drawn(&mut object, born);
         let radius = object.drawn.as_ref().unwrap().radius;
         let center = view(None).center(0);
@@ -830,7 +893,7 @@ pub mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
         let mut shelf = Shelf::default();
-        shelf.show(|_| Object::spawn(Counted::new(), gpu, scene(0.2, Some((crate::program::tests::FOLLOW, 4.0))), UNBUDGETED, born));
+        shelf.show(|_| Object::spawn(Handoff::new(counted()), gpu, scene(0.2, Some((crate::program::tests::FOLLOW, 4.0))), UNBUDGETED, born));
         drawn(shelf.objects.last_mut().unwrap(), born);
         let frame = Duration::from_millis(11);
         let mut now = born;
@@ -876,7 +939,7 @@ pub mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
         let nodes = serde_json::json!([{ "mesh": 0, "translation": [-0.06, 0.0, 0.0] }, { "mesh": 0, "translation": [0.06, 0.0, 0.0] }]);
-        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None, false), UNBUDGETED, born).unwrap();
+        let mut object = Object::spawn(Handoff::new(counted()), gpu, built(0.05, nodes, None, false), UNBUDGETED, born).unwrap();
         drawn(&mut object, born);
         let mut now = born;
         for _ in 0..60 {
@@ -893,7 +956,7 @@ pub mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
         let nodes = serde_json::json!([{ "mesh": 0, "name": "left", "translation": [-0.06, 0.0, 0.0] }, { "mesh": 0, "name": "right", "translation": [0.06, 0.0, 0.0] }]);
-        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None, true), UNBUDGETED, born).unwrap();
+        let mut object = Object::spawn(Handoff::new(counted()), gpu, built(0.05, nodes, None, true), UNBUDGETED, born).unwrap();
         drawn(&mut object, born);
         let center = V3::from(view(None).center(0));
         let right = V3::from(object.locate("right").unwrap());
@@ -913,7 +976,7 @@ pub mod tests {
         let named = |name: &str| built(0.05, serde_json::json!([{ "mesh": 0, "name": name }]), None, false);
         let mut shelf: Shelf<Counted> = Shelf::default();
         for name in ["gear", "gear", "wheel"] {
-            shelf.show(|_| Object::spawn(Counted::new(), gpu.clone(), named(name), UNBUDGETED, now));
+            shelf.show(|_| Object::spawn(Handoff::new(counted()), gpu.clone(), named(name), UNBUDGETED, now));
             drawn(shelf.objects.last_mut().unwrap(), now);
         }
         let at = |place: usize| V3::from(view(None).center(place));
@@ -937,7 +1000,7 @@ pub mod tests {
         assert!(V3::from(shelf.locate("wheel").unwrap()).abs_diff_eq(at(2), 1e-5), "the rest stay where they were");
         shelf.show(|place| {
             assert_eq!(place, 1, "a new object takes the nearest free place");
-            Object::spawn(Counted::new(), gpu.clone(), named("wheel"), UNBUDGETED, now)
+            Object::spawn(Handoff::new(counted()), gpu.clone(), named("wheel"), UNBUDGETED, now)
         });
         drawn(shelf.objects.last_mut().unwrap(), now);
         assert!(V3::from(shelf.locate("wheel").unwrap()).abs_diff_eq(at(1), 1e-5));
@@ -951,7 +1014,7 @@ pub mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
         let nodes = serde_json::json!([{ "mesh": 0, "name": "left", "translation": [-0.06, 0.0, 0.0] }, { "mesh": 0, "name": "right", "translation": [0.06, 0.0, 0.0] }]);
-        let mut object = Object::spawn(Counted::new(), gpu, built(0.05, nodes, None, true), UNBUDGETED, born).unwrap();
+        let mut object = Object::spawn(Handoff::new(counted()), gpu, built(0.05, nodes, None, true), UNBUDGETED, born).unwrap();
         drawn(&mut object, born);
         let hand = |angle: f32, at: Vec3| Pose::from_axes([angle.cos(), 0.0, -angle.sin()], [0.0, 1.0, 0.0], [angle.sin(), 0.0, angle.cos()], at);
         let held = on_controller(&hand(0.7, [0.3, 1.0, -0.6]));
@@ -982,7 +1045,7 @@ pub mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
         let mut shelf = Shelf::default();
-        shelf.show(|_| Object::spawn(Counted::new(), gpu, scene(0.2, Some((crate::program::tests::GAUGE, 0.0))), UNBUDGETED, born));
+        shelf.show(|_| Object::spawn(Handoff::new(counted()), gpu, scene(0.2, Some((crate::program::tests::GAUGE, 0.0))), UNBUDGETED, born));
         shelf.feed(b"\x05".to_vec(), None);
         let deadline = Instant::now() + HANG;
         loop {
@@ -1000,7 +1063,7 @@ pub mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let born = Instant::now();
         let bytes = built_with(0.2, serde_json::json!([{ "mesh": 0 }]), Some((crate::program::tests::GAUGE, 0.0)), false, serde_json::json!({ "feed": "device" }));
-        let mut object = Object::spawn(Counted::new(), gpu, bytes, UNBUDGETED, born).unwrap();
+        let mut object = Object::spawn(Handoff::new(counted()), gpu, bytes, UNBUDGETED, born).unwrap();
         let cores = std::fs::read_to_string("/proc/stat").unwrap().lines().filter(|line| line.starts_with("cpu") && line.as_bytes()[3].is_ascii_digit()).count();
         let late = born + LIFETIME - Duration::from_secs(1);
         let deadline = Instant::now() + HANG;
@@ -1020,7 +1083,7 @@ pub mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let now = Instant::now();
         let nodes: Vec<serde_json::Value> = (0..500).map(|at| serde_json::json!({ "mesh": at % 2, "translation": [at as f32 * 0.001, 0.0, 0.0] })).collect();
-        let mut object = Object::spawn(Counted::new(), gpu, built(0.001, serde_json::Value::Array(nodes), None, false), UNBUDGETED, now).unwrap();
+        let mut object = Object::spawn(Handoff::new(counted()), gpu, built(0.001, serde_json::Value::Array(nodes), None, false), UNBUDGETED, now).unwrap();
         drawn(&mut object, now);
         let draws = &object.drawn.as_ref().unwrap().skinned.draws;
         assert_eq!(draws.iter().map(|draw| (draw.material, draw.count)).collect::<Vec<_>>(), [(0, 250 * 36), (1, 250 * 36)]);
@@ -1030,7 +1093,7 @@ pub mod tests {
     fn an_object_removed_on_one_slow_frame_logs_that_frame_s_cost() {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let now = Instant::now();
-        let mut object = Object::spawn(Counted::new(), gpu, cube(0.1), Budget { mean: Duration::from_secs(5), frame: Duration::ZERO }, now).unwrap();
+        let mut object = Object::spawn(Handoff::new(counted()), gpu, cube(0.1), Budget { mean: Duration::from_secs(5), frame: Duration::ZERO }, now).unwrap();
         drawn(&mut object, now);
         let error = (0..2 * WINDOW as usize).find_map(|_| object.step(now, &view(None)).err()).expect("stopped on its first measured frame");
         assert!(error.contains("one frame"), "{error}");
@@ -1043,7 +1106,7 @@ pub mod tests {
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let now = Instant::now();
         let tight = Budget { mean: Duration::from_nanos(1), frame: Duration::MAX };
-        let mut object = Object::spawn(Counted::new(), gpu, cube(0.1), tight, now).unwrap();
+        let mut object = Object::spawn(Handoff::new(counted()), gpu, cube(0.1), tight, now).unwrap();
         drawn(&mut object, now);
         let error = (0..2 * WINDOW as usize).find_map(|_| object.step(now, &view(None)).err()).expect("stopped within its window");
         assert!(error.contains("budget"), "{error}");
@@ -1080,7 +1143,7 @@ pub mod tests {
         let spin = r#"(module (memory (export "memory") 1) (func (export "tick") (param f32 f32 f32 f32 i32) (result i32) (loop $l (br $l)) (i32.const 0)))"#;
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let now = Instant::now();
-        let mut object = Object::loading(Counted::new(), gpu, scene(0.2, Some((spin, 0.0))), Work { tick: held, ..WORK }, UNBUDGETED, now).unwrap();
+        let mut object = Object::loading(Handoff::new(counted()), gpu, scene(0.2, Some((spin, 0.0))), Work { tick: held, ..WORK }, UNBUDGETED, now).unwrap();
         let (state, changed) = &HELD;
         let step = |object: &mut Object<Counted>| {
             let stepped = object.step(now, &view(None));
@@ -1222,7 +1285,7 @@ pub mod tests {
         let mut shelf = Shelf::default();
         let shown = |shelf: &mut Shelf<Watched>| {
             let gone = Arc::new(AtomicBool::new(false));
-            shelf.show(|_| Object::loading(Watched(gone.clone()), gpu.clone(), cube(0.2), Work { load: gated, ..WORK }, UNBUDGETED, now));
+            shelf.show(|_| Object::loading(Handoff::new([Watched(gone.clone()), Watched(gone.clone())]), gpu.clone(), cube(0.2), Work { load: gated, ..WORK }, UNBUDGETED, now));
             (gone, Arc::downgrade(&shelf.objects.last().unwrap().runner.exchange))
         };
         let (first, first_exchange) = shown(&mut shelf);
@@ -1250,7 +1313,7 @@ pub mod tests {
         let broken = |_: &[u8], _: &AtomicBool| panic!("a broken file");
         let gpu = Rc::new(Gpu::new(None).unwrap());
         let now = Instant::now();
-        let mut object = Object::loading(Counted::new(), gpu, cube(0.2), Work { load: broken, ..WORK }, UNBUDGETED, now).unwrap();
+        let mut object = Object::loading(Handoff::new(counted()), gpu, cube(0.2), Work { load: broken, ..WORK }, UNBUDGETED, now).unwrap();
         let deadline = Instant::now() + HANG;
         let error = loop {
             assert!(Instant::now() < deadline, "the panic never reached the render thread");
@@ -1313,7 +1376,7 @@ pub mod tests {
         let mut shelf: Shelf<Counted> = Shelf::default();
         let start = Instant::now();
         let spawn = |shelf: &mut Shelf<Counted>, now: Instant| {
-            shelf.show(|_| Object::spawn(Counted::new(), gpu.clone(), bytes[now.duration_since(start).as_secs() as usize % 5 % 2].clone(), UNBUDGETED, now));
+            shelf.show(|_| Object::spawn(Handoff::new(counted()), gpu.clone(), bytes[now.duration_since(start).as_secs() as usize % 5 % 2].clone(), UNBUDGETED, now));
             drawn(shelf.objects.last_mut().unwrap(), now);
         };
         // Each kind is drawn once first: the driver keeps what it compiled for a kind's pipelines after the object goes.
@@ -1331,7 +1394,7 @@ pub mod tests {
         for round in 0..120 {
             let now = start + Duration::from_secs(round);
             spawn(&mut shelf, now);
-            assert_eq!(SURFACES.load(Ordering::SeqCst), 1, "one overlay while shown");
+            assert_eq!(SURFACES.load(Ordering::SeqCst), 2, "two overlays while shown, the one showing and the one taking the next quad");
             assert!(gpu.allocations() > allocations && settled(threads_before + 1) <= threads_before + 1);
             match round % 4 {
                 0 => {
@@ -1347,7 +1410,7 @@ pub mod tests {
                 _ => shelf.clear("session ended"),
             }
             if round % 4 == 2 {
-                assert_eq!(SURFACES.load(Ordering::SeqCst), MOST, "with every place taken a new object replaces the oldest, one overlay a place");
+                assert_eq!(SURFACES.load(Ordering::SeqCst), 2 * MOST, "with every place taken a new object replaces the oldest, two overlays a place");
                 shelf.clear("asleep");
             }
             assert!(!shelf.shown(), "round {round}: the object is gone");

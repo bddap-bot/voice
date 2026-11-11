@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use glam::Vec3 as V3;
 
+use crate::openvr::Handoff;
 use crate::object::{Budget, Object, Offscreen, View, BUDGET, QUAD, UNBUDGETED};
 use crate::placement::{facing, Pose, Vec3};
 use crate::program::Program;
@@ -97,7 +98,7 @@ fn frames(gpu: Rc<Gpu>, bytes: &[u8], options: &Options, budget: Budget) -> Resu
     let view = |tip: Option<Vec3>| View { stand, size: 1.0, head: viewer, eyes: [eye, eye], tip };
     let center = view(None).center(0);
     let started = Instant::now();
-    let mut object = Object::spawn(Offscreen, gpu.clone(), bytes.to_vec(), budget, started)?;
+    let mut object = Object::spawn(Handoff::new([Offscreen, Offscreen]), gpu.clone(), bytes.to_vec(), budget, started)?;
     if let Some(data) = &options.data {
         object.feed(data.as_bytes().to_vec());
     }

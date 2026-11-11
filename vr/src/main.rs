@@ -482,7 +482,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
     let mut picking: Option<Picking> = None;
     let mut reveal = Reveal::new(HEIGHT);
     let mut board_image = vulkan::Flat::new(gpu.clone());
-    let mut overlay = openvr::Handoff::new([runtime.create_overlay("voice.puppet", "Puppet", QUAD, true)?, runtime.create_overlay("voice.puppet.handoff", "Puppet", QUAD, true)?]);
+    let mut overlay = runtime.handoff("voice.puppet", "Puppet", QUAD)?;
     let mut board_overlay = runtime.create_overlay("voice.board", "Board", board::WIDTH, false)?;
     let mut marker_overlay = runtime.create_overlay("voice.marker", "Fingertip", board::MARKER_WIDTH, false)?;
     marker_overlay.above_others();
@@ -691,7 +691,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
                 objects.clear("cleared by the hub");
             }
             if let Some(scene) = shown.object.take() {
-                objects.show(|place| object::Object::spawn(runtime.create_overlay(&format!("voice.object.{place}"), "Object", object::QUAD, true)?, gpu.clone(), scene, object::BUDGET, started));
+                objects.show(|place| object::Object::spawn(runtime.handoff(&format!("voice.object.{place}"), "Object", object::QUAD)?, gpu.clone(), scene, object::BUDGET, started));
             }
             if let Some(data) = shown.data.take() {
                 objects.feed(data.into_bytes(), shown.point.as_deref());
@@ -953,7 +953,7 @@ fn card(args: &[String]) -> Result<(), String> {
     let mut objects: object::Shelf<openvr::Overlay> = object::Shelf::default();
     let started = Instant::now();
     if let Some(scene) = shown.object.take() {
-        objects.show(|place| object::Object::spawn(runtime.create_overlay(&format!("voice.object.{place}"), "Object", object::QUAD, true)?, gpu.clone(), scene, object::BUDGET, started));
+        objects.show(|place| object::Object::spawn(runtime.handoff(&format!("voice.object.{place}"), "Object", object::QUAD)?, gpu.clone(), scene, object::BUDGET, started));
     }
     if let Some(data) = shown.data.take() {
         objects.feed(data.into_bytes(), shown.point.as_deref());

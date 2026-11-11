@@ -261,6 +261,10 @@ impl Runtime {
             .collect()
     }
 
+    pub fn handoff(&self, key: &str, name: &str, width: f32) -> Result<Handoff<Overlay<'_>>, String> {
+        Ok(Handoff::new([self.create_overlay(key, name, width, true)?, self.create_overlay(&format!("{key}.handoff"), name, width, true)?]))
+    }
+
     pub fn create_overlay(&self, key: &str, name: &str, width: f32, stereo: bool) -> Result<Overlay<'_>, String> {
         let key = CString::new(key).unwrap();
         let name = CString::new(name).unwrap();

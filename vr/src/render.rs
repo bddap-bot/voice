@@ -442,6 +442,30 @@ struct DrawCall {
 
 type Buffer = (vk::Buffer, vk::DeviceMemory, *mut u8);
 
+struct SetLayout {
+    layout: vk::DescriptorSetLayout,
+    sizes: Vec<vk::DescriptorPoolSize>,
+}
+
+impl SetLayout {
+    fn new(device: &ash::Device, bindings: &[vk::DescriptorSetLayoutBinding]) -> Result<SetLayout, String> {
+        let layout = unsafe { device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(bindings), None) }.map_err(vk_error("vkCreateDescriptorSetLayout"))?;
+        let mut sizes: Vec<vk::DescriptorPoolSize> = Vec::new();
+        for binding in bindings {
+            match sizes.iter_mut().find(|size| size.ty == binding.descriptor_type) {
+                Some(size) => size.descriptor_count += binding.descriptor_count,
+                None => sizes.push(vk::DescriptorPoolSize { ty: binding.descriptor_type, descriptor_count: binding.descriptor_count }),
+            }
+        }
+        Ok(SetLayout { layout, sizes })
+    }
+
+    fn pool(&self, device: &ash::Device, sets: u32) -> Result<vk::DescriptorPool, String> {
+        let sizes: Vec<vk::DescriptorPoolSize> = self.sizes.iter().map(|size| vk::DescriptorPoolSize { descriptor_count: size.descriptor_count * sets, ..*size }).collect();
+        unsafe { device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(sets).pool_sizes(&sizes), None) }.map_err(vk_error("vkCreateDescriptorPool"))
+    }
+}
+
 pub struct Renderer {
     gpu: Rc<Gpu>,
     pub eye: [u32; 2],
@@ -449,7 +473,7 @@ pub struct Renderer {
     depth: Texture,
     samples: Texture,
     render_pass: vk::RenderPass,
-    set_layout: vk::DescriptorSetLayout,
+    set_layout: SetLayout,
     layout: vk::PipelineLayout,
     pipelines: HashMap<PipelineKey, vk::Pipeline>,
     sampler: vk::Sampler,
@@ -468,7 +492,7 @@ pub struct Renderer {
     pub drawing: Option<std::time::Duration>,
     /// The GPU's drawing time, averaged over recent frames so one slow frame moves the density little.
     typical: Option<f32>,
-    particle_set_layout: vk::DescriptorSetLayout,
+    particle_set_layout: SetLayout,
     particle_layout: vk::PipelineLayout,
     particle_pipelines: HashMap<Blend, vk::Pipeline>,
 }
@@ -623,8 +647,8 @@ impl Renderer {
             vk::DescriptorSetLayoutBinding::default().binding(17).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(18).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
         ];
-        let set_layout = unsafe { device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None) }.map_err(vk_error("vkCreateDescriptorSetLayout"))?;
-        let set_layouts = [set_layout];
+        let set_layout = SetLayout::new(device, &bindings)?;
+        let set_layouts = [set_layout.layout];
         let push_ranges = [vk::PushConstantRange::default().stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT).size(std::mem::size_of::<Push>() as u32)];
         let layout = unsafe { device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts).push_constant_ranges(&push_ranges), None) }.map_err(vk_error("vkCreatePipelineLayout"))?;
         let sampler = |address| unsafe {
@@ -649,8 +673,8 @@ impl Renderer {
             vk::DescriptorSetLayoutBinding::default().binding(2).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(3).descriptor_type(vk::DescriptorType::SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
         ];
-        let particle_set_layout = unsafe { device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&particle_bindings), None) }.map_err(vk_error("vkCreateDescriptorSetLayout"))?;
-        let particle_set_layouts = [particle_set_layout];
+        let particle_set_layout = SetLayout::new(device, &particle_bindings)?;
+        let particle_set_layouts = [particle_set_layout.layout];
         let particle_push = [vk::PushConstantRange::default().stage_flags(both).size(std::mem::size_of::<ParticlePush>() as u32)];
         let particle_layout = unsafe { device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&particle_set_layouts).push_constant_ranges(&particle_push), None) }.map_err(vk_error("vkCreatePipelineLayout"))?;
         let mut renderer = Renderer {
@@ -721,12 +745,7 @@ impl Renderer {
         let gpu = &self.gpu;
         let device = &gpu.device;
         let set_count = model.materials.len() as u32;
-        let sizes = [
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: (10 + DECAL_PAGES as u32) * set_count },
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLER, descriptor_count: 2 * set_count },
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 5 * set_count },
-        ];
-        let descriptors = unsafe { device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(set_count).pool_sizes(&sizes), None) }.map_err(vk_error("vkCreateDescriptorPool"))?;
+        let descriptors = self.set_layout.pool(device, set_count)?;
         let joints = skinned.joints();
         let material_data: Vec<MaterialData> = model.materials.iter().map(material_data).collect();
         let look_data: Vec<LookData> = std::iter::once(LookData { page: [-1; 4], ..LookData::default() }).chain(looks.into_iter().flat_map(|looks| looks.materials.iter().map(|look| look_data(look, &places)))).collect();
@@ -804,7 +823,7 @@ impl Renderer {
         appearance.textures.push(texture(gpu, 1, 1, &[255; 4], FORMAT)?);
         let black = appearance.textures.len();
         appearance.textures.push(texture(gpu, 1, 1, &[0, 0, 0, 255], vk::Format::R8G8B8A8_UNORM)?);
-        let layouts = vec![self.set_layout; model.materials.len()];
+        let layouts = vec![self.set_layout.layout; model.materials.len()];
         let sets = unsafe { device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(descriptors).set_layouts(&layouts)) }.map_err(vk_error("vkAllocateDescriptorSets"))?;
         for (material, &set) in model.materials.iter().zip(&sets) {
             let image = |index: Option<usize>| [vk::DescriptorImageInfo::default().image_view(appearance.textures[index.unwrap_or(white)].view).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
@@ -900,11 +919,6 @@ impl Renderer {
             textures.push(texture(gpu, image.width, image.height, &image.rgba, FORMAT)?);
         }
         let set_count = 1 + definition.images.len() as u32;
-        let sizes = [
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: set_count },
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLER, descriptor_count: set_count },
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 2 * set_count },
-        ];
         let none = (vk::Buffer::null(), vk::DeviceMemory::null(), std::ptr::null_mut());
         let mut buffers = ParticleBuffers { gpu: gpu.clone(), vertices: none, indices: none, instances: none, systems: none, curves: none, descriptors: vk::DescriptorPool::null(), sets: Vec::new(), draws, shown: Vec::new(), space: Mat4::IDENTITY };
         buffers.vertices = upload(gpu, bytes_of(&vertices), vk::BufferUsageFlags::VERTEX_BUFFER)?;
@@ -912,8 +926,8 @@ impl Renderer {
         buffers.instances = upload(gpu, bytes_of(&unborn), vk::BufferUsageFlags::VERTEX_BUFFER)?;
         buffers.systems = gpu.host_buffer((definition.systems.len() * std::mem::size_of::<SystemData>()) as u64, vk::BufferUsageFlags::STORAGE_BUFFER)?;
         buffers.curves = upload(gpu, bytes_of(&curves), vk::BufferUsageFlags::STORAGE_BUFFER)?;
-        buffers.descriptors = unsafe { device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(set_count).pool_sizes(&sizes), None) }.map_err(vk_error("vkCreateDescriptorPool"))?;
-        let layouts = vec![self.particle_set_layout; set_count as usize];
+        buffers.descriptors = self.particle_set_layout.pool(device, set_count)?;
+        let layouts = vec![self.particle_set_layout.layout; set_count as usize];
         buffers.sets = unsafe { device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(buffers.descriptors).set_layouts(&layouts)) }.map_err(vk_error("vkAllocateDescriptorSets"))?;
         for (at, &set) in buffers.sets.iter().enumerate() {
             let systems = [vk::DescriptorBufferInfo::default().buffer(buffers.systems.0).range(vk::WHOLE_SIZE)];
@@ -1358,11 +1372,11 @@ impl Drop for Renderer {
                 device.destroy_pipeline(pipeline, None);
             }
             device.destroy_pipeline_layout(self.particle_layout, None);
-            device.destroy_descriptor_set_layout(self.particle_set_layout, None);
+            device.destroy_descriptor_set_layout(self.particle_set_layout.layout, None);
             device.destroy_sampler(self.sampler, None);
             device.destroy_sampler(self.edge_sampler, None);
             device.destroy_pipeline_layout(self.layout, None);
-            device.destroy_descriptor_set_layout(self.set_layout, None);
+            device.destroy_descriptor_set_layout(self.set_layout.layout, None);
             device.destroy_render_pass(self.render_pass, None);
         }
     }

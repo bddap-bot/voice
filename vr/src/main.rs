@@ -50,7 +50,7 @@ use gesture::{Recognizer, Templates};
 use relay::{Avatar, Relay, Token};
 use reveal::Reveal;
 use voice::Voice;
-use render::{eye_projection, eye_texels, Appearance, Renderer};
+use render::{eye_projection, Appearance, Renderer};
 use vrm::expressions::{Controller, Kind};
 use vrm::spring::{self, Springs};
 use vrm::{Fit, Humanoid, Model, Skinned};
@@ -450,8 +450,8 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
     let mut recognizer = Recognizer::new(Templates::parse(&std::fs::read(&gesture_file).map_err(|error| format!("{}: {error}", gesture_file.display()))?)?);
     let gpu = Rc::new(vulkan::Gpu::new(Some(runtime))?);
     let runtime = gpu.vr.as_ref().expect("the overlay's device was made for SteamVR");
-    tracing::info!("display {:.0} px/rad, windows sized for {:.0} px/rad at {} m: puppet {} texels per eye, object {}", runtime.display_density(), render::DISPLAY_DENSITY, render::NEAREST, eye_texels(QUAD, render::NEAREST), eye_texels(object::QUAD, render::NEAREST));
-    let mut renderer = Renderer::new(gpu.clone(), [eye_texels(QUAD, render::NEAREST); 2], HEIGHT / render::PAGE_HEIGHT)?;
+    let mut renderer = Renderer::for_window(gpu.clone(), QUAD, HEIGHT / render::PAGE_HEIGHT)?;
+    tracing::info!("display {:.0} px/rad: at {} m the puppet takes {} texels per eye, an object {}", runtime.display_density(), render::NEAREST, renderer.texels(QUAD, render::NEAREST), renderer.texels(object::QUAD, render::NEAREST));
     let cache = state.join("assets");
     let give_up = Instant::now() + session::CONNECT_PATIENCE;
     let mut quit = false;
@@ -493,8 +493,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
     let mut card: Option<panel::Card> = None;
     let mut objects: object::Shelf<openvr::Overlay> = object::Shelf::default();
     let mut pointing = point::Pointing::default();
-    let eye_offsets = runtime.eye_offsets();
-    let view = runtime.view();
+    let (mut eye_offsets, mut view) = runtime.eyes();
     tracing::info!("the eyes see {:.0}° off the head's axis at the widest", view.atan().to_degrees());
     let mut meter = Meter::default();
     let mut window = placement::Window::default();
@@ -520,9 +519,16 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
     tracing::info!("dormant");
     let mut ready = Duration::ZERO;
     loop {
-        if let Some(Signal::Quit) = runtime.poll() {
-            tracing::info!("SteamVR asked the overlay to quit");
-            return Ok(());
+        match runtime.poll() {
+            Some(Signal::Quit) => {
+                tracing::info!("SteamVR asked the overlay to quit");
+                return Ok(());
+            }
+            Some(Signal::Eyes) => {
+                (eye_offsets, view) = runtime.eyes();
+                tracing::info!("the eyes moved: {:.1} mm apart, seeing {:.0}° off the head's axis at the widest", 1e3 * (eye_offsets[1].t[0] - eye_offsets[0].t[0]), view.atan().to_degrees());
+            }
+            None => {}
         }
         for (id, image) in previews.iter().flat_map(|previews: &std::sync::mpsc::Receiver<_>| previews.try_iter()) {
             if let Some(index) = catalog.avatars.iter().position(|avatar| avatar.id == id) {
@@ -862,7 +868,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         renderer.outline_scale = HEIGHT * size / render::PAGE_HEIGHT;
         renderer.density.budget = runtime.drawing_budget();
         let seen = eye_points.map(|eye| local.apply(eye));
-        let texels = renderer.density.settle(eye_texels(2.0 * half, seen[0][2].min(seen[1][2])) as f32);
+        let texels = renderer.density.settle(renderer.texels(2.0 * half, seen[0][2].min(seen[1][2])) as f32);
         let mut texture = renderer.render(&puppet.drawn, seen.map(|eye| eye_projection(eye.into(), half, half)), to_window, texels)?;
         let rendered = Instant::now();
         overlay.present(&mut texture, &place, 2.0 * half, texels as f32 / renderer.eye[0] as f32)?;
@@ -1112,7 +1118,7 @@ mod tests {
         };
         let direct = draw(&field, FIELD, SEEN);
         let (window, half) = grown_window(&skinned, &HashSet::new(), &worlds, body, &head, &[eye, head.apply([0.032, 0.0, 0.0])], FIELD);
-        let texels = eye_texels(QUAD, render::NEAREST);
+        let texels = render::eye_texels(render::OFF_HEADSET_DENSITY, QUAD, render::NEAREST);
         let quad = draw(&window, half, texels);
         let to_window = window.inverse();
         let origin = to_window.apply(eye);
@@ -1204,7 +1210,7 @@ mod tests {
         let (quad, half) = grown_window(&skinned, &HashSet::new(), &worlds, body, &head, &eyes, FIELD);
         assert!(2.0 * half < 2.0, "the 1.7 m fixture, including its projected depth and outline margin, fits two metres: {} m", 2.0 * half);
         let depth = quad.inverse().apply(head.t)[2];
-        assert!(eye_texels(2.0 * half, depth) <= eye_texels(QUAD, render::NEAREST), "at three metres the full display density fits the target");
+        assert!(render::eye_texels(render::OFF_HEADSET_DENSITY, 2.0 * half, depth) <= render::eye_texels(render::OFF_HEADSET_DENSITY, QUAD, render::NEAREST), "at three metres the full display density fits the target");
     }
 
     #[test]

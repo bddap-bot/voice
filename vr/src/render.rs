@@ -16,8 +16,8 @@ pub const PAGE_HEIGHT: f32 = 2.7;
 const FAR: f32 = 10.0;
 /// Samples per pixel, resolved into the overlay's texture: one sample breaks outlines thinner than a texel into dots.
 const SAMPLES: vk::SampleCountFlags = vk::SampleCountFlags::TYPE_4;
-/// The Frame's display: 2160 pixels across a 110° field per eye, in pixels per radian.
-pub const DISPLAY_DENSITY: f32 = 2160.0 / (110.0 * std::f32::consts::PI / 180.0);
+/// Pixels per radian a render with no headset is sized for: 2160 pixels across a 110° field.
+pub const OFF_HEADSET_DENSITY: f32 = 2160.0 / (110.0 * std::f32::consts::PI / 180.0);
 /// The widest anisotropic filtering the avatar's textures take: on the Frame 16x cost about 0.3 ms a frame more than 4x.
 const ANISOTROPY: f32 = 4.0;
 /// The closest a window is seen from: the puppet held up on the hand.
@@ -395,9 +395,9 @@ enum Cull {
     Front,
 }
 
-/// Texels across one eye's image of a window `width` metres wide seen from `distance`, as dense as the display at the window's centre: the compositor samples a window without mipmaps, so a denser image aliases.
-pub fn eye_texels(width: f32, distance: f32) -> u32 {
-    (DISPLAY_DENSITY * width / distance.max(NEAREST)).ceil() as u32
+/// Texels across one eye's image of a window `width` metres wide seen from `distance` on a display of `density` pixels per radian: the compositor samples a window without mipmaps, so a denser image aliases.
+pub fn eye_texels(density: f32, width: f32, distance: f32) -> u32 {
+    (density * width / distance.max(NEAREST)).ceil() as u32
 }
 
 pub fn eye_projection(eye: Vec3, half_width: f32, half_height: f32) -> Option<Mat4> {
@@ -675,6 +675,16 @@ fn barrier(image: vk::Image, range: vk::ImageSubresourceRange, from: vk::ImageLa
 }
 
 impl Renderer {
+    /// A renderer whose target holds a window `width` metres wide from the nearest it is seen.
+    pub fn for_window(gpu: Rc<Gpu>, width: f32, outline_scale: f32) -> Result<Renderer, String> {
+        let texels = eye_texels(gpu.density, width, NEAREST);
+        Renderer::new(gpu, [texels; 2], outline_scale)
+    }
+
+    pub fn texels(&self, width: f32, distance: f32) -> u32 {
+        eye_texels(self.gpu.density, width, distance)
+    }
+
     pub fn new(gpu: Rc<Gpu>, eye: [u32; 2], outline_scale: f32) -> Result<Renderer, String> {
         let device = &gpu.device;
         let attachments = [
@@ -1574,16 +1584,16 @@ mod tests {
 
     #[test]
     fn a_windows_texels_hold_while_its_viewer_sways_and_follow_a_real_change_of_distance() {
-        let most = eye_texels(0.4, NEAREST);
+        let most = eye_texels(OFF_HEADSET_DENSITY, 0.4, NEAREST);
         let mut density = Density::new(most);
-        let edges = (0..12).map(|step| 0.4 * DISPLAY_DENSITY / (most as f32 * STEP.powi(step)));
+        let edges = (0..12).map(|step| 0.4 * OFF_HEADSET_DENSITY / (most as f32 * STEP.powi(step)));
         for middle in edges.flat_map(|edge| [edge * 0.98, edge, edge * 1.02, edge * 1.05]) {
             for approach in [0.5, 2.0] {
-                let mut held = density.settle(eye_texels(0.4, middle * approach) as f32);
+                let mut held = density.settle(eye_texels(OFF_HEADSET_DENSITY, 0.4, middle * approach) as f32);
                 let mut changes = 0;
                 for step in 0..200 {
                     let sway = 0.02 * middle * (step as f32 * 0.7).sin();
-                    let texels = density.settle(eye_texels(0.4, middle + sway) as f32);
+                    let texels = density.settle(eye_texels(OFF_HEADSET_DENSITY, 0.4, middle + sway) as f32);
                     changes += usize::from(step > 0 && texels != held);
                     held = texels;
                 }
@@ -1591,10 +1601,10 @@ mod tests {
             }
         }
         let mut changes = 0;
-        let mut last = density.settle(eye_texels(0.4, 0.4) as f32);
+        let mut last = density.settle(eye_texels(OFF_HEADSET_DENSITY, 0.4, 0.4) as f32);
         let there_and_back = (0..3600).map(|step| 0.4 + 0.001 * step as f32).chain((0..3600).rev().map(|step| 0.4 + 0.001 * step as f32));
         for distance in there_and_back {
-            let (texels, wanted) = (density.settle(eye_texels(0.4, distance) as f32), eye_texels(0.4, distance) as f32);
+            let (texels, wanted) = (density.settle(eye_texels(OFF_HEADSET_DENSITY, 0.4, distance) as f32), eye_texels(OFF_HEADSET_DENSITY, 0.4, distance) as f32);
             assert!(texels as f32 <= wanted * SLACK + 1.0 && texels as f32 >= wanted * STEP - 1.0, "at {distance} m: {texels} texels where the display sees {wanted}");
             changes += usize::from(texels != last);
             last = texels;
@@ -1626,7 +1636,7 @@ mod tests {
     }
 
     fn budgeted() -> Density {
-        Density { budget: Some(std::time::Duration::from_micros(10_400)), ..Density::new(eye_texels(0.4, NEAREST)) }
+        Density { budget: Some(std::time::Duration::from_micros(10_400)), ..Density::new(eye_texels(OFF_HEADSET_DENSITY, 0.4, NEAREST)) }
     }
 
     #[test]
@@ -1707,8 +1717,14 @@ mod tests {
 
     #[test]
     fn a_farther_window_draws_no_denser_than_the_display_sees_it() {
-        assert_eq!(eye_texels(0.4, 0.2), eye_texels(0.4, NEAREST), "nearer than the closest, the target's size");
-        assert!(eye_texels(0.4, 4.0) as f32 <= DISPLAY_DENSITY * 0.4 / 4.0 + 1.0);
+        assert_eq!(eye_texels(OFF_HEADSET_DENSITY, 0.4, 0.2), eye_texels(OFF_HEADSET_DENSITY, 0.4, NEAREST), "nearer than the closest, the target's size");
+        assert!(eye_texels(OFF_HEADSET_DENSITY, 0.4, 4.0) as f32 <= OFF_HEADSET_DENSITY * 0.4 / 4.0 + 1.0);
+        assert_eq!(eye_texels(1000.0, 0.4, 0.5), 800, "a window takes the density its display reports");
+        assert_eq!(eye_texels(500.0, 0.4, 0.5), 400);
+        let mut gpu = Gpu::new(None).unwrap();
+        gpu.density = 500.0;
+        let renderer = Renderer::for_window(Rc::new(gpu), 0.4, 1.0).unwrap();
+        assert_eq!((renderer.eye, renderer.texels(0.4, 0.5)), ([eye_texels(500.0, 0.4, NEAREST); 2], 400));
         let model = Model::parse(&figure(Version::One)).unwrap();
         let mut skinned = model.skinned().unwrap();
         let changed = skinned.morph(&model.rest().weights);

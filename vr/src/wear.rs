@@ -6,7 +6,7 @@ use crate::board::Board;
 use crate::placement::{facing, Hand, HandPose, Pose, Vec3, TIP};
 use crate::point::Pointing;
 use crate::relay::{Relay, Token};
-use crate::render::{eye_projection, eye_texels, Renderer, NEAREST, PAGE_HEIGHT};
+use crate::render::{eye_projection, Renderer, PAGE_HEIGHT};
 use crate::vulkan::Gpu;
 use crate::vrm::spring::{Contact, Contacts};
 use crate::{action, grown_window, lit, load, preview, touching, FINGERTIP, FLOOR, HEIGHT, QUAD};
@@ -81,7 +81,7 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
     // Made first, as the host does: were the preview thread's device the process's only one, the loader would unload the driver before that thread's exit runs the driver's thread-local destructors.
     let gpu = std::rc::Rc::new(Gpu::new(None)?);
     library(&catalog.avatars, worn[0], token, &cache, &out.join("library.png"))?;
-    let mut renderer = Renderer::new(gpu, [eye_texels(QUAD, NEAREST); 2], HEIGHT / PAGE_HEIGHT)?;
+    let mut renderer = Renderer::for_window(gpu, QUAD, HEIGHT / PAGE_HEIGHT)?;
     for index in worn {
         let avatar = &catalog.avatars[index];
         let pictures = out.join(&avatar.id);
@@ -309,9 +309,9 @@ fn stand_grounded(puppet: &mut crate::Puppet, renderer: &mut Renderer, distance:
         puppet.draw(&posed, skin);
         let seen = eyes.map(|eye| local.apply(eye));
         let depth = seen[0][2].min(seen[1][2]);
-        let texels = renderer.density.settle(eye_texels(2.0 * half, depth) as f32);
+        let texels = renderer.density.settle(renderer.texels(2.0 * half, depth) as f32);
         renderer.render(&puppet.drawn, seen.map(|eye| eye_projection(eye.into(), half, half)), to_window, texels)?;
-        shown = (texels, eye_texels(2.0 * half, depth));
+        shown = (texels, renderer.texels(2.0 * half, depth));
     }
     let gpu = before.zip(gpu_time()).map_or("not counted".to_owned(), |(before, after)| format!("{:.2} ms", (after - before) as f64 / 1e6 / frames as f64));
     renderer.outline_scale = held_outline;

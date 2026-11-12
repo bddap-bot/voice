@@ -8,7 +8,7 @@ use crate::board::Board;
 use crate::placement::{facing, Pose};
 use crate::openvr::{Overlay, Runtime};
 use crate::relay::{Relay, Token};
-use crate::render::{eye_projection, eye_texels, Renderer, NEAREST, PAGE_HEIGHT};
+use crate::render::{eye_projection, Renderer, PAGE_HEIGHT};
 use crate::settings::Settings;
 use crate::vrm::expressions::{Control, Controller, Kind};
 use crate::vulkan::{Flat, Gpu};
@@ -43,7 +43,7 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
         overlay.place_on(0, &Pose::from_axes([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [x, 0.0, -0.5]));
     }
     let mut board_image = Flat::new(gpu.clone());
-    let mut renderer = Renderer::new(gpu.clone(), [eye_texels(QUAD, NEAREST); 2], HEIGHT / PAGE_HEIGHT)?;
+    let mut renderer = Renderer::for_window(gpu.clone(), QUAD, HEIGHT / PAGE_HEIGHT)?;
     let mut lines = Vec::new();
     for avatar in catalog.avatars.iter().filter(|avatar| ids.is_empty() || ids.contains(&avatar.id)) {
         let pictures = out.join(&avatar.id);
@@ -176,7 +176,7 @@ pub fn sweep(args: &[String]) -> Result<(), String> {
     let [out, file, names @ ..] = args else { return Err(usage.into()) };
     if names.is_empty() { return Err(usage.into()); }
     let gpu = std::rc::Rc::new(Gpu::new(None)?);
-    let mut renderer = Renderer::new(gpu, [eye_texels(QUAD, NEAREST); 2], HEIGHT / PAGE_HEIGHT)?;
+    let mut renderer = Renderer::for_window(gpu, QUAD, HEIGHT / PAGE_HEIGHT)?;
     let bytes = std::fs::read(file).map_err(|error| format!("{file}: {error}"))?;
     let model = crate::vrm::Model::parse(&bytes)?;
     let mut puppet = crate::dressed(model, Default::default(), file, &mut renderer, &Default::default())?;
@@ -245,7 +245,7 @@ pub fn walk(args: &[String]) -> Result<(), String> {
     let frames = PathBuf::from(out);
     std::fs::create_dir_all(&frames).map_err(|error| format!("{}: {error}", frames.display()))?;
     let gpu = std::rc::Rc::new(Gpu::new(None)?);
-    let mut renderer = Renderer::new(gpu, [eye_texels(QUAD, NEAREST); 2], HEIGHT / PAGE_HEIGHT)?;
+    let mut renderer = Renderer::for_window(gpu, QUAD, HEIGHT / PAGE_HEIGHT)?;
     let bytes = std::fs::read(file).map_err(|error| format!("{file}: {error}"))?;
     let model = crate::vrm::Model::parse(&bytes)?;
     let mut puppet = crate::dressed(model, Default::default(), file, &mut renderer, &Default::default())?;

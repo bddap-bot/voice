@@ -8,7 +8,7 @@ use crate::openvr::Handoff;
 use crate::object::{Budget, Object, Offscreen, View, BUDGET, QUAD, UNBUDGETED};
 use crate::placement::{facing, Pose, Vec3};
 use crate::program::Program;
-use crate::render::{eye_projection, eye_texels, Renderer, DISPLAY_DENSITY, NEAREST, PAGE_HEIGHT};
+use crate::render::{eye_projection, Renderer, OFF_HEADSET_DENSITY, PAGE_HEIGHT};
 use crate::vrm::{Fit, Model};
 use crate::vulkan::Gpu;
 
@@ -20,7 +20,7 @@ const VIEWER: Vec3 = [0.0, 0.12, 0.5];
 /// The composite's window onto the puppet quad's plane, in metres: left, right, bottom, top.
 const WINDOW: [f32; 4] = [-0.22, 0.47, -0.2, 0.2];
 /// The display's density on the quad's plane as seen from `VIEWER`.
-const PIXELS_PER_METRE: f32 = DISPLAY_DENSITY / VIEWER[2];
+const PIXELS_PER_METRE: f32 = OFF_HEADSET_DENSITY / VIEWER[2];
 
 struct Options {
     file: PathBuf,
@@ -154,7 +154,7 @@ fn frames(gpu: Rc<Gpu>, bytes: &[u8], options: &Options, budget: Budget) -> Resu
 /// The puppet in its standing pose on its own quad, the left eye's texels, as the host draws it.
 fn puppet(gpu: Rc<Gpu>, file: &Path) -> Result<Vec<u8>, String> {
     let model = Model::parse(&std::fs::read(file).map_err(|error| format!("{}: {error}", file.display()))?)?;
-    let mut renderer = Renderer::new(gpu, [eye_texels(crate::QUAD, NEAREST); 2], crate::HEIGHT / PAGE_HEIGHT)?;
+    let mut renderer = Renderer::for_window(gpu, crate::QUAD, crate::HEIGHT / PAGE_HEIGHT)?;
     let mut skinned = model.skinned()?;
     let fit = Fit::new(&model, &skinned, crate::HEIGHT);
     let pose = model.pose(&model.standing());

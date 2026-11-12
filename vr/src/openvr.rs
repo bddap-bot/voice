@@ -37,8 +37,24 @@ macro_rules! call {
     };
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Signal {
     Quit,
+    /// The eyes moved against the head: their offsets and the view they bound are to be read again.
+    Eyes,
+}
+
+/// Pixels per radian of a target `width` pixels across a field from the tangent `left` to the tangent `right`.
+fn per_radian(width: u32, left: f32, right: f32) -> f32 {
+    width as f32 / (right.atan() - left.atan())
+}
+
+fn signal(event: u32) -> Option<Signal> {
+    match event {
+        quit if quit == sys::EVREventType_VREvent_Quit as u32 => Some(Signal::Quit),
+        ipd if ipd == sys::EVREventType_VREvent_IpdChanged as u32 => Some(Signal::Eyes),
+        _ => None,
+    }
 }
 
 impl Runtime {
@@ -71,13 +87,18 @@ impl Runtime {
 
     pub fn poll(&self) -> Option<Signal> {
         let mut event: sys::VREvent_t = unsafe { std::mem::zeroed() };
+        let mut eyes = None;
         while call!(self.system, PollNextEvent, &mut event, std::mem::size_of::<sys::VREvent_t>() as u32) {
-            if event.eventType == sys::EVREventType_VREvent_Quit as u32 {
-                call!(self.system, AcknowledgeQuit_Exiting);
-                return Some(Signal::Quit);
+            match signal(event.eventType) {
+                Some(Signal::Quit) => {
+                    call!(self.system, AcknowledgeQuit_Exiting);
+                    return Some(Signal::Quit);
+                }
+                Some(Signal::Eyes) => eyes = Some(Signal::Eyes),
+                None => {}
             }
         }
-        None
+        eyes
     }
 
     pub fn poses(&self, ahead: std::time::Duration) -> Vec<sys::TrackedDevicePose_t> {
@@ -108,6 +129,11 @@ impl Runtime {
 
     pub fn wait_frame(&self) {
         call!(self.overlay, WaitFrameSync, 100);
+    }
+
+    /// What an IPD change moves: each eye's offset from the head, and `view`.
+    pub fn eyes(&self) -> ([Pose; 2], f32) {
+        (self.eye_offsets(), self.view())
     }
 
     pub fn eye_offsets(&self) -> [Pose; 2] {
@@ -160,7 +186,7 @@ impl Runtime {
         call!(self.system, GetRecommendedRenderTargetSize, &mut width, &mut height);
         let (mut left, mut right, mut top, mut bottom) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
         call!(self.system, GetProjectionRaw, sys::EVREye_Eye_Left, &mut left, &mut right, &mut top, &mut bottom);
-        width as f32 / (right.atan() - left.atan())
+        per_radian(width, left, right)
     }
 
     pub fn hand_index(&self, hand: Hand) -> Option<u32> {
@@ -528,6 +554,19 @@ mod tests {
             self.0.borrow_mut().push("show");
         }
         fn hide(&mut self) {}
+    }
+
+    #[test]
+    fn a_displays_density_is_its_target_over_its_field() {
+        assert!((per_radian(2000, -1.0, 1.0) - 2000.0 / std::f32::consts::FRAC_PI_2).abs() < 1e-3);
+        assert!((per_radian(1000, -3f32.sqrt(), 1.0) - 1000.0 / (std::f32::consts::PI * 7.0 / 12.0)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn an_ipd_change_reads_the_eyes_again() {
+        assert_eq!(signal(sys::EVREventType_VREvent_IpdChanged as u32), Some(Signal::Eyes));
+        assert_eq!(signal(sys::EVREventType_VREvent_Quit as u32), Some(Signal::Quit));
+        assert_eq!(signal(sys::EVREventType_VREvent_TrackedDeviceActivated as u32), None);
     }
 
     #[test]

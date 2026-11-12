@@ -3,7 +3,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::relay::{Catalog, Relay, Token};
-use crate::render::{eye_texels, Renderer, NEAREST, PAGE_HEIGHT};
+use crate::render::{Renderer, PAGE_HEIGHT};
 use crate::vulkan::Gpu;
 use crate::{dressed, fetch_aside, preview, HEIGHT, QUAD};
 
@@ -37,7 +37,7 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
         }
         return Ok(());
     }
-    let mut renderer = Renderer::new(gpu, [eye_texels(QUAD, NEAREST); 2], HEIGHT / PAGE_HEIGHT)?;
+    let mut renderer = Renderer::for_window(gpu, QUAD, HEIGHT / PAGE_HEIGHT)?;
     for avatar in startup.avatars.iter().filter(|avatar| wanted(&avatar.id)) {
         let started = Instant::now();
         let (token, cache) = (token.clone(), cache.clone());

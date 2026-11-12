@@ -11,7 +11,7 @@ use crate::hub::Hold;
 use crate::openvr::{Handoff, Place, Surface};
 use crate::placement::{facing, length, sub, Pose, Vec3};
 use crate::program::{self, Transform};
-use crate::render::{eye_projection, eye_texels, Appearance, Renderer};
+use crate::render::{eye_projection, Appearance, Renderer};
 use crate::vrm::{bounds, Model, Skinned};
 use crate::vulkan::Gpu;
 
@@ -368,7 +368,7 @@ impl<S: Surface> Object<S> {
     }
 
     fn loading(overlay: Handoff<S>, gpu: Rc<Gpu>, bytes: Vec<u8>, work: Work, budget: Budget, now: Instant) -> Result<Object<S>, String> {
-        Ok(Object { place: 0, drawn: None, renderer: Renderer::new(gpu, [eye_texels(QUAD, crate::render::NEAREST); 2], 1.0)?, runner: Runner::start(bytes, work)?, overlay, handling: Handling::new(now), data: None, budget, cost: 0.0, worst: 0.0, frames: 0 })
+        Ok(Object { place: 0, drawn: None, renderer: Renderer::for_window(gpu, QUAD, 1.0)?, runner: Runner::start(bytes, work)?, overlay, handling: Handling::new(now), data: None, budget, cost: 0.0, worst: 0.0, frames: 0 })
     }
 
     pub fn hide(&mut self) {
@@ -443,7 +443,7 @@ impl<S: Surface> Object<S> {
         drawn.placed = Mat4::from_translation(center.into()) * turned;
         drawn.appearance.update(&drawn.skinned.palette(&drawn.parts.spread(&drawn.worlds, self.handling.spread), local.mat4() * drawn.placed), &drawn.skinned, &[]);
         let seen = view.eyes.map(|eye| local.apply(view.head.then(&eye).t));
-        let texels = self.renderer.density.settle(eye_texels(QUAD, seen[0][2].min(seen[1][2])) as f32);
+        let texels = self.renderer.density.settle(self.renderer.texels(QUAD, seen[0][2].min(seen[1][2])) as f32);
         let part = texels as f32 / self.renderer.eye[0] as f32;
         let started = Instant::now();
         let texture = self.renderer.render(&drawn.appearance, seen.map(|eye| eye_projection(eye.into(), QUAD / 2.0, QUAD / 2.0)), Mat4::IDENTITY, texels)?;

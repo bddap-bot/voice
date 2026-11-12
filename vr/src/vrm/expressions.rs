@@ -539,6 +539,8 @@ struct EncodedLooks {
     shade: Option<usize>,
     #[serde(default)]
     shade2: Option<usize>,
+    #[serde(default)]
+    rim_tint: Option<usize>,
 }
 
 /// The inverted hull of the materials whose glTF extras say `outline`, over the atlas UV: its RGB the hull's colour,
@@ -553,7 +555,8 @@ pub struct OutlineLayer {
 /// one-based, zero or no index for none. Every layer is a glTF image the extension names by index, each at its own size;
 /// a clear coat map holds linear mask, smoothness, reflection and specular levels in its four channels. `shades` are
 /// the first shade colours a shadowed look turns each texel to and, where some look has a second shade, the second's,
-/// each spanning the atlas at its shape but carried at most as wide as the converter carries a glow map.
+/// each spanning the atlas at its shape but carried at most as wide as the converter carries a glow map; `rim_tint`,
+/// where a rim has a colour texture, the factor each texel's rim takes (white where none tints it), at the shades' size.
 #[derive(Clone, Debug)]
 pub struct Looks {
     pub index: Option<Image>,
@@ -565,6 +568,7 @@ pub struct Looks {
     pub clearcoat_maps: Vec<Image>,
     pub outline: Option<OutlineLayer>,
     pub shades: Vec<Image>,
+    pub rim_tint: Option<Image>,
 }
 
 /// One component of a node's Unity local rotation: of `rest` read as localEulerAngles in degrees when it has three, a quaternion when four.
@@ -809,6 +813,7 @@ fn looks(encoded: EncodedLooks, image: &impl Fn(usize) -> Result<Image, String>)
             (None, None) => Vec::new(),
             (None, Some(_)) => return Err(format!("{EXTENSION}: a second shade layer without the first")),
         },
+        rim_tint: encoded.rim_tint.map(|at| image(at)).transpose().map_err(|error| format!("{EXTENSION}: rim tint: {error}"))?,
         materials,
     };
     let shadows: Vec<&Shadow> = looks.materials.iter().filter_map(|look| match &look.lighting {
@@ -820,8 +825,12 @@ fn looks(encoded: EncodedLooks, image: &impl Fn(usize) -> Result<Image, String>)
         return Err(format!("{EXTENSION}: a shadowed look without its shade layers"));
     }
     let over_atlas = |layer: &Image| looks.index.as_ref().is_none_or(|index| (f64::from(layer.height) - f64::from(layer.width) * f64::from(index.height) / f64::from(index.width)).abs() < 1.0);
-    if looks.shades.first().is_some_and(|first| !over_atlas(first) || looks.shades.iter().any(|layer| (layer.width, layer.height) != (first.width, first.height))) {
-        return Err(format!("{EXTENSION}: shade layers not of one size over the atlas"));
+    if looks.rim_tint.is_some() && looks.materials.iter().all(|look| look.rim.is_none()) {
+        return Err(format!("{EXTENSION}: a rim tint without a rim"));
+    }
+    let toon_layers = || looks.shades.iter().chain(&looks.rim_tint);
+    if toon_layers().next().is_some_and(|first| !over_atlas(first) || toon_layers().any(|layer| (layer.width, layer.height) != (first.width, first.height))) {
+        return Err(format!("{EXTENSION}: shade layers and rim tint not of one size over the atlas"));
     }
     let textures = looks.matcaps.len() as u32;
     let cell = |look: &Look| {
@@ -1637,6 +1646,9 @@ mod tests {
         assert_eq!((read.second.as_ref().map(|second| second.weight), read.edge.as_ref().map(|edge| edge.range)), (Some(1.0), Some(0.08)));
         assert_eq!(shaded.materials[0].rim.as_ref().map(|rim| (rim.shadow_mask, rim.backface)), Some((0.5, false)));
         assert!(shaded.shades.len() == 2 && shaded.shades[0].width == 2, "the shade layers load narrower than the atlas");
+        assert!(parse(serde_json::json!({"model": "flat", "cap": 1, "shadow": shadow}), serde_json::json!({"shade": 1, "shade2": 1, "rimTint": 1})).is_ok_and(|looks| looks.rim_tint.is_some_and(|tint| tint.width == 2)), "a rim tint at the shades' size loads");
+        let rimless = serde_json::json!({"index": 0, "materials": [{"rect": [0, 0, 1, 1], "decals": [null, null, null, null], "matcaps": [null, null, null, null], "emission": null, "lighting": {"model": "flat", "cap": 1}, "rim": null}], "rimTint": 1});
+        assert!(looks(serde_json::from_value(rimless).unwrap(), &|_| Ok(Image { width: 1, height: 1, rgba: vec![255; 4] })).is_err(), "a rim tint where no look draws a rim is refused");
         assert!(parse(serde_json::json!({"model": "flat", "cap": 1}), serde_json::json!({})).is_ok_and(|looks| looks.shades.is_empty()), "an unshadowed flat look needs no shade layers");
         let single = serde_json::json!({"model": "flat", "cap": 1, "shadow": {"border": 0.5, "blur": 0.1, "strength": 1, "second": null, "edge": null}});
         assert!(parse(single.clone(), serde_json::json!({"shade": 1})).is_ok_and(|looks| looks.shades.len() == 1), "a shadow without a second shade loads with the first shade layer alone");
@@ -1646,6 +1658,7 @@ mod tests {
             (serde_json::json!({"shade": 0}), "the first alone, where it has a second shade"),
             (serde_json::json!({"shade": 0, "shade2": 1}), "layers of two sizes"),
             (serde_json::json!({"shade": 2, "shade2": 2}), "layers not the atlas's shape"),
+            (serde_json::json!({"shade": 1, "shade2": 1, "rimTint": 0}), "a rim tint of another size"),
         ] {
             assert!(parse(serde_json::json!({"model": "flat", "cap": 1, "shadow": shadow}), layers).is_err(), "a shadowed look with {why} is refused");
         }

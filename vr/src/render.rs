@@ -238,7 +238,8 @@ struct LookData {
     rim_shadow_mask: f32,
     /// Whether the rim draws on back faces.
     rim_backface: u32,
-    pad: f32,
+    /// The layer of the toon layers holding the rim tint, or -1 for none.
+    rim_tint_layer: i32,
     matcaps: [MatcapData; 4],
     ramp: [[f32; 4]; RAMP / 4],
     ramped: u32,
@@ -274,7 +275,7 @@ struct ThemeData {
     exposure: f32,
 }
 
-fn look_data(look: &crate::vrm::expressions::Look, places: &[Place]) -> LookData {
+fn look_data(look: &crate::vrm::expressions::Look, places: &[Place], rim_tint_layer: i32) -> LookData {
     use crate::vrm::expressions::{Lighting, Mapping};
     let decal = |value: fn(&crate::vrm::expressions::Decal) -> f32| look.decals.each_ref().map(|decal| decal.as_ref().map_or(0.0, value));
     let emission = look.emission.as_ref();
@@ -333,7 +334,7 @@ fn look_data(look: &crate::vrm::expressions::Look, places: &[Place]) -> LookData
         rim_lit: rim.map_or(0.0, |rim| rim.lit),
         rim_shadow_mask: rim.map_or(0.0, |rim| rim.shadow_mask),
         rim_backface: rim.is_some_and(|rim| rim.backface) as u32,
-        pad: 0.0,
+        rim_tint_layer,
         matcaps: look.matcaps.each_ref().map(|matcap| matcap.as_ref().map_or_else(MatcapData::default, |m| MatcapData {
             color: m.color,
             hue: m.hue.as_ref().map_or([0.0; 4], |hue| [hue.shift, hue.space, hue.select, 1.0]),
@@ -915,7 +916,7 @@ impl Renderer {
         let descriptors = self.set_layout.pool(device, set_count)?;
         let joints = skinned.joints();
         let material_data: Vec<MaterialData> = model.materials.iter().map(material_data).collect();
-        let look_data: Vec<LookData> = std::iter::once(LookData { page: [-1; 4], ..LookData::default() }).chain(looks.into_iter().flat_map(|looks| looks.materials.iter().map(|look| look_data(look, &places)))).collect();
+        let look_data: Vec<LookData> = std::iter::once(LookData { page: [-1; 4], rim_tint_layer: -1, ..LookData::default() }).chain(looks.into_iter().flat_map(|looks| looks.materials.iter().map(|look| look_data(look, &places, if looks.rim_tint.is_some() { looks.shades.len() as i32 } else { -1 })))).collect();
         let untinted = model.menu.as_ref().and_then(|menu| menu.untinted.as_ref());
         let untinted_cells: Vec<[f32; 8]> = match untinted.map(|untinted| &untinted.cells[..]) {
             Some(cells) if !cells.is_empty() => cells.to_vec(),
@@ -967,7 +968,7 @@ impl Renderer {
         let no_decal = array(&[], [0; 4])?;
         decal_textures.resize(*DECAL_PAGES, no_decal);
         let matcaps = array(&looks.into_iter().flat_map(|looks| &looks.matcaps).collect::<Vec<_>>(), [255; 4])?;
-        let shades = array(&looks.into_iter().flat_map(|looks| &looks.shades).collect::<Vec<_>>(), [255; 4])?;
+        let toon_layers = array(&looks.into_iter().flat_map(|looks| looks.shades.iter().chain(&looks.rim_tint)).collect::<Vec<_>>(), [255; 4])?;
         let coat_maps = {
             let maps = looks.map(|looks| &looks.clearcoat_maps[..]).unwrap_or_default();
             let (width, height) = maps.iter().fold((1, 1), |(width, height), map| (map.width.max(width), map.height.max(height)));
@@ -998,7 +999,7 @@ impl Renderer {
             let mask = image(hue_mask);
             let untinted = image(untinted);
             let decal: Vec<_> = decal_textures.iter().map(|&texture| vk::DescriptorImageInfo::default().image_view(appearance.textures[texture].view).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)).collect();
-            let (index, matcap, masks, glow, coat, shade_layers) = (image(Some(look_index.unwrap_or(black))), image(Some(matcaps)), image(matcap_masks), image(Some(emission.unwrap_or(black))), image(Some(coat_maps)), image(Some(shades)));
+            let (index, matcap, masks, glow, coat, toon) = (image(Some(look_index.unwrap_or(black))), image(Some(matcaps)), image(matcap_masks), image(Some(emission.unwrap_or(black))), image(Some(coat_maps)), image(Some(toon_layers)));
             let surfaces = [vk::DescriptorBufferInfo::default().buffer(appearance.surfaces.0).range(vk::WHOLE_SIZE)];
             let looks = [vk::DescriptorBufferInfo::default().buffer(appearance.looks.0).range(vk::WHOLE_SIZE)];
             let cells = [vk::DescriptorBufferInfo::default().buffer(appearance.untinted_cells.0).range(vk::WHOLE_SIZE)];
@@ -1025,7 +1026,7 @@ impl Renderer {
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(15).descriptor_type(vk::DescriptorType::SAMPLER).image_info(&edge_sampler),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(16).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&cells),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(17).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&coat),
-                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(18).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&shade_layers),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(18).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&toon),
             ];
             unsafe { device.update_descriptor_sets(&writes, &[]) };
         }
@@ -1858,7 +1859,7 @@ mod tests {
             menu.untinted = Some(crate::vrm::expressions::Untinted { image: crate::vrm::Image { width: 4, height: 1, rgba: [[255, 0, 0, 255], [255, 0, 0, 255], [255; 4], [255; 4]].concat() }, cells: vec![[0.0, 0.0, 1.0, 1.0, 0.5, 0.0, 1.0, 1.0]] });
             let mut look = looks_test::look();
             look.decals[1] = Some(crate::vrm::expressions::Decal { alpha: 0.0, intensity: 1.0, color_blend: [(8.0, DecalBlend::Multiply), (9.0, DecalBlend::Lighten), (10.0, DecalBlend::Darken)].into_iter().find(|(at, _)| *at == space).map_or(DecalBlend::Replace, |(_, blend)| blend), image: 0, hue: None });
-            menu.looks = Some(crate::vrm::expressions::Looks { index: Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }), materials: vec![look], decals: vec![crate::vrm::Image { width: 2, height: 1, rgba: if space == 10.0 { vec![64, 255, 255, 255, 0, 0, 0, 0] } else { vec![0, 255, 0, 255, 0, 0, 0, 0] } }], matcaps: Vec::new(), matcap_masks: None, emission: None, clearcoat_maps: Vec::new(), outline: None, shades: Vec::new() });
+            menu.looks = Some(crate::vrm::expressions::Looks { index: Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }), materials: vec![look], decals: vec![crate::vrm::Image { width: 2, height: 1, rgba: if space == 10.0 { vec![64, 255, 255, 255, 0, 0, 0, 0] } else { vec![0, 255, 0, 255, 0, 0, 0, 0] } }], matcaps: Vec::new(), matcap_masks: None, emission: None, clearcoat_maps: Vec::new(), outline: None, shades: Vec::new(), rim_tint: None });
             model.menu = Some(menu);
             let mut skinned = model.skinned().unwrap();
             let original_vertices = bytes_of(&skinned.vertices).to_vec();
@@ -1943,6 +1944,7 @@ mod tests {
             clearcoat_maps,
             outline: None,
             shades: Vec::new(),
+            rim_tint: None,
         });
         model.menu = Some(menu);
         let mut skinned = model.skinned().unwrap();
@@ -1978,12 +1980,13 @@ mod tests {
         assert!(uncapped[0] > 140, "uncapped, it takes its main and ambient light whole: {uncapped:?}");
     }
 
-    /// What `faces_drawn` lays beyond its look: the looks' matcap images and shade layers, the menu's targets, each at
+    /// What `faces_drawn` lays beyond its look: the looks' matcap images, shade layers and rim tint, the menu's targets, each at
     /// its default, and whether the quads turn their back faces to the viewer, drawn two-sided.
     #[derive(Default)]
     struct Faces {
         matcaps: Vec<crate::vrm::Image>,
         shades: Vec<crate::vrm::Image>,
+        rim_tint: Option<crate::vrm::Image>,
         targets: Vec<serde_json::Value>,
         back: bool,
     }
@@ -2003,7 +2006,7 @@ mod tests {
         model.images.push(crate::vrm::Image { width: 1, height: 1, rgba: rgba.to_vec() });
         model.materials[0].base_image = Some(0);
         let mut menu = crate::vrm::expressions::Expressions::parse(&serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": faces.targets})).unwrap();
-        menu.looks = Some(crate::vrm::expressions::Looks { index: Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }), materials: vec![look], decals: Vec::new(), matcaps: faces.matcaps, matcap_masks: None, emission: None, clearcoat_maps: Vec::new(), outline: None, shades: faces.shades });
+        menu.looks = Some(crate::vrm::expressions::Looks { index: Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }), materials: vec![look], decals: Vec::new(), matcaps: faces.matcaps, matcap_masks: None, emission: None, clearcoat_maps: Vec::new(), outline: None, shades: faces.shades, rim_tint: faces.rim_tint });
         model.menu = Some(menu);
         let pixels = draw(&model, &model.rest(), [32, 32], [eye_projection(Vec3::new(0.0, 0.0, 0.4), 0.2, 0.2), None], Vec3::ZERO);
         [8, 24].map(|x| pixel(&pixels, 64, x, 16))
@@ -2082,6 +2085,13 @@ mod tests {
         let [facing, rimmed] = faces_drawn([128, 64, 32, 255], look.clone(), [square, grazing], Faces::default());
         assert_eq!(facing, plain[0], "a surface square to the view takes no rim");
         assert!(rimmed[2] > plain[1][2] + 100 && rimmed[..2] == plain[1][..2], "the grazing surface adds the rim's colour: {rimmed:?} over {:?}", plain[1]);
+        let texel = |rgba: [u8; 4]| crate::vrm::Image { width: 1, height: 1, rgba: rgba.to_vec() };
+        let tinted = |blue: u8, shades: usize| faces_drawn([128, 64, 32, 255], look.clone(), [square, grazing], Faces { shades: vec![texel([128, 64, 32, 255]); shades], rim_tint: Some(texel([255, 255, blue, 255])), ..Faces::default() })[1];
+        for shades in 0..=2 {
+            assert_eq!(tinted(0, shades), plain[1], "a rim tint without the rim's colour takes the rim away, after {shades} shade layers");
+            let half = tinted(188, shades);
+            assert!(half[2] > plain[1][2] + 20 && half[2] + 20 < rimmed[2], "a rim tint half the rim's colour in linear light adds part of it, after {shades} shade layers: {half:?} between {:?} and {rimmed:?}", plain[1]);
+        }
         let behind = [[0.0, 0.0, -1.0], [-1.0, 0.0, -0.15]];
         let back = || Faces { back: true, ..Faces::default() };
         let [_, unlit] = faces_drawn([128, 64, 32, 255], crate::vrm::expressions::Look { rim: None, ..look.clone() }, behind, back());
@@ -2156,7 +2166,7 @@ mod tests {
         look.decals[0] = Some(crate::vrm::expressions::Decal { alpha: 1.0, intensity: 1.0, color_blend: DecalBlend::Replace, image: 1, hue: None });
         let index = (0..64).flat_map(|at| [(at % 8 >= 4 && at / 8 < 4) as u8, 0, 0, 255]).collect();
         let unused = crate::vrm::Image { width: 3, height: 5, rgba: vec![255; 60] };
-        menu.looks = Some(crate::vrm::expressions::Looks { index: Some(crate::vrm::Image { width: 8, height: 8, rgba: index }), materials: vec![look], decals: vec![unused, decal], matcaps: Vec::new(), matcap_masks: None, emission: None, clearcoat_maps: Vec::new(), outline: None, shades: Vec::new() });
+        menu.looks = Some(crate::vrm::expressions::Looks { index: Some(crate::vrm::Image { width: 8, height: 8, rgba: index }), materials: vec![look], decals: vec![unused, decal], matcaps: Vec::new(), matcap_masks: None, emission: None, clearcoat_maps: Vec::new(), outline: None, shades: Vec::new(), rim_tint: None });
         model.menu = Some(menu);
         let skinned = model.skinned().unwrap();
         let worlds = model.worlds(&model.rest());

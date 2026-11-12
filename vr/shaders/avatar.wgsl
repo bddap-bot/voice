@@ -116,6 +116,7 @@ struct Look {
     rim_lit: f32,
     rim_shadow_mask: f32,
     rim_backface: u32,
+    rim_tint_layer: i32,
     matcaps: array<Matcap, 4>,
     ramp: array<vec4<f32>, 4>,
     ramped: u32,
@@ -129,7 +130,7 @@ struct Look {
 @group(0) @binding(14) var emission_map: texture_2d<f32>;
 @group(0) @binding(15) var edge_sampler: sampler;
 @group(0) @binding(17) var clearcoat_maps: texture_2d_array<f32>;
-@group(0) @binding(18) var shade_layers: texture_2d_array<f32>;
+@group(0) @binding(18) var toon_layers: texture_2d_array<f32>;
 
 // Rows of Surface.look, in the order of expressions::Field.
 const DECAL = 0u;
@@ -611,10 +612,10 @@ fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
     if shadow_reached && looks[look].shadowed != 0u {
         // A shade made from the albedo moves with it under the material's colour and a colour region.
         let own = material.base.rgb * recoloured / max(sampled.rgb, vec3<f32>(1e-4));
-        let first = textureSampleGrad(shade_layers, texture_sampler, input.uv, 0, gradient[0], gradient[1]);
+        let first = textureSampleGrad(toon_layers, texture_sampler, input.uv, 0, gradient[0], gradient[1]);
         var dark = adjust(first.rgb * own, surface, mask);
         if second_shadow_reached && looks[look].second_weight > 0.0 {
-            let second = adjust(textureSampleGrad(shade_layers, texture_sampler, input.uv, 1, gradient[0], gradient[1]).rgb * own, surface, mask);
+            let second = adjust(textureSampleGrad(toon_layers, texture_sampler, input.uv, 1, gradient[0], gradient[1]).rgb * own, surface, mask);
             dark = mix(dark, second, looks[look].second_weight * (1.0 - band(toward, toward_width, looks[look].second_border, looks[look].second_blur, 0.0)));
         }
         shadowmix = band(toward, toward_width, looks[look].shadow_border, looks[look].shadow_blur, 0.0);
@@ -648,7 +649,11 @@ fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
     var rim_light = vec3<f32>(0.0);
     if rim_reached {
         let rim = band(fresnel, fresnel_width, looks[look].rim_border, looks[look].rim_blur, 0.0) * mix(1.0, shadowmix, looks[look].rim_shadow_mask) * looks[look].rim_strength * f32(at.front || looks[look].rim_backface != 0u);
-        rim_light = looks[look].rim_color * mix(vec3<f32>(1.0), unshadowed, looks[look].rim_main) * mix(vec3<f32>(1.0), flat_light, looks[look].rim_lit) * rim;
+        var rim_color = looks[look].rim_color;
+        if rim > 0.0 && looks[look].rim_tint_layer >= 0 {
+            rim_color *= textureSampleGrad(toon_layers, texture_sampler, input.uv, looks[look].rim_tint_layer, gradient[0], gradient[1]).rgb;
+        }
+        rim_light = rim_color * mix(vec3<f32>(1.0), unshadowed, looks[look].rim_main) * mix(vec3<f32>(1.0), flat_light, looks[look].rim_lit) * rim;
     }
     var color = light + glow + rim_light + emission(input.surface, look, input.uv, gradient, mask.r) + sheen;
     if draw.outline != 0u {

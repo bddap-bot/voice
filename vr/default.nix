@@ -85,7 +85,7 @@ let
   } // pkgs.lib.optionalAttrs (!cross) {
     # lavapipe takes a descriptor set its pool has no room for; SwiftShader refuses it as the headset's driver does.
     postCheck = ''
-      (cd "$NIX_BUILD_TOP/source/vr" && VK_ICD_FILENAMES=${pkgs.swiftshader}/share/vulkan/icd.d/vk_swiftshader_icd.json $(find ../target -path '*/release/deps/voice_vr-*' -type f -executable) --exact render::tests::both_eyes_draw_the_textured_figure_on_a_clear_background)
+      (cd "$NIX_BUILD_TOP/source/vr" && VK_ICD_FILENAMES=${pkgs.swiftshader}/share/vulkan/icd.d/vk_swiftshader_icd.json $(grep -l both_eyes_draw_the_textured_figure_on_a_clear_background $(find ../target -path '*/release/deps/voice_vr-*' -type f -executable)) --exact render::tests::both_eyes_draw_the_textured_figure_on_a_clear_background)
     '';
   });
   native = host pkgs;

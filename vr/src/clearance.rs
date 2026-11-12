@@ -176,7 +176,7 @@ fn film(renderer: &mut Renderer, path: &str, clip: &Clip, at: f32, angle: f32, o
             let changed = skinned.morph(&pose.weights);
             let worlds = model.worlds(&pose);
             let placed = Mat4::from_translation(Vec3::new(0.0, -centre, 0.0)) * Mat4::from_quat(Quat::from_rotation_y(view)) * fit.placement(&model, &worlds, 0.0);
-            appearance.update(&skinned.palette(&worlds, placed), &skinned, &changed);
+            appearance.update(&skinned, &worlds, placed, &changed);
             renderer.render(&appearance, [eye_projection(Vec3::new(0.0, 0.0, 3.0), window / 2.0, window / 2.0), None], Mat4::IDENTITY, renderer.eye[0])?;
             panels.push(crate::wear::eye(&renderer.read()?, TEXELS));
         }

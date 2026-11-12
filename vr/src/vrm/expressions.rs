@@ -420,7 +420,14 @@ pub struct ClearCoat {
     pub smoothness: f32,
     pub reflection: f32,
     pub specular: f32,
+    /// How far the reflection takes Poiyomi's Fresnel up to 9.1, which `fresnel_strength` replaces.
     pub fresnel: f32,
+    /// Poiyomi 9.2's Fresnel strength; a coat with one draws its reflection as 9.2 does, blurred by the roughness its
+    /// antialiasing widens. None is a shader up to 9.1.
+    #[serde(deserialize_with = "read_required")]
+    pub fresnel_strength: Option<f32>,
+    /// The light below which 9.2 dims the reflection where it is seen at a glance; 0 never dims it.
+    pub exposure_occlusion: f32,
     pub specular_tint: [f32; 3],
     pub reflection_tint: [f32; 3],
     pub st: [f32; 4],
@@ -429,14 +436,41 @@ pub struct ClearCoat {
     /// Its place in `Looks::clearcoat_maps`, read through the mesh's second UV; a place past the maps reads as none.
     #[serde(deserialize_with = "read_map")]
     pub map: Option<usize>,
+    /// Its place in `Looks::clearcoat_fallbacks`, the cubemap it reflects where the scene has no reflection probe; none, or
+    /// a place past them, reflects Unity's default grey cube.
+    #[serde(deserialize_with = "read_fallback")]
+    pub fallback: Option<usize>,
+    /// Whether the fallback's reflection is lit as the material's albedo is.
+    pub lit_fallback: bool,
+    /// Whether it reflects the fallback even in a scene with a reflection probe: no scene here has one, so the key is
+    /// only required to be a bool.
+    #[serde(deserialize_with = "read_flag")]
+    pub force_fallback: (),
 }
 
 fn read_map<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<usize>, D::Error> {
+    read_place(deserializer, "map", "clearcoatMaps")
+}
+
+fn read_fallback<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<usize>, D::Error> {
+    read_place(deserializer, "fallback", "clearcoatFallbacks")
+}
+
+fn read_place<'de, D: serde::Deserializer<'de>>(deserializer: D, key: &str, list: &str) -> Result<Option<usize>, D::Error> {
     match i64::deserialize(deserializer)? {
         -1 => Ok(None),
-        map if map >= 0 => Ok(Some(map as usize)),
-        map => Err(serde::de::Error::custom(format!("a clear coat's map is -1 or a place in clearcoatMaps, got {map}"))),
+        place if place >= 0 => Ok(Some(place as usize)),
+        place => Err(serde::de::Error::custom(format!("a clear coat's {key} is -1 or a place in {list}, got {place}"))),
     }
+}
+
+// serde reads a missing key as None for an Option, and this key is required.
+fn read_required<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<f32>, D::Error> {
+    Option::deserialize(deserializer)
+}
+
+fn read_flag<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<(), D::Error> {
+    bool::deserialize(deserializer).map(drop)
 }
 
 /// How a material takes the light: by the angle it meets each light at, through its `ramp` of brightnesses over the
@@ -555,6 +589,8 @@ struct EncodedLooks {
     shade2: Option<usize>,
     #[serde(default)]
     rim_tint: Option<usize>,
+    #[serde(default)]
+    clearcoat_fallbacks: Vec<usize>,
 }
 
 /// The inverted hull of the materials whose glTF extras say `outline`, over the atlas UV: its RGB the hull's colour,
@@ -567,7 +603,10 @@ pub struct OutlineLayer {
 
 /// What each atlas texel's material lays over the albedo: `index`'s red channel names a texel's entry in `materials`,
 /// one-based, zero or no index for none. Every layer is a glTF image the extension names by index, each at its own size;
-/// a clear coat map holds linear mask, smoothness, reflection and specular levels in its four channels. `shades` are
+/// a clear coat map holds linear mask, smoothness, reflection and specular levels in its four channels, and a clear coat
+/// fallback is a cubemap's `FALLBACK_LEVELS` blur levels, each a latitude-longitude `FALLBACK_WIDTH` x
+/// `FALLBACK_LEVEL_HEIGHT` image of RGBM texels, linear light as colour times alpha times `FALLBACK_RANGE`, stacked top
+/// to bottom. `shades` are
 /// the first shade colours a shadowed look turns each texel to and, where some look has a second shade, the second's,
 /// each spanning the atlas at its shape but carried at most as wide as the converter carries a glow map; `rim_tint`,
 /// where a rim has a colour texture, the factor each texel's rim takes (white where none tints it), at the shades' size.
@@ -580,10 +619,16 @@ pub struct Looks {
     pub matcap_masks: Option<Image>,
     pub emission: Option<Image>,
     pub clearcoat_maps: Vec<Image>,
+    pub clearcoat_fallbacks: Vec<Image>,
     pub outline: Option<OutlineLayer>,
     pub shades: Vec<Image>,
     pub rim_tint: Option<Image>,
 }
+
+pub const FALLBACK_WIDTH: u32 = 256;
+pub const FALLBACK_LEVEL_HEIGHT: u32 = 128;
+pub const FALLBACK_LEVELS: u32 = 7;
+pub const FALLBACK_RANGE: f32 = 128.0;
 
 /// One component of a node's Unity local rotation: of `rest` read as localEulerAngles in degrees when it has three, a quaternion when four.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -801,22 +846,29 @@ impl Untinted {
 }
 
 fn looks(encoded: EncodedLooks, image: &impl Fn(usize) -> Result<Image, String>) -> Result<Looks, String> {
-    let matcaps: Vec<Image> = encoded.matcaps.iter().map(|&at| image(at)).collect::<Result<_, _>>().map_err(|error| format!("{EXTENSION}: matcaps: {error}"))?;
+    let images = |list: &[usize], what: &str| list.iter().map(|&at| image(at)).collect::<Result<Vec<_>, _>>().map_err(|error| format!("{EXTENSION}: {what}: {error}"));
+    let matcaps = images(&encoded.matcaps, "matcaps")?;
     if matcaps.iter().any(|layer| (layer.width, layer.height) != (matcaps[0].width, matcaps[0].height)) {
         return Err(format!("{EXTENSION}: matcaps of differing sizes"));
     }
-    let clearcoat_maps: Vec<Image> = encoded.clearcoat_maps.iter().map(|&at| image(at)).collect::<Result<_, _>>().map_err(|error| format!("{EXTENSION}: a clear coat map: {error}"))?;
+    let clearcoat_maps = images(&encoded.clearcoat_maps, "a clear coat map")?;
+    let clearcoat_fallbacks = images(&encoded.clearcoat_fallbacks, "a clear coat fallback")?;
+    if let Some(fallback) = clearcoat_fallbacks.iter().find(|fallback| (fallback.width, fallback.height) != (FALLBACK_WIDTH, FALLBACK_LEVELS * FALLBACK_LEVEL_HEIGHT)) {
+        return Err(format!("{EXTENSION}: a clear coat fallback is {}x{}, not {FALLBACK_WIDTH}x{}", fallback.width, fallback.height, FALLBACK_LEVELS * FALLBACK_LEVEL_HEIGHT));
+    }
     let mut materials = encoded.materials;
     for coat in materials.iter_mut().filter_map(|look| look.clearcoat.as_mut()) {
         coat.map = coat.map.filter(|&map| map < clearcoat_maps.len());
+        coat.fallback = coat.fallback.filter(|&fallback| fallback < clearcoat_fallbacks.len());
     }
     let looks = Looks {
         index: encoded.index.map(|at| image(at)).transpose().map_err(|error| format!("{EXTENSION}: look index: {error}"))?,
-        decals: encoded.decals.iter().map(|&at| image(at)).collect::<Result<_, _>>().map_err(|error| format!("{EXTENSION}: a decal: {error}"))?,
+        decals: images(&encoded.decals, "a decal")?,
         matcaps,
         matcap_masks: encoded.matcap_masks.map(|at| image(at)).transpose().map_err(|error| format!("{EXTENSION}: matcap masks: {error}"))?,
         emission: encoded.emission.map(|at| image(at)).transpose().map_err(|error| format!("{EXTENSION}: emission: {error}"))?,
         clearcoat_maps,
+        clearcoat_fallbacks,
         outline: match (encoded.outline, encoded.outline_width) {
             (None, _) => None,
             (Some(at), Some(width)) if width.is_finite() && width > 0.0 => Some(OutlineLayer { image: image(at).map_err(|error| format!("{EXTENSION}: outline: {error}"))?, width }),

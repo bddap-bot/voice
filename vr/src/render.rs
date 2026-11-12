@@ -1,9 +1,10 @@
 use ash::vk;
-use glam::{Mat3, Mat4, Vec3};
+use glam::{Mat3, Mat4, Quat, Vec3};
 
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::vrm::expressions::{FALLBACK_LEVEL_HEIGHT, FALLBACK_LEVELS, FALLBACK_RANGE, FALLBACK_WIDTH};
 use crate::vrm::particles::{Blend, Instance, Mode, Particles};
 use crate::vrm::{Alpha, Features, Model, OutlineWidth, Skinned, Vertex};
 use crate::vulkan::{vk_error, Gpu};
@@ -100,6 +101,9 @@ struct Push {
     focal: f32,
     /// Seconds the figure's expressions have run, wrapped at THEME_WRAP, which turns a theme colour's hue at its speed.
     seconds: f32,
+    /// The rotation from the space the figure is placed in back to its model space, where a clear coat's fallback is
+    /// looked up: a quaternion, since a matrix would take the push constants past the 128 bytes every device allows.
+    model: [f32; 4],
 }
 
 /// The seconds a figure has shown wrap at this before the shader reads them as an f32, which past a day would step them
@@ -197,7 +201,11 @@ struct CoatData {
     map: i32,
     gsaa: [f32; 2],
     on: u32,
-    pad: u32,
+    fallback: i32,
+    lit_fallback: u32,
+    fresnel_strength: f32,
+    exposure_occlusion: f32,
+    has_fresnel_strength: u32,
 }
 
 #[repr(C)]
@@ -382,7 +390,11 @@ fn look_data(look: &crate::vrm::expressions::Look, places: &[Place], rim_tint_la
             map: coat.map.map_or(-1, |map| map as i32),
             gsaa: coat.gsaa,
             on: 1,
-            pad: 0,
+            fallback: coat.fallback.map_or(-1, |fallback| fallback as i32),
+            lit_fallback: coat.lit_fallback as u32,
+            fresnel_strength: coat.fresnel_strength.unwrap_or_default(),
+            exposure_occlusion: coat.exposure_occlusion,
+            has_fresnel_strength: coat.fresnel_strength.is_some() as u32,
         }),
     }
 }
@@ -673,6 +685,7 @@ pub struct Appearance {
     indices: Buffer,
     palette: Buffer,
     joints: usize,
+    model: Quat,
     materials: Buffer,
     surfaces: Buffer,
     looks: Buffer,
@@ -819,6 +832,7 @@ impl Renderer {
             vk::DescriptorSetLayoutBinding::default().binding(16).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(17).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(18).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default().binding(19).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
         ];
         let set_layout = SetLayout::new(device, &bindings)?;
         let set_layouts = [set_layout.layout];
@@ -945,6 +959,7 @@ impl Renderer {
             indices: upload(gpu, bytes_of(&skinned.indices), vk::BufferUsageFlags::INDEX_BUFFER)?,
             palette: gpu.host_buffer((joints.max(1) * std::mem::size_of::<Mat4>()) as u64, vk::BufferUsageFlags::STORAGE_BUFFER)?,
             joints,
+            model: Quat::IDENTITY,
             materials: upload(gpu, bytes_of(&material_data), vk::BufferUsageFlags::STORAGE_BUFFER)?,
             surfaces: upload(gpu, bytes_of(&skinned.surfaces), vk::BufferUsageFlags::STORAGE_BUFFER)?,
             looks: upload(gpu, bytes_of(&look_data), vk::BufferUsageFlags::STORAGE_BUFFER)?,
@@ -970,8 +985,8 @@ impl Renderer {
         } else { None };
         let mut array = |layers: &[&crate::vrm::Image], empty: [u8; 4]| -> Result<usize, String> {
             appearance.textures.push(match layers {
-                [] => layered(gpu, 1, 1, 1, &empty, FORMAT, vk::ImageViewType::TYPE_2D_ARRAY)?,
-                layers => layered(gpu, layers[0].width, layers[0].height, layers.len() as u32, &layers.iter().flat_map(|layer| layer.rgba.iter().copied()).collect::<Vec<_>>(), FORMAT, vk::ImageViewType::TYPE_2D_ARRAY)?,
+                [] => layered(gpu, 1, 1, 1, &empty, FORMAT, vk::ImageViewType::TYPE_2D_ARRAY, true)?,
+                layers => layered(gpu, layers[0].width, layers[0].height, layers.len() as u32, &layers.iter().flat_map(|layer| layer.rgba.iter().copied()).collect::<Vec<_>>(), FORMAT, vk::ImageViewType::TYPE_2D_ARRAY, true)?,
             });
             Ok(appearance.textures.len() - 1)
         };
@@ -990,7 +1005,24 @@ impl Renderer {
             for map in maps {
                 if (map.width, map.height) == (width, height) { rgba.extend_from_slice(&map.rgba) } else { rgba.extend(resized(map, width, height)) }
             }
-            appearance.textures.push(layered(gpu, width, height, maps.len().max(1) as u32, if maps.is_empty() { &[255; 4] } else { &rgba }, vk::Format::R8G8B8A8_UNORM, vk::ImageViewType::TYPE_2D_ARRAY)?);
+            appearance.textures.push(layered(gpu, width, height, maps.len().max(1) as u32, if maps.is_empty() { &[255; 4] } else { &rgba }, vk::Format::R8G8B8A8_UNORM, vk::ImageViewType::TYPE_2D_ARRAY, true)?);
+            appearance.textures.len() - 1
+        };
+        let coat_fallbacks = {
+            let fallbacks = looks.map(|looks| &looks.clearcoat_fallbacks[..]).unwrap_or_default();
+            let (width, height) = (FALLBACK_WIDTH, FALLBACK_LEVELS * FALLBACK_LEVEL_HEIGHT);
+            if fallbacks.iter().any(|fallback| (fallback.width, fallback.height) != (width, height) || fallback.rgba.len() != (4 * width * height) as usize) {
+                return Err(format!("a clear coat fallback is not {width}x{height}"));
+            }
+            // RGBM's multiplier differs between neighbouring texels, so it is decoded before the sampler filters it.
+            let halves: Vec<[u16; 4]> = fallbacks.iter().flat_map(|fallback| fallback.rgba.chunks_exact(4)).map(|texel| {
+                let range = texel[3] as f32 / 255.0 * FALLBACK_RANGE;
+                [half(texel[0] as f32 / 255.0 * range), half(texel[1] as f32 / 255.0 * range), half(texel[2] as f32 / 255.0 * range), half(1.0)]
+            }).collect();
+            appearance.textures.push(match fallbacks {
+                [] => layered(gpu, 1, 1, 1, &[0; 8], vk::Format::R16G16B16A16_SFLOAT, vk::ImageViewType::TYPE_2D_ARRAY, false)?,
+                fallbacks => layered(gpu, width, height, fallbacks.len() as u32, bytes_of(&halves), vk::Format::R16G16B16A16_SFLOAT, vk::ImageViewType::TYPE_2D_ARRAY, false)?,
+            });
             appearance.textures.len() - 1
         };
         let mut single = |image: Option<&crate::vrm::Image>, format: vk::Format| -> Result<Option<usize>, String> {
@@ -1014,6 +1046,7 @@ impl Renderer {
             let untinted = image(untinted);
             let decal: Vec<_> = decal_textures.iter().map(|&texture| vk::DescriptorImageInfo::default().image_view(appearance.textures[texture].view).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)).collect();
             let (index, matcap, masks, glow, coat, toon) = (image(Some(look_index.unwrap_or(black))), image(Some(matcaps)), image(matcap_masks), image(Some(emission.unwrap_or(black))), image(Some(coat_maps)), image(Some(toon_layers)));
+            let fallbacks = image(Some(coat_fallbacks));
             let surfaces = [vk::DescriptorBufferInfo::default().buffer(appearance.surfaces.0).range(vk::WHOLE_SIZE)];
             let looks = [vk::DescriptorBufferInfo::default().buffer(appearance.looks.0).range(vk::WHOLE_SIZE)];
             let cells = [vk::DescriptorBufferInfo::default().buffer(appearance.untinted_cells.0).range(vk::WHOLE_SIZE)];
@@ -1041,6 +1074,7 @@ impl Renderer {
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(16).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&cells),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(17).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&coat),
                 vk::WriteDescriptorSet::default().dst_set(set).dst_binding(18).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&toon),
+                vk::WriteDescriptorSet::default().dst_set(set).dst_binding(19).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&fallbacks),
             ];
             unsafe { device.update_descriptor_sets(&writes, &[]) };
         }
@@ -1351,7 +1385,7 @@ impl Renderer {
                     let shown = || appearance.drawn.iter().filter(|drawn| drawn.switched.is_none_or(|node| !appearance.hidden.contains(&node)));
                     let depths = shown().filter_map(|drawn| Some((drawn, drawn.depth?)));
                     for (drawn, pipeline) in depths.chain(shown().map(|drawn| (drawn, drawn.pipeline))) {
-                        let push = Push { view_projection: view_projection.to_cols_array(), camera: camera(view_projection).to_array(), material: drawn.material, outline: drawn.outline as u32, outline_scale: self.outline_scale, focal: projection.y_axis.y, seconds: (appearance.seconds % THEME_WRAP) as f32 };
+                        let push = Push { view_projection: view_projection.to_cols_array(), camera: camera(view_projection).to_array(), material: drawn.material, outline: drawn.outline as u32, outline_scale: self.outline_scale, focal: projection.y_axis.y, seconds: (appearance.seconds % THEME_WRAP) as f32, model: appearance.model.to_array() };
                         let bytes = std::slice::from_raw_parts(&push as *const Push as *const u8, std::mem::size_of::<Push>());
                         device.cmd_bind_pipeline(target.commands, vk::PipelineBindPoint::GRAPHICS, pipeline);
                         device.cmd_bind_descriptor_sets(target.commands, vk::PipelineBindPoint::GRAPHICS, self.layout, 0, &[drawn.set], &[]);
@@ -1399,6 +1433,23 @@ impl Renderer {
     }
 }
 
+/// `value`, finite and not negative, as the nearest half float, infinity past its range.
+fn half(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let exponent = (bits >> 23) as i32 - 127 + 15;
+    let mantissa = bits & 0x7f_ffff;
+    if exponent >= 31 {
+        0x7c00
+    } else if exponent > 0 {
+        (((exponent as u32) << 10 | mantissa >> 13) + (mantissa >> 12 & 1)) as u16
+    } else if exponent >= -10 {
+        let shifted = (mantissa | 0x80_0000) >> (1 - exponent);
+        ((shifted + 0x1000) >> 13) as u16
+    } else {
+        0
+    }
+}
+
 fn bytes_of<T: Copy>(values: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(values.as_ptr() as *const u8, std::mem::size_of_val(values)) }
 }
@@ -1432,10 +1483,12 @@ impl Appearance {
         }
     }
 
-    pub fn update(&mut self, palette: &[Mat4], skinned: &Skinned, changed: &[u32]) {
+    pub fn update(&mut self, skinned: &Skinned, worlds: &[Mat4], placement: Mat4, changed: &[u32]) {
+        let palette = skinned.palette(worlds, placement);
         assert_eq!(palette.len(), self.joints, "the palette has one matrix per joint");
+        self.model = placement.to_scale_rotation_translation().1.inverse();
         self.settled();
-        let bytes = bytes_of(palette);
+        let bytes = bytes_of(&palette);
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.palette.2, bytes.len()) };
         let bytes = bytes_of(&skinned.surfaces);
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.surfaces.2, bytes.len()) };
@@ -1553,12 +1606,12 @@ fn resized(map: &crate::vrm::Image, width: u32, height: u32) -> Vec<u8> {
 }
 
 fn texture(gpu: &Gpu, width: u32, height: u32, rgba: &[u8], format: vk::Format) -> Result<Texture, String> {
-    layered(gpu, width, height, 1, rgba, format, vk::ImageViewType::TYPE_2D)
+    layered(gpu, width, height, 1, rgba, format, vk::ImageViewType::TYPE_2D, true)
 }
 
-fn layered(gpu: &Gpu, width: u32, height: u32, layers: u32, rgba: &[u8], format: vk::Format, view: vk::ImageViewType) -> Result<Texture, String> {
+fn layered(gpu: &Gpu, width: u32, height: u32, layers: u32, texels: &[u8], format: vk::Format, view: vk::ImageViewType, mipped: bool) -> Result<Texture, String> {
     let device = &gpu.device;
-    let levels = 32 - width.max(height).leading_zeros();
+    let levels = if mipped { 32 - width.max(height).leading_zeros() } else { 1 };
     let (image, memory) = gpu.image(
         &vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
@@ -1571,8 +1624,8 @@ fn layered(gpu: &Gpu, width: u32, height: u32, layers: u32, rgba: &[u8], format:
             .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::SAMPLED)
             .initial_layout(vk::ImageLayout::UNDEFINED),
     )?;
-    let staging = gpu.host_buffer(rgba.len() as u64, vk::BufferUsageFlags::TRANSFER_SRC)?;
-    unsafe { std::ptr::copy_nonoverlapping(rgba.as_ptr(), staging.2, rgba.len()) };
+    let staging = gpu.host_buffer(texels.len() as u64, vk::BufferUsageFlags::TRANSFER_SRC)?;
+    unsafe { std::ptr::copy_nonoverlapping(texels.as_ptr(), staging.2, texels.len()) };
     gpu.once(|commands| unsafe {
         let all = color_range(levels);
         device.cmd_pipeline_barrier(commands, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[barrier(image, all, vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::AccessFlags::empty(), vk::AccessFlags::TRANSFER_WRITE)]);
@@ -1633,10 +1686,10 @@ mod tests {
         let changed = skinned.morph(&pose.weights);
         let fit = crate::vrm::Fit::new(model, &skinned, height);
         let worlds = model.worlds(pose);
-        let palette = skinned.palette(&worlds, Mat4::from_translation(shift) * fit.placement(model, &worlds, floor));
+        let placement = Mat4::from_translation(shift) * fit.placement(model, &worlds, floor);
         let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), eye, height / PAGE_HEIGHT).unwrap();
         let mut appearance = renderer.appearance(model, &skinned).unwrap();
-        appearance.update(&palette, &skinned, &changed);
+        appearance.update(&skinned, &worlds, placement, &changed);
         renderer.render(&appearance, eyes, Mat4::IDENTITY, eye[0]).unwrap();
         renderer.read().unwrap()
     }
@@ -1819,7 +1872,7 @@ mod tests {
         let worlds = model.worlds(&model.rest());
         let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [64, 64], crate::HEIGHT / PAGE_HEIGHT).unwrap();
         let mut appearance = renderer.appearance(&model, &skinned).unwrap();
-        appearance.update(&skinned.palette(&worlds, fit.placement(&model, &worlds, crate::FLOOR)), &skinned, &changed);
+        appearance.update(&skinned, &worlds, fit.placement(&model, &worlds, crate::FLOOR), &changed);
         let eyes = [-0.032, 0.032].map(|x| eye_projection(Vec3::new(x, 0.0, 0.4), 0.2, 0.2));
         renderer.render(&appearance, eyes, Mat4::IDENTITY, 64).unwrap();
         let full = renderer.read().unwrap();
@@ -1874,18 +1927,18 @@ mod tests {
             menu.untinted = Some(crate::vrm::expressions::Untinted { image: crate::vrm::Image { width: 4, height: 1, rgba: [[255, 0, 0, 255], [255, 0, 0, 255], [255; 4], [255; 4]].concat() }, cells: vec![[0.0, 0.0, 1.0, 1.0, 0.5, 0.0, 1.0, 1.0]] });
             let mut look = looks_test::look();
             look.decals[1] = Some(crate::vrm::expressions::Decal { alpha: 0.0, intensity: 1.0, color_blend: [(8.0, DecalBlend::Multiply), (9.0, DecalBlend::Lighten), (10.0, DecalBlend::Darken)].into_iter().find(|(at, _)| *at == space).map_or(DecalBlend::Replace, |(_, blend)| blend), image: 0, hue: None });
-            menu.looks = Some(crate::vrm::expressions::Looks { index: Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }), materials: vec![look], decals: vec![crate::vrm::Image { width: 2, height: 1, rgba: if space == 10.0 { vec![64, 255, 255, 255, 0, 0, 0, 0] } else { vec![0, 255, 0, 255, 0, 0, 0, 0] } }], matcaps: Vec::new(), matcap_masks: None, emission: None, clearcoat_maps: Vec::new(), outline: None, shades: Vec::new(), rim_tint: None });
+            menu.looks = Some(crate::vrm::expressions::Looks { index: Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }), materials: vec![look], decals: vec![crate::vrm::Image { width: 2, height: 1, rgba: if space == 10.0 { vec![64, 255, 255, 255, 0, 0, 0, 0] } else { vec![0, 255, 0, 255, 0, 0, 0, 0] } }], matcaps: Vec::new(), matcap_masks: None, emission: None, clearcoat_maps: Vec::new(), clearcoat_fallbacks: Vec::new(), outline: None, shades: Vec::new(), rim_tint: None });
             model.menu = Some(menu);
             let mut skinned = model.skinned().unwrap();
             let original_vertices = bytes_of(&skinned.vertices).to_vec();
             let worlds = model.worlds(&model.rest());
             let fit = crate::vrm::Fit::new(&model, &skinned, crate::HEIGHT);
-            let palette = skinned.palette(&worlds, fit.placement(&model, &worlds, crate::FLOOR));
+            let placement = fit.placement(&model, &worlds, crate::FLOOR);
             let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [32, 32], crate::HEIGHT / PAGE_HEIGHT).unwrap();
             let mut appearance = renderer.appearance(&model, &skinned).unwrap();
             let eyes = [eye_projection(Vec3::new(0.0, 0.0, 0.4), 0.2, 0.2), None];
             let mut capture = |skinned: &Skinned| {
-                appearance.update(&palette, skinned, &[]);
+                appearance.update(skinned, &worlds, placement, &[]);
                 renderer.render(&appearance, eyes, Mat4::IDENTITY, 32).unwrap();
                 renderer.read().unwrap()
             };
@@ -1931,14 +1984,18 @@ mod tests {
     /// before and after its one target `effect` moves from `rest` to `value`: the left quad's pixel each time, and whether
     /// the right one stayed as it was.
     fn look_drawn(rgba: [u8; 4], look: crate::vrm::expressions::Look, effect: Option<serde_json::Value>, rest: f32, value: f32, matcaps: Vec<crate::vrm::Image>) -> ([u8; 4], [u8; 4], bool) {
-        coat_drawn(rgba, look, effect, rest, value, matcaps, Vec::new())
+        coat_drawn(rgba, look, effect, rest, value, matcaps, Vec::new(), Vec::new(), Quat::IDENTITY, |_| Vec3::Z)
     }
 
-    /// `look_drawn` with `clearcoat_maps`, read through a second UV equal to the first.
-    fn coat_drawn(rgba: [u8; 4], look: crate::vrm::expressions::Look, effect: Option<serde_json::Value>, rest: f32, value: f32, matcaps: Vec<crate::vrm::Image>, clearcoat_maps: Vec<crate::vrm::Image>) -> ([u8; 4], [u8; 4], bool) {
+    /// `look_drawn` with `clearcoat_maps`, read through a second UV equal to the first, and `clearcoat_fallbacks`. The
+    /// figure's model space is `turn`ed in the space it is placed in, where it stands and faces as it does unturned, so
+    /// it draws the same but for what its model space reaches. `normal` is a corner's normal there by its x.
+    #[allow(clippy::too_many_arguments)]
+    fn coat_drawn(rgba: [u8; 4], look: crate::vrm::expressions::Look, effect: Option<serde_json::Value>, rest: f32, value: f32, matcaps: Vec<crate::vrm::Image>, clearcoat_maps: Vec<crate::vrm::Image>, clearcoat_fallbacks: Vec<crate::vrm::Image>, turn: Quat, normal: fn(f32) -> Vec3) -> ([u8; 4], [u8; 4], bool) {
         let mut builder = crate::vrm::tests::Builder::new(serde_json::json!({"VRMC_vrm": {"humanoid": {"humanBones": {}}}}));
-        let position = builder.accessor("VEC3", &[-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0]);
-        let normal = builder.accessor("VEC3", &[0.0, 0.0, 1.0].repeat(8));
+        let corners = [[-1.0, 0.0], [0.0, 0.0], [0.0, 1.0], [-1.0, 1.0], [0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let position = builder.accessor("VEC3", &corners.iter().flat_map(|&[x, y]| (turn.inverse() * Vec3::new(x, y, 0.0)).to_array()).collect::<Vec<_>>());
+        let normal = builder.accessor("VEC3", &corners.iter().flat_map(|&[x, _]| (turn.inverse() * normal(x)).to_array()).collect::<Vec<_>>());
         let uv = builder.accessor("VEC2", &[[0.25, 0.25].repeat(4), [0.75, 0.25].repeat(4)].concat());
         let indices = builder.indices(&[0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]);
         builder.set("nodes", serde_json::json!([{"mesh": 0}]));
@@ -1961,18 +2018,18 @@ mod tests {
             outline: None,
             shades: Vec::new(),
             rim_tint: None,
+            clearcoat_fallbacks,
         });
         model.menu = Some(menu);
         let mut skinned = model.skinned().unwrap();
         let worlds = model.worlds(&model.rest());
-        let fit = crate::vrm::Fit::new(&model, &skinned, crate::HEIGHT);
-        let palette = skinned.palette(&worlds, fit.placement(&model, &worlds, crate::FLOOR));
+        let placement = Mat4::from_translation(Vec3::new(0.0, crate::FLOOR, 0.0)) * Mat4::from_scale(Vec3::splat(crate::HEIGHT)) * Mat4::from_quat(turn);
         let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [32, 32], crate::HEIGHT / PAGE_HEIGHT).unwrap();
         let mut appearance = renderer.appearance(&model, &skinned).unwrap();
         let eyes = [eye_projection(Vec3::new(0.0, 0.0, 0.4), 0.2, 0.2), None];
         let mut capture = |skinned: &Skinned, seconds: f64| {
             appearance.seconds = seconds;
-            appearance.update(&palette, skinned, &[]);
+            appearance.update(skinned, &worlds, placement, &[]);
             renderer.render(&appearance, eyes, Mat4::IDENTITY, 32).unwrap();
             renderer.read().unwrap()
         };
@@ -2023,7 +2080,7 @@ mod tests {
         model.images.push(crate::vrm::Image { width: 1, height: 1, rgba: rgba.to_vec() });
         model.materials[0].base_image = Some(0);
         let mut menu = crate::vrm::expressions::Expressions::parse(&serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": faces.targets})).unwrap();
-        menu.looks = Some(crate::vrm::expressions::Looks { index: Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }), materials: vec![look], decals: faces.decals, matcaps: faces.matcaps, matcap_masks: None, emission: None, clearcoat_maps: Vec::new(), outline: None, shades: faces.shades, rim_tint: faces.rim_tint });
+        menu.looks = Some(crate::vrm::expressions::Looks { index: Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }), materials: vec![look], decals: faces.decals, matcaps: faces.matcaps, matcap_masks: None, emission: None, clearcoat_maps: Vec::new(), clearcoat_fallbacks: Vec::new(), outline: None, shades: faces.shades, rim_tint: faces.rim_tint });
         model.menu = Some(menu);
         let pixels = draw(&model, &model.rest(), [32, 32], [eye_projection(Vec3::new(0.0, 0.0, 0.4), 0.2, 0.2), None], Vec3::ZERO);
         [8, 24].map(|x| pixel(&pixels, 64, x, 16))
@@ -2247,15 +2304,15 @@ mod tests {
         look.decals[0] = Some(crate::vrm::expressions::Decal { alpha: 1.0, intensity: 1.0, color_blend: DecalBlend::Replace, image: 1, hue: None });
         let index = (0..64).flat_map(|at| [(at % 8 >= 4 && at / 8 < 4) as u8, 0, 0, 255]).collect();
         let unused = crate::vrm::Image { width: 3, height: 5, rgba: vec![255; 60] };
-        menu.looks = Some(crate::vrm::expressions::Looks { index: Some(crate::vrm::Image { width: 8, height: 8, rgba: index }), materials: vec![look], decals: vec![unused, decal], matcaps: Vec::new(), matcap_masks: None, emission: None, clearcoat_maps: Vec::new(), outline: None, shades: Vec::new(), rim_tint: None });
+        menu.looks = Some(crate::vrm::expressions::Looks { index: Some(crate::vrm::Image { width: 8, height: 8, rgba: index }), materials: vec![look], decals: vec![unused, decal], matcaps: Vec::new(), matcap_masks: None, emission: None, clearcoat_maps: Vec::new(), clearcoat_fallbacks: Vec::new(), outline: None, shades: Vec::new(), rim_tint: None });
         model.menu = Some(menu);
         let skinned = model.skinned().unwrap();
         let worlds = model.worlds(&model.rest());
         let fit = crate::vrm::Fit::new(&model, &skinned, crate::HEIGHT);
-        let palette = skinned.palette(&worlds, fit.placement(&model, &worlds, crate::FLOOR));
+        let placement = fit.placement(&model, &worlds, crate::FLOOR);
         let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [64, 64], crate::HEIGHT / PAGE_HEIGHT).unwrap();
         let mut appearance = renderer.appearance(&model, &skinned).unwrap();
-        appearance.update(&palette, &skinned, &[]);
+        appearance.update(&skinned, &worlds, placement, &[]);
         renderer.render(&appearance, [eye_projection(Vec3::new(0.0, 0.0, 0.4), 0.2, 0.2), None], Mat4::IDENTITY, 64).unwrap();
         renderer.read().unwrap()
     }
@@ -2376,15 +2433,15 @@ mod tests {
     fn a_clear_coat_brightens_its_material_where_its_map_masks_it_and_follows_an_animated_offset() {
         let coated = |strength: f32| {
             let mut look = looks_test::look();
-            look.clearcoat = Some(crate::vrm::expressions::ClearCoat { strength, smoothness: 0.9, reflection: 1.0, specular: 1.0, fresnel: 1.0, specular_tint: [1.0; 3], reflection_tint: [1.0; 3], st: [1.0, 1.0, 0.0, 0.0], inverts: [false; 4], gsaa: [0.15, 0.1], map: Some(0) });
+            look.clearcoat = Some(crate::vrm::expressions::ClearCoat { strength, smoothness: 0.9, reflection: 1.0, specular: 1.0, fresnel: 1.0, specular_tint: [1.0; 3], reflection_tint: [1.0; 3], st: [1.0, 1.0, 0.0, 0.0], inverts: [false; 4], gsaa: [0.15, 0.1], fresnel_strength: None, exposure_occlusion: 0.0, map: Some(0), fallback: None, lit_fallback: false, force_fallback: () });
             look
         };
         let map = vec![crate::vrm::Image { width: 2, height: 1, rgba: vec![255, 255, 255, 255, 0, 255, 255, 255] }];
         let offset = serde_json::json!({"look": [{"node": 0, "rect": [0.0, 0.0, 1.0, 1.0], "field": "clearcoatST", "slot": 2}]});
-        let (bare, _, _) = coat_drawn([64, 64, 64, 255], coated(0.0), None, 0.0, 0.0, Vec::new(), map.clone());
+        let (bare, _, _) = coat_drawn([64, 64, 64, 255], coated(0.0), None, 0.0, 0.0, Vec::new(), map.clone(), Vec::new(), Quat::IDENTITY, |_| Vec3::Z);
         let (plain, _, _) = look_drawn([64, 64, 64, 255], looks_test::look(), None, 0.0, 0.0, Vec::new());
         assert!(bare.iter().zip(plain).all(|(&a, b)| a.abs_diff(b) <= 1), "a coat of no strength draws as no coat: {bare:?} {plain:?}");
-        let (wet, dry, right) = coat_drawn([64, 64, 64, 255], coated(1.0), Some(offset), 0.0, 0.5, Vec::new(), map);
+        let (wet, dry, right) = coat_drawn([64, 64, 64, 255], coated(1.0), Some(offset), 0.0, 0.5, Vec::new(), map, Vec::new(), Quat::IDENTITY, |_| Vec3::Z);
         assert!(wet[..3].iter().zip(&bare[..3]).all(|(&a, &b)| a > b + 8), "the coat adds its sheen where the map's mask is full: {wet:?} over {bare:?}");
         assert!(dry.iter().zip(bare).all(|(&a, b)| a.abs_diff(b) <= 1), "half the map over, its mask is empty: {dry:?}");
         assert!(right, "a texel of an uncoated material stays as it was");
@@ -2397,6 +2454,126 @@ mod tests {
             for (stage, entry) in [(naga::ShaderStage::Vertex, "vertex"), (naga::ShaderStage::Vertex, "coated_vertex"), (naga::ShaderStage::Fragment, "depth"), (naga::ShaderStage::Fragment, "fragment"), (naga::ShaderStage::Fragment, "cutout"), (naga::ShaderStage::Fragment, "coated_fragment"), (naga::ShaderStage::Fragment, "coated_cutout")] {
                 AVATAR_SHADER.spirv(stage, entry, &shading.constants()).unwrap();
             }
+        }
+    }
+
+    #[test]
+    fn a_clear_coat_reflects_its_fallback_along_the_reflection_in_model_space_at_its_roughness() {
+        use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+        type Normal = fn(f32) -> Vec3;
+        let coated = |strength: f32, smoothness: f32, gsaa: [f32; 2], fresnel_strength: Option<f32>, exposure_occlusion: f32, fallback: Option<usize>, lit_fallback: bool, lighting: crate::vrm::expressions::Lighting| {
+            let mut look = looks_test::look();
+            look.lighting = lighting;
+            look.clearcoat = Some(crate::vrm::expressions::ClearCoat { strength, smoothness, reflection: 1.0, specular: 0.0, fresnel: 0.0, fresnel_strength, exposure_occlusion, specular_tint: [1.0; 3], reflection_tint: [1.0; 3], st: [1.0, 1.0, 0.0, 0.0], inverts: [false; 4], gsaa, map: None, fallback, lit_fallback, force_fallback: () });
+            look
+        };
+        // Red tells the quarter of longitudes a direction lies in, about +X, +Z, -X and -Z in turn; green the top third
+        // of latitudes from the rest; blue the level, in no order a wrong level or mix could match.
+        const QUARTERS: [u8; 4] = [26, 51, 77, 102];
+        const TOP: u8 = 77;
+        const REST: u8 = 26;
+        const LEVELS: [u8; 7] = [0, 77, 13, 102, 26, 128, 51];
+        const ALPHA: u8 = 2;
+        let fallbacks = vec![crate::vrm::Image {
+            width: FALLBACK_WIDTH,
+            height: FALLBACK_LEVELS * FALLBACK_LEVEL_HEIGHT,
+            rgba: (0..FALLBACK_LEVELS * FALLBACK_LEVEL_HEIGHT).flat_map(|y| (0..FALLBACK_WIDTH).flat_map(move |x| {
+                let quarter = (x + FALLBACK_WIDTH / 8) % FALLBACK_WIDTH / (FALLBACK_WIDTH / 4);
+                [QUARTERS[quarter as usize], if y % FALLBACK_LEVEL_HEIGHT < FALLBACK_LEVEL_HEIGHT / 3 { TOP } else { REST }, LEVELS[(y / FALLBACK_LEVEL_HEIGHT) as usize], ALPHA]
+            })).collect(),
+        }];
+        let light = |byte: u8| byte as f32 / 255.0 * ALPHA as f32 / 255.0 * FALLBACK_RANGE;
+        // `coat_drawn` reads the pixel at (8, 16) of 32 across a 0.4 m window, from an eye 0.4 m before its centre, and
+        // the figure is HEIGHT times its model's size.
+        let place = |pixel: f32| -0.2 + (pixel + 0.5) * 0.4 / 32.0;
+        let normal_at = |normal: Normal, pixel: f32| {
+            let x = place(pixel) / crate::HEIGHT;
+            (normal(0.0) * (1.0 + x) - normal(-1.0) * x).normalize()
+        };
+        let view = (Vec3::new(0.0, 0.0, 0.4) - Vec3::new(place(8.0), -place(16.0), 0.0)).normalize();
+        const F0: f32 = 0.220916301;
+        let reflected = |quarter: usize, top: bool, smoothness: f32, gsaa: [f32; 2], normal: Normal, fresnel_strength: Option<f32>, exposure_occlusion: f32| {
+            let perceptual = 1.0 - smoothness;
+            let curvature = (normal_at(normal, 9.0) - normal_at(normal, 8.0)).length_squared();
+            let widened = (perceptual.powi(4) + (2.0 * gsaa[0] * curvature).min(gsaa[1])).clamp(0.0, 1.0).powf(0.25);
+            let rough = (widened * widened).max(0.002);
+            let nv = normal_at(normal, 8.0).dot(view).clamp(0.0, 1.0);
+            let (roughness, mirror) = match fresnel_strength {
+                None => (perceptual * (1.7 - 0.7 * perceptual), 1.0),
+                Some(strength) => {
+                    let visibility = (Vec3::new(0.987, 0.685, 0.514).length() / exposure_occlusion).clamp(0.0, 1.0);
+                    let seen = if exposure_occlusion > 0.0 { ((nv + visibility).powf((-16.0 * rough - 1.0).exp2()) - 1.0 + visibility).clamp(0.0, 1.0) } else { 1.0 };
+                    (widened, (F0 + (F0 + (1.0 - F0) * strength) * 0.5 * (1.0 - nv).powi(5)) * seen)
+                }
+            };
+            let lod = (6.0 * roughness).clamp(0.0, 6.0);
+            let (low, high) = (lod.floor() as usize, (lod.floor() as usize + 1).min(6));
+            let level = light(LEVELS[low]) + (light(LEVELS[high]) - light(LEVELS[low])) * lod.fract();
+            [light(QUARTERS[quarter]), light(if top { TOP } else { REST }), level].map(|channel| channel * mirror / (rough * rough + 1.0))
+        };
+        let lit = || crate::vrm::expressions::Lighting::Lit { ramp: None, shadow_tint: 0.0, cap: None };
+        let flat = || crate::vrm::expressions::Lighting::Flat { cap: Some(10.0), shadow: None };
+        let decode = |byte: u8| { let value = byte as f32 / 255.0; if value <= 0.04045 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) } };
+        let encode = |value: f32| { let value = value.clamp(0.0, 1.0); 255.0 * if value <= 0.0031308 { value * 12.92 } else { 1.055 * value.powf(1.0 / 2.4) - 0.055 } };
+        // The flat look's light, the key light's colour and the mean of sky and ground in avatar.wgsl.
+        let flat_light = [0.987 + 0.5 * (0.596 + 0.0064), 0.685 + 0.5 * (0.681 + 0.0048), 0.514 + 0.5 * (0.859 + 0.0106)];
+        let facing: Normal = |_| Vec3::Z;
+        // Bent 40 degrees across the left quad, so the normal changes from each pixel to the next.
+        let bent: Normal = |x| Vec3::new(0.839 * x, 0.0, 1.0).normalize();
+        // Seen at a glance, which is where the Fresnel strength shows.
+        let glanced: Normal = |_| Vec3::new(-0.906, 0.0, 0.423);
+        const OFF: [f32; 2] = [0.0, 0.0];
+        const WIDENING: [f32; 2] = [25.0, 0.1];
+        let old = |quarter, top, smoothness| reflected(quarter, top, smoothness, OFF, facing, None, 0.0);
+        let mut drawn_sheens = Vec::new();
+        // The quad faces the viewer along the placed +Z, so it reflects the model direction its turn takes there.
+        for (smoothness, gsaa, fresnel_strength, exposure_occlusion, fallback, lit_fallback, lighting, turn, normal, sheen, why) in [
+            (1.0, OFF, None, 0.0, Some(0), false, lit(), Quat::IDENTITY, facing, old(1, false, 1.0), "a smooth coat reflects model +Z at the sharpest level"),
+            (1.0, OFF, None, 0.0, Some(0), false, lit(), Quat::from_rotation_y(FRAC_PI_2), facing, old(2, false, 1.0), "a quarter turn left reflects model -X"),
+            (1.0, OFF, None, 0.0, Some(0), false, lit(), Quat::from_rotation_y(-FRAC_PI_2), facing, old(0, false, 1.0), "a quarter turn right reflects model +X, across the image's seam"),
+            (1.0, OFF, None, 0.0, Some(0), false, lit(), Quat::from_rotation_y(PI), facing, old(3, false, 1.0), "a half turn reflects model -Z"),
+            (1.0, OFF, None, 0.0, Some(0), false, lit(), Quat::from_rotation_x(FRAC_PI_4), facing, old(1, true, 1.0), "a figure tipped forward reflects what is above it"),
+            (1.0, OFF, None, 0.0, Some(0), false, lit(), Quat::from_rotation_x(-FRAC_PI_4), facing, old(1, false, 1.0), "and tipped back, what is below"),
+            (0.5, OFF, None, 0.0, Some(0), false, lit(), Quat::IDENTITY, facing, old(1, false, 0.5), "a half-smooth coat mixes the two levels about its roughness"),
+            (0.0, OFF, None, 0.0, Some(0), false, lit(), Quat::IDENTITY, facing, old(1, false, 0.0), "a rough coat reflects the blurriest level"),
+            (1.5, OFF, None, 0.0, Some(0), false, lit(), Quat::IDENTITY, facing, old(1, false, 1.5), "a smoothness past one stays on the sharpest level"),
+            (1.0, OFF, None, 0.0, None, false, lit(), Quat::IDENTITY, facing, [0.2140; 3], "a coat without a fallback reflects Unity's grey cube"),
+            (1.0, OFF, None, 0.0, None, true, flat(), Quat::IDENTITY, facing, flat_light.map(|light| 0.2140 * light), "a lit fallback takes the light the albedo is multiplied by"),
+            (1.0, WIDENING, None, 0.0, Some(0), false, lit(), Quat::IDENTITY, bent, reflected(1, false, 1.0, WIDENING, bent, None, 0.0), "a smooth coat without a Fresnel strength stays sharp over a bend"),
+            (1.0, WIDENING, Some(1.0), 0.0, Some(0), false, lit(), Quat::IDENTITY, bent, reflected(1, false, 1.0, WIDENING, bent, Some(1.0), 0.0), "with one, the bend blurs it by its widened roughness"),
+            (1.0, WIDENING, Some(1.0), 0.0, Some(0), false, lit(), Quat::IDENTITY, facing, reflected(1, false, 1.0, WIDENING, facing, Some(1.0), 0.0), "and a flat surface stays sharp"),
+            (0.5, OFF, Some(1.0), 0.0, Some(0), false, lit(), Quat::IDENTITY, facing, reflected(1, false, 0.5, OFF, facing, Some(1.0), 0.0), "its level is its roughness, not Unity's curve of it"),
+            (1.0, OFF, Some(0.0), 0.0, Some(0), false, lit(), Quat::IDENTITY, glanced, reflected(3, false, 1.0, OFF, glanced, Some(0.0), 0.0), "a glance with no Fresnel strength"),
+            (1.0, OFF, Some(1.0), 0.0, Some(0), false, lit(), Quat::IDENTITY, glanced, reflected(3, false, 1.0, OFF, glanced, Some(1.0), 0.0), "a glance at full Fresnel strength"),
+            (1.0, OFF, Some(1.0), 4.0, Some(0), false, lit(), Quat::IDENTITY, facing, reflected(1, false, 1.0, OFF, facing, Some(1.0), 4.0), "an exposure occlusion above the key light dims the reflection"),
+        ] {
+            let drawn = |strength: f32| coat_drawn([64, 64, 64, 255], coated(strength, smoothness, gsaa, fresnel_strength, exposure_occlusion, fallback, lit_fallback, lighting.clone()), None, 0.0, 0.0, Vec::new(), Vec::new(), fallbacks.clone(), turn, normal);
+            let ((bare, _, _), (wet, _, right)) = (drawn(0.0), drawn(1.0));
+            let expected: Vec<f32> = (0..3).map(|channel| encode(decode(bare[channel]) + sheen[channel])).collect();
+            assert!(wet[..3].iter().zip(&expected).all(|(&a, &b)| (a as f32 - b).abs() <= 2.0), "{why}: {wet:?} over {bare:?}, expected {expected:?}");
+            assert!(right, "a texel of an uncoated material stays as it was");
+            drawn_sheens.push(wet);
+        }
+        let apart = |a: usize, b: usize| drawn_sheens[a].iter().zip(drawn_sheens[b]).any(|(&a, b)| a.abs_diff(b) > 8);
+        assert!(apart(11, 12), "over a bend the widened roughness draws another level than the unwidened: {:?} {:?}", drawn_sheens[11], drawn_sheens[12]);
+        assert!(apart(15, 16), "the Fresnel strength shows at a glance: {:?} {:?}", drawn_sheens[15], drawn_sheens[16]);
+        assert!(apart(13, 17), "the exposure occlusion shows: {:?} {:?}", drawn_sheens[13], drawn_sheens[17]);
+    }
+
+    #[test]
+    fn a_fallback_of_another_size_is_refused_at_upload() {
+        let mut model = Model::parse(&figure(Version::One)).unwrap();
+        let mut menu = crate::vrm::expressions::Expressions::parse(&serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": []})).unwrap();
+        menu.looks = Some(crate::vrm::expressions::Looks { index: None, materials: Vec::new(), decals: Vec::new(), matcaps: Vec::new(), matcap_masks: None, emission: None, clearcoat_maps: Vec::new(), clearcoat_fallbacks: vec![crate::vrm::Image { width: 2, height: 2, rgba: vec![0; 16] }], outline: None, shades: Vec::new(), rim_tint: None });
+        model.menu = Some(menu);
+        let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [16, 16], 1.0).unwrap();
+        assert!(renderer.appearance(&model, &model.skinned().unwrap()).is_err());
+    }
+
+    #[test]
+    fn a_half_float_is_the_nearest_to_its_value() {
+        for (value, bits) in [(0.0, 0), (1.0, 0x3c00), (0.5, 0x3800), (128.0, 0x5800), (0.2140, 0x32d9), (1e-5, 168), (1e-9, 0), (1e6, 0x7c00)] {
+            assert_eq!(half(value), bits, "{value}");
         }
     }
 
@@ -2438,7 +2615,7 @@ mod tests {
             let worlds = model.worlds(&model.rest());
             let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [64, 64], crate::HEIGHT / PAGE_HEIGHT).unwrap();
             let mut appearance = renderer.appearance(&model, &skinned).unwrap();
-            appearance.update(&skinned.palette(&worlds, space.inverse() * Mat4::from_scale(Vec3::splat(0.08))), &skinned, &[]);
+            appearance.update(&skinned, &worlds, space.inverse() * Mat4::from_scale(Vec3::splat(0.08)), &[]);
             renderer.render(&appearance, [eye_projection(Vec3::new(0.05, 0.15, 0.4), 0.2, 0.2), None], space, 64).unwrap();
             renderer.read().unwrap().chunks_exact(4).map(|texel| texel[3] == 255).collect::<Vec<bool>>()
         };
@@ -2486,7 +2663,7 @@ mod tests {
         particles.step(&worlds, Mat4::IDENTITY, 0.02);
         let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [64, 64], 1.0).unwrap();
         let mut appearance = renderer.appearance(&model, &skinned).unwrap();
-        appearance.update(&skinned.palette(&worlds, Mat4::IDENTITY), &skinned, &[]);
+        appearance.update(&skinned, &worlds, Mat4::IDENTITY, &[]);
         appearance.place_particles(&mut particles, Mat4::IDENTITY);
         renderer.render(&appearance, [eye_projection(Vec3::new(0.0, 0.0, 3.0), 1.5, 1.5), None], Mat4::IDENTITY, 64).unwrap();
         let pixels = renderer.read().unwrap();
@@ -2529,7 +2706,7 @@ mod tests {
             let worlds = model.worlds(&model.rest());
             let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [64, 64], crate::HEIGHT / PAGE_HEIGHT).unwrap();
             let mut appearance = renderer.appearance(&model, &skinned).unwrap();
-            appearance.update(&skinned.palette(&worlds, Mat4::from_scale(Vec3::splat(0.08))), &skinned, &[]);
+            appearance.update(&skinned, &worlds, Mat4::from_scale(Vec3::splat(0.08)), &[]);
             renderer.render(&appearance, [eye_projection(Vec3::new(0.05, 0.15, 0.4), 0.2, 0.2), None], Mat4::IDENTITY, 64).unwrap();
             renderer.read().unwrap().chunks_exact(4).map(|texel| [texel[0], texel[1], texel[2], texel[3]]).collect::<Vec<[u8; 4]>>()
         };
@@ -2556,7 +2733,7 @@ mod tests {
             let worlds = model.worlds(&model.rest());
             let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [32, 32], crate::HEIGHT / PAGE_HEIGHT).unwrap();
             let mut appearance = renderer.appearance(&model, &skinned).unwrap();
-            appearance.update(&skinned.palette(&worlds, Mat4::from_scale(Vec3::splat(0.08))), &skinned, &[]);
+            appearance.update(&skinned, &worlds, Mat4::from_scale(Vec3::splat(0.08)), &[]);
             renderer.render(&appearance, [eye_projection(Vec3::new(0.0, 0.0, 0.4), 0.2, 0.2), None], Mat4::IDENTITY, 32).unwrap();
             renderer.read().unwrap().chunks_exact(4).filter(|texel| texel[3] != 0).count()
         };
@@ -2629,7 +2806,7 @@ mod tests {
             let worlds = model.worlds(&model.rest());
             let loaded = renderer.appearance(model, &skinned).unwrap();
             let shown = appearance.insert(loaded);
-            shown.update(&skinned.palette(&worlds, fit.placement(model, &worlds, crate::FLOOR)), &skinned, &[]);
+            shown.update(&skinned, &worlds, fit.placement(model, &worlds, crate::FLOOR), &[]);
             renderer.render(shown, eyes, Mat4::IDENTITY, 32).unwrap();
             pixel(&renderer.read().unwrap(), 64, 16, 16)
         };

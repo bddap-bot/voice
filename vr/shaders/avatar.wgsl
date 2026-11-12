@@ -6,6 +6,8 @@ struct Draw {
     outline_scale: f32,
     focal: f32,
     seconds: f32,
+    // The rotation, a quaternion, from the space the figure is placed in back to its model space.
+    model: vec4<f32>,
 }
 
 struct Material {
@@ -81,6 +83,11 @@ struct ClearCoat {
     map: i32,
     gsaa: vec2<f32>,
     on: u32,
+    fallback: i32,
+    lit_fallback: u32,
+    fresnel_strength: f32,
+    exposure_occlusion: f32,
+    has_fresnel_strength: u32,
 }
 struct Look {
     decal: vec4<f32>,
@@ -136,6 +143,7 @@ struct Look {
 @group(0) @binding(15) var edge_sampler: sampler;
 @group(0) @binding(17) var clearcoat_maps: texture_2d_array<f32>;
 @group(0) @binding(18) var toon_layers: texture_2d_array<f32>;
+@group(0) @binding(19) var clearcoat_fallbacks: texture_2d_array<f32>;
 
 // Rows of Surface.look, in the order of expressions::Field.
 const DECAL = 0u;
@@ -507,8 +515,31 @@ fn pow5(x: f32) -> f32 {
     return square * square * x;
 }
 
-// Poiyomi's clear coat: GGX's highlight of the key light and a reflection of the sky and ground, blurred toward their mean
-// as it roughens in place of Unity's reflection probe.
+// expressions::FALLBACK_LEVELS and FALLBACK_LEVEL_HEIGHT.
+const FALLBACK_LEVELS = 7.0;
+const FALLBACK_LEVEL_HEIGHT = 128.0;
+// Unity's default cube, which a coat without a fallback reflects: sRGB 0.5.
+const DEFAULT_CUBE = vec3<f32>(0.2140);
+const PI = 3.14159265359;
+
+// Rows are clamped half a texel inside the level so filtering never reads its neighbour.
+fn fallback_level(layer: i32, u: f32, v: f32, level: f32) -> vec3<f32> {
+    let row = level * FALLBACK_LEVEL_HEIGHT + clamp(v * FALLBACK_LEVEL_HEIGHT, 0.5, FALLBACK_LEVEL_HEIGHT - 0.5);
+    return textureSampleLevel(clearcoat_fallbacks, texture_sampler, vec2<f32>(u, row / (FALLBACK_LEVELS * FALLBACK_LEVEL_HEIGHT)), layer, 0.0).rgb;
+}
+
+fn fallback(layer: i32, direction: vec3<f32>, roughness: f32) -> vec3<f32> {
+    if layer < 0 { return DEFAULT_CUBE; }
+    let lod = clamp(roughness * (FALLBACK_LEVELS - 1.0), 0.0, FALLBACK_LEVELS - 1.0);
+    // Straight up or down every longitude is the same texel, and atan2 of two zeros is none of them.
+    let u = select(0.5 - atan2(direction.z, -direction.x) / (2.0 * PI), 0.0, abs(direction.y) > 0.999999);
+    let v = acos(clamp(direction.y, -1.0, 1.0)) / PI;
+    let low = floor(lod);
+    let high = min(low + 1.0, FALLBACK_LEVELS - 1.0);
+    return mix(fallback_level(layer, u, v, low), fallback_level(layer, u, v, high), lod - low);
+}
+
+// Poiyomi's clear coat in a scene without a reflection probe, which the overlay's always is.
 fn coat(at: u32, look: u32, uv: vec2<f32>, gradient: mat2x2<f32>, normal: vec3<f32>, curvature: f32, view: vec3<f32>) -> vec3<f32> {
     let layer = looks[look].coat;
     if layer.on == 0u { return vec3<f32>(0.0); }
@@ -538,10 +569,26 @@ fn coat(at: u32, look: u32, uv: vec2<f32>, gradient: mat2x2<f32>, normal: vec3<f
     }
     let fresnel = DIELECTRIC + (1.0 - DIELECTRIC) * pow5(1.0 - lh);
     let highlight = KEY_COLOR * max(0.0, ggx * max(1e-5, nl)) * fresnel * levels.w * layer.specular_tint * nl;
-    let reflected = reflect(-view, normal);
-    let environment = mix(mix(GROUND, SKY, 0.5 * reflected.y + 0.5), 0.5 * (SKY + GROUND), perceptual * (1.7 - 0.7 * perceptual));
-    let glancing = mix(DIELECTRIC, saturate(levels.y + 0.04), pow5(1.0 - nv));
-    let reflection = environment / (rough * rough + 1.0) * mix(1.0, glancing, layer.fresnel) * layer.reflection_tint * levels.z;
+    let placed = reflect(-view, normal);
+    let reflected = placed + 2.0 * cross(draw.model.xyz, cross(draw.model.xyz, placed) + draw.model.w * placed);
+    var roughness = perceptual * (1.7 - 0.7 * perceptual);
+    var mirror = mix(1.0, mix(DIELECTRIC, saturate(levels.y + 0.04), pow5(1.0 - nv)), layer.fresnel);
+    // Poiyomi 9.2, whose reflection blurs by the widened roughness and so softens over a curved surface.
+    if layer.has_fresnel_strength != 0u {
+        roughness = widened;
+        mirror = mix(DIELECTRIC, DIELECTRIC + mix(DIELECTRIC, 1.0, layer.fresnel_strength) * 0.5, pow5(1.0 - nv));
+        if layer.exposure_occlusion > 0.0 {
+            let visibility = saturate(length(KEY_COLOR) / layer.exposure_occlusion);
+            mirror *= saturate(pow(nv + visibility, exp2(-16.0 * rough - 1.0)) - 1.0 + visibility);
+        }
+    }
+    var environment = fallback(layer.fallback, reflected, roughness);
+    if layer.lit_fallback != 0u {
+        // Poiyomi's finalLighting: the light the albedo is multiplied by, here that of a white albedo shaded by the material's shade colour.
+        let material = materials[draw.material];
+        environment *= lighting(material, look, normal, toon(material, normal, KEY_DIRECTION), vec3<f32>(1.0), material.shade);
+    }
+    let reflection = environment / (rough * rough + 1.0) * mirror * layer.reflection_tint * levels.z;
     return saturate((highlight + reflection) * levels.x);
 }
 
@@ -610,6 +657,31 @@ fn facing(input: Varying, front: bool) -> Facing {
     return Facing(look, normal, normalize(draw.camera - input.world), front);
 }
 
+// A flat material takes its main light's colour whole, as a Lambert surface square to it would, and the ambient
+// light, whichever way it faces: Unity's base pass, which lights it by the one main directional light.
+fn flat_light(look: u32) -> vec3<f32> {
+    return min(KEY_COLOR + 0.5 * (SKY + GROUND), vec3<f32>(looks[look].light_cap));
+}
+
+fn lighting(material: Material, look: u32, normal: vec3<f32>, lit: f32, albedo: vec3<f32>, shade: vec3<f32>) -> vec3<f32> {
+    if flat_reached && looks[look].flat != 0u {
+        return flat_light(look) * albedo;
+    }
+    if ramp_reached && looks[look].ramped != 0u {
+        // Toon Standard's base pass: its main light through its ramp at the half-Lambert term, the shade lent the
+        // albedo by its shadow tint, and the ambient, capped where it limits brightness.
+        let x = clamp(dot(normal, KEY_DIRECTION) * 0.5 + 0.5, 0.0, 1.0) * f32(RAMP - 1u);
+        let i = min(u32(x), RAMP - 2u);
+        let j = i + 1u;
+        let ramp = mix(looks[look].ramp[i / 4u][i % 4u], looks[look].ramp[j / 4u][j % 4u], x - f32(i));
+        let level = ramp + (1.0 - ramp) * looks[look].shadow_tint * albedo;
+        return min(level * KEY_COLOR + 0.5 * (SKY + GROUND), vec3<f32>(looks[look].light_cap)) * albedo;
+    }
+    let direct = mix(shade, albedo, lit) * KEY_COLOR + mix(shade, albedo, toon(material, normal, RIM_DIRECTION)) * RIM_COLOR;
+    let hemisphere = mix(GROUND, SKY, 0.5 * normal.y + 0.5);
+    return direct + mix(hemisphere, 0.5 * (SKY + GROUND), material.equalization) * albedo;
+}
+
 fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
     // Taken before any branch on the look, which differs within a quad along a look's edge.
     let gradient = mat2x2<f32>(dpdx(input.uv), dpdy(input.uv));
@@ -659,26 +731,8 @@ fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
     }
     let glow = matcaps(&albedo, &shade, material.shade, input.surface, look, input.uv, gradient, normal, view, light_mask);
     let base = vec4<f32>(albedo, sampled.a);
-    var light: vec3<f32>;
-    // A flat material takes its main light's colour whole, as a Lambert surface square to it would, and the ambient
-    // light, whichever way it faces: Unity's base pass, which lights it by the one main directional light.
-    let flat_light = min(KEY_COLOR + 0.5 * (SKY + GROUND), vec3<f32>(looks[look].light_cap));
-    if flat_reached && looks[look].flat != 0u {
-        light = flat_light * base.rgb;
-    } else if ramp_reached && looks[look].ramped != 0u {
-        // Toon Standard's base pass: its main light through its ramp at the half-Lambert term, the shade lent the
-        // albedo by its shadow tint, and the ambient, capped where it limits brightness.
-        let x = clamp(dot(normal, KEY_DIRECTION) * 0.5 + 0.5, 0.0, 1.0) * f32(RAMP - 1u);
-        let i = min(u32(x), RAMP - 2u);
-        let j = i + 1u;
-        let ramp = mix(looks[look].ramp[i / 4u][i % 4u], looks[look].ramp[j / 4u][j % 4u], x - f32(i));
-        let level = ramp + (1.0 - ramp) * looks[look].shadow_tint * base.rgb;
-        light = min(level * KEY_COLOR + 0.5 * (SKY + GROUND), vec3<f32>(looks[look].light_cap)) * base.rgb;
-    } else {
-        let direct = mix(shade, base.rgb, lit) * KEY_COLOR + mix(shade, base.rgb, toon(material, normal, RIM_DIRECTION)) * RIM_COLOR;
-        let hemisphere = mix(GROUND, SKY, 0.5 * normal.y + 0.5);
-        light = direct + mix(hemisphere, 0.5 * (SKY + GROUND), material.equalization) * base.rgb;
-    }
+    let flat_light = flat_light(look);
+    let light = lighting(material, look, normal, lit, base.rgb, shade);
     var rim_light = vec3<f32>(0.0);
     if rim_reached {
         let rim = fresnel_band(turned, turned_width, looks[look].rim_power, looks[look].rim_border, looks[look].rim_blur) * mix(1.0, shadowmix, looks[look].rim_shadow_mask) * looks[look].rim_strength * f32(at.front || looks[look].rim_backface != 0u);

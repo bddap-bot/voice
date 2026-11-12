@@ -352,8 +352,7 @@ impl Puppet {
     }
 
     fn draw(&mut self, posed: &[glam::Mat4], to_window: glam::Mat4) {
-        let palette = self.skinned.palette(posed, to_window);
-        self.drawn.update(&palette, &self.skinned, &self.changed);
+        self.drawn.update(&self.skinned, posed, to_window, &self.changed);
         self.drawn.place_particles(&mut self.particles, to_window);
     }
 }
@@ -1112,7 +1111,7 @@ mod tests {
             renderer.outline_scale = HEIGHT * size / render::PAGE_HEIGHT;
             let mut drawn = renderer.appearance(&model, &skinned).unwrap();
             let local = window.inverse();
-            drawn.update(&skinned.palette(&worlds, local.mat4() * body), &skinned, &changed);
+            drawn.update(&skinned, &worlds, local.mat4() * body, &changed);
             renderer.render(&drawn, [eye_projection(local.apply(eye).into(), half, half), None], glam::Mat4::IDENTITY, texels).unwrap();
             left_eye(&renderer.read().unwrap(), texels)
         };

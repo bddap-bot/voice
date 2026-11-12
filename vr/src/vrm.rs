@@ -2395,10 +2395,12 @@ pub mod tests {
         let mut builder = Builder::new(serde_json::json!({ "VRMC_vrm": { "humanoid": { "humanBones": {} } } }));
         let index = builder.webp(10, 1, &(0..10).flat_map(|x| [(x < 5) as u8, 0, 0, 255]).collect::<Vec<u8>>());
         let map = builder.webp(2, 2, &checker());
+        let fallback = builder.webp(expressions::FALLBACK_WIDTH, expressions::FALLBACK_LEVELS * expressions::FALLBACK_LEVEL_HEIGHT, &fallback_rgbm());
         let mut looks = serde_json::json!({
             "index": index,
             "materials": [{"rect": [0, 0, 0.5, 1], "decals": [null, null, null, null], "matcaps": [null, null, null, null], "lighting": {"model": "lit"}, "clearcoat": coat}, {"rect": [0.5, 0, 1, 1], "decals": [null, null, null, null], "matcaps": [null, null, null, null], "lighting": {"model": "lit"}}],
             "clearcoatMaps": [map],
+            "clearcoatFallbacks": [fallback],
         });
         looks.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
         builder.json["extensions"][expressions::EXTENSION] = serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": [
@@ -2418,16 +2420,23 @@ pub mod tests {
     }
 
     fn coat() -> Value {
-        serde_json::json!({"strength": 0.8, "smoothness": 0.7, "reflection": 0.6, "specular": 0.5, "fresnel": 1, "specularTint": [1, 0.5, 0.25], "reflectionTint": [0.25, 0.5, 1], "st": [2, 3, 0.25, 0.5], "inverts": [false, true, false, false], "gsaa": [0.15, 0.1], "map": 0})
+        serde_json::json!({"strength": 0.8, "smoothness": 0.7, "reflection": 0.6, "specular": 0.5, "fresnel": 1, "specularTint": [1, 0.5, 0.25], "reflectionTint": [0.25, 0.5, 1], "st": [2, 3, 0.25, 0.5], "inverts": [false, true, false, false], "gsaa": [0.15, 0.1], "fresnelStrength": 0.75, "exposureOcclusion": 0.5, "map": 0, "fallback": 0, "litFallback": true, "forceFallback": false})
+    }
+
+    /// A fallback whose every texel differs, its alpha well short of opaque as an RGBM texel's is.
+    fn fallback_rgbm() -> Vec<u8> {
+        (0..expressions::FALLBACK_LEVELS * expressions::FALLBACK_LEVEL_HEIGHT).flat_map(|y| (0..expressions::FALLBACK_WIDTH).flat_map(move |x| [x as u8, y as u8, 7, 2])).collect()
     }
 
     #[test]
     fn a_clear_coat_reads_with_its_map_and_second_uv_and_only_its_draws_are_coated() {
         let model = coated(coat(), serde_json::json!({}), &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0]).unwrap();
         let looks = model.menu.as_ref().unwrap().looks.as_ref().unwrap();
-        assert_eq!(looks.materials[0].clearcoat, Some(expressions::ClearCoat { strength: 0.8, smoothness: 0.7, reflection: 0.6, specular: 0.5, fresnel: 1.0, specular_tint: [1.0, 0.5, 0.25], reflection_tint: [0.25, 0.5, 1.0], st: [2.0, 3.0, 0.25, 0.5], inverts: [false, true, false, false], gsaa: [0.15, 0.1], map: Some(0) }));
+        assert_eq!(looks.materials[0].clearcoat, Some(expressions::ClearCoat { strength: 0.8, smoothness: 0.7, reflection: 0.6, specular: 0.5, fresnel: 1.0, specular_tint: [1.0, 0.5, 0.25], reflection_tint: [0.25, 0.5, 1.0], st: [2.0, 3.0, 0.25, 0.5], inverts: [false, true, false, false], gsaa: [0.15, 0.1], fresnel_strength: Some(0.75), exposure_occlusion: 0.5, map: Some(0), fallback: Some(0), lit_fallback: true, force_fallback: () }));
         assert_eq!(looks.materials[1].clearcoat, None, "a look without the key has no coat");
         assert_eq!((looks.clearcoat_maps[0].width, looks.clearcoat_maps[0].height, &looks.clearcoat_maps[0].rgba), (2, 2, &checker()), "the map decodes to its packed levels");
+        assert_eq!((looks.clearcoat_fallbacks[0].width, looks.clearcoat_fallbacks[0].height), (256, 896));
+        assert!(looks.clearcoat_fallbacks[0].rgba == fallback_rgbm(), "the fallback keeps its RGBM texels, colour under a transparent alpha included");
         let skinned = model.skinned().unwrap();
         let draws: Vec<(usize, bool)> = skinned.draws.iter().map(|draw| (draw.material, draw.features.coat)).collect();
         assert_eq!(draws, vec![(0, true), (1, false)], "only the draw over the coated cell pays for the coat");
@@ -2436,6 +2445,13 @@ pub mod tests {
         assert_eq!(mapless.menu.as_ref().unwrap().looks.as_ref().unwrap().materials[0].clearcoat.as_ref().unwrap().map, None);
         let past = coated(serde_json::json!(coat().as_object().unwrap().clone().into_iter().map(|(key, value)| if key == "map" { (key, 1.into()) } else { (key, value) }).collect::<serde_json::Map<_, _>>()), serde_json::json!({}), &[0.0; 6]).unwrap();
         assert_eq!(past.menu.as_ref().unwrap().looks.as_ref().unwrap().materials[0].clearcoat.as_ref().unwrap().map, None, "a map past clearcoatMaps reads as none");
+        let with = |key: &str, value: Value| { let mut coat = coat(); coat[key] = value; coated(coat, serde_json::json!({}), &[0.0; 6]).unwrap().menu.unwrap().looks.unwrap().materials[0].clearcoat.clone().unwrap() };
+        assert_eq!(with("fallback", (-1).into()).fallback, None, "a fallback of -1 reflects Unity's default cube");
+        assert_eq!(with("fallback", 1.into()).fallback, None, "a fallback past clearcoatFallbacks reads as none");
+        assert!(!with("litFallback", false.into()).lit_fallback);
+        with("forceFallback", true.into());
+        assert_eq!(with("fresnelStrength", Value::Null).fresnel_strength, None, "a null Fresnel strength is a shader before it had one");
+        assert_eq!(with("exposureOcclusion", 0.into()).exposure_occlusion, 0.0);
         assert!(coated(Value::Null, serde_json::json!({}), &[0.0; 6]).unwrap().skinned().unwrap().draws.iter().all(|draw| !draw.features.coat), "a null coat is none");
     }
 
@@ -2463,9 +2479,24 @@ pub mod tests {
             (with("st", serde_json::json!([1, 1, 0])), serde_json::json!({}), "an st of three"),
             (with("strength", "wet".into()), serde_json::json!({}), "a strength that is no number"),
             (coat(), serde_json::json!({"clearcoatMaps": [7]}), "a map image the file lacks"),
+            (with("fallback", (-2).into()), serde_json::json!({}), "a fallback below -1"),
+            (with("litFallback", 1.into()), serde_json::json!({}), "a litFallback that is no bool"),
+            (with("forceFallback", 1.into()), serde_json::json!({}), "a forceFallback that is no bool"),
+            (with("fresnelStrength", true.into()), serde_json::json!({}), "a fresnelStrength that is neither null nor a number"),
+            (with("fresnelStrength", "strong".into()), serde_json::json!({}), "a fresnelStrength in words"),
+            (with("exposureOcclusion", Value::Null), serde_json::json!({}), "a null exposureOcclusion"),
+            (with("exposureOcclusion", serde_json::json!([0])), serde_json::json!({}), "an exposureOcclusion in a list"),
+            (coat(), serde_json::json!({"clearcoatFallbacks": [7]}), "a fallback image the file lacks"),
+            (coat(), serde_json::json!({"clearcoatFallbacks": [1]}), "a fallback image of another size"),
         ] {
             assert!(coated(coat, extra, &[0.0; 6]).is_err(), "{why} is refused");
         }
+        for key in ["fallback", "litFallback", "forceFallback", "fresnelStrength", "exposureOcclusion"] {
+            let mut coat = coat();
+            coat.as_object_mut().unwrap().remove(key);
+            assert!(coated(coat, serde_json::json!({}), &[0.0; 6]).is_err(), "a coat without {key} is refused");
+        }
+        assert!(coated(with("fallback", (-2).into()), serde_json::json!({}), &[0.0; 6]).err().is_some_and(|error| error.contains("a clear coat's fallback is -1 or a place in clearcoatFallbacks")), "the refusal names its key");
         assert!(coated(coat(), serde_json::json!({}), &[0.0; 4]).is_err(), "a second UV of another length is refused");
     }
 

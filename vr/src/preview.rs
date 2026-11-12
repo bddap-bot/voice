@@ -63,9 +63,9 @@ fn render(renderer: &mut Renderer, model: &Model) -> Result<Vec<u8>, String> {
     let pose = model.pose(&model.standing());
     let changed = skinned.morph(&pose.weights);
     let worlds = model.worlds(&pose);
-    let palette = skinned.palette(&worlds, Mat4::from_translation(Vec3::new(0.0, -CENTRE, 0.0)) * fit.placement(model, &worlds, 0.0));
+    let placement = Mat4::from_translation(Vec3::new(0.0, -CENTRE, 0.0)) * fit.placement(model, &worlds, 0.0);
     let mut appearance = renderer.appearance(model, &skinned)?;
-    appearance.update(&palette, &skinned, &changed);
+    appearance.update(&skinned, &worlds, placement, &changed);
     renderer.render(&appearance, [eye_projection(EYE, WINDOW / 2.0, WINDOW / 2.0), None], glam::Mat4::IDENTITY, renderer.eye[0])?;
     Ok(downsample(&renderer.read()?, renderer.eye[0] * 2))
 }

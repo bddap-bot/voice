@@ -441,7 +441,7 @@ impl<S: Surface> Object<S> {
         let quad = facing(center, view.head.t);
         let local = quad.inverse();
         drawn.placed = Mat4::from_translation(center.into()) * turned;
-        drawn.appearance.update(&drawn.skinned.palette(&drawn.parts.spread(&drawn.worlds, self.handling.spread), local.mat4() * drawn.placed), &drawn.skinned, &[]);
+        drawn.appearance.update(&drawn.skinned, &drawn.parts.spread(&drawn.worlds, self.handling.spread), local.mat4() * drawn.placed, &[]);
         let seen = view.eyes.map(|eye| local.apply(view.head.then(&eye).t));
         let texels = self.renderer.density.settle(self.renderer.texels(QUAD, seen[0][2].min(seen[1][2])) as f32);
         let part = texels as f32 / self.renderer.eye[0] as f32;

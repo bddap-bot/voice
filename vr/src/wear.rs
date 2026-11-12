@@ -128,9 +128,7 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
                 }
                 clipped += kept.is_some() as usize;
             }
-            if let Some(wait) = (started + FRAME).checked_duration_since(Instant::now()) {
-                std::thread::sleep(wait);
-            }
+            paced(started);
             Ok(posed)
         };
         let frames = |span: Duration| (span.as_secs_f64() / FRAME.as_secs_f64()) as usize;
@@ -258,7 +256,7 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
             frame(&mut puppet, &mut pointing, HELD, None, speaking(at), (at == frames(POINT_PICTURE)).then(|| pictures.join("point.png")).as_deref())?;
         }
         drop(frame);
-        let held_gpu = gpu_before.zip(gpu_time()).map(|(before, after)| (after - before) as f64 / 1e6 / work.len() as f64);
+        let gpu = shown_ms(per_frame(gpu_before, work.len()));
         stand_grounded(&mut puppet, &mut renderer, GROUNDED[0], GROUNDED_SETTLE, None)?;
         let mut grounded = Vec::new();
         for distance in GROUNDED {
@@ -267,7 +265,6 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
         write_motion(motion, clipped, &pictures.join("spring-motion.json"))?;
         write_motion(constraints, clipped, &pictures.join("constraint-motion.json"))?;
         let pointed = pointing.hand().map_or("no reach".to_owned(), |hand| format!("{hand:?} hand"));
-        let gpu = held_gpu.map_or("not counted".to_owned(), |ms| format!("{ms:.2} ms"));
         let measured: Vec<f64> = work.iter().skip(45).map(|time| time.as_secs_f64() * 1e3).collect();
         let mut sorted = measured.clone();
         sorted.sort_by(f64::total_cmp);
@@ -289,7 +286,7 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// The puppet standing full size on the floor `distance` metres ahead of the wearer, drawn as the host draws it there for `span`; with a `path`, the GPU time per frame is measured and the last frame's picture written there, and the window's texels per eye against the display's need said.
+/// The puppet standing full size on the floor `distance` metres ahead of the wearer, drawn as the host draws it there for `span`; with a `path`, its picture written there and its texels, GPU time and work per frame said, beside the same window's drawn empty.
 fn stand_grounded(puppet: &mut crate::Puppet, renderer: &mut Renderer, distance: f32, span: Duration, path: Option<&Path>) -> Result<String, String> {
     let full = puppet.full;
     let stand = HELD;
@@ -300,8 +297,11 @@ fn stand_grounded(puppet: &mut crate::Puppet, renderer: &mut Renderer, distance:
     renderer.outline_scale = HEIGHT * full / PAGE_HEIGHT;
     let before = gpu_time();
     let mut shown = (0, 0);
+    let mut work = Duration::ZERO;
+    let mut last = None;
     for _ in 0..frames {
-        let (posed, body, _) = puppet.step(FRAME.as_secs_f32(), |_| stand, full, head.t, &[], 0.0, &mut Pointing::default(), Instant::now(), |_| None);
+        let started = Instant::now();
+        let (posed, body, _) = puppet.step(FRAME.as_secs_f32(), |_| stand, full, head.t, &[], 0.0, &mut Pointing::default(), started, |_| None);
         let (quad, half) = grown_window(&puppet.skinned, &puppet.drawn.hidden, &posed, body, &head, &eyes, GROUNDED_VIEW);
         let local = quad.inverse();
         let figure = facing(stand.apply([0.0, -FLOOR * full, 0.0]), head.t);
@@ -310,16 +310,44 @@ fn stand_grounded(puppet: &mut crate::Puppet, renderer: &mut Renderer, distance:
         let seen = eyes.map(|eye| local.apply(eye));
         let depth = seen[0][2].min(seen[1][2]);
         let texels = renderer.density.settle(renderer.texels(2.0 * half, depth) as f32);
-        renderer.render(&puppet.drawn, seen.map(|eye| eye_projection(eye.into(), half, half)), to_window, texels)?;
+        last = Some(renderer.render(&puppet.drawn, seen.map(|eye| eye_projection(eye.into(), half, half)), to_window, texels)?);
+        work += started.elapsed();
         shown = (texels, renderer.texels(2.0 * half, depth));
+        paced(started);
     }
-    let gpu = before.zip(gpu_time()).map_or("not counted".to_owned(), |(before, after)| format!("{:.2} ms", (after - before) as f64 / 1e6 / frames as f64));
+    last.take().map(|drawing| drawing.drawn()).transpose()?;
+    let gpu = per_frame(before, frames);
     renderer.outline_scale = held_outline;
     let (texels, needed) = shown;
     let Some(path) = path else { return Ok(String::new()) };
     let window = eye(&renderer.read()?, texels);
     image::imageops::resize(&window, needed, needed, image::imageops::FilterType::Triangle).save(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    Ok(format!("grounded at {distance} m: {texels} texels per eye for the display's {needed}, GPU {gpu} per frame"))
+    let (empty_before, mut empty_work) = (gpu_time(), Duration::ZERO);
+    for _ in 0..frames {
+        let started = Instant::now();
+        last = Some(renderer.render(&puppet.drawn, [None, None], glam::Mat4::IDENTITY, texels)?);
+        empty_work += started.elapsed();
+        paced(started);
+    }
+    last.take().map(|drawing| drawing.drawn()).transpose()?;
+    let ms = |work: Duration| work.as_secs_f64() * 1e3 / frames as f64;
+    let bound = if gpu.is_some_and(|gpu| gpu > FRAME.as_secs_f64() * 1e3) { " (GPU-bound, so the work waits on it)" } else { "" };
+    Ok(format!("grounded at {distance} m: {texels} texels per eye for the display's {needed}, GPU {}, work {:.2} ms{bound} per frame; the empty window GPU {}, work {:.2} ms per frame", shown_ms(gpu), ms(work), shown_ms(per_frame(empty_before, frames)), ms(empty_work)))
+}
+
+fn paced(started: Instant) {
+    if let Some(wait) = (started + FRAME).checked_duration_since(Instant::now()) {
+        std::thread::sleep(wait);
+    }
+}
+
+/// GPU milliseconds per frame since `before`, a `gpu_time` reading.
+fn per_frame(before: Option<u64>, frames: usize) -> Option<f64> {
+    before.zip(gpu_time()).map(|(before, after)| (after - before) as f64 / 1e6 / frames as f64)
+}
+
+fn shown_ms(ms: Option<f64>) -> String {
+    ms.map_or("not counted".to_owned(), |ms| format!("{ms:.2} ms"))
 }
 
 /// Where a probe of the fingertip toward the puppet is: coming nearer by the distance so far, waiting a little short of touching, pressing on past the first touch, dragging across, drawing away, and its hand gone while what it moved settles.

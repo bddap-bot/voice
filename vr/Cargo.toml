@@ -35,9 +35,8 @@ opentelemetry-otlp = { version = "0.33", default-features = false, features = ["
 opentelemetry-appender-tracing = "0.33"
 tracing-opentelemetry = "0.34"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+naga = { version = "26", features = ["wgsl-in", "spv-out"] }
 
 [dev-dependencies]
 wat = "1"
 
-[build-dependencies]
-naga = { version = "26", features = ["wgsl-in", "spv-out"] }

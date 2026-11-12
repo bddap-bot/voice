@@ -311,9 +311,22 @@ fn value(at: u32, row: u32, slot: u32, rest: f32) -> f32 {
     return select(rest, surfaces[at].look[row][slot], ((surfaces[at].animated[bit / 32u] >> (bit % 32u)) & 1u) != 0u);
 }
 
-// How many pages a pipeline samples: build.rs compiles one fragment shader per count, since every sampled page costs the
-// driver's compiler whether a figure fills it or not.
+// How many pages a pipeline samples, since every sampled page costs the driver's compiler whether a figure fills it or not.
 override decal_pages_used: u32;
+
+// What the looks a pipeline's draws reach draw (vrm::Features): the code of every feature none of them draws folds away, and
+// with it the registers it would hold, which bound how many pixels the GPU shades at once.
+override decal_slots: u32;
+override matcap_slots: u32;
+override shadow_reached: bool;
+override second_shadow_reached: bool;
+override rim_reached: bool;
+override emission_reached: bool;
+override flat_reached: bool;
+override ramp_reached: bool;
+override untinted_reached: bool;
+// An outline hull whose colour takes nothing from the surface's shading.
+override outline_unlit: bool;
 
 // Pages are indexed by constants alone: indexing them by a per-texel value needs a device feature the overlay does not ask for.
 fn decal(page: i32, layer: u32, uv: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>) -> vec4<f32> {
@@ -340,6 +353,7 @@ fn decal_samples(at: u32, look: u32, uv: vec2<f32>) -> array<vec4<f32>, 4> {
     let dx = dpdx(uv) / size;
     let dy = dpdy(uv) / size;
     for (var slot = 0u; slot < 4u; slot++) {
+        if (decal_slots & (1u << slot)) == 0u { continue; }
         if value(at, DECAL, slot, looks[look].decal[slot]) * value(at, DECAL_INTENSITY, slot, looks[look].intensity[slot]) == 0.0 { continue; }
         samples[slot] = decal(looks[look].page[slot], looks[look].layer[slot], local, dx, dy);
     }
@@ -368,6 +382,7 @@ fn decal_blend(base: vec3<f32>, laid: vec3<f32>, tint: vec3<f32>, mode: u32) -> 
 fn decals(color: vec3<f32>, tint: vec3<f32>, at: u32, look: u32, samples: array<vec4<f32>, 4>) -> vec3<f32> {
     var result = color;
     for (var slot = 0u; slot < 4u; slot++) {
+        if (decal_slots & (1u << slot)) == 0u { continue; }
         let layer = samples[slot];
         let turn = looks[look].decal_hue[slot];
         let colour = hue(layer.rgb, vec4<f32>(value(at, DECAL_HUE, slot, turn.x), turn.yzw));
@@ -382,12 +397,13 @@ fn decals(color: vec3<f32>, tint: vec3<f32>, at: u32, look: u32, samples: array<
 // they add to the light.
 fn matcaps(base: ptr<function, vec3<f32>>, shade: ptr<function, vec3<f32>>, tint: vec3<f32>, at: u32, look: u32, uv: vec2<f32>, gradient: mat2x2<f32>, normal: vec3<f32>, view: vec3<f32>, lit: f32) -> vec3<f32> {
     var glow = vec3<f32>(0.0);
-    if (looks[look].matcaps[0].on | looks[look].matcaps[1].on | looks[look].matcaps[2].on | looks[look].matcaps[3].on) == 0u { return glow; }
+    if matcap_slots == 0u || (looks[look].matcaps[0].on | looks[look].matcaps[1].on | looks[look].matcaps[2].on | looks[look].matcaps[3].on) == 0u { return glow; }
     let masks = textureSampleGrad(matcap_masks, texture_sampler, uv, gradient[0], gradient[1]);
     let up = normalize(vec3<f32>(0.0, 1.0, 0.0) - view * dot(view, vec3<f32>(0.0, 1.0, 0.0)));
     let right = normalize(cross(up, view));
     let reflected = reflect(-view, normal);
     for (var slot = 0u; slot < 4u; slot++) {
+        if (matcap_slots & (1u << slot)) == 0u { continue; }
         let matcap = looks[look].matcaps[slot];
         if matcap.on == 0u { continue; }
         let replace_at = value(at, MATCAP_REPLACE, slot, matcap.replace);
@@ -446,7 +462,7 @@ fn theme(at: u32, look: u32, slot: u32) -> vec3<f32> {
 // VRChat Toon Standard's emission, turned by its hue shift under the hue mask, or Poiyomi's in its theme colour.
 fn emission(at: u32, look: u32, uv: vec2<f32>, gradient: mat2x2<f32>, mask: f32) -> vec3<f32> {
     let strength = value(at, EMISSION, 0u, looks[look].emission_strength);
-    if strength == 0.0 { return vec3<f32>(0.0); }
+    if !emission_reached || strength == 0.0 { return vec3<f32>(0.0); }
     var color = looks[look].emission_color;
     if looks[look].emission_theme >= 0 { color = theme(at, look, u32(looks[look].emission_theme)); }
     let glow = textureSampleGrad(emission_map, texture_sampler, uv, gradient[0], gradient[1]).rgb * color * strength;
@@ -567,6 +583,9 @@ fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
     // Taken before any branch on the look, which differs within a quad along a look's edge.
     let gradient = mat2x2<f32>(dpdx(input.uv), dpdy(input.uv));
     let material = materials[draw.material];
+    if outline_unlit {
+        return outlined(input, gradient, material, vec3<f32>(1.0), textureSample(base_texture, texture_sampler, input.uv).a * material.base.a);
+    }
     let surface = surfaces[input.surface];
     let look = at.look;
     let normal = at.normal;
@@ -577,7 +596,7 @@ fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
     let fresnel = pow(max(1.0 - abs(dot(normal, view)), 1e-4), looks[look].rim_power);
     let fresnel_width = fwidth(fresnel);
     var raw = surface.color.rgb;
-    if surface.color.a > 0.0 {
+    if untinted_reached && surface.color.a > 0.0 {
         raw *= untinted(input.uv, gradient);
     }
     let sampled = textureSample(base_texture, texture_sampler, input.uv) * material.base;
@@ -589,12 +608,12 @@ fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
     let unshadowed = albedo;
     var shadowmix = 1.0;
     var light_mask = lit;
-    if looks[look].shadowed != 0u {
+    if shadow_reached && looks[look].shadowed != 0u {
         // A shade made from the albedo moves with it under the material's colour and a colour region.
         let own = material.base.rgb * recoloured / max(sampled.rgb, vec3<f32>(1e-4));
         let first = textureSampleGrad(shade_layers, texture_sampler, input.uv, 0, gradient[0], gradient[1]);
         var dark = adjust(first.rgb * own, surface, mask);
-        if looks[look].second_weight > 0.0 {
+        if second_shadow_reached && looks[look].second_weight > 0.0 {
             let second = adjust(textureSampleGrad(shade_layers, texture_sampler, input.uv, 1, gradient[0], gradient[1]).rgb * own, surface, mask);
             dark = mix(dark, second, looks[look].second_weight * (1.0 - band(toward, toward_width, looks[look].second_border, looks[look].second_blur, 0.0)));
         }
@@ -610,9 +629,9 @@ fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
     // A flat material takes its main light's colour whole, as a Lambert surface square to it would, and the ambient
     // light, whichever way it faces: Unity's base pass, which lights it by the one main directional light.
     let flat_light = min(KEY_COLOR + 0.5 * (SKY + GROUND), vec3<f32>(looks[look].light_cap));
-    if looks[look].flat != 0u {
+    if flat_reached && looks[look].flat != 0u {
         light = flat_light * base.rgb;
-    } else if looks[look].ramped != 0u {
+    } else if ramp_reached && looks[look].ramped != 0u {
         // Toon Standard's base pass: its main light through its ramp at the half-Lambert term, the shade lent the
         // albedo by its shadow tint, and the ambient, capped where it limits brightness.
         let x = clamp(dot(normal, KEY_DIRECTION) * 0.5 + 0.5, 0.0, 1.0) * f32(RAMP - 1u);
@@ -626,14 +645,25 @@ fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
         let hemisphere = mix(GROUND, SKY, 0.5 * normal.y + 0.5);
         light = direct + mix(hemisphere, 0.5 * (SKY + GROUND), material.equalization) * base.rgb;
     }
-    let rim = band(fresnel, fresnel_width, looks[look].rim_border, looks[look].rim_blur, 0.0) * mix(1.0, shadowmix, looks[look].rim_shadow_mask) * looks[look].rim_strength * f32(at.front || looks[look].rim_backface != 0u);
-    let rim_light = looks[look].rim_color * mix(vec3<f32>(1.0), unshadowed, looks[look].rim_main) * mix(vec3<f32>(1.0), flat_light, looks[look].rim_lit) * rim;
+    var rim_light = vec3<f32>(0.0);
+    if rim_reached {
+        let rim = band(fresnel, fresnel_width, looks[look].rim_border, looks[look].rim_blur, 0.0) * mix(1.0, shadowmix, looks[look].rim_shadow_mask) * looks[look].rim_strength * f32(at.front || looks[look].rim_backface != 0u);
+        rim_light = looks[look].rim_color * mix(vec3<f32>(1.0), unshadowed, looks[look].rim_main) * mix(vec3<f32>(1.0), flat_light, looks[look].rim_lit) * rim;
+    }
     var color = light + glow + rim_light + emission(input.surface, look, input.uv, gradient, mask.r) + sheen;
-    if draw.outline != 0u && material.outline_layered > 0.5 {
-        color = textureSampleGrad(outline_width_texture, texture_sampler, input.uv, gradient[0], gradient[1]).rgb * min(KEY_COLOR + 0.5 * (SKY + GROUND), vec3<f32>(1.0));
-    } else if draw.outline != 0u {
-        color = material.outline_color * mix(vec3<f32>(1.0), color, material.outline_lighting_mix);
+    if draw.outline != 0u {
+        return outlined(input, gradient, material, color, base.a);
     }
     let alpha = select(1.0, base.a, material.blend > 0.5);
+    return vec4<f32>(color * alpha, alpha);
+}
+
+// An outline hull's colour over the surface's `lit` colour: a layer's own, lit flat, or the material's, mixed toward `lit`.
+fn outlined(input: Varying, gradient: mat2x2<f32>, material: Material, lit: vec3<f32>, coverage: f32) -> vec4<f32> {
+    var color = material.outline_color * mix(vec3<f32>(1.0), lit, material.outline_lighting_mix);
+    if material.outline_layered > 0.5 {
+        color = textureSampleGrad(outline_width_texture, texture_sampler, input.uv, gradient[0], gradient[1]).rgb * min(KEY_COLOR + 0.5 * (SKY + GROUND), vec3<f32>(1.0));
+    }
+    let alpha = select(1.0, coverage, material.blend > 0.5);
     return vec4<f32>(color * alpha, alpha);
 }

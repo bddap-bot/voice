@@ -228,8 +228,64 @@ pub struct Draw {
     pub count: u32,
     pub material: usize,
     pub switched: Option<usize>,
-    /// Whether a triangle's UVs reach a clear-coated look's cell: only such draws pay for the coat.
-    pub coated: bool,
+    /// What the looks whose cells its triangles' UVs reach draw: only such draws pay for each feature.
+    pub features: Features,
+}
+
+/// Which of the looks' shading features some look draws. A pipeline is compiled for one, dropping the rest.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Features {
+    /// A bit per decal slot a look lays a decal in.
+    pub decals: u32,
+    /// A bit per matcap slot a look draws.
+    pub matcaps: u32,
+    pub shadow: bool,
+    pub second_shadow: bool,
+    pub rim: bool,
+    pub emission: bool,
+    pub flat: bool,
+    pub ramp: bool,
+    pub coat: bool,
+}
+
+impl Features {
+    pub fn of(look: &expressions::Look) -> Features {
+        let shadow = match &look.lighting {
+            expressions::Lighting::Flat { shadow, .. } => shadow.as_ref(),
+            expressions::Lighting::Lit { .. } => None,
+        };
+        let slots = |present: [bool; 4]| present.iter().enumerate().fold(0, |bits, (slot, &on)| bits | (on as u32) << slot);
+        Features {
+            decals: slots(look.decals.each_ref().map(Option::is_some)),
+            matcaps: slots(look.matcaps.each_ref().map(Option::is_some)),
+            shadow: shadow.is_some(),
+            second_shadow: shadow.is_some_and(|shadow| shadow.second.is_some()),
+            rim: look.rim.is_some(),
+            emission: look.emission.is_some(),
+            flat: matches!(look.lighting, expressions::Lighting::Flat { .. }),
+            ramp: matches!(&look.lighting, expressions::Lighting::Lit { ramp: Some(ramp), .. } if ramp.len() >= 2),
+            coat: look.clearcoat.is_some(),
+        }
+    }
+
+}
+
+impl std::ops::BitOr for Features {
+    type Output = Features;
+
+    fn bitor(self, other: Features) -> Features {
+        Features {
+            decals: self.decals | other.decals,
+            matcaps: self.matcaps | other.matcaps,
+            shadow: self.shadow || other.shadow,
+            second_shadow: self.second_shadow || other.second_shadow,
+            rim: self.rim || other.rim,
+            emission: self.emission || other.emission,
+            flat: self.flat || other.flat,
+            ramp: self.ramp || other.ramp,
+            coat: self.coat || other.coat,
+        }
+    }
 }
 
 struct Delta {
@@ -1236,7 +1292,7 @@ impl Model {
                         morphs.push(Morph { mesh: mesh_index, target, deltas });
                     }
                 }
-                draws.push(Draw { first: indices.len() as u32, count: primitive.indices.len() as u32, material: primitive.material.unwrap_or(self.materials.len() - 1), switched: switched.contains(&node).then_some(node), coated: false });
+                draws.push(Draw { first: indices.len() as u32, count: primitive.indices.len() as u32, material: primitive.material.unwrap_or(self.materials.len() - 1), switched: switched.contains(&node).then_some(node), features: Features::default() });
                 indices.extend(primitive.indices.iter().map(|&vertex| vertex + base));
             }
             spans.insert(node, start..vertices.len());
@@ -1265,22 +1321,40 @@ impl Model {
             }
             joins
         });
-        let coats: Vec<[f32; 4]> = self.menu.iter().filter_map(|menu| menu.looks.as_ref()).flat_map(|looks| &looks.materials).filter(|look| look.clearcoat.is_some()).map(|look| look.rect).collect();
+        let looks = self.menu.iter().filter_map(|menu| menu.looks.as_ref()).next();
         let moves: Vec<(std::ops::Range<usize>, &[[f32; 4]])> = self.menu.iter().flat_map(|menu| &menu.targets).filter_map(|target| match &target.effect {
             expressions::Effect::Material { node, choices } => spans.get(node).map(|span: &std::ops::Range<usize>| (span.clone(), &choices[..])),
             _ => None,
         }).collect();
-        for draw in &mut draws {
-            draw.coated = !coats.is_empty() && indices[draw.first as usize..(draw.first + draw.count) as usize].chunks_exact(3).any(|triangle| {
-                let chosen = moves.iter().filter(|(span, _)| span.contains(&(triangle[0] as usize))).flat_map(|(_, choices)| choices.iter());
-                std::iter::once(&[1.0, 1.0, 0.0, 0.0]).chain(chosen).any(|&[sx, sy, ox, oy]| {
-                    let uvs = triangle.iter().map(|&vertex| (Vec2::from(vertices[vertex as usize].uv) * Vec2::new(sx, sy) + Vec2::new(ox, oy)).clamp(Vec2::ZERO, Vec2::ONE));
-                    let (low, high) = uvs.fold((Vec2::ONE, Vec2::ZERO), |(low, high), uv| (low.min(uv), high.max(uv)));
-                    coats.iter().any(|&[x0, y0, x1, y1]| low.x <= x1 && high.x >= x0 && low.y <= y1 && high.y >= y0)
-                })
-            });
+        if let Some((index, looks)) = looks.and_then(|looks| Some((looks.index.as_ref()?, looks))) {
+            let by_value: Vec<Features> = std::iter::once(Features::default()).chain(looks.materials.iter().map(Features::of)).collect();
+            let every = by_value.iter().fold(Features::default(), |all, &features| all | features);
+            let size = Vec2::new(index.width as f32, index.height as f32);
+            let texel = |uv: Vec2| (uv * size).clamp(Vec2::ZERO, size - 1.0).as_uvec2();
+            for draw in &mut draws {
+                for triangle in indices[draw.first as usize..(draw.first + draw.count) as usize].chunks_exact(3) {
+                    let chosen = moves.iter().filter(|(span, _)| span.contains(&(triangle[0] as usize))).flat_map(|(_, choices)| choices.iter());
+                    for &[sx, sy, ox, oy] in std::iter::once(&[1.0, 1.0, 0.0, 0.0]).chain(chosen) {
+                        let uvs = triangle.iter().map(|&vertex| Vec2::from(vertices[vertex as usize].uv) * Vec2::new(sx, sy) + Vec2::new(ox, oy));
+                        let (low, high) = uvs.fold((Vec2::INFINITY, Vec2::NEG_INFINITY), |(low, high), uv| (low.min(uv), high.max(uv)));
+                        // A pixel its edge only grazes is shaded at its centre, past the triangle: its UVs run on
+                        // about one triangle further, so the looks found there are counted too.
+                        let reach = high - low + 1.0 / size;
+                        let (from, to) = (texel(low - reach), texel(high + reach));
+                        for y in from.y..=to.y {
+                            for x in from.x..=to.x {
+                                let value = index.rgba[((y * index.width + x) * 4) as usize] as usize;
+                                draw.features = draw.features | by_value.get(value).copied().unwrap_or_default();
+                            }
+                        }
+                    }
+                    if draw.features == every {
+                        break;
+                    }
+                }
+            }
         }
-        if !draws.iter().any(|draw| draw.coated) {
+        if !draws.iter().any(|draw| draw.features.coat) {
             coat_uvs.clear();
         }
         let mut touched: Vec<u32> = morphs.iter().flat_map(|morph| morph.deltas.iter().map(|delta| delta.slot)).collect();
@@ -2311,11 +2385,11 @@ pub mod tests {
         assert_eq!(skinned.vertices[2].position, [0.0, 1.25, 0.0], "the mesh's default weight applies at load");
     }
 
-    /// Two triangles over the left and right halves of a 2x1 atlas whose look index gives the left half a clear-coated
-    /// material, its look `coat` and the file's looks `extra` keys; the left triangle carries a second UV.
+    /// Two narrow triangles over the left and right halves of an atlas whose 10x1 look index gives the left half a
+    /// clear-coated material, its look `coat` and the file's looks `extra` keys; the left triangle carries a second UV.
     fn coated(coat: Value, extra: Value, coat_uvs: &[f32]) -> Result<Model, String> {
         let mut builder = Builder::new(serde_json::json!({ "VRMC_vrm": { "humanoid": { "humanBones": {} } } }));
-        let index = builder.webp(2, 1, &[1, 0, 0, 255, 0, 0, 0, 255]);
+        let index = builder.webp(10, 1, &(0..10).flat_map(|x| [(x < 5) as u8, 0, 0, 255]).collect::<Vec<u8>>());
         let map = builder.webp(2, 2, &checker());
         let mut looks = serde_json::json!({
             "index": index,
@@ -2327,8 +2401,8 @@ pub mod tests {
             {"effect": {"look": [{"node": 0, "rect": [0, 0, 0.5, 1], "field": "clearcoatST", "slot": 2}]}, "default": 0.25}
         ], "looks": looks});
         let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
-        let left = builder.accessor("VEC2", &[0.1, 0.1, 0.4, 0.1, 0.1, 0.9]);
-        let right = builder.accessor("VEC2", &[0.6, 0.1, 0.9, 0.1, 0.6, 0.9]);
+        let left = builder.accessor("VEC2", &[0.1, 0.1, 0.2, 0.1, 0.1, 0.9]);
+        let right = builder.accessor("VEC2", &[0.8, 0.1, 0.9, 0.1, 0.8, 0.9]);
         let second = builder.accessor("VEC2", coat_uvs);
         builder.set("nodes", serde_json::json!([{"mesh": 0}, {"mesh": 1}]));
         builder.set("meshes", serde_json::json!([
@@ -2351,14 +2425,14 @@ pub mod tests {
         assert_eq!(looks.materials[1].clearcoat, None, "a look without the key has no coat");
         assert_eq!((looks.clearcoat_maps[0].width, looks.clearcoat_maps[0].height, &looks.clearcoat_maps[0].rgba), (2, 2, &checker()), "the map decodes to its packed levels");
         let skinned = model.skinned().unwrap();
-        let draws: Vec<(usize, bool)> = skinned.draws.iter().map(|draw| (draw.material, draw.coated)).collect();
+        let draws: Vec<(usize, bool)> = skinned.draws.iter().map(|draw| (draw.material, draw.features.coat)).collect();
         assert_eq!(draws, vec![(0, true), (1, false)], "only the draw over the coated cell pays for the coat");
         assert_eq!(skinned.coat_uvs, vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0; 2], [0.0; 2], [0.0; 2]], "a primitive without a second UV reads zeros");
         let mapless = coated(serde_json::json!(coat().as_object().unwrap().clone().into_iter().map(|(key, value)| if key == "map" { (key, (-1).into()) } else { (key, value) }).collect::<serde_json::Map<_, _>>()), serde_json::json!({}), &[0.0; 6]).unwrap();
         assert_eq!(mapless.menu.as_ref().unwrap().looks.as_ref().unwrap().materials[0].clearcoat.as_ref().unwrap().map, None);
         let past = coated(serde_json::json!(coat().as_object().unwrap().clone().into_iter().map(|(key, value)| if key == "map" { (key, 1.into()) } else { (key, value) }).collect::<serde_json::Map<_, _>>()), serde_json::json!({}), &[0.0; 6]).unwrap();
         assert_eq!(past.menu.as_ref().unwrap().looks.as_ref().unwrap().materials[0].clearcoat.as_ref().unwrap().map, None, "a map past clearcoatMaps reads as none");
-        assert!(coated(Value::Null, serde_json::json!({}), &[0.0; 6]).unwrap().skinned().unwrap().draws.iter().all(|draw| !draw.coated), "a null coat is none");
+        assert!(coated(Value::Null, serde_json::json!({}), &[0.0; 6]).unwrap().skinned().unwrap().draws.iter().all(|draw| !draw.features.coat), "a null coat is none");
     }
 
     #[test]
@@ -2366,7 +2440,7 @@ pub mod tests {
         let mut model = coated(coat(), serde_json::json!({}), &[0.0; 6]).unwrap();
         let mut moved = |choices: Vec<[f32; 4]>| {
             model.menu.as_mut().unwrap().targets.push(expressions::Target { effect: expressions::Effect::Material { node: 1, choices }, default: 0.0 });
-            let draws: Vec<(usize, bool)> = model.skinned().unwrap().draws.iter().map(|draw| (draw.material, draw.coated)).collect();
+            let draws: Vec<(usize, bool)> = model.skinned().unwrap().draws.iter().map(|draw| (draw.material, draw.features.coat)).collect();
             model.menu.as_mut().unwrap().targets.pop();
             draws
         };

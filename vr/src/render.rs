@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::vrm::particles::{Blend, Instance, Mode, Particles};
-use crate::vrm::{Alpha, Model, OutlineWidth, Skinned, Vertex};
+use crate::vrm::{Alpha, Features, Model, OutlineWidth, Skinned, Vertex};
 use crate::vulkan::{vk_error, Gpu};
 
 pub const FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
@@ -27,12 +27,66 @@ pub const NEAREST: f32 = 0.35;
 /// whole avatar's decals.
 const PAGE_BYTES: u64 = 512 << 20;
 
-const VERTEX_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vertex.spv"));
-const COATED_VERTEX_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/coated_vertex.spv"));
-const DEPTH_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/depth.spv"));
-include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
-const PARTICLE_VERTEX_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/particle-vertex.spv"));
-const PARTICLE_FRAGMENT_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/particle-fragment.spv"));
+/// A WGSL shader parsed and validated once, compiled to SPIR-V for each set of override constants it is used with.
+struct Shader {
+    module: naga::Module,
+    info: naga::valid::ModuleInfo,
+}
+
+impl Shader {
+    fn parse(text: &str) -> Shader {
+        let module = naga::front::wgsl::parse_str(text).unwrap_or_else(|error| panic!("{}", error.emit_to_string(text)));
+        let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::PUSH_CONSTANT).validate(&module).unwrap_or_else(|error| panic!("{error:?}"));
+        Shader { module, info }
+    }
+
+    fn spirv(&self, stage: naga::ShaderStage, entry: &str, constants: &naga::back::PipelineConstants) -> Result<Vec<u32>, String> {
+        let (module, info) = naga::back::pipeline_constants::process_overrides(&self.module, &self.info, Some((stage, entry)), constants).map_err(|error| format!("{entry}: {error:?}"))?;
+        let options = naga::back::spv::Options { flags: naga::back::spv::Options::default().flags - naga::back::spv::WriterFlags::ADJUST_COORDINATE_SPACE, ..Default::default() };
+        let pipeline = naga::back::spv::PipelineOptions { shader_stage: stage, entry_point: entry.into() };
+        naga::back::spv::write_vec(&module, &info, &options, Some(&pipeline)).map_err(|error| format!("{entry}: {error:?}"))
+    }
+
+    /// The length of the binding array `name`.
+    fn binding_array(&self, name: &str) -> usize {
+        self.module.global_variables.iter().find(|(_, global)| global.name.as_deref() == Some(name)).map(|(_, global)| match self.module.types[global.ty].inner {
+            naga::TypeInner::BindingArray { size: naga::ArraySize::Constant(size), .. } => size.get() as usize,
+            _ => panic!("{name} is not a binding array of a fixed size"),
+        }).unwrap_or_else(|| panic!("the shader has no {name}"))
+    }
+}
+
+static AVATAR_SHADER: std::sync::LazyLock<Shader> = std::sync::LazyLock::new(|| Shader::parse(include_str!("../shaders/avatar.wgsl")));
+static PARTICLE_SHADER: std::sync::LazyLock<Shader> = std::sync::LazyLock::new(|| Shader::parse(include_str!("../shaders/particles.wgsl")));
+static DECAL_PAGES: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| AVATAR_SHADER.binding_array("decal_pages"));
+
+/// The override constants a figure pipeline's shaders are compiled with.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+struct Shading {
+    pages: usize,
+    features: Features,
+    untinted: bool,
+    outline_unlit: bool,
+}
+
+impl Shading {
+    fn constants(self) -> naga::back::PipelineConstants {
+        let Shading { pages, features, untinted, outline_unlit } = self;
+        [
+            ("decal_pages_used", pages as f64),
+            ("decal_slots", features.decals as f64),
+            ("matcap_slots", features.matcaps as f64),
+            ("shadow_reached", features.shadow as u8 as f64),
+            ("second_shadow_reached", features.second_shadow as u8 as f64),
+            ("rim_reached", features.rim as u8 as f64),
+            ("emission_reached", features.emission as u8 as f64),
+            ("flat_reached", features.flat as u8 as f64),
+            ("ramp_reached", features.ramp as u8 as f64),
+            ("untinted_reached", untinted as u8 as f64),
+            ("outline_unlit", outline_unlit as u8 as f64),
+        ].into_iter().map(|(name, value)| (name.to_owned(), value)).collect()
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -231,6 +285,7 @@ fn look_data(look: &crate::vrm::expressions::Look, places: &[Place]) -> LookData
     let second = shadow.and_then(|shadow| shadow.second.as_ref());
     let edge = shadow.and_then(|shadow| shadow.edge.as_ref());
     let rim = look.rim.as_ref();
+    let features = Features::of(look);
     LookData {
         decal: decal(|decal| decal.alpha),
         intensity: decal(|decal| decal.intensity),
@@ -245,7 +300,7 @@ fn look_data(look: &crate::vrm::expressions::Look, places: &[Place]) -> LookData
         shifts_hue: emission.is_some_and(|emission| emission.shifts_hue) as u32 as f32,
         themes: look.themes.each_ref().map(|theme| theme.as_ref().map_or_else(ThemeData::default, |theme| ThemeData { offsets: [theme.hue, theme.saturation, theme.value, theme.speed], hsv: theme.hsv, exposure: theme.exposure })),
         emission_theme: emission.and_then(|emission| emission.theme).map_or(-1, |slot| slot as i32),
-        flat: matches!(look.lighting, Lighting::Flat { .. }) as u32,
+        flat: features.flat as u32,
         light_cap: match look.lighting {
             Lighting::Flat { cap: Some(cap), .. } | Lighting::Lit { ramp: Some(_), cap: Some(cap), .. } => cap,
             _ => f32::MAX,
@@ -254,13 +309,13 @@ fn look_data(look: &crate::vrm::expressions::Look, places: &[Place]) -> LookData
             Lighting::Lit { ramp: Some(ramp), .. } => ramp_points(ramp),
             _ => [[1.0; 4]; RAMP / 4],
         },
-        ramped: matches!(&look.lighting, Lighting::Lit { ramp: Some(ramp), .. } if ramp.len() >= 2) as u32,
+        ramped: features.ramp as u32,
         shadow_tint: match look.lighting {
             Lighting::Lit { shadow_tint, .. } => shadow_tint,
             _ => 0.0,
         },
         ramp_pad: [0.0; 2],
-        shadowed: shadow.is_some() as u32,
+        shadowed: features.shadow as u32,
         shadow_border: shadow.map_or(0.0, |shadow| shadow.border),
         shadow_blur: shadow.map_or(0.0, |shadow| shadow.blur),
         shadow_strength: shadow.map_or(0.0, |shadow| shadow.strength),
@@ -368,9 +423,8 @@ struct PipelineKey {
     blend: bool,
     cull: Cull,
     depth_write: bool,
-    pages: usize,
-    coated: bool,
     pass: Pass,
+    shading: Shading,
 }
 
 /// How a draw meets the depth buffer. A fragment shader that may discard is shaded before its depth test, so only the
@@ -667,9 +721,8 @@ struct Module<'a> {
 }
 
 impl<'a> Module<'a> {
-    fn new(device: &'a ash::Device, code: &[u8]) -> Result<Module<'a>, String> {
-        let words: Vec<u32> = code.chunks_exact(4).map(|word| u32::from_le_bytes(word.try_into().unwrap())).collect();
-        let module = unsafe { device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None) }.map_err(vk_error("vkCreateShaderModule"))?;
+    fn new(device: &'a ash::Device, words: &[u32]) -> Result<Module<'a>, String> {
+        let module = unsafe { device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(words), None) }.map_err(vk_error("vkCreateShaderModule"))?;
         Ok(Module { device, module })
     }
 }
@@ -741,7 +794,7 @@ impl Renderer {
             vk::DescriptorSetLayoutBinding::default().binding(6).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(7).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(8).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
-            vk::DescriptorSetLayoutBinding::default().binding(9).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(DECAL_PAGES as u32).stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default().binding(9).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(*DECAL_PAGES as u32).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(10).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(11).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default().binding(12).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT),
@@ -821,16 +874,26 @@ impl Renderer {
         let looks = model.menu.as_ref().and_then(|menu| menu.looks.as_ref());
         let decals = looks.map(|looks| &looks.decals[..]).unwrap_or_default();
         let (pages, places) = decal_pages(decals);
-        if pages.len() > DECAL_PAGES {
-            return Err(format!("the decals take {} pages, over {DECAL_PAGES}", pages.len()));
+        if pages.len() > *DECAL_PAGES {
+            return Err(format!("the decals take {} pages, over {}", pages.len(), *DECAL_PAGES));
         }
         let prepassed = |material: &crate::vrm::Material| material.alpha != Alpha::Blend && material.depth_write;
-        let key = |material: &crate::vrm::Material, coated: bool, outline: bool, depth: bool| PipelineKey {
+        let untinted = model.menu.as_ref().and_then(|menu| menu.untinted.as_ref()).is_some_and(|untinted| !untinted.cells.is_empty());
+        let key = |material: &crate::vrm::Material, features: Features, outline: bool, depth: bool| {
+            let outline_unlit = outline && material.outline.as_ref().is_some_and(|outline| outline.layered || outline.lighting_mix == 0.0);
+            let shading = if depth {
+                Shading::default()
+            } else if outline_unlit {
+                Shading { outline_unlit, ..Shading::default() }
+            } else {
+                let features = Features { coat: features.coat && !outline, ..features };
+                Shading { pages: if features.decals == 0 { 0 } else { pages.len() }, features, untinted, outline_unlit }
+            };
+            PipelineKey {
             blend: material.alpha == Alpha::Blend,
             cull: if outline { Cull::Front } else if material.double_sided { Cull::None } else { Cull::Back },
             depth_write: material.depth_write,
-            pages: pages.len(),
-            coated: coated && !outline && !depth,
+            shading,
             pass: match (outline, depth) {
                 (true, _) => Pass::Cutout,
                 (false, true) => Pass::Depth,
@@ -838,10 +901,11 @@ impl Renderer {
                 (false, false) if matches!(material.alpha, Alpha::Cutout(_)) => Pass::Cutout,
                 (false, false) => Pass::Shade,
             },
+            }
         };
         let keys: Vec<PipelineKey> = skinned.draws.iter().flat_map(|draw| {
             let material = &model.materials[draw.material];
-            [Some(key(material, draw.coated, false, false)), prepassed(material).then(|| key(material, draw.coated, false, true)), material.outline.as_ref().map(|_| key(material, false, true, false))]
+            [Some(key(material, draw.features, false, false)), prepassed(material).then(|| key(material, draw.features, false, true)), material.outline.as_ref().map(|_| key(material, draw.features, true, false))]
         }).flatten().filter(|key| !self.pipelines.contains_key(key)).collect();
         self.pipelines(&keys)?;
 
@@ -901,7 +965,7 @@ impl Renderer {
             decal_textures.push(array(&page.iter().map(|&at| &decals[at]).collect::<Vec<_>>(), [0; 4])?);
         }
         let no_decal = array(&[], [0; 4])?;
-        decal_textures.resize(DECAL_PAGES, no_decal);
+        decal_textures.resize(*DECAL_PAGES, no_decal);
         let matcaps = array(&looks.into_iter().flat_map(|looks| &looks.matcaps).collect::<Vec<_>>(), [255; 4])?;
         let shades = array(&looks.into_iter().flat_map(|looks| &looks.shades).collect::<Vec<_>>(), [255; 4])?;
         let coat_maps = {
@@ -974,8 +1038,8 @@ impl Renderer {
                     first: draw.first,
                     count: draw.count,
                     set: sets[draw.material],
-                    depth: (!outline && prepassed(material)).then(|| self.pipelines[&key(material, draw.coated, false, true)]),
-                    pipeline: self.pipelines[&key(material, draw.coated, outline, false)],
+                    depth: (!outline && prepassed(material)).then(|| self.pipelines[&key(material, draw.features, false, true)]),
+                    pipeline: self.pipelines[&key(material, draw.features, outline, false)],
                     material: draw.material as u32,
                     outline,
                     switched: draw.switched,
@@ -1055,7 +1119,8 @@ impl Renderer {
             return Ok(());
         }
         let gpu = self.gpu.clone();
-        let (vertex, fragment) = (Module::new(&gpu.device, PARTICLE_VERTEX_SHADER)?, Module::new(&gpu.device, PARTICLE_FRAGMENT_SHADER)?);
+        let no_constants = naga::back::PipelineConstants::default();
+        let (vertex, fragment) = (Module::new(&gpu.device, &PARTICLE_SHADER.spirv(naga::ShaderStage::Vertex, "vertex", &no_constants)?)?, Module::new(&gpu.device, &PARTICLE_SHADER.spirv(naga::ShaderStage::Fragment, "fragment", &no_constants)?)?);
         let bindings = [
             vk::VertexInputBindingDescription::default().binding(0).stride(20).input_rate(vk::VertexInputRate::VERTEX),
             vk::VertexInputBindingDescription::default().binding(1).stride(std::mem::size_of::<Instance>() as u32).input_rate(vk::VertexInputRate::INSTANCE),
@@ -1103,17 +1168,17 @@ impl Renderer {
     /// whatever fails after.
     fn pipelines(&mut self, keys: &[PipelineKey]) -> Result<(), String> {
         let gpu = self.gpu.clone();
-        let vertex = |key: &PipelineKey| if key.coated { (COATED_VERTEX_SHADER, c"coated_vertex") } else { (VERTEX_SHADER, c"vertex") };
-        let shader = |key: &PipelineKey| match key.pass {
-            Pass::Equal { cutout: false } | Pass::Shade => if key.coated { (COATED_FRAGMENT_SHADERS[key.pages], c"coated_fragment") } else { (FRAGMENT_SHADERS[key.pages], c"fragment") },
-            Pass::Depth => (DEPTH_SHADER, c"depth"),
-            Pass::Equal { cutout: true } | Pass::Cutout => if key.coated { (COATED_CUTOUT_SHADERS[key.pages], c"coated_cutout") } else { (CUTOUT_SHADERS[key.pages], c"cutout") },
-        };
+        let vertex = |key: &PipelineKey| (naga::ShaderStage::Vertex, if key.shading.features.coat { c"coated_vertex" } else { c"vertex" }, Shading::default());
+        let shader = |key: &PipelineKey| (naga::ShaderStage::Fragment, match key.pass {
+            Pass::Equal { cutout: false } | Pass::Shade => if key.shading.features.coat { c"coated_fragment" } else { c"fragment" },
+            Pass::Depth => c"depth",
+            Pass::Equal { cutout: true } | Pass::Cutout => if key.shading.features.coat { c"coated_cutout" } else { c"cutout" },
+        }, key.shading);
         let mut modules = HashMap::new();
         for key in keys {
-            for (code, _) in [vertex(key), shader(key)] {
-                if let std::collections::hash_map::Entry::Vacant(entry) = modules.entry(code.as_ptr()) {
-                    entry.insert(Module::new(&gpu.device, code)?);
+            for (stage, entry, shading) in [vertex(key), shader(key)] {
+                if let std::collections::hash_map::Entry::Vacant(unmade) = modules.entry((entry, shading)) {
+                    unmade.insert(Module::new(&gpu.device, &AVATAR_SHADER.spirv(stage, entry.to_str().unwrap(), &shading.constants())?)?);
                 }
             }
         }
@@ -1158,10 +1223,10 @@ impl Renderer {
                 .color_write_mask(if key.pass == Pass::Depth { vk::ColorComponentFlags::empty() } else { vk::ColorComponentFlags::RGBA })];
             let color = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachment);
             let stages = [
-                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(modules[&vertex(&key).0.as_ptr()].module).name(vertex(&key).1),
-                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(modules[&shader(&key).0.as_ptr()].module).name(shader(&key).1),
+                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(modules[&(vertex(&key).1, vertex(&key).2)].module).name(vertex(&key).1),
+                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(modules[&(shader(&key).1, shader(&key).2)].module).name(shader(&key).1),
             ];
-            let pipeline = self.pipeline(self.layout, &stages, if key.coated { &coated } else { &plain }, &raster, &depth, &color)?;
+            let pipeline = self.pipeline(self.layout, &stages, if key.shading.features.coat { &coated } else { &plain }, &raster, &depth, &color)?;
             self.pipelines.insert(key, pipeline);
         }
         Ok(())
@@ -2235,13 +2300,23 @@ mod tests {
     }
 
     #[test]
+    fn every_figure_entry_compiles_with_every_feature_and_with_none() {
+        let every = Features { decals: 0b1111, matcaps: 0b1111, shadow: true, second_shadow: true, rim: true, emission: true, flat: true, ramp: true, coat: true };
+        for shading in [Shading::default(), Shading { pages: *DECAL_PAGES, features: every, untinted: true, outline_unlit: false }, Shading { outline_unlit: true, ..Shading::default() }] {
+            for (stage, entry) in [(naga::ShaderStage::Vertex, "vertex"), (naga::ShaderStage::Vertex, "coated_vertex"), (naga::ShaderStage::Fragment, "depth"), (naga::ShaderStage::Fragment, "fragment"), (naga::ShaderStage::Fragment, "cutout"), (naga::ShaderStage::Fragment, "coated_fragment"), (naga::ShaderStage::Fragment, "coated_cutout")] {
+                AVATAR_SHADER.spirv(stage, entry, &shading.constants()).unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn only_draws_reaching_a_coated_look_take_the_coated_pipeline() {
         let model = Model::parse(&figure(Version::One)).unwrap();
         let skinned = model.skinned().unwrap();
-        assert!(skinned.draws.iter().all(|draw| !draw.coated) && skinned.coat_uvs.is_empty(), "an uncoated figure keeps its plain pipelines and no second UV");
+        assert!(skinned.draws.iter().all(|draw| !draw.features.coat) && skinned.coat_uvs.is_empty(), "an uncoated figure keeps its plain pipelines and no second UV");
         let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [16, 16], 1.0).unwrap();
         let _appearance = renderer.appearance(&model, &skinned).unwrap();
-        assert!(renderer.pipelines.keys().all(|key| !key.coated));
+        assert!(renderer.pipelines.keys().all(|key| !key.shading.features.coat));
     }
 
     #[test]

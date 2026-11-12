@@ -41,7 +41,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use openvr::{Place, Runtime, Signal, Surface};
+use openvr::{Place, Runtime, Signal};
 use board::{Board, Press};
 use placement::{beside, facing, local_tip, marker, under_controller, window, Anchor, Glide, Hand, HandPose, Pose, Vec3, TIP};
 use gaze::Gaze;
@@ -93,8 +93,8 @@ fn directory(variable: &str, fallback: &str) -> PathBuf {
 }
 
 /// What a frame's work goes to, in order: input, posing and springs, bounding the window, writing the GPU's buffers (after the
-/// previous frame's drawing is done with them), recording and submitting the drawing, and handing it to SteamVR.
-const PHASES: [&str; 5] = ["animate", "window", "draw", "render", "present"];
+/// previous frame's drawing is done with them), and handing the previous frame's image to SteamVR and submitting this one's.
+const PHASES: [&str; 4] = ["animate", "window", "draw", "present"];
 
 #[derive(Default)]
 struct Meter {
@@ -869,11 +869,11 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         renderer.density.budget = runtime.drawing_budget();
         let seen = eye_points.map(|eye| local.apply(eye));
         let texels = renderer.density.settle(renderer.texels(2.0 * half, seen[0][2].min(seen[1][2])) as f32);
-        let mut texture = renderer.render(&puppet.drawn, seen.map(|eye| eye_projection(eye.into(), half, half)), to_window, texels)?;
-        let rendered = Instant::now();
-        overlay.present(&mut texture, &place, 2.0 * half, texels as f32 / renderer.eye[0] as f32)?;
-        ready = started.elapsed().max(rendered - started + renderer.drawing.unwrap_or_default());
-        meter.frame(interval, started, [animated, bounded, drawn, rendered, Instant::now()], &renderer, texels);
+        let part = texels as f32 / renderer.eye[0] as f32;
+        overlay.present(|| renderer.render(&puppet.drawn, seen.map(|eye| eye_projection(eye.into(), half, half)), to_window, texels), &place, 2.0 * half, part)?;
+        // The image given in this frame is the last frame's.
+        ready = interval + (drawn - started);
+        meter.frame(interval, started, [animated, bounded, drawn, Instant::now()], &renderer, texels);
         runtime.wait_frames(started);
     }
 }

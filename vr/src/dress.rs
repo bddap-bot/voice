@@ -141,7 +141,7 @@ fn board_pages(controls: &[Control], path: &mut Vec<usize>, puppet: &Puppet, out
 
 fn still(puppet: &mut Puppet, renderer: &mut Renderer, overlay: &mut Overlay, runtime: &Runtime, head: [f32; 3]) -> Result<Vec<u8>, String> {
     let eyes = posed(puppet, head, SETTLE);
-    overlay.texture(&mut renderer.render(&puppet.drawn, eyes, glam::Mat4::IDENTITY, renderer.eye[0])?)?;
+    overlay.texture(&mut renderer.render(&puppet.drawn, eyes, glam::Mat4::IDENTITY, renderer.eye[0])?.drawn()?)?;
     overlay.show();
     runtime.wait_frame();
     left(renderer)

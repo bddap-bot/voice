@@ -429,6 +429,20 @@ struct Target {
     fence: vk::Fence,
 }
 
+/// Good until `RING - 1` more drawings are submitted: the one after reuses its target and fence.
+pub struct Drawing {
+    gpu: Rc<Gpu>,
+    fence: vk::Fence,
+    texture: openvr_sys::VRVulkanTextureData_t,
+}
+
+impl Drawing {
+    pub fn drawn(self) -> Result<openvr_sys::VRVulkanTextureData_t, String> {
+        unsafe { self.gpu.device.wait_for_fences(&[self.fence], true, u64::MAX) }.map_err(vk_error("vkWaitForFences"))?;
+        Ok(self.texture)
+    }
+}
+
 struct DrawCall {
     first: u32,
     count: u32,
@@ -493,7 +507,7 @@ pub struct Renderer {
 }
 
 /// The ratio between neighbouring densities. A window's texels move in whole steps, because each change of them
-/// reaches the headset a frame late through a second overlay (`openvr::Handoff`): texels that followed every
+/// reaches the headset late through a second overlay (`openvr::Handoff`): texels that followed every
 /// millimetre of the viewer's sway and every scatter of the drawing time would change on every frame.
 const STEP: f32 = 0.9;
 /// The most steps the budget lowers an image, to about half its density.
@@ -1220,8 +1234,7 @@ impl Renderer {
     }
 
     /// Draws each eye's image `texels` square, packed from the target's top left; the overlay shows that part through `Overlay::part`.
-    /// Returns once the drawing is submitted: SteamVR copies the image on the same queue, after it.
-    pub fn render(&mut self, appearance: &Appearance, eyes: [Option<Mat4>; 2], space: Mat4, texels: u32) -> Result<openvr_sys::VRVulkanTextureData_t, String> {
+    pub fn render(&mut self, appearance: &Appearance, eyes: [Option<Mat4>; 2], space: Mat4, texels: u32) -> Result<Drawing, String> {
         let device = &self.gpu.device;
         let target = &self.targets[self.next];
         unsafe { device.wait_for_fences(&[target.fence], true, u64::MAX) }.map_err(vk_error("vkWaitForFences"))?;
@@ -1294,13 +1307,7 @@ impl Renderer {
         self.timed[self.next] = self.timestamps.is_some();
         self.last = Some((self.next, texels));
         self.next = (self.next + 1) % RING;
-        Ok(self.gpu.texture_data(target.texture.image, width * 2, height, FORMAT))
-    }
-
-    /// Waits for the last drawing to finish.
-    pub fn finish(&self) -> Result<(), String> {
-        let Some((target, _)) = self.last else { return Ok(()) };
-        unsafe { self.gpu.device.wait_for_fences(&[self.targets[target].fence], true, u64::MAX) }.map_err(vk_error("vkWaitForFences"))
+        Ok(Drawing { gpu: self.gpu.clone(), fence: target.fence, texture: self.gpu.texture_data(target.texture.image, width * 2, height, FORMAT) })
     }
 
     /// The last frame's two eye images side by side, at the size it drew them.

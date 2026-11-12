@@ -256,6 +256,7 @@ pub struct Color {
 pub struct Tone {
     pub node: usize,
     pub rect: [f32; 4],
+    /// Poiyomi's gamma, saturation offset and brightness offset (0 to 2), or lilToon's HSV saturation scale (3).
     pub channel: usize,
 }
 
@@ -921,7 +922,7 @@ impl Expressions {
             Effect::Switch | Effect::Unread(_) => true,
             Effect::Hue(regions) => regions.iter().all(|region| region.node < nodes && region.rect.iter().all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
             Effect::Color(regions) => regions.iter().all(|region| region.node < nodes && region.channel < 3 && region.color.iter().chain(&region.rect).all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
-            Effect::Tone(regions) => regions.iter().all(|region| region.node < nodes && region.channel < 3 && region.rect.iter().all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
+            Effect::Tone(regions) => regions.iter().all(|region| region.node < nodes && region.channel < 4 && region.rect.iter().all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
             Effect::Look(regions) => regions.iter().all(|region| region.node < nodes && region.slot < 4 && region.rect.iter().all(|v| v.is_finite()) && region.rect[0] <= region.rect[2] && region.rect[1] <= region.rect[3]),
             Effect::Morph(binds) => binds.iter().all(|&[mesh, morph]| meshes.get(mesh).is_some_and(|mesh| morph < mesh.weights.len())),
             Effect::Scale { node, axis } => *node < nodes && *axis < 3,

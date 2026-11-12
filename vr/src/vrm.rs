@@ -305,6 +305,8 @@ struct Morph {
 pub struct Surface {
     pub hue: [f32; 4],
     pub color: [f32; 4],
+    /// The menu's tone by `expressions::Tone::channel`, at rest (1, 0, 0, 1): Poiyomi's under the hue mask's alpha, blue
+    /// and green, lilToon's saturation scale under its red, as lilToon's own mask is.
     pub tone: [f32; 4],
     /// Each animated look field's value by slot, a row per `expressions::Field`; the material's own where its bit in
     /// `animated` (row * 4 + slot) is clear.
@@ -313,7 +315,7 @@ pub struct Surface {
 }
 
 impl Default for Surface {
-    fn default() -> Self { Self { hue: [0.0; 4], color: [1.0, 1.0, 1.0, 0.0], tone: [1.0, 0.0, 0.0, 0.0], look: [[0.0; 4]; expressions::FIELDS], animated: [0; 4] } }
+    fn default() -> Self { Self { hue: [0.0; 4], color: [1.0, 1.0, 1.0, 0.0], tone: [1.0, 0.0, 0.0, 1.0], look: [[0.0; 4]; expressions::FIELDS], animated: [0; 4] } }
 }
 
 pub struct Skinned {
@@ -1546,7 +1548,6 @@ fn set_surfaces(surface_of: &HashMap<(usize, [u32; 4]), usize>, surfaces: &mut [
             expressions::Effect::Tone(regions) => for region in regions {
                 let at = surface_of[&(region.node, region.rect.map(f32::to_bits))];
                 surfaces[at].tone[region.channel] = value;
-                surfaces[at].tone[3] = 1.0;
             },
             expressions::Effect::Color(regions) => for region in regions {
                 let at = surface_of[&(region.node, region.rect.map(f32::to_bits))];

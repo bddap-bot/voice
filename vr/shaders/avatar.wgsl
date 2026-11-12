@@ -296,9 +296,19 @@ fn hue(color: vec3<f32>, settings: vec4<f32>) -> vec3<f32> {
     return max(vec3<f32>(dot(cubes, vec3<f32>(4.0767416621, -3.3077115913, 0.2309699292)), dot(cubes, vec3<f32>(-1.2684380046, 2.6097574011, -0.3413193965)), dot(cubes, vec3<f32>(-0.0041960863, -0.7034186147, 1.7076147010))), vec3<f32>(0.0));
 }
 
+// `color` with its HSV saturation scaled by `scale` and clamped to 1, its hue and value kept, as lilToon's tone
+// correction scales it.
+fn scale_saturation(color: vec3<f32>, scale: f32) -> vec3<f32> {
+    let high = max(color.r, max(color.g, color.b));
+    let saturation = 1.0 - min(color.r, min(color.g, color.b)) / max(high, 1e-7);
+    if saturation < 1e-7 { return color; }
+    return vec3<f32>(high) - (vec3<f32>(high) - color) * (clamp(saturation * scale, 0.0, 1.0) / saturation);
+}
+
 fn adjust(color: vec3<f32>, surface: Surface, mask: vec4<f32>) -> vec3<f32> {
     var result = mix(color, hue(color, surface.hue), mask.r);
-    if surface.tone.w != 0.0 {
+    if any(surface.tone != vec4<f32>(1.0, 0.0, 0.0, 1.0)) {
+        result = mix(result, scale_saturation(result, surface.tone.w), mask.r);
         result = mix(result, pow(abs(result), vec3<f32>(surface.tone.x)), mask.a);
         result = mix(result, vec3<f32>(dot(result, vec3<f32>(0.3, 0.59, 0.11))), -surface.tone.y * mask.b);
         result = clamp(mix(result, result * (surface.tone.z + 1.0), mask.g), vec3<f32>(0.0), vec3<f32>(1.0));

@@ -1830,26 +1830,27 @@ mod tests {
         builder.set("meshes", serde_json::json!([{"primitives": [{"attributes": {"POSITION": position, "NORMAL": normal, "TEXCOORD_0": uv}, "indices": indices, "material": 0}]}]));
         builder.set("materials", serde_json::json!([{"pbrMetallicRoughness": {"baseColorFactor": [1.0, 1.0, 1.0, 1.0]}}]));
         let data = builder.glb();
-        for (space, value) in [(1.0, 1.0 / 3.0), (0.0, 0.5), (2.0, std::f32::consts::TAU / 3.0), (3.0, 1.0), (4.0, 2.0), (5.0, -1.0), (6.0, 1.0), (7.0, 1.0), (8.0, 1.0), (9.0, 1.0), (10.0, 1.0)] {
+        for (space, value) in [(1.0, 1.0 / 3.0), (0.0, 0.5), (2.0, std::f32::consts::TAU / 3.0), (3.0, 1.0), (4.0, 2.0), (5.0, -1.0), (6.0, 1.0), (7.0, 1.0), (8.0, 1.0), (9.0, 1.0), (10.0, 1.0), (11.0, 0.0)] {
+            let tone = [4.0, 5.0, 6.0, 11.0].iter().position(|&at| at == space);
             let mut model = Model::parse(&data).unwrap();
-            model.images.push(crate::vrm::Image { width: 1, height: 1, rgba: if (4.0..7.0).contains(&space) || space == 10.0 { vec![128, 64, 32, 255] } else { vec![255, 0, 0, 255] } });
+            model.images.push(crate::vrm::Image { width: 1, height: 1, rgba: if tone.is_some() || space == 10.0 { vec![128, 64, 32, 255] } else { vec![255, 0, 0, 255] } });
             model.materials[0].base_image = Some(0);
             model.materials[0].shade_image = Some(0);
             let rect = [0.0, 0.0, if space == 2.0 || space >= 4.0 { 1.0 } else { 0.5 }, 1.0];
-            let effect = if space == 3.0 {
+            let effect = if let Some(channel) = tone {
+                serde_json::json!({"tone": [{"node": 0, "rect": rect, "channel": channel}]})
+            } else if space == 3.0 {
                 serde_json::json!({"color": [{"node": 0, "rect": rect, "channel": 1, "color": [0.0, 0.0, 0.0]}]})
             } else if space >= 7.0 {
                 serde_json::json!({"look": [{"node": 0, "rect": rect, "field": "decal", "slot": 1}]})
-            } else if space >= 4.0 {
-                serde_json::json!({"tone": [{"node": 0, "rect": rect, "channel": (space - 4.0) as usize}]})
             } else {
                 serde_json::json!({"hue": [{"node": 0, "rect": rect, "space": space, "shift": 1.0}]})
             };
-            let rest = if space == 4.0 { 1.0 } else { 0.0 };
+            let rest = if space == 4.0 || space == 11.0 { 1.0 } else { 0.0 };
             let mut menu = crate::vrm::expressions::Expressions::parse(&serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": [{"effect": effect, "default": rest}]})).unwrap();
             let mut mask = vec![255, 255, 255, 255, 0, 0, 0, 255];
-            if (4.0..7.0).contains(&space) {
-                let channel = [3, 2, 1][(space - 4.0) as usize];
+            if let Some(tone) = tone {
+                let channel = [3, 2, 1, 0][tone];
                 mask[..4].fill(0);
                 mask[4..].fill(255);
                 mask[channel] = 255;
@@ -1885,6 +1886,7 @@ mod tests {
             if space == 4.0 { assert!(center[0] < initial[0], "gamma darkens the midtone"); }
             else if space == 5.0 { assert!(center[0] < initial[0] && center[1] > initial[1], "desaturation moves red toward luminance"); }
             else if space == 6.0 { assert!(center[0] > initial[0], "brightness raises the midtone"); }
+            else if space == 11.0 { assert!(center[0].abs_diff(initial[0]) <= 2 && center[2] > initial[2] + 16 && center[1] > initial[1], "an HSV saturation of 0 greys brown at its red's value: {initial:?} to {center:?}"); }
             else if space == 8.0 { assert!(center[0] < initial[0] / 4 && center[1] < 8, "multiplying red by green leaves black: {center:?}"); }
             else if space == 9.0 { assert!(center[0].abs_diff(initial[0]) <= 2 && center[1] > initial[0] / 2, "lightening red by green keeps the red and lays the green, yellow: {center:?}"); }
             else if space == 10.0 { assert!(center[0] > initial[0] / 3 && center[0] < initial[0] - initial[0] / 4 && center[1].abs_diff(initial[1]) <= 2 && center[2].abs_diff(initial[2]) <= 2, "darkening brown by cyan keeps the darker red, the cyan's, and the brown's green and blue: {initial:?} to {center:?}"); }

@@ -1996,10 +1996,11 @@ mod tests {
         assert!(uncapped[0] > 140, "uncapped, it takes its main and ambient light whole: {uncapped:?}");
     }
 
-    /// What `faces_drawn` lays beyond its look: the looks' matcap images, shade layers and rim tint, the menu's targets, each at
-    /// its default, and whether the quads turn their back faces to the viewer, drawn two-sided.
+    /// What `faces_drawn` lays beyond its look: the looks' decal and matcap images, shade layers and rim tint, the menu's targets,
+    /// each at its default, and whether the quads turn their back faces to the viewer, drawn two-sided.
     #[derive(Default)]
     struct Faces {
+        decals: Vec<crate::vrm::Image>,
         matcaps: Vec<crate::vrm::Image>,
         shades: Vec<crate::vrm::Image>,
         rim_tint: Option<crate::vrm::Image>,
@@ -2022,7 +2023,7 @@ mod tests {
         model.images.push(crate::vrm::Image { width: 1, height: 1, rgba: rgba.to_vec() });
         model.materials[0].base_image = Some(0);
         let mut menu = crate::vrm::expressions::Expressions::parse(&serde_json::json!({"menu": [], "parameters": [], "layers": [], "clips": [], "targets": faces.targets})).unwrap();
-        menu.looks = Some(crate::vrm::expressions::Looks { index: Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }), materials: vec![look], decals: Vec::new(), matcaps: faces.matcaps, matcap_masks: None, emission: None, clearcoat_maps: Vec::new(), outline: None, shades: faces.shades, rim_tint: faces.rim_tint });
+        menu.looks = Some(crate::vrm::expressions::Looks { index: Some(crate::vrm::Image { width: 1, height: 1, rgba: vec![1, 0, 0, 255] }), materials: vec![look], decals: faces.decals, matcaps: faces.matcaps, matcap_masks: None, emission: None, clearcoat_maps: Vec::new(), outline: None, shades: faces.shades, rim_tint: faces.rim_tint });
         model.menu = Some(menu);
         let pixels = draw(&model, &model.rest(), [32, 32], [eye_projection(Vec3::new(0.0, 0.0, 0.4), 0.2, 0.2), None], Vec3::ZERO);
         [8, 24].map(|x| pixel(&pixels, 64, x, 16))
@@ -2056,6 +2057,42 @@ mod tests {
         let [lit, dark] = faces_drawn([128, 128, 128, 255], look, [toward, away], Faces { shades: vec![texel([64, 64, 64])], targets: vec![doubled], ..Faces::default() });
         assert!(lit[0].abs_diff(176) <= 3 && lit[1].abs_diff(128) <= 2, "the region doubles the albedo's linear red: {lit:?}");
         assert!(dark[0].abs_diff(90) <= 3 && dark[1].abs_diff(64) <= 2, "and the shade's, which a shade the region left would hold at its own: {dark:?}");
+    }
+
+    #[test]
+    fn a_shade_keeps_of_what_the_menu_and_a_decal_make_of_the_albedo_the_share_it_keeps_of_each_channel() {
+        use crate::vrm::expressions::{Decal, DecalBlend, Lighting, SecondShadow, Shadow};
+        const ALBEDO: [u8; 3] = [230, 128, 0];
+        const DECAL: [u8; 3] = [128, 230, 128];
+        let linear = |c: u8| ((c as f32 / 255.0 + 0.055) / 1.055).powf(2.4);
+        // Of a channel the albedo lacks, here blue, a shade keeps its share of the whole colour.
+        let kept = |shade: [u8; 3], drawn: [u8; 3]| {
+            let whole = shade.map(linear).iter().sum::<f32>() / ALBEDO.map(linear).iter().sum::<f32>();
+            [0, 1, 2].map(|k| {
+                let share = if ALBEDO[k] == 0 { whole } else { linear(shade[k]) / linear(ALBEDO[k]) };
+                let value = linear(shade[k]) + (linear(drawn[k]) - linear(ALBEDO[k])) * share;
+                ((1.055 * value.max(0.0).powf(1.0 / 2.4) - 0.055) * 255.0).round().max(0.0) as u8
+            })
+        };
+        let [toward, away] = [[0.4685, 0.7496, 0.5622], [-0.4685, -0.7496, 0.5622]];
+        let turned = serde_json::json!({"effect": {"hue": [{"node": 0, "rect": [0, 0, 1, 1], "space": 1.0, "shift": 1.0}]}, "default": 1.0 / 3.0});
+        let unsaturated = serde_json::json!({"effect": {"tone": [{"node": 0, "rect": [0, 0, 1, 1], "channel": 3}]}, "default": 0.0});
+        for (second, shade) in [(None, [128, 64, 0]), (Some(SecondShadow { border: 0.5, blur: 0.1, weight: 1.0 }), [64, 128, 0])] {
+            let mut look = looks_test::look();
+            look.lighting = Lighting::Flat { cap: Some(1.0), shadow: Some(Shadow { border: 0.5, blur: 0.1, strength: 1.0, second: second.clone(), edge: None }) };
+            let shades = if second.is_some() { vec![texel([128, 64, 0]), texel(shade)] } else { vec![texel(shade)] };
+            let drawn = |look: &crate::vrm::expressions::Look, targets: Vec<serde_json::Value>| faces_drawn([ALBEDO[0], ALBEDO[1], ALBEDO[2], 255], look.clone(), [toward, away], Faces { shades: shades.clone(), decals: vec![texel(DECAL)], targets, ..Faces::default() });
+            let near = |drawn: [u8; 4], expected: [u8; 3]| drawn[..3].iter().zip(expected).all(|(&a, b)| a.abs_diff(b) <= 4);
+            let [_, rest] = drawn(&look, Vec::new());
+            assert!(near(rest, shade), "the side turned from the key light draws the shade: {rest:?}");
+            let third = [ALBEDO[2], ALBEDO[0], ALBEDO[1]];
+            let [lit, dark] = drawn(&look, vec![turned.clone()]);
+            assert!(near(lit, third) && near(dark, kept(shade, third)), "a hue turn of a third turns the orange albedo green, and its shade keeps of each channel the share it kept at rest: {lit:?}, {dark:?} for {:?}", kept(shade, third));
+            look.decals[0] = Some(Decal { alpha: 1.0, intensity: 1.0, color_blend: DecalBlend::Replace, image: 0, hue: None });
+            let [lit, dark] = drawn(&look, Vec::new());
+            assert!(near(lit, DECAL) && near(dark, kept(shade, DECAL)), "under an opaque decal the shade keeps of the decal the share of each channel it keeps of the albedo: {lit:?}, {dark:?} for {:?}", kept(shade, DECAL));
+            assert_eq!(drawn(&look, vec![unsaturated.clone()]), [lit, dark], "a saturation of nothing greys the albedo under the decal, and the decal and its shade stay");
+        }
     }
 
     /// An image of `side` texels, red over its top half, blue over its lower right and green over its lower left.

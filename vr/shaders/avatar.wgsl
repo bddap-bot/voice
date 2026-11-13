@@ -327,6 +327,14 @@ fn adjust(color: vec3<f32>, surface: Surface, mask: vec4<f32>) -> vec3<f32> {
     return result;
 }
 
+// The shade `dim` of the albedo `lit` once the albedo is `drawn`. The shade layers are made from the albedo at rest and
+// lilToon shades the albedo it draws, so what the menu's hue and tone and the decals add to a channel is shaded by the
+// share of it the shade keeps, and by the share of the whole colour where the channel is too dark to tell its own.
+fn shade_of(dim: vec3<f32>, lit: vec3<f32>, drawn: vec3<f32>) -> vec3<f32> {
+    let whole = (dim.r + dim.g + dim.b + 0.006) / (lit.r + lit.g + lit.b + 0.006);
+    return max(dim + (drawn - lit) * (dim + 0.002 * whole) / (lit + 0.002), vec3<f32>(0.0));
+}
+
 // A clip animating a renderer's material value sets it for whichever material the renderer shows, as Unity does.
 fn value(at: u32, row: u32, slot: u32, rest: f32) -> f32 {
     let bit = row * 4u + slot;
@@ -635,9 +643,9 @@ fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
         // A shade made from the albedo moves with it under the material's colour and a colour region.
         let own = material.base.rgb * recoloured / max(sampled.rgb, vec3<f32>(1e-4));
         let first = textureSampleGrad(toon_layers, texture_sampler, input.uv, 0, gradient[0], gradient[1]);
-        var dark = adjust(first.rgb * own, surface, mask);
+        var dark = shade_of(first.rgb * own, recoloured, albedo);
         if second_shadow_reached && looks[look].second_weight > 0.0 {
-            let second = adjust(textureSampleGrad(toon_layers, texture_sampler, input.uv, 1, gradient[0], gradient[1]).rgb * own, surface, mask);
+            let second = shade_of(textureSampleGrad(toon_layers, texture_sampler, input.uv, 1, gradient[0], gradient[1]).rgb * own, recoloured, albedo);
             dark = mix(dark, second, looks[look].second_weight * (1.0 - band(toward, toward_width, looks[look].second_border, looks[look].second_blur, 0.0)));
         }
         shadowmix = band(toward, toward_width, looks[look].shadow_border, looks[look].shadow_blur, 0.0);

@@ -79,6 +79,7 @@ impl Shading {
             ("shadow_reached", features.shadow as u8 as f64),
             ("second_shadow_reached", features.second_shadow as u8 as f64),
             ("rim_reached", features.rim as u8 as f64),
+            ("rim_shade_reached", features.rim_shade as u8 as f64),
             ("emission_reached", features.emission as u8 as f64),
             ("flat_reached", features.flat as u8 as f64),
             ("ramp_reached", features.ramp as u8 as f64),
@@ -240,6 +241,12 @@ struct LookData {
     rim_backface: u32,
     /// The layer of the toon layers holding the rim tint, or -1 for none.
     rim_tint_layer: i32,
+    rim_shade_color: [f32; 3],
+    rim_shade_strength: f32,
+    rim_shade_border: f32,
+    rim_shade_blur: f32,
+    rim_shade_power: f32,
+    rim_shade_pad: f32,
     matcaps: [MatcapData; 4],
     ramp: [[f32; 4]; RAMP / 4],
     ramped: u32,
@@ -286,6 +293,7 @@ fn look_data(look: &crate::vrm::expressions::Look, places: &[Place], rim_tint_la
     let second = shadow.and_then(|shadow| shadow.second.as_ref());
     let edge = shadow.and_then(|shadow| shadow.edge.as_ref());
     let rim = look.rim.as_ref();
+    let rim_shade = look.rim_shade.as_ref();
     let features = Features::of(look);
     LookData {
         decal: decal(|decal| decal.alpha),
@@ -335,6 +343,12 @@ fn look_data(look: &crate::vrm::expressions::Look, places: &[Place], rim_tint_la
         rim_shadow_mask: rim.map_or(0.0, |rim| rim.shadow_mask),
         rim_backface: rim.is_some_and(|rim| rim.backface) as u32,
         rim_tint_layer,
+        rim_shade_color: rim_shade.map_or([1.0; 3], |shade| shade.color),
+        rim_shade_strength: rim_shade.map_or(0.0, |shade| shade.strength),
+        rim_shade_border: rim_shade.map_or(0.0, |shade| shade.border),
+        rim_shade_blur: rim_shade.map_or(0.0, |shade| shade.blur),
+        rim_shade_power: rim_shade.map_or(1.0, |shade| shade.power),
+        rim_shade_pad: 0.0,
         matcaps: look.matcaps.each_ref().map(|matcap| matcap.as_ref().map_or_else(MatcapData::default, |m| MatcapData {
             color: m.color,
             hue: m.hue.as_ref().map_or([0.0; 4], |hue| [hue.shift, hue.space, hue.select, 1.0]),
@@ -1901,7 +1915,7 @@ mod tests {
         use crate::vrm::expressions::{Lighting, Look, Mapping, Matcap, HueShift};
 
         pub fn look() -> Look {
-            Look { rect: [0.0, 0.0, 1.0, 1.0], decals: [None, None, None, None], matcaps: [None, None, None, None], emission: None, lighting: Lighting::Lit { ramp: None, shadow_tint: 0.0, cap: None }, rim: None, themes: Default::default(), clearcoat: None }
+            Look { rect: [0.0, 0.0, 1.0, 1.0], decals: [None, None, None, None], matcaps: [None, None, None, None], emission: None, lighting: Lighting::Lit { ramp: None, shadow_tint: 0.0, cap: None }, rim: None, rim_shade: None, themes: Default::default(), clearcoat: None }
         }
 
         pub fn matcap() -> Matcap {
@@ -2074,6 +2088,34 @@ mod tests {
         let [up, right] = faces_drawn([128, 128, 128, 255], look, [[0.0, 0.38, 0.92], [0.3, -0.2, 0.93]], Faces { matcaps: vec![quartered(8)], ..Faces::default() });
         assert!(up[0] > 200 && up[1] < 40 && up[2] < 40, "a normal turned up reflects into the matcap's top, red: {up:?}");
         assert!(right[1] > 200 && right[0] < 40 && right[2] < 40, "a normal turned right reflects into its lower left, green: {right:?}");
+    }
+
+    #[test]
+    fn a_rim_shade_darkens_the_surface_turning_from_the_view() {
+        use crate::vrm::expressions::{Lighting, RimShade};
+        let mut look = looks_test::look();
+        look.lighting = Lighting::Flat { cap: Some(1.0), shadow: None };
+        let [square, grazing] = [[0.0, 0.0, 1.0], [1.0, 0.0, 0.5]];
+        let plain = faces_drawn([128, 64, 32, 255], look.clone(), [square, grazing], Faces::default());
+        let shade = RimShade { color: [1.0, 0.25, 0.0], strength: 1.0, border: 0.5, blur: 0.8, power: 1.0 };
+        let drawn = |shade: RimShade| faces_drawn([128, 64, 32, 255], crate::vrm::expressions::Look { rim_shade: Some(shade), ..look.clone() }, [square, grazing], Faces::default());
+        let [facing, shaded] = drawn(shade.clone());
+        assert_eq!(facing, plain[0], "a surface square to the view takes no rim shade");
+        assert!(shaded[0] == plain[1][0] && shaded[1] + 20 < plain[1][1] && shaded[2] + 10 < plain[1][2] && shaded[2] > 0, "a surface part of the way across the band is multiplied part of the way to the rim shade's colour: {shaded:?} under {:?}", plain[1]);
+        let [_, squared] = drawn(RimShade { power: 2.0, ..shade.clone() });
+        assert!(squared[1] > shaded[1] + 5 && squared[1] + 5 < plain[1][1], "a higher power lowers the fresnel term and so darkens less: {squared:?} between {shaded:?} and {:?}", plain[1]);
+        let [_, late] = drawn(RimShade { border: 1.0, blur: 0.0, ..shade.clone() });
+        assert_eq!(late, plain[1], "a band no turn reaches leaves it as it was");
+        let [_, half] = drawn(RimShade { strength: 0.5, ..shade.clone() });
+        assert!(half[0] == plain[1][0] && half[1] > shaded[1] + 5 && half[1] + 5 < plain[1][1], "half its strength darkens half as far: {half:?} between {shaded:?} and {:?}", plain[1]);
+        let [_, whole] = drawn(RimShade { border: 0.0, blur: 0.0, ..shade.clone() });
+        assert!(whole[0] == plain[1][0] && whole[2] == 0, "past the band the colour is multiplied by the rim shade's whole: {whole:?} under {:?}", plain[1]);
+        look.rim_shade = Some(shade);
+        let behind = [[0.0, 0.0, -1.0], [-1.0, 0.0, -0.5]];
+        let back = || Faces { back: true, ..Faces::default() };
+        let [_, unshaded] = faces_drawn([128, 64, 32, 255], crate::vrm::expressions::Look { rim_shade: None, ..look.clone() }, behind, back());
+        let [_, behind_shaded] = faces_drawn([128, 64, 32, 255], look, behind, back());
+        assert!(behind_shaded[1] + 20 < unshaded[1], "a back face turning from the view is darkened too: {behind_shaded:?} under {unshaded:?}");
     }
 
     #[test]
@@ -2313,7 +2355,7 @@ mod tests {
 
     #[test]
     fn every_figure_entry_compiles_with_every_feature_and_with_none() {
-        let every = Features { decals: 0b1111, matcaps: 0b1111, shadow: true, second_shadow: true, rim: true, emission: true, flat: true, ramp: true, coat: true };
+        let every = Features { decals: 0b1111, matcaps: 0b1111, shadow: true, second_shadow: true, rim: true, rim_shade: true, emission: true, flat: true, ramp: true, coat: true };
         for shading in [Shading::default(), Shading { pages: *DECAL_PAGES, features: every, untinted: true, outline_unlit: false }, Shading { outline_unlit: true, ..Shading::default() }] {
             for (stage, entry) in [(naga::ShaderStage::Vertex, "vertex"), (naga::ShaderStage::Vertex, "coated_vertex"), (naga::ShaderStage::Fragment, "depth"), (naga::ShaderStage::Fragment, "fragment"), (naga::ShaderStage::Fragment, "cutout"), (naga::ShaderStage::Fragment, "coated_fragment"), (naga::ShaderStage::Fragment, "coated_cutout")] {
                 AVATAR_SHADER.spirv(stage, entry, &shading.constants()).unwrap();

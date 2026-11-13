@@ -500,6 +500,17 @@ pub struct Rim {
     pub backface: bool,
 }
 
+/// lilToon's rim shade, darkening where the surface turns from the view: the lit colour multiplied towards `color` by
+/// `strength` over the fresnel term raised to `power`, above zero, past `border` (with `blur`), on both faces.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct RimShade {
+    pub color: [f32; 3],
+    pub strength: f32,
+    pub border: f32,
+    pub blur: f32,
+    pub power: f32,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct Look {
     /// The material's cell of the atlas, `[x0, y0, x1, y1]` in atlas UV; each of its decals spans it corner to corner.
@@ -509,6 +520,8 @@ pub struct Look {
     pub emission: Option<Emission>,
     pub lighting: Lighting,
     pub rim: Option<Rim>,
+    #[serde(rename = "rimShade")]
+    pub rim_shade: Option<RimShade>,
     /// The global theme colours its emission and matcaps are drawn in, by slot.
     #[serde(default)]
     pub themes: [Option<Theme>; 4],
@@ -817,6 +830,9 @@ fn looks(encoded: EncodedLooks, image: &impl Fn(usize) -> Result<Image, String>)
         rim_tint: encoded.rim_tint.map(|at| image(at)).transpose().map_err(|error| format!("{EXTENSION}: rim tint: {error}"))?,
         materials,
     };
+    if looks.materials.iter().filter_map(|look| look.rim_shade.as_ref()).any(|shade| !(shade.power > 0.0)) {
+        return Err(format!("{EXTENSION}: a rim shade without a power above zero"));
+    }
     let shadows: Vec<&Shadow> = looks.materials.iter().filter_map(|look| match &look.lighting {
         Lighting::Flat { shadow, .. } => shadow.as_ref(),
         Lighting::Lit { .. } => None,
@@ -1633,8 +1649,9 @@ mod tests {
         let sizes = [(4, 4), (2, 2), (4, 2)];
         let shadow = serde_json::json!({"border": 0.5, "blur": 0.1, "strength": 1, "second": {"border": 0.15, "blur": 0.1, "weight": 1}, "edge": {"color": [1, 0.1, 0], "range": 0.08}});
         let rim = serde_json::json!({"color": [0.66, 0.5, 0.48], "strength": 1, "main": 0, "border": 0.5, "blur": 0.65, "power": 3.5, "lit": 1, "shadowMask": 0.5, "backface": false});
+        let power = std::cell::Cell::new(1.5);
         let parse = |lighting: serde_json::Value, layers: serde_json::Value| {
-            let material = serde_json::json!({"rect": [0, 0, 1, 1], "decals": [null, null, null, null], "matcaps": [null, null, null, null], "emission": null, "lighting": lighting, "rim": rim});
+            let material = serde_json::json!({"rect": [0, 0, 1, 1], "decals": [null, null, null, null], "matcaps": [null, null, null, null], "emission": null, "lighting": lighting, "rim": rim, "rimShade": {"color": [0.9, 0.8, 0.7], "strength": 0.6, "border": 0.4, "blur": 0.2, "power": power.get()}});
             let mut encoded = serde_json::json!({"index": 0, "materials": [material]});
             encoded.as_object_mut().unwrap().extend(layers.as_object().unwrap().clone());
             looks(serde_json::from_value(encoded).unwrap(), &|at: usize| {
@@ -1646,6 +1663,10 @@ mod tests {
         let Lighting::Flat { shadow: Some(read), .. } = &shaded.materials[0].lighting else { panic!("{:?}", shaded.materials[0].lighting) };
         assert_eq!((read.second.as_ref().map(|second| second.weight), read.edge.as_ref().map(|edge| edge.range)), (Some(1.0), Some(0.08)));
         assert_eq!(shaded.materials[0].rim.as_ref().map(|rim| (rim.shadow_mask, rim.backface)), Some((0.5, false)));
+        assert_eq!(shaded.materials[0].rim_shade, Some(RimShade { color: [0.9, 0.8, 0.7], strength: 0.6, border: 0.4, blur: 0.2, power: 1.5 }));
+        power.set(0.0);
+        assert!(parse(serde_json::json!({"model": "flat", "cap": 1, "shadow": shadow}), serde_json::json!({"shade": 1, "shade2": 1})).is_err(), "a rim shade whose power is zero is refused");
+        power.set(1.5);
         assert!(shaded.shades.len() == 2 && shaded.shades[0].width == 2, "the shade layers load narrower than the atlas");
         assert!(parse(serde_json::json!({"model": "flat", "cap": 1, "shadow": shadow}), serde_json::json!({"shade": 1, "shade2": 1, "rimTint": 1})).is_ok_and(|looks| looks.rim_tint.is_some_and(|tint| tint.width == 2)), "a rim tint at the shades' size loads");
         let rimless = serde_json::json!({"index": 0, "materials": [{"rect": [0, 0, 1, 1], "decals": [null, null, null, null], "matcaps": [null, null, null, null], "emission": null, "lighting": {"model": "flat", "cap": 1}, "rim": null}], "rimTint": 1});

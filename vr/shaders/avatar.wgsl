@@ -117,6 +117,11 @@ struct Look {
     rim_shadow_mask: f32,
     rim_backface: u32,
     rim_tint_layer: i32,
+    rim_shade_color: vec3<f32>,
+    rim_shade_strength: f32,
+    rim_shade_border: f32,
+    rim_shade_blur: f32,
+    rim_shade_power: f32,
     matcaps: array<Matcap, 4>,
     ramp: array<vec4<f32>, 4>,
     ramped: u32,
@@ -262,6 +267,12 @@ fn band(v: f32, width: f32, border: f32, blur: f32, reach: f32) -> f32 {
     return saturate((v - low) / max(saturate(high - low + width), 1e-4));
 }
 
+// lilToon's Fresnel band: `turned`, how far the surface turns from the view, and `turned_width`, how far that moves
+// across a pixel, raised to `power` and stepped across `border`, `blur` wide.
+fn fresnel_band(turned: f32, turned_width: f32, power: f32, border: f32, blur: f32) -> f32 {
+    return band(pow(turned, power), power * pow(turned, power - 1.0) * turned_width, border, blur, 0.0);
+}
+
 fn hue(color: vec3<f32>, settings: vec4<f32>) -> vec3<f32> {
     if settings.w == 0.0 { return color; }
     if settings.y > 1.5 {
@@ -332,6 +343,7 @@ override matcap_slots: u32;
 override shadow_reached: bool;
 override second_shadow_reached: bool;
 override rim_reached: bool;
+override rim_shade_reached: bool;
 override emission_reached: bool;
 override flat_reached: bool;
 override ramp_reached: bool;
@@ -604,8 +616,8 @@ fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
     let lit = toon(material, normal, KEY_DIRECTION);
     let toward = saturate(dot(KEY_DIRECTION, normal) * 0.5 + 0.5);
     let toward_width = fwidth(toward);
-    let fresnel = pow(max(1.0 - abs(dot(normal, view)), 1e-4), looks[look].rim_power);
-    let fresnel_width = fwidth(fresnel);
+    let turned = max(1.0 - abs(dot(normal, view)), 1e-4);
+    let turned_width = fwidth(turned);
     var raw = surface.color.rgb;
     if untinted_reached && surface.color.a > 0.0 {
         raw *= untinted(input.uv, gradient);
@@ -634,6 +646,9 @@ fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
         dark = mix(dark, albedo, band(toward, toward_width, looks[look].shadow_border, looks[look].shadow_blur, looks[look].edge_range) * looks[look].edge_color);
         albedo = mix(dark, albedo, mix(1.0, shadowmix, looks[look].shadow_strength * first.a));
     }
+    if rim_shade_reached {
+        albedo *= mix(vec3<f32>(1.0), looks[look].rim_shade_color, fresnel_band(turned, turned_width, looks[look].rim_shade_power, looks[look].rim_shade_border, looks[look].rim_shade_blur) * looks[look].rim_shade_strength);
+    }
     let glow = matcaps(&albedo, &shade, material.shade, input.surface, look, input.uv, gradient, normal, view, light_mask);
     let base = vec4<f32>(albedo, sampled.a);
     var light: vec3<f32>;
@@ -658,7 +673,7 @@ fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
     }
     var rim_light = vec3<f32>(0.0);
     if rim_reached {
-        let rim = band(fresnel, fresnel_width, looks[look].rim_border, looks[look].rim_blur, 0.0) * mix(1.0, shadowmix, looks[look].rim_shadow_mask) * looks[look].rim_strength * f32(at.front || looks[look].rim_backface != 0u);
+        let rim = fresnel_band(turned, turned_width, looks[look].rim_power, looks[look].rim_border, looks[look].rim_blur) * mix(1.0, shadowmix, looks[look].rim_shadow_mask) * looks[look].rim_strength * f32(at.front || looks[look].rim_backface != 0u);
         var rim_color = looks[look].rim_color;
         if rim > 0.0 && looks[look].rim_tint_layer >= 0 {
             rim_color *= textureSampleGrad(toon_layers, texture_sampler, input.uv, looks[look].rim_tint_layer, gradient[0], gradient[1]).rgb;

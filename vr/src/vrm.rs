@@ -1233,6 +1233,17 @@ impl Model {
         Some([*self.humanoid.get("leftFoot")?, *self.humanoid.get("rightFoot")?].map(|node| worlds[node].w_axis.truncate()))
     }
 
+    /// A node the list leaves out keeps its own turn under the placed ones, so placing hips and head leaves the torso between as posed.
+    pub fn set_bone_worlds(&self, pose: &mut Pose, placed: &[(&str, Mat4)]) {
+        let mut placed: Vec<(usize, Mat4)> = placed.iter().filter_map(|(bone, world)| Some((*self.humanoid.get(*bone)?, *world))).collect();
+        placed.sort_by_key(|&(node, _)| std::iter::successors(self.nodes[node].parent, |&parent| self.nodes[parent].parent).count());
+        for (node, world) in placed {
+            let parent = self.nodes[node].parent.map_or(Mat4::IDENTITY, |parent| self.worlds(pose)[parent]);
+            let (_, rotation, translation) = (parent.inverse() * world).to_scale_rotation_translation();
+            (pose.rotations[node], pose.translations[node]) = (rotation.normalize(), translation);
+        }
+    }
+
     /// Where each named humanoid bone of the file stands at `worlds`, in its name's order.
     pub fn humanoid_points(&self, worlds: &[Mat4], names: &[&'static str]) -> Vec<(&'static str, Vec3)> {
         names.iter().filter_map(|&name| Some((name, worlds[*self.humanoid.get(name)?].w_axis.truncate()))).collect()

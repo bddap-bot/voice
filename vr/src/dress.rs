@@ -407,9 +407,12 @@ fn replay_reference(recording: &Path, file: &str, out: &Path, meta: &mut serde_j
     let frame_of = |field: &str| field.trim().parse::<i64>().map_err(|_| format!("not a frame: {field}"));
     let mut track = Vec::new();
     for row in table("track.tsv")?.iter().skip(1) {
-        let values = row.get(1).ok_or("track.tsv: a row without a root")?.split(',').map(number).collect::<Result<Vec<_>, _>>()?;
-        let &[x, y, z, qx, qy, qz, qw] = &values[..] else { return Err(format!("track.tsv: root {values:?} is not a position and rotation")) };
-        track.push((frame_of(&row[0])?, from_unity(Vec3::new(x, y, z), glam::Quat::from_xyzw(qx, qy, qz, qw))));
+        let transform = |column: usize, name: &str| -> Result<glam::Mat4, String> {
+            let values = row.get(column).ok_or(format!("track.tsv: a row without a {name}"))?.split(',').map(number).collect::<Result<Vec<_>, _>>()?;
+            let &[x, y, z, qx, qy, qz, qw] = &values[..] else { return Err(format!("track.tsv: {name} {values:?} is not a position and rotation")) };
+            Ok(from_unity(Vec3::new(x, y, z), glam::Quat::from_xyzw(qx, qy, qz, qw)))
+        };
+        track.push((frame_of(&row[0])?, transform(1, "root")?, [("head", transform(2, "head")?), ("hips", transform(5, "hips")?)]));
     }
     let mut steps: HashMap<i64, Vec<(String, f32)>> = HashMap::new();
     let mut window = (i64::MAX, i64::MIN);
@@ -432,18 +435,9 @@ fn replay_reference(recording: &Path, file: &str, out: &Path, meta: &mut serde_j
         renders.entry(frame_of(frame)?).or_default().push(name.clone());
     }
     let camera: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(recording.join("camera.json")).map_err(|error| format!("camera.json: {error}"))?).map_err(|error| format!("camera.json: {error}"))?;
-    let floats = |key: &str| -> Result<Vec<f32>, String> { camera[key].as_array().ok_or(format!("camera.json: no {key}"))?.iter().map(|value| value.as_f64().map(|value| value as f32).ok_or(format!("camera.json: {key} is not numbers"))).collect() };
-    let (position, euler, background) = (floats("position")?, floats("rotation_euler")?, floats("background")?);
-    let (width, height) = (camera["width"].as_u64().ok_or("camera.json: no width")? as u32, camera["height"].as_u64().ok_or("camera.json: no height")? as u32);
-    let field = (camera["fov_vertical"].as_f64().ok_or("camera.json: no fov_vertical")? as f32).to_radians();
-    let [ex, ey, ez] = euler[..] else { return Err("camera.json: rotation_euler is not three angles".into()) };
-    let [px, py, pz] = position[..] else { return Err("camera.json: position is not three coordinates".into()) };
-    let viewer = from_unity(Vec3::new(px, py, pz), glam::Quat::from_euler(glam::EulerRot::YXZ, ey.to_radians(), ex.to_radians(), ez.to_radians()));
-    let (eye, ahead, up) = (viewer.transform_point3(Vec3::ZERO), viewer.transform_vector3(Vec3::Z), viewer.transform_vector3(Vec3::Y));
-    let half = (field / 2.0).tan();
-    let view = eye_projection(Vec3::Z, half, half).unwrap() * glam::Mat4::from_translation(Vec3::Z) * glam::Mat4::look_to_rh(eye, ahead, up);
+    let Camera { view, width, height, background } = reference_camera(&camera)?;
     meta["notes"].as_array_mut().unwrap().push(format!("the overlay's own lights (a warm key, a blue rim and a sky/ground hemisphere) instead of the recording's ambient {} and white light at Unity euler {}", camera["ambient"], camera["light_euler"]).into());
-    meta["notes"].as_array_mut().unwrap().push("no tracked head or hands: the figure holds the overlay's standing pose, moved by the recorded root".into());
+    meta["notes"].as_array_mut().unwrap().push("the recorded hips and head placed where the recording has them, the torso between them at rest, the limbs in the overlay's standing pose".into());
 
     let bytes = std::fs::read(file).map_err(|error| format!("{file}: {error}"))?;
     let model = crate::vrm::Model::parse(&bytes)?;
@@ -491,15 +485,19 @@ fn replay_reference(recording: &Path, file: &str, out: &Path, meta: &mut serde_j
     }
 
     let to_root = glam::Mat4::from_quat(puppet.model.facing());
+    // Between the placed hips and head the preset's lean would bend the neck off the head; Unity's idle holds the torso near its rest.
+    let mut standing = puppet.standing.clone();
+    standing.rotations.retain(|bone, _| !["spine", "chest", "upperChest", "neck"].contains(&bone.as_str()));
     let mut written = String::new();
-    for (frame, root) in track {
+    for (frame, root, bones) in track {
         if let Some(controller) = puppet.controller.as_mut() {
             for (name, value) in steps.get(&frame).into_iter().flatten() {
                 controller.set(name, *value);
             }
         }
-        let mut pose = puppet.model.pose(&puppet.standing);
+        let mut pose = puppet.model.pose(&standing);
         let idle = puppet.express(&mut pose, 1, RECORDED_DELTA);
+        place_recorded(&puppet.model, &mut pose, &bones);
         puppet.settle(&mut pose, root * to_root, &[], RECORDED_DELTA, &idle);
         let worlds = puppet.model.worlds(&pose);
         if (window.0..window.1).contains(&frame) {
@@ -528,6 +526,34 @@ fn replay_reference(recording: &Path, file: &str, out: &Path, meta: &mut serde_j
     std::fs::write(&path, written).map_err(|error| format!("{}: {error}", path.display()))
 }
 
+struct Camera {
+    view: glam::Mat4,
+    width: u32,
+    height: u32,
+    background: Vec<f32>,
+}
+
+fn reference_camera(camera: &serde_json::Value) -> Result<Camera, String> {
+    let floats = |key: &str| -> Result<Vec<f32>, String> { camera[key].as_array().ok_or(format!("camera.json: no {key}"))?.iter().map(|value| value.as_f64().map(|value| value as f32).ok_or(format!("camera.json: {key} is not numbers"))).collect() };
+    let (position, euler, background) = (floats("position")?, floats("rotation_euler")?, floats("background")?);
+    let (width, height) = (camera["width"].as_u64().ok_or("camera.json: no width")? as u32, camera["height"].as_u64().ok_or("camera.json: no height")? as u32);
+    let field = (camera["fov_vertical"].as_f64().ok_or("camera.json: no fov_vertical")? as f32).to_radians();
+    let [ex, ey, ez] = euler[..] else { return Err("camera.json: rotation_euler is not three angles".into()) };
+    let [px, py, pz] = position[..] else { return Err("camera.json: position is not three coordinates".into()) };
+    let viewer = from_unity(Vec3::new(px, py, pz), glam::Quat::from_euler(glam::EulerRot::YXZ, ey.to_radians(), ex.to_radians(), ez.to_radians()));
+    let (eye, ahead, up) = (viewer.transform_point3(Vec3::ZERO), viewer.transform_vector3(Vec3::Z), viewer.transform_vector3(Vec3::Y));
+    let half = (field / 2.0).tan();
+    let view = eye_projection(Vec3::Z, half, half).unwrap() * glam::Mat4::from_translation(Vec3::Z) * glam::Mat4::look_to_rh(eye, ahead, up);
+    Ok(Camera { view, width, height, background })
+}
+
+/// A VRM 0 figure faces -Z, so a Unity bone's frame reaches its node turned by the figure's facing.
+fn place_recorded(model: &crate::vrm::Model, pose: &mut crate::vrm::Pose, recorded: &[(&str, glam::Mat4)]) {
+    let facing = glam::Mat4::from_quat(model.facing());
+    let placed: Vec<(&str, glam::Mat4)> = recorded.iter().map(|&(bone, from_root)| (bone, facing.inverse() * from_root * facing)).collect();
+    model.set_bone_worlds(pose, &placed);
+}
+
 /// A transform in Unity's left-handed axes, as the same transform in the overlay's right-handed ones.
 fn from_unity(position: Vec3, rotation: glam::Quat) -> glam::Mat4 {
     glam::Mat4::from_rotation_translation(glam::Quat::from_xyzw(rotation.x, -rotation.y, -rotation.z, rotation.w), Vec3::new(-position.x, position.y, position.z))
@@ -549,4 +575,67 @@ fn unnumbered(segment: &str) -> &str {
 
 fn normalized(name: &str) -> String {
     name.chars().filter(char::is_ascii_alphanumeric).map(|letter| letter.to_ascii_lowercase()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vrm::tests::Builder;
+    use crate::vrm::{Model, Version};
+    use glam::{Mat4, Quat, Vec2};
+
+    fn figure(version: Version) -> Model {
+        let mut builder = Builder::new(match version {
+            Version::One => serde_json::json!({ "VRMC_vrm": { "humanoid": { "humanBones": { "hips": { "node": 1 }, "spine": { "node": 2 }, "head": { "node": 3 } } } } }),
+            Version::Zero => serde_json::json!({ "VRM": { "humanoid": { "humanBones": [{ "bone": "hips", "node": 1 }, { "bone": "spine", "node": 2 }, { "bone": "head", "node": 3 }] } } }),
+        });
+        let position = builder.accessor("VEC3", &[0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0, 0.1, 0.0]);
+        builder.set("nodes", serde_json::json!([
+            { "mesh": 0, "children": [1] },
+            { "translation": [0.0, 0.9, 0.05], "children": [2] },
+            { "translation": [0.0, 0.3, 0.0], "rotation": [0.2, 0.1, 0.05, 0.97], "children": [3] },
+            { "translation": [0.02, 0.35, -0.04], "rotation": [-0.1, 0.0, 0.08, 0.99] },
+        ]));
+        builder.set("meshes", serde_json::json!([{ "primitives": [{ "attributes": { "POSITION": position } }] }]));
+        Model::parse(&builder.glb()).unwrap()
+    }
+
+    /// Unity's pinhole: a left-handed camera looking down its +Z, its euler applied Z, then X, then Y.
+    fn unity_pixel(camera: &serde_json::Value, point: Vec3) -> Vec2 {
+        let number = |key: &str, index: usize| camera[key][index].as_f64().unwrap() as f32;
+        let turn = Quat::from_euler(glam::EulerRot::YXZ, number("rotation_euler", 1).to_radians(), number("rotation_euler", 0).to_radians(), number("rotation_euler", 2).to_radians());
+        let local = turn.inverse() * (point - Vec3::new(number("position", 0), number("position", 1), number("position", 2)));
+        let focal = camera["height"].as_f64().unwrap() as f32 / 2.0 / (camera["fov_vertical"].as_f64().unwrap() as f32 / 2.0).to_radians().tan();
+        let (width, height) = (camera["width"].as_f64().unwrap() as f32, camera["height"].as_f64().unwrap() as f32);
+        Vec2::new(width / 2.0 + focal * local.x / local.z, height / 2.0 - focal * local.y / local.z)
+    }
+
+    fn replay_pixel(camera: &Camera, point: Vec3) -> Vec2 {
+        let side = camera.width.max(camera.height) as f32;
+        let at = camera.view.project_point3(point);
+        Vec2::new((at.x + 1.0) / 2.0 * side - (side - camera.width as f32) / 2.0, (at.y + 1.0) / 2.0 * side - (side - camera.height as f32) / 2.0)
+    }
+
+    #[test]
+    fn a_replayed_head_is_drawn_where_unitys_camera_drew_the_recorded_one() {
+        let mirror = Vec3::new(-1.0, 1.0, 1.0);
+        let (head_at, head_turn) = (Vec3::new(0.012, 1.46, -0.016), Quat::from_euler(glam::EulerRot::XYZ, 0.06, -0.12, 0.03));
+        let hips = from_unity(Vec3::new(0.0, 0.76, 0.037), Quat::from_rotation_x(-0.02));
+        for (camera, version) in [
+            (serde_json::json!({ "position": [0.0, 1.5, 1.36], "rotation_euler": [0, 180, 0], "fov_vertical": 12, "width": 512, "height": 512, "background": [0.5, 0.5, 0.5] }), Version::One),
+            (serde_json::json!({ "position": [0.4, 1.3, 1.1], "rotation_euler": [4, 200, 2], "fov_vertical": 30, "width": 384, "height": 640, "background": [0.5, 0.5, 0.5] }), Version::Zero),
+        ] {
+            let model = figure(version);
+            let mut pose = model.pose(&model.standing());
+            place_recorded(&model, &mut pose, &[("head", from_unity(head_at, head_turn)), ("hips", hips)]);
+            let head = model.worlds(&pose)[3];
+            let drawn = Mat4::from_quat(model.facing()) * head;
+            let replay = reference_camera(&camera).unwrap();
+            for offset in [Vec3::ZERO, Vec3::new(0.032, 0.05, 0.07), Vec3::new(-0.032, 0.05, 0.07), Vec3::new(0.0, -0.06, 0.06)] {
+                let replayed = replay_pixel(&replay, drawn.transform_point3(model.facing() * (offset * mirror)));
+                let unity = unity_pixel(&camera, head_at + head_turn * offset);
+                assert!(replayed.distance(unity) < 0.05, "{version:?}: a point {offset} on the head drawn at {replayed}, Unity drew it at {unity}");
+            }
+        }
+    }
 }

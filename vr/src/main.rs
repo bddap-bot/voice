@@ -449,7 +449,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
     let mut recognizer = Recognizer::new(Templates::parse(&std::fs::read(&gesture_file).map_err(|error| format!("{}: {error}", gesture_file.display()))?)?);
     let gpu = Rc::new(vulkan::Gpu::new(Some(runtime))?);
     let runtime = gpu.vr.as_ref().expect("the overlay's device was made for SteamVR");
-    let mut renderer = Renderer::for_window(gpu.clone(), QUAD, HEIGHT / render::PAGE_HEIGHT)?;
+    let mut renderer = Renderer::for_growing_window(gpu.clone(), QUAD, HEIGHT / render::PAGE_HEIGHT)?;
     tracing::info!("display {:.0} px/rad: at {} m the puppet takes {} texels per eye, an object {}", runtime.display_density(), render::NEAREST, renderer.texels(QUAD, render::NEAREST), renderer.texels(object::QUAD, render::NEAREST));
     let cache = state.join("assets");
     let give_up = Instant::now() + session::CONNECT_PATIENCE;
@@ -501,6 +501,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
     let mut pressing: Option<(u32, Vec3)> = None;
     let mut anchor = Anchor::Riding;
     let mut glide = Glide::default();
+    let mut was_full = false;
     let mut calibration = (epoch, String::new());
     let mut outlines: HashMap<Hand, (u32, (glam::Vec3, glam::Vec3, f32))> = HashMap::new();
     let mut outline_tried: HashMap<Hand, (Instant, String)> = HashMap::new();
@@ -822,8 +823,8 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             board.log = log;
             board.mark();
         }
-        if std::mem::discriminant(&board.anchor) != std::mem::discriminant(&anchor) {
-            eprintln!("puppet {} at {:.2} m above the floor", match anchor { Anchor::Riding => "riding", Anchor::Settling(_) => "settling", Anchor::Stuck(_) => "set down", Anchor::Grounded(_) => "standing on the floor" }, held.t[1]);
+        let anchored = std::mem::discriminant(&board.anchor) != std::mem::discriminant(&anchor);
+        if anchored {
             board.anchor = anchor;
             board.mark();
         }
@@ -867,8 +868,15 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
         renderer.outline_scale = HEIGHT * size / render::PAGE_HEIGHT;
         renderer.density.budget = runtime.drawing_budget();
         let seen = eye_points.map(|eye| local.apply(eye));
-        let texels = renderer.density.settle(renderer.texels(2.0 * half, seen[0][2].min(seen[1][2])) as f32);
-        let part = texels as f32 / renderer.eye[0] as f32;
+        let depth = seen[0][2].min(seen[1][2]);
+        let shown = renderer.texels(2.0 * half, depth);
+        let texels = renderer.density.settle(shown as f32);
+        let target = renderer.target_for(texels);
+        if anchored || std::mem::replace(&mut was_full, size == puppet.full) != (size == puppet.full) {
+            let state = match anchor { Anchor::Riding => "riding", Anchor::Settling(_) => "settling", Anchor::Stuck(_) => "set down", Anchor::Grounded(_) => "standing on the floor" };
+            tracing::info!("puppet {state} at {:.2} m above the floor, size {size:.2}: a {:.2} m quad seen from {depth:.2} m, {texels} texels per eye of a {}x{} target where the display shows {shown}, the budget drawing {:.2} of that", held.t[1], 2.0 * half, target[0], target[1], renderer.density.scale());
+        }
+        let part = texels as f32 / target[0] as f32;
         overlay.present(|| renderer.render(&puppet.drawn, seen.map(|eye| eye_projection(eye.into(), half, half)), to_window, texels), &place, 2.0 * half, part)?;
         // The image given in this frame is the last frame's.
         ready = interval + (drawn - started);

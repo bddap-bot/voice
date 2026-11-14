@@ -84,10 +84,14 @@ impl Gpu {
         self.allocations.get()
     }
 
+    /// An image in device memory; a transient attachment's in lazily allocated memory where the device has it, which a
+    /// tiling GPU backs only as far as a render pass needs.
     pub fn image(&self, info: &vk::ImageCreateInfo) -> Result<(vk::Image, vk::DeviceMemory), String> {
         let image = unsafe { self.device.create_image(info, None) }.map_err(vk_error("vkCreateImage"))?;
         let requirements = unsafe { self.device.get_image_memory_requirements(image) };
-        let memory = self.allocate(requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
+        let lazy = vk::MemoryPropertyFlags::DEVICE_LOCAL | vk::MemoryPropertyFlags::LAZILY_ALLOCATED;
+        let transient = info.usage.contains(vk::ImageUsageFlags::TRANSIENT_ATTACHMENT) && self.memory_type(requirements.memory_type_bits, lazy).is_ok();
+        let memory = self.allocate(requirements, if transient { lazy } else { vk::MemoryPropertyFlags::DEVICE_LOCAL })?;
         unsafe { self.device.bind_image_memory(image, memory, 0) }.map_err(vk_error("vkBindImageMemory"))?;
         Ok((image, memory))
     }

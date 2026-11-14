@@ -564,6 +564,8 @@ impl SetLayout {
 pub struct Renderer {
     gpu: Rc<Gpu>,
     pub eye: [u32; 2],
+    /// The size it was made at, which a drawing that needs more grows past and one that fits again returns to.
+    made: [u32; 2],
     targets: Vec<Target>,
     depth: Texture,
     samples: Texture,
@@ -600,11 +602,19 @@ const SETTLED: u32 = 32;
 /// The share of the budget a drawing one step denser must fit for the density to rise a step.
 const HEADROOM: f32 = 0.85;
 
+/// The least a target grows by, so a viewer walking up to a figure set down full size remakes it a few times, not at every step.
+const GROWTH: f32 = 1.25;
+/// The most steps a growing window's density rises past its target's made size: about 2.6 times its texels across.
+/// A figure set down full size wants that from about a metre away; nearer, it is drawn as densely as this allows.
+const GROWN: u32 = 9;
+
 /// The texels each eye's image is drawn at, in steps of `STEP` down from the target's size.
 pub struct Density {
     most: u32,
-    /// Steps down for the viewer's distance, and further steps down for the budget.
-    far: u32,
+    /// The steps above `most` the distance may raise it.
+    above: u32,
+    /// Steps down for the viewer's distance, up where negative, and further steps down for the budget.
+    far: i32,
     lowered: u32,
     /// The GPU time a drawing may take, None to draw every image as dense as its distance shows.
     pub budget: Option<std::time::Duration>,
@@ -620,23 +630,33 @@ pub struct Density {
 
 impl Density {
     pub fn new(most: u32) -> Density {
-        Density { most, far: 0, lowered: 0, budget: None, typical: 0.0, timed: 0, dearer: 1.0 / (STEP * STEP), left: None }
+        Density::growing(most, 0)
     }
 
-    fn step(&self, steps: u32) -> f32 {
-        self.most as f32 * STEP.powi(steps as i32)
+    /// A density that rises up to `above` steps past `most` where the display shows that many texels.
+    pub fn growing(most: u32, above: u32) -> Density {
+        Density { most, above, far: 0, lowered: 0, budget: None, typical: 0.0, timed: 0, dearer: 1.0 / (STEP * STEP), left: None }
+    }
+
+    fn step(&self, steps: i32) -> f32 {
+        self.most as f32 * STEP.powi(steps)
+    }
+
+    /// The most texels it settles on.
+    pub fn ceiling(&self) -> u32 {
+        self.step(-(self.above as i32)).round() as u32
     }
 
     /// Settles on the texels to draw where the display shows `wanted` of them: the step at or under that, kept
     /// until `wanted` falls `SLACK` under it or reaches the next, less the budget's steps.
     pub fn settle(&mut self, wanted: f32) -> u32 {
-        while self.far > 0 && self.step(self.far - 1) <= wanted {
+        while self.far > -(self.above as i32) && self.step(self.far - 1) <= wanted {
             self.far -= 1;
         }
-        while self.step(self.far) > wanted * SLACK && self.step(self.far + self.lowered) > 1.0 {
+        while self.step(self.far) > wanted * SLACK && self.step(self.far + self.lowered as i32) > 1.0 {
             self.far += 1;
         }
-        (self.step(self.far + self.lowered).round() as u32).max(1)
+        (self.step(self.far + self.lowered as i32).round() as u32).max(1)
     }
 
     /// What the budget draws of the density the distance shows.
@@ -649,7 +669,7 @@ impl Density {
     /// for at most twice the budget, so a lone stall moves nothing.
     fn time(&mut self, took: std::time::Duration) {
         let Some(budget) = self.budget.map(|budget| budget.as_secs_f32()) else {
-            *self = Density { far: self.far, ..Density::new(self.most) };
+            *self = Density { far: self.far, ..Density::growing(self.most, self.above) };
             return;
         };
         self.timed = (self.timed + 1).min(SETTLED);
@@ -776,6 +796,32 @@ impl Renderer {
         Renderer::new(gpu, [texels; 2], outline_scale)
     }
 
+    /// A renderer for a window that may outgrow `width` metres, as a figure set down full size does: its density
+    /// follows the display up to `GROWN` steps past the target's size, and the target grows to what a drawing needs.
+    pub fn for_growing_window(gpu: Rc<Gpu>, width: f32, outline_scale: f32) -> Result<Renderer, String> {
+        let mut renderer = Renderer::for_window(gpu, width, outline_scale)?;
+        renderer.density = Density::growing(renderer.made[0].min(renderer.made[1]), GROWN);
+        Ok(renderer)
+    }
+
+    /// The texels per eye of the target it was made with.
+    pub fn made(&self) -> u32 {
+        self.made[0].min(self.made[1])
+    }
+
+    /// The target a drawing of `texels` per eye is drawn into: past the current one it grows by at least `GROWTH`,
+    /// up to the density's ceiling, and once the drawing falls a step under the size it was made at it returns to
+    /// that, so a density stepping about the made size does not remake it each time.
+    pub fn target_for(&self, texels: u32) -> [u32; 2] {
+        if texels > self.eye[0].min(self.eye[1]) {
+            [((self.eye[0].max(self.eye[1]) as f32 * GROWTH) as u32).max(texels).min(self.density.ceiling()); 2]
+        } else if texels < self.made() {
+            self.made
+        } else {
+            self.eye
+        }
+    }
+
     pub fn texels(&self, width: f32, distance: f32) -> u32 {
         eye_texels(self.gpu.density, width, distance)
     }
@@ -865,10 +911,11 @@ impl Renderer {
         let particle_push = [vk::PushConstantRange::default().stage_flags(both).size(std::mem::size_of::<ParticlePush>() as u32)];
         let particle_layout = unsafe { device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&particle_set_layouts).push_constant_ranges(&particle_push), None) }.map_err(vk_error("vkCreatePipelineLayout"))?;
         let mut renderer = Renderer {
-            depth: Texture { image: vk::Image::null(), memory: vk::DeviceMemory::null(), view: vk::ImageView::null() },
-            samples: Texture { image: vk::Image::null(), memory: vk::DeviceMemory::null(), view: vk::ImageView::null() },
+            depth: null_texture(),
+            samples: null_texture(),
             gpu,
             eye,
+            made: eye,
             targets: Vec::new(),
             render_pass,
             set_layout,
@@ -890,13 +937,62 @@ impl Renderer {
         if renderer.gpu.timestamp.is_some() {
             renderer.timestamps = Some(unsafe { renderer.gpu.device.create_query_pool(&vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::TIMESTAMP).query_count(2 * RING as u32), None) }.map_err(vk_error("vkCreateQueryPool"))?);
         }
-        renderer.depth = renderer.attachment(DEPTH, SAMPLES, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::ImageAspectFlags::DEPTH)?;
-        renderer.samples = renderer.attachment(FORMAT, SAMPLES, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT, vk::ImageAspectFlags::COLOR)?;
-        for _ in 0..RING {
-            let target = renderer.target()?;
-            renderer.targets.push(target);
-        }
+        renderer.allocate_targets()?;
         Ok(renderer)
+    }
+
+    fn allocate_targets(&mut self) -> Result<(), String> {
+        let device = &self.gpu.device;
+        for _ in 0..RING {
+            let commands = unsafe { device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(self.gpu.pool).command_buffer_count(1)) }.map_err(vk_error("vkAllocateCommandBuffers"))?[0];
+            let fence = unsafe { device.create_fence(&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None) }.map_err(vk_error("vkCreateFence"))?;
+            self.targets.push(Target { texture: null_texture(), framebuffer: vk::Framebuffer::null(), commands, fence });
+        }
+        self.remake()
+    }
+
+    fn attach(&mut self) -> Result<(), String> {
+        self.depth = self.attachment(DEPTH, SAMPLES, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT, vk::ImageAspectFlags::DEPTH)?;
+        self.samples = self.attachment(FORMAT, SAMPLES, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT, vk::ImageAspectFlags::COLOR)?;
+        Ok(())
+    }
+
+    /// Frees every image the targets draw into, once the GPU is idle; their fences and command buffers stay.
+    fn release_images(&mut self) {
+        let device = &self.gpu.device;
+        unsafe {
+            let _ = device.device_wait_idle();
+            for target in &mut self.targets {
+                device.destroy_framebuffer(std::mem::replace(&mut target.framebuffer, vk::Framebuffer::null()), None);
+                destroy(&self.gpu, &std::mem::replace(&mut target.texture, null_texture()));
+            }
+        }
+        destroy(&self.gpu, &std::mem::replace(&mut self.depth, null_texture()));
+        destroy(&self.gpu, &std::mem::replace(&mut self.samples, null_texture()));
+    }
+
+    fn remake(&mut self) -> Result<(), String> {
+        self.attach()?;
+        for at in 0..RING {
+            (self.targets[at].texture, self.targets[at].framebuffer) = self.images()?;
+        }
+        Ok(())
+    }
+
+    /// Remakes the targets' images at `eye` texels per eye. The images given out before have reached the compositor,
+    /// which copies each as it is given, so they go once the GPU is idle.
+    fn resize(&mut self, eye: [u32; 2]) -> Result<(), String> {
+        let started = std::time::Instant::now();
+        let was = self.eye;
+        self.release_images();
+        (self.eye, self.last) = (eye, None);
+        if let Err(error) = self.remake() {
+            self.release_images();
+            self.eye = [0; 2];
+            return Err(error);
+        }
+        tracing::info!("figure target {}x{} texels per eye, was {}x{}; remade in {:.1} ms", eye[0], eye[1], was[0], was[1], started.elapsed().as_secs_f64() * 1e3);
+        Ok(())
     }
 
     pub fn appearance(&mut self, model: &Model, skinned: &Skinned) -> Result<Appearance, String> {
@@ -1323,14 +1419,16 @@ impl Renderer {
         Ok(Texture { image, memory, view })
     }
 
-    fn target(&self) -> Result<Target, String> {
-        let device = &self.gpu.device;
+    fn images(&self) -> Result<(Texture, vk::Framebuffer), String> {
         let texture = self.attachment(FORMAT, vk::SampleCountFlags::TYPE_1, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::SAMPLED, vk::ImageAspectFlags::COLOR)?;
         let views = [self.samples.view, self.depth.view, texture.view];
-        let framebuffer = unsafe { device.create_framebuffer(&vk::FramebufferCreateInfo::default().render_pass(self.render_pass).attachments(&views).width(self.eye[0] * 2).height(self.eye[1]).layers(1), None) }.map_err(vk_error("vkCreateFramebuffer"))?;
-        let commands = unsafe { device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(self.gpu.pool).command_buffer_count(1)) }.map_err(vk_error("vkAllocateCommandBuffers"))?[0];
-        let fence = unsafe { device.create_fence(&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None) }.map_err(vk_error("vkCreateFence"))?;
-        Ok(Target { texture, framebuffer, commands, fence })
+        match unsafe { self.gpu.device.create_framebuffer(&vk::FramebufferCreateInfo::default().render_pass(self.render_pass).attachments(&views).width(self.eye[0] * 2).height(self.eye[1]).layers(1), None) } {
+            Ok(framebuffer) => Ok((texture, framebuffer)),
+            Err(error) => {
+                destroy(&self.gpu, &texture);
+                Err(vk_error("vkCreateFramebuffer")(error))
+            }
+        }
     }
 
     /// Reads the GPU time of the drawing `target` finished.
@@ -1349,6 +1447,10 @@ impl Renderer {
 
     /// Draws each eye's image `texels` square, packed from the target's top left; the overlay shows that part through `Overlay::part`.
     pub fn render(&mut self, appearance: &Appearance, eyes: [Option<Mat4>; 2], space: Mat4, texels: u32) -> Result<Drawing, String> {
+        let eye = self.target_for(texels);
+        if eye != self.eye {
+            self.resize(eye)?;
+        }
         let device = &self.gpu.device;
         let target = &self.targets[self.next];
         unsafe { device.wait_for_fences(&[target.fence], true, u64::MAX) }.map_err(vk_error("vkWaitForFences"))?;
@@ -1547,6 +1649,9 @@ impl Appearance {
 }
 
 fn destroy(gpu: &Gpu, texture: &Texture) {
+    if texture.image == vk::Image::null() {
+        return;
+    }
     unsafe {
         gpu.device.destroy_image_view(texture.view, None);
         gpu.device.destroy_image(texture.image, None);
@@ -1572,17 +1677,13 @@ impl Drop for Appearance {
 
 impl Drop for Renderer {
     fn drop(&mut self) {
+        self.release_images();
         let device = &self.gpu.device;
         unsafe {
-            let _ = device.device_wait_idle();
             for target in &self.targets {
                 device.destroy_fence(target.fence, None);
-                device.destroy_framebuffer(target.framebuffer, None);
                 device.free_command_buffers(self.gpu.pool, &[target.commands]);
-                destroy(&self.gpu, &target.texture);
             }
-            destroy(&self.gpu, &self.depth);
-            destroy(&self.gpu, &self.samples);
             if let Some(pool) = self.timestamps {
                 device.destroy_query_pool(pool, None);
             }
@@ -1598,6 +1699,10 @@ impl Drop for Renderer {
             device.destroy_render_pass(self.render_pass, None);
         }
     }
+}
+
+fn null_texture() -> Texture {
+    Texture { image: vk::Image::null(), memory: vk::DeviceMemory::null(), view: vk::ImageView::null() }
 }
 
 fn resized(map: &crate::vrm::Image, width: u32, height: u32) -> Vec<u8> {
@@ -1723,6 +1828,45 @@ mod tests {
     }
 
     #[test]
+    fn a_growing_window_draws_as_densely_as_the_display_shows_past_its_made_size_and_returns_to_it() {
+        let model = Model::parse(&figure(Version::One)).unwrap();
+        let mut skinned = model.skinned().unwrap();
+        let pose = model.rest();
+        let changed = skinned.morph(&pose.weights);
+        let worlds = model.worlds(&pose);
+        let placement = crate::vrm::Fit::new(&model, &skinned, crate::HEIGHT).placement(&model, &worlds, crate::FLOOR);
+        let eyes = [Vec3::new(-0.032, 0.0, 0.4), Vec3::new(0.032, 0.0, 0.4)].map(|eye| eye_projection(eye, 0.2, 0.2));
+        let gpu = Rc::new(Gpu::new(None).unwrap());
+        let made = 32;
+        let mut renderer = Renderer::new(gpu.clone(), [made; 2], crate::HEIGHT / PAGE_HEIGHT).unwrap();
+        renderer.density = Density::growing(made, GROWN);
+        let mut appearance = renderer.appearance(&model, &skinned).unwrap();
+        let mut drawn = |renderer: &mut Renderer, texels: u32| {
+            appearance.update(&skinned, &worlds, placement, &changed);
+            renderer.render(&appearance, eyes, Mat4::IDENTITY, texels).unwrap().drawn().unwrap();
+            renderer.read().unwrap()
+        };
+        assert_eq!(renderer.density.settle(made as f32), made, "held at its nearest, the window draws the target's own size");
+        let wanted = renderer.density.settle(3.0 * made as f32);
+        assert!(wanted > 2 * made, "the density follows the display past the made size: {wanted}");
+        let before = gpu.allocations();
+        let grown = drawn(&mut renderer, wanted);
+        assert_eq!(renderer.target_for(wanted), renderer.eye);
+        assert!(renderer.eye[0] >= wanted, "the target grew to hold {wanted}: {:?}", renderer.eye);
+        let mut alone = Renderer::new(gpu.clone(), [wanted; 2], crate::HEIGHT / PAGE_HEIGHT).unwrap();
+        let mut separate = alone.appearance(&model, &skinned).unwrap();
+        separate.update(&skinned, &worlds, placement, &changed);
+        alone.render(&separate, eyes, Mat4::IDENTITY, wanted).unwrap().drawn().unwrap();
+        assert_eq!(grown, alone.read().unwrap(), "a target grown to {wanted} texels draws what one made that size draws");
+        drop((separate, alone));
+        drawn(&mut renderer, made);
+        assert!(renderer.eye[0] > made, "a drawing back at the made size keeps the grown target, so a density stepping about it remakes nothing");
+        drawn(&mut renderer, made * 9 / 10);
+        assert_eq!(renderer.eye, [made; 2], "a step under its made size, the target returns to it");
+        assert_eq!(gpu.allocations(), before, "the grown images are freed and no more are left");
+    }
+
+    #[test]
     fn a_windows_texels_hold_while_its_viewer_sways_and_follow_a_real_change_of_distance() {
         let most = eye_texels(OFF_HEADSET_DENSITY, 0.4, NEAREST);
         let mut density = Density::new(most);
@@ -1759,7 +1903,7 @@ mod tests {
     type Figure = (f32, f32);
 
     fn time_at(density: &Density, (cost, fixed): Figure, lowered: u32) -> f32 {
-        cost * (fixed + (1.0 - fixed) * (density.step(lowered) / density.most as f32).powi(2))
+        cost * (fixed + (1.0 - fixed) * (density.step(lowered as i32) / density.most as f32).powi(2))
     }
 
     /// Feeds `density` `frames` drawings of `figure`, each scattered up to 15% about its time, and returns how

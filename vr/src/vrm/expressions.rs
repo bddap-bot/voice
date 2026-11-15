@@ -281,9 +281,11 @@ pub enum Field {
     ThemeSpeed,
     #[serde(rename = "clearcoatST")]
     ClearCoatSt,
+    LightAdd,
+    Brightness,
 }
 
-pub const FIELDS: usize = Field::ClearCoatSt as usize + 1;
+pub const FIELDS: usize = Field::Brightness as usize + 1;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct LookRegion {
@@ -291,6 +293,8 @@ pub struct LookRegion {
     pub rect: [f32; 4],
     pub field: Field,
     pub slot: usize,
+    #[serde(default)]
+    pub rest: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
@@ -983,6 +987,11 @@ impl Expressions {
         self.untinted = self.encoded_untinted.take().map(|encoded| untinted(encoded, &image)).transpose()?.flatten();
         self.looks = self.encoded_looks.take().map(|encoded| looks(encoded, &image)).transpose()?;
         Ok(())
+    }
+
+    pub fn look_rest(&self, look: &Look, field: Field) -> Option<f32> {
+        self.targets.iter().filter_map(|target| match &target.effect { Effect::Look(regions) => Some(regions), _ => None }).flatten()
+            .find_map(|region| region.rest.filter(|_| region.field == field && region.rect == look.rect))
     }
 
     pub(super) fn check(&self, nodes: usize, meshes: &[super::Mesh]) -> Result<(), String> {
@@ -1771,7 +1780,7 @@ mod tests {
             Effect::Unread("glow".into()),
             Effect::Unread("shimmer".into()),
             Effect::Scale { node: 0, axis: 1 },
-            Effect::Look(vec![LookRegion { node: 0, rect: [0.0, 0.0, 1.0, 1.0], field: Field::Decal, slot: 0 }]),
+            Effect::Look(vec![LookRegion { node: 0, rect: [0.0, 0.0, 1.0, 1.0], field: Field::Decal, slot: 0, rest: None }]),
         ]);
         assert!(expressions.check(1, &[]).is_ok());
         let mut pose = unposed(1);

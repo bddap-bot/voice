@@ -259,7 +259,8 @@ struct LookData {
     ramp: [[f32; 4]; RAMP / 4],
     ramped: u32,
     shadow_tint: f32,
-    ramp_pad: [f32; 2],
+    light_add: f32,
+    brightness: f32,
     coat: CoatData,
 }
 
@@ -290,8 +291,8 @@ struct ThemeData {
     exposure: f32,
 }
 
-fn look_data(look: &crate::vrm::expressions::Look, places: &[Place], rim_tint_layer: i32) -> LookData {
-    use crate::vrm::expressions::{Lighting, Mapping};
+fn look_data(look: &crate::vrm::expressions::Look, menu: &crate::vrm::expressions::Expressions, places: &[Place], rim_tint_layer: i32) -> LookData {
+    use crate::vrm::expressions::{Field, Lighting, Mapping};
     let decal = |value: fn(&crate::vrm::expressions::Decal) -> f32| look.decals.each_ref().map(|decal| decal.as_ref().map_or(0.0, value));
     let emission = look.emission.as_ref();
     let shadow = match &look.lighting {
@@ -331,7 +332,8 @@ fn look_data(look: &crate::vrm::expressions::Look, places: &[Place], rim_tint_la
             Lighting::Lit { shadow_tint, .. } => shadow_tint,
             _ => 0.0,
         },
-        ramp_pad: [0.0; 2],
+        light_add: menu.look_rest(look, Field::LightAdd).unwrap_or(0.0),
+        brightness: menu.look_rest(look, Field::Brightness).unwrap_or(1.0),
         shadowed: features.shadow as u32,
         shadow_border: shadow.map_or(0.0, |shadow| shadow.border),
         shadow_blur: shadow.map_or(0.0, |shadow| shadow.blur),
@@ -1040,7 +1042,8 @@ impl Renderer {
         let descriptors = self.set_layout.pool(device, set_count)?;
         let joints = skinned.joints();
         let material_data: Vec<MaterialData> = model.materials.iter().map(material_data).collect();
-        let look_data: Vec<LookData> = std::iter::once(LookData { page: [-1; 4], rim_tint_layer: -1, ..LookData::default() }).chain(looks.into_iter().flat_map(|looks| looks.materials.iter().map(|look| look_data(look, &places, if looks.rim_tint.is_some() { looks.shades.len() as i32 } else { -1 })))).collect();
+        let looked = model.menu.as_ref().and_then(|menu| Some((menu, menu.looks.as_ref()?)));
+        let look_data: Vec<LookData> = std::iter::once(LookData { page: [-1; 4], rim_tint_layer: -1, brightness: 1.0, ..LookData::default() }).chain(looked.into_iter().flat_map(|(menu, looks)| looks.materials.iter().map(move |look| (menu, looks, look))).map(|(menu, looks, look)| look_data(look, menu, &places, if looks.rim_tint.is_some() { looks.shades.len() as i32 } else { -1 }))).collect();
         let untinted = model.menu.as_ref().and_then(|menu| menu.untinted.as_ref());
         let untinted_cells: Vec<[f32; 8]> = match untinted.map(|untinted| &untinted.cells[..]) {
             Some(cells) if !cells.is_empty() => cells.to_vec(),
@@ -2543,6 +2546,42 @@ mod tests {
         assert!(shifted[1] > 200 && shifted[0] < 40, "a theme resting a third of a turn round glows green with no clip: {shifted:?}");
         let (start, later, _) = look_drawn([0, 0, 0, 255], themed(theme(0.0, 1.0)), None, 0.0, 0.0, Vec::new());
         assert!(start[0] > 200 && start[1] < 40 && later[1] > 200 && later[0] < 40, "a theme turning at rest turns with no clip: {start:?} then {later:?}");
+    }
+
+    #[test]
+    fn an_added_light_lifts_a_flat_material_past_its_cap_and_brightness_scales_its_colour() {
+        let mut flat = looks_test::look();
+        flat.lighting = crate::vrm::expressions::Lighting::Flat { cap: Some(1.0), shadow: None };
+        flat.rect = [0.0, 0.0, 0.5, 1.0];
+        let linear = |byte: u8| {
+            let c = byte as f32 / 255.0;
+            if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        let ratio = |after: [u8; 4], before: [u8; 4], channel: usize| linear(after[channel]) / linear(before[channel]);
+        let effect = |field: &str, rest: Option<f32>| {
+            let mut region = serde_json::json!({"node": 0, "rect": flat.rect, "field": field, "slot": 0});
+            if let Some(rest) = rest {
+                region["rest"] = rest.into();
+            }
+            serde_json::json!({"look": [region]})
+        };
+        let (capped, lifted, right) = look_drawn([128, 64, 32, 255], flat.clone(), Some(effect("lightAdd", None)), 0.0, 1.0, Vec::new());
+        assert!(capped[..2].iter().zip([128, 64]).all(|(&a, b)| a.abs_diff(b) <= 2), "at rest no light is added over the cap: {capped:?}");
+        assert!((0..2).all(|channel| (ratio(lifted, capped, channel) - 2.0).abs() < 0.1), "a light of one added after a cap of one doubles the albedo it lights: {capped:?} to {lifted:?}");
+        assert!(right, "the added light stays on its material's texels");
+        let (_, dark, _) = look_drawn([128, 64, 32, 255], flat.clone(), Some(effect("lightAdd", None)), 0.0, -2.0, Vec::new());
+        assert_eq!(dark[..3], [0; 3], "light taken below nothing draws black: {dark:?}");
+        let (full, halved, right) = look_drawn([128, 64, 32, 255], flat.clone(), Some(effect("brightness", None)), 1.0, 0.5, Vec::new());
+        assert!((0..2).all(|channel| (ratio(halved, full, channel) - 0.5).abs() < 0.05), "a brightness of a half halves the colour: {full:?} to {halved:?}");
+        assert!(right, "the brightness stays on its material's texels");
+        let (_, black, _) = look_drawn([128, 64, 32, 255], flat.clone(), Some(effect("brightness", None)), 1.0, -0.5, Vec::new());
+        assert_eq!(black[..3], [0; 3], "a negative brightness draws black: {black:?}");
+        let (dim, kept, _) = look_drawn([128, 64, 32, 255], flat.clone(), Some(effect("brightness", Some(0.5))), 1.0, 1.0, Vec::new());
+        assert!((ratio(dim, full, 0) - 0.5).abs() < 0.05 && dim == kept, "at the target's rest a material keeps the brightness it saves: {full:?} to {dim:?}");
+        let (_, moved, _) = look_drawn([128, 64, 32, 255], flat.clone(), Some(effect("brightness", Some(0.5))), 1.0, 0.25, Vec::new());
+        assert!((ratio(moved, full, 0) - 0.25).abs() < 0.05, "off its rest the clip's brightness replaces the saved one: {moved:?}");
+        let (lit, _, _) = look_drawn([128, 64, 32, 255], flat.clone(), Some(effect("lightAdd", Some(1.0))), 0.0, 0.0, Vec::new());
+        assert!((ratio(lit, capped, 0) - 2.0).abs() < 0.1, "at rest a material keeps the light it saves added: {lit:?}");
     }
 
     #[test]

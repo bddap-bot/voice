@@ -34,7 +34,7 @@ struct Surface {
     hue: vec4<f32>,
     color: vec4<f32>,
     tone: vec4<f32>,
-    look: array<vec4<f32>, 16>,
+    look: array<vec4<f32>, 18>,
     animated: vec4<u32>,
 }
 @group(0) @binding(7) var<storage, read> surfaces: array<Surface>;
@@ -133,6 +133,8 @@ struct Look {
     ramp: array<vec4<f32>, 4>,
     ramped: u32,
     shadow_tint: f32,
+    light_add: f32,
+    brightness: f32,
     coat: ClearCoat,
 }
 @group(0) @binding(10) var look_index: texture_2d<f32>;
@@ -162,6 +164,8 @@ const THEME_SATURATION = 12u;
 const THEME_VALUE = 13u;
 const THEME_SPEED = 14u;
 const CLEARCOAT_ST = 15u;
+const LIGHT_ADD = 16u;
+const BRIGHTNESS = 17u;
 
 @group(0) @binding(2) var texture_sampler: sampler;
 @group(0) @binding(3) var outline_width_texture: texture_2d<f32>;
@@ -586,7 +590,7 @@ fn coat(at: u32, look: u32, uv: vec2<f32>, gradient: mat2x2<f32>, normal: vec3<f
     if layer.lit_fallback != 0u {
         // Poiyomi's finalLighting: the light the albedo is multiplied by, here that of a white albedo shaded by the material's shade colour.
         let material = materials[draw.material];
-        environment *= lighting(material, look, normal, toon(material, normal, KEY_DIRECTION), vec3<f32>(1.0), material.shade);
+        environment *= lighting(material, look, normal, toon(material, normal, KEY_DIRECTION), vec3<f32>(1.0), material.shade, value(at, LIGHT_ADD, 0u, looks[look].light_add));
     }
     let reflection = environment / (rough * rough + 1.0) * mirror * layer.reflection_tint * levels.z;
     return saturate((highlight + reflection) * levels.x);
@@ -659,13 +663,13 @@ fn facing(input: Varying, front: bool) -> Facing {
 
 // A flat material takes its main light's colour whole, as a Lambert surface square to it would, and the ambient
 // light, whichever way it faces: Unity's base pass, which lights it by the one main directional light.
-fn flat_light(look: u32) -> vec3<f32> {
-    return min(KEY_COLOR + 0.5 * (SKY + GROUND), vec3<f32>(looks[look].light_cap));
+fn flat_light(look: u32, lift: f32) -> vec3<f32> {
+    return max(min(KEY_COLOR + 0.5 * (SKY + GROUND), vec3<f32>(looks[look].light_cap)) + lift, vec3<f32>(0.0));
 }
 
-fn lighting(material: Material, look: u32, normal: vec3<f32>, lit: f32, albedo: vec3<f32>, shade: vec3<f32>) -> vec3<f32> {
+fn lighting(material: Material, look: u32, normal: vec3<f32>, lit: f32, albedo: vec3<f32>, shade: vec3<f32>, lift: f32) -> vec3<f32> {
     if flat_reached && looks[look].flat != 0u {
-        return flat_light(look) * albedo;
+        return flat_light(look, lift) * albedo;
     }
     if ramp_reached && looks[look].ramped != 0u {
         // Toon Standard's base pass: its main light through its ramp at the half-Lambert term, the shade lent the
@@ -675,11 +679,11 @@ fn lighting(material: Material, look: u32, normal: vec3<f32>, lit: f32, albedo: 
         let j = i + 1u;
         let ramp = mix(looks[look].ramp[i / 4u][i % 4u], looks[look].ramp[j / 4u][j % 4u], x - f32(i));
         let level = ramp + (1.0 - ramp) * looks[look].shadow_tint * albedo;
-        return min(level * KEY_COLOR + 0.5 * (SKY + GROUND), vec3<f32>(looks[look].light_cap)) * albedo;
+        return max(min(level * KEY_COLOR + 0.5 * (SKY + GROUND), vec3<f32>(looks[look].light_cap)) + lift, vec3<f32>(0.0)) * albedo;
     }
     let direct = mix(shade, albedo, lit) * KEY_COLOR + mix(shade, albedo, toon(material, normal, RIM_DIRECTION)) * RIM_COLOR;
     let hemisphere = mix(GROUND, SKY, 0.5 * normal.y + 0.5);
-    return direct + mix(hemisphere, 0.5 * (SKY + GROUND), material.equalization) * albedo;
+    return direct + max(mix(hemisphere, 0.5 * (SKY + GROUND), material.equalization) + lift, vec3<f32>(0.0)) * albedo;
 }
 
 fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
@@ -731,8 +735,9 @@ fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
     }
     let glow = matcaps(&albedo, &shade, material.shade, input.surface, look, input.uv, gradient, normal, view, light_mask);
     let base = vec4<f32>(albedo, sampled.a);
-    let flat_light = flat_light(look);
-    let light = lighting(material, look, normal, lit, base.rgb, shade);
+    let lift = value(input.surface, LIGHT_ADD, 0u, looks[look].light_add);
+    let flat_light = flat_light(look, lift);
+    let light = lighting(material, look, normal, lit, base.rgb, shade, lift);
     var rim_light = vec3<f32>(0.0);
     if rim_reached {
         let rim = fresnel_band(turned, turned_width, looks[look].rim_power, looks[look].rim_border, looks[look].rim_blur) * mix(1.0, shadowmix, looks[look].rim_shadow_mask) * looks[look].rim_strength * f32(at.front || looks[look].rim_backface != 0u);
@@ -742,7 +747,7 @@ fn shaded(input: Varying, at: Facing, sheen: vec3<f32>) -> vec4<f32> {
         }
         rim_light = rim_color * mix(vec3<f32>(1.0), unshadowed, looks[look].rim_main) * mix(vec3<f32>(1.0), flat_light, looks[look].rim_lit) * rim;
     }
-    var color = light + glow + rim_light + emission(input.surface, look, input.uv, gradient, mask.r) + sheen;
+    var color = (light + glow + rim_light + emission(input.surface, look, input.uv, gradient, mask.r) + sheen) * max(value(input.surface, BRIGHTNESS, 0u, looks[look].brightness), 0.0);
     if draw.outline != 0u {
         return outlined(input, gradient, material, color, base.a);
     }

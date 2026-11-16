@@ -574,7 +574,7 @@ struct Camera {
     lights: Lights,
     width: u32,
     height: u32,
-    background: Vec<f32>,
+    background: [f32; 3],
 }
 
 fn reference_camera(camera: &serde_json::Value) -> Result<Camera, String> {
@@ -583,7 +583,9 @@ fn reference_camera(camera: &serde_json::Value) -> Result<Camera, String> {
         let &[ex, ey, ez] = &floats(key)?[..] else { return Err(format!("camera.json: {key} is not three angles")) };
         Ok(glam::Quat::from_euler(glam::EulerRot::YXZ, ey.to_radians(), ex.to_radians(), ez.to_radians()))
     };
-    let (position, background) = (floats("position")?, floats("background")?);
+    let &[red, green, blue] = &floats("background")?[..] else { return Err("camera.json: background is not three numbers".into()) };
+    let background = [red, green, blue];
+    let position = floats("position")?;
     let (width, height) = (camera["width"].as_u64().ok_or("camera.json: no width")? as u32, camera["height"].as_u64().ok_or("camera.json: no height")? as u32);
     let field = (camera["fov_vertical"].as_f64().ok_or("camera.json: no fov_vertical")? as f32).to_radians();
     let [px, py, pz] = position[..] else { return Err("camera.json: position is not three coordinates".into()) };
@@ -676,6 +678,20 @@ mod tests {
         let side = camera.width.max(camera.height) as f32;
         let at = camera.view.project_point3(point);
         Vec2::new((at.x + 1.0) / 2.0 * side - (side - camera.width as f32) / 2.0, (at.y + 1.0) / 2.0 * side - (side - camera.height as f32) / 2.0)
+    }
+
+    #[test]
+    fn a_camera_field_of_any_length_but_three_is_refused_by_name() {
+        let camera = serde_json::json!({ "position": [0.0, 1.5, 1.36], "rotation_euler": [0, 180, 0], "fov_vertical": 12, "width": 512, "height": 512, "background": [0.5, 0.5, 0.5], "ambient": [0.35, 0.35, 0.35], "light_euler": [40, 160, 0], "light_intensity": 1 });
+        assert!(reference_camera(&camera).is_ok());
+        for field in ["background", "position", "rotation_euler", "ambient", "light_euler"] {
+            for length in [0, 1, 2, 4] {
+                let mut short = camera.clone();
+                short[field] = serde_json::json!(vec![0.5; length]);
+                let error = reference_camera(&short).err().unwrap_or_else(|| panic!("{field} of {length} numbers was accepted"));
+                assert!(error.starts_with(&format!("camera.json: {field} is not three ")), "{field} of {length} numbers: {error}");
+            }
+        }
     }
 
     #[test]

@@ -57,7 +57,7 @@ impl Shader {
     }
 }
 
-static AVATAR_SHADER: std::sync::LazyLock<Shader> = std::sync::LazyLock::new(|| Shader::parse(include_str!("../shaders/avatar.wgsl")));
+static AVATAR_SHADER: std::sync::LazyLock<Shader> = std::sync::LazyLock::new(|| Lights::PAGE.shader());
 static PARTICLE_SHADER: std::sync::LazyLock<Shader> = std::sync::LazyLock::new(|| Shader::parse(include_str!("../shaders/particles.wgsl")));
 static DECAL_PAGES: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| AVATAR_SHADER.binding_array("decal_pages"));
 
@@ -589,6 +589,34 @@ pub struct Renderer {
     particle_set_layout: SetLayout,
     particle_layout: vk::PipelineLayout,
     particle_pipelines: HashMap<Blend, vk::Pipeline>,
+    shader: Shader,
+}
+
+#[derive(Clone, Copy)]
+pub struct Lights {
+    pub key_direction: Vec3,
+    pub key_color: Vec3,
+    pub rim_direction: Vec3,
+    pub rim_color: Vec3,
+    pub sky: Vec3,
+    pub ground: Vec3,
+}
+
+impl Lights {
+    pub const PAGE: Lights = Lights {
+        key_direction: Vec3::new(0.4685, 0.7496, 0.5622),
+        key_color: Vec3::new(0.987, 0.685, 0.514),
+        rim_direction: Vec3::new(-0.7276, 0.4851, -0.4851),
+        rim_color: Vec3::new(0.157, 0.200, 0.764),
+        sky: Vec3::new(0.596, 0.681, 0.859),
+        ground: Vec3::new(0.0064, 0.0048, 0.0106),
+    };
+
+    fn shader(&self) -> Shader {
+        let constants: String = [("KEY_DIRECTION", self.key_direction), ("KEY_COLOR", self.key_color), ("RIM_DIRECTION", self.rim_direction), ("RIM_COLOR", self.rim_color), ("SKY", self.sky), ("GROUND", self.ground)]
+            .map(|(name, light)| format!("const {name} = vec3<f32>({:?}, {:?}, {:?});\n", light.x, light.y, light.z)).concat();
+        Shader::parse(&(constants + include_str!("../shaders/avatar.wgsl")))
+    }
 }
 
 /// The ratio between neighbouring densities. A window's texels move in whole steps, because each change of them
@@ -829,6 +857,10 @@ impl Renderer {
     }
 
     pub fn new(gpu: Rc<Gpu>, eye: [u32; 2], outline_scale: f32) -> Result<Renderer, String> {
+        Renderer::lit(gpu, eye, outline_scale, Lights::PAGE)
+    }
+
+    pub fn lit(gpu: Rc<Gpu>, eye: [u32; 2], outline_scale: f32, lights: Lights) -> Result<Renderer, String> {
         let device = &gpu.device;
         let attachments = [
             vk::AttachmentDescription::default()
@@ -935,6 +967,7 @@ impl Renderer {
             particle_set_layout,
             particle_layout,
             particle_pipelines: HashMap::new(),
+            shader: lights.shader(),
         };
         if renderer.gpu.timestamp.is_some() {
             renderer.timestamps = Some(unsafe { renderer.gpu.device.create_query_pool(&vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::TIMESTAMP).query_count(2 * RING as u32), None) }.map_err(vk_error("vkCreateQueryPool"))?);
@@ -1326,7 +1359,7 @@ impl Renderer {
         for key in keys {
             for (stage, entry, shading) in [vertex(key), shader(key)] {
                 if let std::collections::hash_map::Entry::Vacant(unmade) = modules.entry((entry, shading)) {
-                    unmade.insert(Module::new(&gpu.device, &AVATAR_SHADER.spirv(stage, entry.to_str().unwrap(), &shading.constants())?)?);
+                    unmade.insert(Module::new(&gpu.device, &self.shader.spirv(stage, entry.to_str().unwrap(), &shading.constants())?)?);
                 }
             }
         }

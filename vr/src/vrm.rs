@@ -490,11 +490,11 @@ fn rotation(world: &Mat4) -> Quat {
     world.to_scale_rotation_translation().1
 }
 
-fn bone_one(name: &str) -> String {
+pub fn bone_one(name: &str) -> String {
     name.replace("ThumbProximal", "ThumbMetacarpal").replace("ThumbIntermediate", "ThumbProximal")
 }
 
-fn srgb_to_linear(value: f32) -> f32 {
+pub fn srgb_to_linear(value: f32) -> f32 {
     if value <= 0.04045 {
         value / 12.92
     } else {

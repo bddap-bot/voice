@@ -8,7 +8,7 @@ use crate::board::Board;
 use crate::placement::{facing, Pose};
 use crate::openvr::{Overlay, Runtime};
 use crate::relay::{Relay, Token};
-use crate::render::{eye_projection, Renderer, PAGE_HEIGHT};
+use crate::render::{eye_projection, Lights, Renderer, PAGE_HEIGHT};
 use crate::settings::Settings;
 use crate::vrm::expressions::{Control, Controller, Kind};
 use crate::vulkan::{Flat, Gpu};
@@ -412,7 +412,7 @@ fn replay_reference(recording: &Path, file: &str, out: &Path, meta: &mut serde_j
             let &[x, y, z, qx, qy, qz, qw] = &values[..] else { return Err(format!("track.tsv: {name} {values:?} is not a position and rotation")) };
             Ok(from_unity(Vec3::new(x, y, z), glam::Quat::from_xyzw(qx, qy, qz, qw)))
         };
-        track.push((frame_of(&row[0])?, transform(1, "root")?, [("head", transform(2, "head")?), ("hips", transform(5, "hips")?)]));
+        track.push((frame_of(&row[0])?, transform(1, "root")?));
     }
     let mut steps: HashMap<i64, Vec<(String, f32)>> = HashMap::new();
     let mut window = (i64::MAX, i64::MIN);
@@ -436,14 +436,33 @@ fn replay_reference(recording: &Path, file: &str, out: &Path, meta: &mut serde_j
     }
     let camera: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(recording.join("camera.json")).map_err(|error| format!("camera.json: {error}"))?).map_err(|error| format!("camera.json: {error}"))?;
     let Camera { view, width, height, background } = reference_camera(&camera)?;
-    meta["notes"].as_array_mut().unwrap().push(format!("the overlay's own lights (a warm key, a blue rim and a sky/ground hemisphere) instead of the recording's ambient {} and white light at Unity euler {}", camera["ambient"], camera["light_euler"]).into());
-    meta["notes"].as_array_mut().unwrap().push("the recorded hips and head placed where the recording has them, the torso between them at rest, the limbs in the overlay's standing pose".into());
+    let lights = reference_lights(&camera)?;
+    let mut humanoid = HashMap::new();
+    for row in table("drivers.tsv")?.iter().skip(1) {
+        let [path, roles, ..] = &row[..] else { continue };
+        for role in roles.split(',').filter_map(|role| role.strip_prefix("humanoid:")) {
+            let mut letters = role.chars();
+            let first = letters.next().map(|letter| letter.to_ascii_lowercase()).into_iter();
+            humanoid.insert(path.clone(), crate::vrm::bone_one(&first.chain(letters).collect::<String>()));
+        }
+    }
+    let mut moves: Vec<(i64, String, glam::Mat4)> = Vec::new();
+    for row in table("poses.tsv")? {
+        let [frame, space, path, values, ..] = &row[..] else { continue };
+        let Some(bone) = humanoid.get(path).filter(|_| space == "root") else { continue };
+        let values = values.split(',').map(number).collect::<Result<Vec<_>, _>>()?;
+        let &[x, y, z, qx, qy, qz, qw, ..] = &values[..] else { return Err(format!("poses.tsv: {values:?} is not a position and rotation")) };
+        moves.push((frame_of(frame)?, bone.clone(), from_unity(Vec3::new(x, y, z), glam::Quat::from_xyzw(qx, qy, qz, qw))));
+    }
+    moves.sort_by_key(|&(frame, ..)| frame);
+    let posed: std::collections::HashSet<&str> = moves.iter().map(|(_, bone, _)| bone.as_str()).collect();
+    meta["notes"].as_array_mut().unwrap().push(format!("humanoid bones placed as recorded: {}", posed.len()).into());
 
     let bytes = std::fs::read(file).map_err(|error| format!("{file}: {error}"))?;
     let model = crate::vrm::Model::parse(&bytes)?;
     let side = height.max(width);
     let gpu = std::rc::Rc::new(Gpu::new(None)?);
-    let mut renderer = Renderer::new(gpu, [side; 2], 1.0)?;
+    let mut renderer = Renderer::lit(gpu, [side; 2], 1.0, lights)?;
     let mut puppet = crate::dressed(model, Default::default(), file, &mut renderer, &Default::default())?;
     let names: HashMap<String, usize> = (0..puppet.model.nodes()).rev().filter_map(|node| Some((normalized(puppet.model.name(node)?), node))).collect();
     let mut tips = Vec::new();
@@ -474,7 +493,18 @@ fn replay_reference(recording: &Path, file: &str, out: &Path, meta: &mut serde_j
     std::fs::write(&path, listing).map_err(|error| format!("{}: {error}", path.display()))?;
     match &puppet.model.menu {
         Some(menu) => {
-            let mut unknown: Vec<&str> = steps.values().flatten().map(|(name, _)| name.as_str()).filter(|name| !menu.parameters.iter().any(|parameter| parameter.name == *name)).collect();
+            let defined: Vec<&str> = menu.parameters.iter().map(|parameter| parameter.name.as_str()).collect();
+            let renamed = build_numbered(&defined, steps.values().flatten().map(|(name, _)| name.as_str()));
+            for (name, _) in steps.values_mut().flatten() {
+                if let Some(defined) = renamed.get(name.as_str()) {
+                    *name = defined.clone();
+                }
+            }
+            let mut applied: Vec<&str> = steps.values().flatten().map(|(name, _)| name.as_str()).filter(|name| defined.contains(name)).collect();
+            applied.sort();
+            applied.dedup();
+            meta["notes"].as_array_mut().unwrap().push(format!("stepped parameters applied: {}, {} of them under the avatar's own build number", applied.len(), renamed.len()).into());
+            let mut unknown: Vec<&str> = steps.values().flatten().map(|(name, _)| name.as_str()).filter(|name| !defined.contains(name)).collect();
             unknown.sort();
             unknown.dedup();
             if !unknown.is_empty() {
@@ -485,17 +515,20 @@ fn replay_reference(recording: &Path, file: &str, out: &Path, meta: &mut serde_j
     }
 
     let to_root = glam::Mat4::from_quat(puppet.model.facing());
-    // Between the placed hips and head the preset's lean would bend the neck off the head; Unity's idle holds the torso near its rest.
-    let mut standing = puppet.standing.clone();
-    standing.rotations.retain(|bone, _| !["spine", "chest", "upperChest", "neck"].contains(&bone.as_str()));
+    let mut held: HashMap<String, glam::Mat4> = HashMap::new();
+    let mut moved = moves.into_iter().peekable();
     let mut written = String::new();
-    for (frame, root, bones) in track {
+    for (frame, root) in track {
         if let Some(controller) = puppet.controller.as_mut() {
             for (name, value) in steps.get(&frame).into_iter().flatten() {
                 controller.set(name, *value);
             }
         }
-        let mut pose = puppet.model.pose(&standing);
+        while let Some((_, bone, at)) = moved.next_if(|&(at, ..)| at <= frame) {
+            held.insert(bone, at);
+        }
+        let bones: Vec<(&str, glam::Mat4)> = held.iter().map(|(bone, at)| (bone.as_str(), *at)).collect();
+        let mut pose = puppet.model.pose(&puppet.standing);
         let idle = puppet.express(&mut pose, 1, RECORDED_DELTA);
         place_recorded(&puppet.model, &mut pose, &bones);
         puppet.settle(&mut pose, root * to_root, &[], RECORDED_DELTA, &idle);
@@ -524,6 +557,30 @@ fn replay_reference(recording: &Path, file: &str, out: &Path, meta: &mut serde_j
     }
     let path = out.join("tips.tsv");
     std::fs::write(&path, written).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+fn build_numbered<'a>(defined: &[&str], stepped: impl Iterator<Item = &'a str>) -> HashMap<String, String> {
+    let rest = |name: &str| -> Option<String> {
+        let (number, rest) = name.strip_prefix("VF")?.split_once('_')?;
+        (!number.is_empty() && number.bytes().all(|digit| digit.is_ascii_digit())).then(|| rest.to_owned())
+    };
+    let mut by_rest: HashMap<String, Option<&str>> = HashMap::new();
+    for &name in defined {
+        if let Some(rest) = rest(name) {
+            by_rest.entry(rest).and_modify(|only| *only = None).or_insert(Some(name));
+        }
+    }
+    stepped.filter(|name| !defined.contains(name)).filter_map(|name| Some((name.to_owned(), by_rest.get(&rest(name)?).copied().flatten()?.to_owned()))).collect()
+}
+
+fn reference_lights(camera: &serde_json::Value) -> Result<Lights, String> {
+    let floats = |key: &str| -> Result<Vec<f32>, String> { camera[key].as_array().ok_or(format!("camera.json: no {key}"))?.iter().map(|value| value.as_f64().map(|value| value as f32).ok_or(format!("camera.json: {key} is not numbers"))).collect() };
+    let (euler, ambient) = (floats("light_euler")?, floats("ambient")?);
+    let (&[ex, ey, ez], &[r, g, b]) = (&euler[..], &ambient[..]) else { return Err("camera.json: light_euler or ambient is not three numbers".into()) };
+    let intensity = camera["light_intensity"].as_f64().ok_or("camera.json: no light_intensity")? as f32;
+    let light = from_unity(Vec3::ZERO, glam::Quat::from_euler(glam::EulerRot::YXZ, ey.to_radians(), ex.to_radians(), ez.to_radians()));
+    let ambient = Vec3::new(r, g, b).map(crate::vrm::srgb_to_linear);
+    Ok(Lights { key_direction: -light.transform_vector3(Vec3::Z), key_color: Vec3::splat(intensity), rim_direction: Vec3::Y, rim_color: Vec3::ZERO, sky: ambient, ground: ambient })
 }
 
 struct Camera {
@@ -583,6 +640,13 @@ mod tests {
     use crate::vrm::tests::Builder;
     use crate::vrm::{Model, Version};
     use glam::{Mat4, Quat, Vec2};
+
+    #[test]
+    fn a_build_numbered_parameter_reaches_the_one_its_rest_names_once() {
+        let defined = ["VF3_Alpha", "VF4_Beta", "VF5_Beta", "Gamma", "VF6_Delta"];
+        let renamed = build_numbered(&defined, ["VF90_Alpha", "VF91_Beta", "VF92_Gamma", "VF6_Delta", "VF93_Epsilon", "VF_Alpha", "VFx_Alpha"].into_iter());
+        assert_eq!(renamed, HashMap::from([("VF90_Alpha".to_owned(), "VF3_Alpha".to_owned())]));
+    }
 
     fn figure(version: Version) -> Model {
         let mut builder = Builder::new(match version {

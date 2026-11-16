@@ -245,15 +245,8 @@ fn uncoated(input: CoatedVarying) -> Varying {
     return Varying(input.clip, input.normal, input.uv, input.surface, input.world);
 }
 
-// The page's lights, divided by pi as three.js's Lambert term does.
 // The points a ramp-lit look's ramp holds, render.rs RAMP.
 const RAMP = 16u;
-const KEY_DIRECTION = vec3<f32>(0.4685, 0.7496, 0.5622);
-const KEY_COLOR = vec3<f32>(0.987, 0.685, 0.514);
-const RIM_DIRECTION = vec3<f32>(-0.7276, 0.4851, -0.4851);
-const RIM_COLOR = vec3<f32>(0.157, 0.200, 0.764);
-const SKY = vec3<f32>(0.596, 0.681, 0.859);
-const GROUND = vec3<f32>(0.0064, 0.0048, 0.0106);
 
 fn toon(material: Material, normal: vec3<f32>, direction: vec3<f32>) -> f32 {
     let toony = material.shading_toony;

@@ -435,8 +435,7 @@ fn replay_reference(recording: &Path, file: &str, out: &Path, meta: &mut serde_j
         renders.entry(frame_of(frame)?).or_default().push(name.clone());
     }
     let camera: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(recording.join("camera.json")).map_err(|error| format!("camera.json: {error}"))?).map_err(|error| format!("camera.json: {error}"))?;
-    let Camera { view, width, height, background } = reference_camera(&camera)?;
-    let lights = reference_lights(&camera)?;
+    let Camera { view, lights, width, height, background } = reference_camera(&camera)?;
     let mut humanoid = HashMap::new();
     for row in table("drivers.tsv")?.iter().skip(1) {
         let [path, roles, ..] = &row[..] else { continue };
@@ -462,7 +461,7 @@ fn replay_reference(recording: &Path, file: &str, out: &Path, meta: &mut serde_j
     let model = crate::vrm::Model::parse(&bytes)?;
     let side = height.max(width);
     let gpu = std::rc::Rc::new(Gpu::new(None)?);
-    let mut renderer = Renderer::lit(gpu, [side; 2], 1.0, lights)?;
+    let mut renderer = Renderer::with_lights(gpu, [side; 2], 1.0, lights)?;
     let mut puppet = crate::dressed(model, Default::default(), file, &mut renderer, &Default::default())?;
     let names: HashMap<String, usize> = (0..puppet.model.nodes()).rev().filter_map(|node| Some((normalized(puppet.model.name(node)?), node))).collect();
     let mut tips = Vec::new();
@@ -494,16 +493,13 @@ fn replay_reference(recording: &Path, file: &str, out: &Path, meta: &mut serde_j
     match &puppet.model.menu {
         Some(menu) => {
             let defined: Vec<&str> = menu.parameters.iter().map(|parameter| parameter.name.as_str()).collect();
-            let renamed = build_numbered(&defined, steps.values().flatten().map(|(name, _)| name.as_str()));
+            let renamed = own_build_numbers(&defined, steps.values().flatten().map(|(name, _)| name.as_str()));
             for (name, _) in steps.values_mut().flatten() {
                 if let Some(defined) = renamed.get(name.as_str()) {
                     *name = defined.clone();
                 }
             }
-            let mut applied: Vec<&str> = steps.values().flatten().map(|(name, _)| name.as_str()).filter(|name| defined.contains(name)).collect();
-            applied.sort();
-            applied.dedup();
-            meta["notes"].as_array_mut().unwrap().push(format!("stepped parameters applied: {}, {} of them under the avatar's own build number", applied.len(), renamed.len()).into());
+            meta["notes"].as_array_mut().unwrap().push(format!("stepped parameters set under the avatar's own build number: {}", renamed.len()).into());
             let mut unknown: Vec<&str> = steps.values().flatten().map(|(name, _)| name.as_str()).filter(|name| !defined.contains(name)).collect();
             unknown.sort();
             unknown.dedup();
@@ -559,10 +555,10 @@ fn replay_reference(recording: &Path, file: &str, out: &Path, meta: &mut serde_j
     std::fs::write(&path, written).map_err(|error| format!("{}: {error}", path.display()))
 }
 
-fn build_numbered<'a>(defined: &[&str], stepped: impl Iterator<Item = &'a str>) -> HashMap<String, String> {
+fn own_build_numbers<'a>(defined: &[&str], stepped: impl Iterator<Item = &'a str>) -> HashMap<String, String> {
     let rest = |name: &str| -> Option<String> {
         let (number, rest) = name.strip_prefix("VF")?.split_once('_')?;
-        (!number.is_empty() && number.bytes().all(|digit| digit.is_ascii_digit())).then(|| rest.to_owned())
+        digits(number).then(|| rest.to_owned())
     };
     let mut by_rest: HashMap<String, Option<&str>> = HashMap::new();
     for &name in defined {
@@ -573,35 +569,33 @@ fn build_numbered<'a>(defined: &[&str], stepped: impl Iterator<Item = &'a str>) 
     stepped.filter(|name| !defined.contains(name)).filter_map(|name| Some((name.to_owned(), by_rest.get(&rest(name)?).copied().flatten()?.to_owned()))).collect()
 }
 
-fn reference_lights(camera: &serde_json::Value) -> Result<Lights, String> {
-    let floats = |key: &str| -> Result<Vec<f32>, String> { camera[key].as_array().ok_or(format!("camera.json: no {key}"))?.iter().map(|value| value.as_f64().map(|value| value as f32).ok_or(format!("camera.json: {key} is not numbers"))).collect() };
-    let (euler, ambient) = (floats("light_euler")?, floats("ambient")?);
-    let (&[ex, ey, ez], &[r, g, b]) = (&euler[..], &ambient[..]) else { return Err("camera.json: light_euler or ambient is not three numbers".into()) };
-    let intensity = camera["light_intensity"].as_f64().ok_or("camera.json: no light_intensity")? as f32;
-    let light = from_unity(Vec3::ZERO, glam::Quat::from_euler(glam::EulerRot::YXZ, ey.to_radians(), ex.to_radians(), ez.to_radians()));
-    let ambient = Vec3::new(r, g, b).map(crate::vrm::srgb_to_linear);
-    Ok(Lights { key_direction: -light.transform_vector3(Vec3::Z), key_color: Vec3::splat(intensity), rim_direction: Vec3::Y, rim_color: Vec3::ZERO, sky: ambient, ground: ambient })
-}
-
 struct Camera {
     view: glam::Mat4,
+    lights: Lights,
     width: u32,
     height: u32,
     background: Vec<f32>,
 }
 
 fn reference_camera(camera: &serde_json::Value) -> Result<Camera, String> {
-    let floats = |key: &str| -> Result<Vec<f32>, String> { camera[key].as_array().ok_or(format!("camera.json: no {key}"))?.iter().map(|value| value.as_f64().map(|value| value as f32).ok_or(format!("camera.json: {key} is not numbers"))).collect() };
-    let (position, euler, background) = (floats("position")?, floats("rotation_euler")?, floats("background")?);
+    let floats = |key: &str| -> Result<Vec<f32>, String> { camera[key].as_array().ok_or(format!("camera.json: no {key}"))?.iter().map(|value| value.as_f64().map(|value| value as f32).filter(|value| value.is_finite()).ok_or(format!("camera.json: {key} is not finite numbers"))).collect() };
+    let turn = |key: &str| -> Result<glam::Quat, String> {
+        let &[ex, ey, ez] = &floats(key)?[..] else { return Err(format!("camera.json: {key} is not three angles")) };
+        Ok(glam::Quat::from_euler(glam::EulerRot::YXZ, ey.to_radians(), ex.to_radians(), ez.to_radians()))
+    };
+    let (position, background) = (floats("position")?, floats("background")?);
     let (width, height) = (camera["width"].as_u64().ok_or("camera.json: no width")? as u32, camera["height"].as_u64().ok_or("camera.json: no height")? as u32);
     let field = (camera["fov_vertical"].as_f64().ok_or("camera.json: no fov_vertical")? as f32).to_radians();
-    let [ex, ey, ez] = euler[..] else { return Err("camera.json: rotation_euler is not three angles".into()) };
     let [px, py, pz] = position[..] else { return Err("camera.json: position is not three coordinates".into()) };
-    let viewer = from_unity(Vec3::new(px, py, pz), glam::Quat::from_euler(glam::EulerRot::YXZ, ey.to_radians(), ex.to_radians(), ez.to_radians()));
+    let viewer = from_unity(Vec3::new(px, py, pz), turn("rotation_euler")?);
     let (eye, ahead, up) = (viewer.transform_point3(Vec3::ZERO), viewer.transform_vector3(Vec3::Z), viewer.transform_vector3(Vec3::Y));
     let half = (field / 2.0).tan();
     let view = eye_projection(Vec3::Z, half, half).unwrap() * glam::Mat4::from_translation(Vec3::Z) * glam::Mat4::look_to_rh(eye, ahead, up);
-    Ok(Camera { view, width, height, background })
+    let &[r, g, b] = &floats("ambient")?[..] else { return Err("camera.json: ambient is not three numbers".into()) };
+    let intensity = camera["light_intensity"].as_f64().map(|value| value as f32).filter(|value| value.is_finite()).ok_or("camera.json: no finite light_intensity")?;
+    let ambient = Some(Vec3::new(r, g, b).map(crate::vrm::srgb_to_linear)).filter(|ambient| ambient.is_finite()).ok_or("camera.json: ambient is past what a light holds")?;
+    let lights = Lights { key_direction: -from_unity(Vec3::ZERO, turn("light_euler")?).transform_vector3(Vec3::Z), key_color: Vec3::splat(intensity), rim_direction: Vec3::Y, rim_color: Vec3::ZERO, sky: ambient, ground: ambient };
+    Ok(Camera { view, lights, width, height, background })
 }
 
 /// A VRM 0 figure faces -Z, so a Unity bone's frame reaches its node turned by the figure's facing.
@@ -627,7 +621,11 @@ fn list(controls: &[Control], prefix: &str, out: &mut String) {
 
 /// A recorded path segment without the `#<n>` that tells a later sibling of the same name apart.
 fn unnumbered(segment: &str) -> &str {
-    segment.rsplit_once('#').filter(|(_, number)| !number.is_empty() && number.bytes().all(|digit| digit.is_ascii_digit())).map_or(segment, |(name, _)| name)
+    segment.rsplit_once('#').filter(|(_, number)| digits(number)).map_or(segment, |(name, _)| name)
+}
+
+fn digits(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|digit| digit.is_ascii_digit())
 }
 
 fn normalized(name: &str) -> String {
@@ -642,9 +640,9 @@ mod tests {
     use glam::{Mat4, Quat, Vec2};
 
     #[test]
-    fn a_build_numbered_parameter_reaches_the_one_its_rest_names_once() {
+    fn a_own_build_numbers_parameter_reaches_the_one_its_rest_names_once() {
         let defined = ["VF3_Alpha", "VF4_Beta", "VF5_Beta", "Gamma", "VF6_Delta"];
-        let renamed = build_numbered(&defined, ["VF90_Alpha", "VF91_Beta", "VF92_Gamma", "VF6_Delta", "VF93_Epsilon", "VF_Alpha", "VFx_Alpha"].into_iter());
+        let renamed = own_build_numbers(&defined, ["VF90_Alpha", "VF91_Beta", "VF92_Gamma", "VF6_Delta", "VF93_Epsilon", "VF_Alpha", "VFx_Alpha"].into_iter());
         assert_eq!(renamed, HashMap::from([("VF90_Alpha".to_owned(), "VF3_Alpha".to_owned())]));
     }
 
@@ -686,8 +684,8 @@ mod tests {
         let (head_at, head_turn) = (Vec3::new(0.012, 1.46, -0.016), Quat::from_euler(glam::EulerRot::XYZ, 0.06, -0.12, 0.03));
         let hips = from_unity(Vec3::new(0.0, 0.76, 0.037), Quat::from_rotation_x(-0.02));
         for (camera, version) in [
-            (serde_json::json!({ "position": [0.0, 1.5, 1.36], "rotation_euler": [0, 180, 0], "fov_vertical": 12, "width": 512, "height": 512, "background": [0.5, 0.5, 0.5] }), Version::One),
-            (serde_json::json!({ "position": [0.4, 1.3, 1.1], "rotation_euler": [4, 200, 2], "fov_vertical": 30, "width": 384, "height": 640, "background": [0.5, 0.5, 0.5] }), Version::Zero),
+            (serde_json::json!({ "position": [0.0, 1.5, 1.36], "rotation_euler": [0, 180, 0], "fov_vertical": 12, "width": 512, "height": 512, "background": [0.5, 0.5, 0.5], "ambient": [0.35, 0.35, 0.35], "light_euler": [40, 160, 0], "light_intensity": 1 }), Version::One),
+            (serde_json::json!({ "position": [0.4, 1.3, 1.1], "rotation_euler": [4, 200, 2], "fov_vertical": 30, "width": 384, "height": 640, "background": [0.5, 0.5, 0.5], "ambient": [0.35, 0.35, 0.35], "light_euler": [40, 160, 0], "light_intensity": 1 }), Version::Zero),
         ] {
             let model = figure(version);
             let mut pose = model.pose(&model.standing());

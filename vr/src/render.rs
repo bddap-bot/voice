@@ -57,7 +57,7 @@ impl Shader {
     }
 }
 
-static AVATAR_SHADER: std::sync::LazyLock<Shader> = std::sync::LazyLock::new(|| Lights::PAGE.shader());
+static AVATAR_SHADER: std::sync::LazyLock<std::sync::Arc<Shader>> = std::sync::LazyLock::new(|| std::sync::Arc::new(Lights::PAGE.shader()));
 static PARTICLE_SHADER: std::sync::LazyLock<Shader> = std::sync::LazyLock::new(|| Shader::parse(include_str!("../shaders/particles.wgsl")));
 static DECAL_PAGES: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| AVATAR_SHADER.binding_array("decal_pages"));
 
@@ -589,7 +589,7 @@ pub struct Renderer {
     particle_set_layout: SetLayout,
     particle_layout: vk::PipelineLayout,
     particle_pipelines: HashMap<Blend, vk::Pipeline>,
-    shader: Shader,
+    shader: std::sync::Arc<Shader>,
 }
 
 #[derive(Clone, Copy)]
@@ -857,10 +857,14 @@ impl Renderer {
     }
 
     pub fn new(gpu: Rc<Gpu>, eye: [u32; 2], outline_scale: f32) -> Result<Renderer, String> {
-        Renderer::lit(gpu, eye, outline_scale, Lights::PAGE)
+        Renderer::shaded(gpu, eye, outline_scale, AVATAR_SHADER.clone())
     }
 
-    pub fn lit(gpu: Rc<Gpu>, eye: [u32; 2], outline_scale: f32, lights: Lights) -> Result<Renderer, String> {
+    pub fn with_lights(gpu: Rc<Gpu>, eye: [u32; 2], outline_scale: f32, lights: Lights) -> Result<Renderer, String> {
+        Renderer::shaded(gpu, eye, outline_scale, std::sync::Arc::new(lights.shader()))
+    }
+
+    fn shaded(gpu: Rc<Gpu>, eye: [u32; 2], outline_scale: f32, shader: std::sync::Arc<Shader>) -> Result<Renderer, String> {
         let device = &gpu.device;
         let attachments = [
             vk::AttachmentDescription::default()
@@ -967,7 +971,7 @@ impl Renderer {
             particle_set_layout,
             particle_layout,
             particle_pipelines: HashMap::new(),
-            shader: lights.shader(),
+            shader,
         };
         if renderer.gpu.timestamp.is_some() {
             renderer.timestamps = Some(unsafe { renderer.gpu.device.create_query_pool(&vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::TIMESTAMP).query_count(2 * RING as u32), None) }.map_err(vk_error("vkCreateQueryPool"))?);

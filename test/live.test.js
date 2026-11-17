@@ -290,7 +290,7 @@ test('a request ended with the hand-off phrase carries only the user turns since
   assert.equal(withoutTrailingPhrase('Corvus', HAND_OFF_PHRASE), 'Corvus');
   assert.equal(withoutTrailingPhrase('Compare the evalFly Corvus', HAND_OFF_PHRASE), 'Compare the eval');
   const trace = new ConversationTrace();
-  trace.heard('Egdod issue fourteen', 100);
+  trace.heard('Open issue fourteen', 100);
   trace.delegated('a', 200);
   trace.spoke('Checking.');
   trace.heard('give me a Chesterton', 300);

@@ -373,7 +373,7 @@ mod tests {
     fn a_request_ended_with_the_hand_off_phrase_carries_only_the_user_turns_since_the_previous_hand_off() {
         let start = Instant::now();
         let mut trace = opened();
-        trace.heard("Egdod issue fourteen", start);
+        trace.heard("Open issue fourteen", start);
         trace.delegated(start);
         trace.spoke("Checking.");
         trace.heard("give me a Chesterton", start);

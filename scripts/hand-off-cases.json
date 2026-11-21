@@ -1,0 +1,27 @@
+{
+  "cases": [
+    {"name": "curious-compression", "kind": "vague", "turns": ["I'm curious about our compression experiments."], "reply": "Round two of that has seventeen runs finished and nothing analysed yet."},
+    {"name": "wondering-sensor", "kind": "vague", "turns": ["I've been wondering about the garden sensor project."], "reply": "Round two of that has seventeen runs finished and nothing analysed yet."},
+    {"name": "interested-benchmarks", "kind": "vague", "turns": ["I'm interested in how the benchmark runs are going."], "reply": "Round two of that has seventeen runs finished and nothing analysed yet."},
+    {"name": "hear-caching", "kind": "vague", "turns": ["I want to hear about the caching work."], "reply": "Round two of that has seventeen runs finished and nothing analysed yet."},
+    {"name": "thinking-arm", "kind": "vague", "turns": ["I've been thinking about the robot arm project lately."], "reply": "Round two of that has seventeen runs finished and nothing analysed yet."},
+    {"name": "curious-renderer", "kind": "vague", "turns": ["I'm curious what's new with the map renderer."], "reply": "Round two of that has seventeen runs finished and nothing analysed yet."},
+    {"name": "goal-sensor", "kind": "vague", "turns": ["My goal for the sensor project is to share it so other people can use it in their own builds."], "reply": "Round two of that has seventeen runs finished and nothing analysed yet."},
+    {"name": "goal-compression", "kind": "vague", "turns": ["I want the compression work to be something other people pick up and use."], "reply": "Round two of that has seventeen runs finished and nothing analysed yet."},
+    {"name": "quiet", "kind": "misheard", "turns": ["I'd like to know how the backup job went.", "Quiet, Corvus."], "reply": "It finished at seventeen past four with no errors."},
+    {"name": "quiet-alone", "kind": "misheard", "turns": ["Check whether the printer finished.", "Quiet, Corvus."], "reply": "It finished at seventeen past four with no errors."},
+    {"name": "fight", "kind": "misheard", "turns": ["Find out if the nightly build passed.", "Fight, Corvus."], "reply": "It finished at seventeen past four with no errors."},
+    {"name": "flight", "kind": "misheard", "turns": ["See how much disk the archive uses.", "Flight, Corvus."], "reply": "It finished at seventeen past four with no errors."},
+    {"name": "whole-backup", "kind": "whole", "gap_ms": 2500, "turns": ["Can you check on the backup job.", "And tell me when it last finished.", "Fly, Corvus."], "reply": "Queued; it starts in seventeen minutes."},
+    {"name": "whole-printer", "kind": "whole", "gap_ms": 2500, "turns": ["I want to print the phone stand again.", "Use the blue filament this time.", "Fly, Korvus."], "reply": "Queued; it starts in seventeen minutes."},
+    {"name": "whole-garden", "kind": "whole", "gap_ms": 2500, "turns": ["The tomatoes look droopy today.", "Maybe the watering schedule is off.", "Alright, fly Corvus."], "reply": "Queued; it starts in seventeen minutes."},
+    {"name": "fragment-backup", "kind": "fragment", "gap_ms": 1500, "turns": ["What's the status of", "the backup job from last night?"], "reply": "It finished at seventeen past four with no errors."},
+    {"name": "fragment-compare", "kind": "fragment", "gap_ms": 1500, "turns": ["How does the new compression run compare", "with the one from last week?"], "reply": "It finished at seventeen past four with no errors."},
+    {"name": "fragment-printer", "kind": "fragment", "gap_ms": 1500, "turns": ["Could you find out whether the printer", "has enough filament for another print?"], "reply": "It finished at seventeen past four with no errors."},
+    {"name": "restart-codebase", "kind": "fragment", "gap_ms": 2500, "turns": ["Is our current codebase", "Is it using up-to-date", "designs?"], "reply": "It finished at seventeen past four with no errors."},
+    {"name": "restart-printer", "kind": "fragment", "gap_ms": 2500, "turns": ["Could you check if the", "Actually, could you see whether the printer", "is still warming up?"], "reply": "It finished at seventeen past four with no errors."},
+    {"name": "pause-long", "kind": "fragment", "gap_ms": 3000, "turns": ["I was wondering whether the backup", "from last night", "actually finished."], "reply": "It finished at seventeen past four with no errors."},
+    {"name": "aside-quiet", "kind": "misheard", "gap_ms": 4000, "turns": ["I'm not trying to talk to you right now.", "Quiet, Corvus."], "reply": "It finished at seventeen past four with no errors."},
+    {"name": "aside-fight", "kind": "misheard", "gap_ms": 4000, "turns": ["Please stop chatting and just pass things along.", "Fight, Corvus."], "reply": "It finished at seventeen past four with no errors."}
+  ]
+}

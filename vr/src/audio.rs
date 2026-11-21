@@ -55,16 +55,21 @@ pub struct PlaybackBuffer {
     silent_run: usize,
     since_push: usize,
     level: f32,
+    silenced: bool,
 }
 
 impl Default for PlaybackBuffer {
     fn default() -> Self {
-        PlaybackBuffer { samples: VecDeque::new(), silent_run: 0, since_push: 0, level: 0.0 }
+        PlaybackBuffer { samples: VecDeque::new(), silent_run: 0, since_push: 0, level: 0.0, silenced: false }
     }
 }
 
 impl PlaybackBuffer {
     pub fn push(&mut self, input: &[f32]) {
+        if self.silenced {
+            self.silent_run += input.len();
+            return;
+        }
         for &sample in input {
             if self.samples.len() == CAPACITY {
                 self.samples.pop_front();
@@ -77,6 +82,14 @@ impl PlaybackBuffer {
 
     pub fn clear(&mut self) {
         self.samples.clear();
+    }
+
+    /// The page's `silence`: while on, incoming audio is dropped with what was queued, and counts as quiet.
+    pub fn silence(&mut self, on: bool) {
+        if on && !self.silenced {
+            self.clear();
+        }
+        self.silenced = on;
     }
 
     /// True once `samples` of silence have run and nothing louder is still queued.
@@ -337,6 +350,22 @@ mod tests {
             assert!(pulled < 3 * RATE as usize);
         }
         assert!(pulled >= RATE as usize, "silent packets still arriving: {pulled}");
+    }
+
+    #[test]
+    fn silenced_incoming_audio_is_dropped_with_what_was_queued_and_counts_as_quiet_until_playback_resumes() {
+        let mut buffer = PlaybackBuffer::default();
+        let mut output = vec![0.0; 256];
+        buffer.push(&vec![0.5; DELAY + 1024]);
+        buffer.silence(true);
+        buffer.push(&vec![0.5; 512]);
+        buffer.pull(&mut output);
+        assert!(output.iter().all(|&sample| sample == 0.0));
+        assert!(buffer.quiet(512));
+        buffer.silence(false);
+        buffer.push(&vec![0.5; DELAY + 512]);
+        buffer.pull(&mut output);
+        assert!(output.iter().all(|&sample| sample == 0.5));
     }
 
     #[test]

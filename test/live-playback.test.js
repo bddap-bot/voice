@@ -61,3 +61,16 @@ test('closing playback releases quiet waiters so delayed replies can be discarde
   await playback.quiet();
   assert.equal(playback.quietWaiters.length, 0);
 });
+
+test('silenced, incoming audio is dropped with what was queued and counts as quiet, and playback resumes on the next audio after', () => {
+  const buffer = new PlaybackBuffer(12, 0);
+  const output = new Float32Array(2);
+  buffer.process([1, 2, 3, 4], output);
+  buffer.silence(true);
+  buffer.process([5, 6], output);
+  assert.deepEqual([...output], [0, 0]);
+  assert.ok(buffer.quiet(2));
+  buffer.silence(false);
+  buffer.process([7, 8], output);
+  assert.deepEqual([...output], [7, 8]);
+});

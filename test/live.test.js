@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, TranscriptBatcher, audioFrame, checkedClientEvent, contextEvent, errorEvent, formatElapsed, formatStartError, includesPhrase, isOfferFor, usageLimit, withoutTrailingPhrase, shareFrame } from '../docs/live.js';
+import { AckUploader, AudioChunker, ConversationTrace, beforeNameCall, EventBatcher, ReplyWatch, TranscriptBatcher, audioFrame, checkedClientEvent, contextEvent, errorEvent, formatElapsed, formatStartError, includesPhrase, isOfferFor, usageLimit, withoutTrailingPhrase, shareFrame } from '../docs/live.js';
 import { HAND_OFF_PHRASE, SIGN_OFF } from '../docs/identity.js';
 
 test('start errors include their name and first stack frame', () => {
@@ -523,4 +523,44 @@ test('a usage limit is reported only when the server sets one', () => {
   for (const event of [{}, { usage_limit: null }, { usage_limit: {} }, { usage_limit: { status: null, reset_seconds: null } }, null]) assert.equal(usageLimit(event), null);
   assert.deepEqual(usageLimit({ usage: { audio_duration_ms: 1 }, usage_limit: { status: 'exhausted', reset_seconds: 120, extra: 1 } }), { status: 'exhausted', reset_seconds: 120 });
   assert.deepEqual(usageLimit({ usage_limit: { reset_seconds: 0 } }), { status: null, reset_seconds: 0 });
+});
+
+test('a reply handed to the model is recorded with whether speech followed and when, never its words', () => {
+  let now = 1000;
+  const records = [];
+  const timers = new Map();
+  const watch = new ReplyWatch({ record: (name, detail) => records.push([name, detail]), limitMs: 20000, now: () => now, later: (run, ms) => { const timer = Symbol(ms); timers.set(timer, run); return timer; }, cancel: (timer) => timers.delete(timer) });
+  watch.spoke();
+  watch.handed('item_a');
+  now += 700;
+  watch.spoke();
+  watch.spoke();
+  watch.handed('item_b');
+  now += 300;
+  watch.missed('user spoke');
+  watch.handed('item_c');
+  now += 20000;
+  [...timers.values()].forEach((run) => run());
+  watch.handed('item_d');
+  watch.handed('item_e');
+  assert.deepEqual(records, [
+    ['hub-reply-handed', { id: 'item_a' }],
+    ['hub-reply-spoken', { id: 'item_a', after_ms: 700 }],
+    ['hub-reply-handed', { id: 'item_b' }],
+    ['hub-reply-unspoken', { id: 'item_b', after_ms: 300, reason: 'user spoke' }],
+    ['hub-reply-handed', { id: 'item_c' }],
+    ['hub-reply-unspoken', { id: 'item_c', after_ms: 20000, reason: 'no speech' }],
+    ['hub-reply-handed', { id: 'item_d' }],
+    ['hub-reply-unspoken', { id: 'item_d', after_ms: 0, reason: 'another reply' }],
+    ['hub-reply-handed', { id: 'item_e' }],
+  ]);
+  assert.equal(timers.size, 1);
+});
+
+test('a request closes with the hand-off phrase or a near sound of its first word before the name, and what precedes it is the request', () => {
+  assert.equal(beforeNameCall(`Check the printer. ${HAND_OFF_PHRASE}.`), 'Check the printer.');
+  for (const call of ['Quiet, Corvus.', 'Fight, Corvus', 'Flight Corvus!', 'Fly, Korvus.']) assert.equal(beforeNameCall(`Is the backup done?\n${call}`), 'Is the backup done?', call);
+  assert.equal(beforeNameCall('Fly, Corvus'), '');
+  assert.equal(beforeNameCall('Alright, fly Corvus.'), 'Alright');
+  for (const text of ['Hey Corvus', 'Thanks, Corvus.', 'Good night, Corvus.', 'I was telling her about Corvus.', 'What time is my flight, Corvus?', 'Who won the fight, Corvus.', 'Why so quiet, Corvus?', 'Fly, Corvus?', 'Corvus', 'Corvus, check the printer.', 'Fly, Corvids.', '']) assert.equal(beforeNameCall(text), null, text);
 });

@@ -8,6 +8,7 @@ class LivePlaybackProcessor extends AudioWorkletProcessor {
     this.quiet = null;
     this.port.onmessage = ({ data }) => {
       if (data.type === 'clear') this.buffer.clear();
+      if (data.type === 'silence') this.buffer.silence(data.on);
       if (data.type === 'quiet') {
         this.quiet = Math.round(sampleRate * data.ms / 1000);
         this.buffer.silentRun = 0;

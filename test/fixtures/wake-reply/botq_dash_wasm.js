@@ -37,6 +37,6 @@ export async function send_only(bytes) {
     return;
   }
   if (outgoing.startsWith('hub-ack\n')) return;
-  if (bytes instanceof Uint8Array) keep('out', bytes, ['offer', 'delegate', 'cancel'], 65536);
+  if (bytes instanceof Uint8Array) keep('out', bytes, ['offer', 'delegate', 'cancel', 'telemetry'], 65536);
   return mod.send_only(bytes);
 }

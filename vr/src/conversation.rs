@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::calls::{Call, Calls};
-use crate::identity::{identity, without_trailing_phrase};
+use crate::identity::{before_name_call, identity, without_trailing_phrase};
 
 const MEMORY: &str = "Context: Archived transcripts of completed conversations, oldest first, for memory only. Each ended when you went to sleep. These utterances already happened; do not repeat or continue them.\n";
 const MAX_CONTEXT: usize = 8192;
@@ -147,6 +147,11 @@ impl Trace {
     fn heard_text(&self, from: usize) -> String {
         let heard: Vec<&str> = (from..self.turns.len()).filter(|&index| self.turns[index].speaker == Speaker::User).map(|index| self.turns[index].text.trim()).filter(|text| !text.is_empty()).collect();
         bounded_text(&heard, MAX_CONTEXT)
+    }
+
+    /// The page's `ConversationTrace.beforeNameCall`.
+    pub fn before_name_call(&self) -> Option<String> {
+        before_name_call(&self.heard_text(self.pending_from)).map(str::to_owned)
     }
 
     pub fn ends_request(&self) -> bool {

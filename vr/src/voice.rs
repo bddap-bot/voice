@@ -259,18 +259,27 @@ impl Voice {
                     awake.hub.heard(&delta, &self.trace, Instant::now());
                     awake.activity = Instant::now();
                 }
+                session::Event::ModelTurn(open) => awake.hub.model_turn(open),
                 session::Event::Spoke(delta) => {
-                    tracing::info!("spoke {delta:?}");
-                    self.actions.spoke(&delta);
-                    self.trace.spoke(&delta);
-                    awake.hub.spoke();
                     awake.activity = Instant::now();
                     awake.said.push_str(&delta);
                     let keep = 4 * sign_off.len();
                     if let Some((cut, _)) = awake.said.char_indices().find(|&(at, _)| awake.said.len() - at <= keep) {
                         awake.said.drain(..cut);
                     }
-                    if !awake.hub.sleeping() && includes_phrase(&awake.said, sign_off) {
+                    let signed_off = includes_phrase(&awake.said, sign_off);
+                    if signed_off {
+                        awake.hub.end_call_quiet("sign-off");
+                    }
+                    if awake.hub.unheard(&delta) {
+                        tracing::info!("unplayed {} characters", delta.chars().count());
+                        continue;
+                    }
+                    tracing::info!("spoke {delta:?}");
+                    self.actions.spoke(&delta);
+                    self.trace.spoke(&delta);
+                    awake.hub.spoke(Instant::now());
+                    if signed_off && !awake.hub.sleeping() {
                         tracing::info!("sign-off heard");
                         awake.hub.sleep();
                         awake.session.listen_for_quiet();
@@ -300,6 +309,7 @@ impl Voice {
                 }
             }
         }
+        awake.session.silence(awake.hub.silenced());
         if awake.hub.take_listen() {
             awake.session.listen_for_quiet();
         }

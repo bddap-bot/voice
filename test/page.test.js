@@ -1564,6 +1564,114 @@ window.addEventListener('test-ready', async () => {
   ]);
 });
 
+test('after a request closes with the hand-off phrase or a near sound, nothing the model says plays until the hub reply reaches it and its turn then speaking ends, and each reply is logged as spoken or not, without words', async () => {
+  const { result, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  const { LivePlayback } = await import('/live-playback.js');
+  const silences = [];
+  const silence = LivePlayback.prototype.silence;
+  LivePlayback.prototype.silence = function (on) { silences.push(on); return silence.call(this, on); };
+  const records = () => (globalThis.telemetryBatches ?? []).flat().filter(({ kind, name }) => kind === 'session' && /^(hand-off-quiet|hub-reply-)/.test(name)).map(({ name, detail }) => [name, JSON.parse(detail)]);
+  const modelTurn = (type) => emitLive({ type, turn: { id: 'turn_model', role: 'assistant' } });
+  hear('Hey, Corvus');
+  say('Hello.');
+  hear('Is the printer busy?');
+  delegateTurn('item_printer');
+  say('Sure, checking.');
+  const greeting = [...silences];
+  hear('Quiet, Corvus.');
+  modelTurn('turn.created');
+  say('Understood, staying quiet.');
+  await until(() => globalThis.delegateFrames?.length);
+  replyFromHub('item_printer', 'printer', ['The printer is idle.']);
+  await until(() => globalThis.hubAcks?.includes('printer'));
+  say(' I will hold it.');
+  const replyMidTurn = [...silences];
+  modelTurn('turn.done');
+  say('The printer is idle.');
+  hear('Thanks, Corvus.');
+  const thanks = [...silences];
+  hear('And the backup? Fly, Corvus.');
+  delegateTurn('item_backup');
+  say('Got it, I will hold.');
+  await until(() => globalThis.delegateFrames?.length === 2);
+  hear('Never mind.');
+  say('Okay.');
+  replyFromHub('item_backup', 'backup', ['The backup finished.']);
+  await until(() => globalThis.hubAcks?.includes('backup'));
+  hear('Thanks.');
+  await until(() => records().length >= 8);
+  document.body.dataset.result = JSON.stringify({ greeting, replyMidTurn, thanks, silences, records: records(), spoken: testPuppet.calls.filter(([name]) => name === 'speak').map(([, text]) => text), sent: globalThis.delegateFrames.map(({ text }) => text), log: document.querySelector('#log').innerText });
+});
+`);
+  assert.ok(result, stderr);
+  assert.deepEqual([result.greeting, result.replyMidTurn, result.thanks, result.silences], [[], [true], [true, false], [true, false, true, false]]);
+  assert.deepEqual(result.spoken, ['Hello.', 'Sure, checking.', 'The printer is idle.', 'Okay.']);
+  assert.doesNotMatch(result.log, /staying quiet|I will hold/);
+  assert.equal(result.sent.length, 2);
+  assert.match(result.sent[1], /And the backup\?$/);
+  const after = ({ after_ms, ...rest }) => (assert.ok(Number.isInteger(after_ms) && after_ms >= 0), rest);
+  assert.deepEqual(result.records.map(([name, detail]) => [name, 'after_ms' in detail ? after(detail) : detail]), [
+    ['hand-off-quiet', { on: true }],
+    ['hub-reply-handed', { id: 'item_printer' }],
+    ['hand-off-quiet', { on: false, reason: 'hub reply', unheard_chars: 42 }],
+    ['hub-reply-spoken', { id: 'item_printer' }],
+    ['hand-off-quiet', { on: true }],
+    ['hand-off-quiet', { on: false, reason: 'user spoke', unheard_chars: 20 }],
+    ['hub-reply-handed', { id: 'item_backup' }],
+    ['hub-reply-unspoken', { id: 'item_backup', reason: 'user spoke' }],
+  ]);
+});
+
+test('a hand-off phrase with no request in flight is played after three seconds, and a sign-off while quiet still ends the session', async () => {
+  const { result, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const records = () => (globalThis.telemetryBatches ?? []).flat().filter(({ kind, name }) => kind === 'session' && name === 'hand-off-quiet').map(({ detail }) => JSON.parse(detail));
+  hear('Check the printer. Quiet, Corvus.');
+  say('Okay.');
+  await wait(3100);
+  say('Staying quiet.');
+  hear('And the backup? Fly, Corvus.');
+  delegateTurn('item_backup');
+  say('My labor here is ended.');
+  await until(() => records().length >= 4);
+  await wait(100);
+  document.body.dataset.result = JSON.stringify({ records: records(), spoken: testPuppet.calls.filter(([name]) => name === 'speak').map(([, text]) => text), awake: document.querySelector('#puppet').getAttribute('aria-pressed') });
+});
+`, { virtualTime: true });
+  assert.ok(result, stderr);
+  assert.deepEqual(result.records, [
+    { on: true },
+    { on: false, reason: 'no request', unheard_chars: 5 },
+    { on: true },
+    { on: false, reason: 'sign-off', unheard_chars: 0 },
+  ]);
+  assert.deepEqual(result.spoken, ['Staying quiet.', 'My labor here is ended.']);
+});
+
+test('the quiet after the hand-off phrase outlasts its three seconds when the page hands the request off itself, and a question ending with the name is played', async () => {
+  const { result, stderr } = await runPage(`
+window.addEventListener('test-ready', async () => {
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const records = () => (globalThis.telemetryBatches ?? []).flat().filter(({ kind, name }) => kind === 'session' && name === 'hand-off-quiet').map(({ detail }) => JSON.parse(detail));
+  hear('Check the printer. Fly, Corvus.');
+  say('Okay, staying quiet.');
+  await wait(3100);
+  const relays = globalThis.delegateFrames?.length ?? 0;
+  hear('What time is my flight, Corvus?');
+  say('Your flight leaves at noon.');
+  await until(() => records().length >= 2);
+  await wait(100);
+  document.body.dataset.result = JSON.stringify({ relays, records: records(), spoken: testPuppet.calls.filter(([name]) => name === 'speak').map(([, text]) => text) });
+});
+`, { virtualTime: true });
+  assert.ok(result, stderr);
+  assert.equal(result.relays, 1);
+  assert.deepEqual(result.records, [{ on: true }, { on: false, reason: 'user spoke', unheard_chars: 20 }]);
+  assert.deepEqual(result.spoken, ['Your flight leaves at noon.']);
+});
+
 test('a hand-off waits for the speech Live heard to sound finished, joining later speech under the newest delegation, or six seconds of quiet', async () => {
   const { result, stderr } = await runPage(`
 globalThis.heldTurns = true;

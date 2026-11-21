@@ -38,6 +38,8 @@ pub enum Event {
     Open { window: usize, seeded: usize },
     Heard(String),
     Spoke(String),
+    /// A model turn started (`true`) or ended.
+    ModelTurn(bool),
     Delegated(String),
     Hub(Vec<u8>),
     HubError { id: String, message: String },
@@ -89,6 +91,10 @@ impl Session {
     /// The output energy the mouth follows.
     pub fn level(&self) -> f32 {
         self.played.lock().unwrap().level()
+    }
+
+    pub fn silence(&self, on: bool) {
+        self.played.lock().unwrap().silence(on);
     }
 
     pub fn listen_for_quiet(&self) {
@@ -309,6 +315,9 @@ impl Link {
                                 "input_transcript.added" => {
                                     self.played.lock().unwrap().clear();
                                     let _ = self.events.send(Event::Heard(event["item"]["text"].as_str().unwrap_or("").to_owned()));
+                                }
+                                "turn.created" | "turn.done" if event["turn"]["role"] == "assistant" => {
+                                    let _ = self.events.send(Event::ModelTurn(event["type"] == "turn.created"));
                                 }
                                 "output_transcript.added" => {
                                     let _ = self.events.send(Event::Spoke(event["item"]["text"].as_str().unwrap_or("").to_owned()));

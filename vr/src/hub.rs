@@ -162,6 +162,58 @@ enum Standing {
     Settling(Vec<String>),
 }
 
+/// Session events the page records as telemetry, logged here as events and times without words.
+#[derive(Default)]
+struct Log {
+    #[cfg(test)]
+    records: Vec<(&'static str, Value)>,
+}
+
+impl Log {
+    fn record(&mut self, name: &'static str, detail: Value) {
+        tracing::info!("{name} {detail}");
+        #[cfg(test)]
+        self.records.push((name, detail));
+    }
+}
+
+/// The page's `ReplyWatch`: whether speech followed a hub reply handed to the model.
+#[derive(Default)]
+struct ReplyWatch {
+    pending: Option<(String, Instant)>,
+}
+
+impl ReplyWatch {
+    fn handed(&mut self, id: &str, now: Instant, log: &mut Log) {
+        self.missed("another reply", now, log);
+        self.pending = Some((id.to_owned(), now));
+        log.record("hub-reply-handed", json!({ "id": id }));
+    }
+
+    fn spoke(&mut self, now: Instant, log: &mut Log) {
+        self.settle("hub-reply-spoken", None, now, log);
+    }
+
+    fn missed(&mut self, reason: &'static str, now: Instant, log: &mut Log) {
+        self.settle("hub-reply-unspoken", Some(reason), now, log);
+    }
+
+    fn overdue(&mut self, now: Instant, log: &mut Log) {
+        if self.pending.as_ref().is_some_and(|(_, at)| now >= *at + TURN_START) {
+            self.missed("no speech", now, log);
+        }
+    }
+
+    fn settle(&mut self, name: &'static str, reason: Option<&'static str>, now: Instant, log: &mut Log) {
+        let Some((id, at)) = self.pending.take() else { return };
+        let mut detail = json!({ "id": id, "after_ms": now.duration_since(at).as_millis() as u64 });
+        if let Some(reason) = reason {
+            detail["reason"] = reason.into();
+        }
+        log.record(name, detail);
+    }
+}
+
 /// The page's delegation and hub-reply handling for one session: `delegate`, `hub`, `hub-error` and the order replies and standing instructions reach Live.
 #[derive(Default)]
 pub struct Hub {
@@ -189,6 +241,19 @@ pub struct Hub {
     held: Option<Held>,
     heard_at: Option<Instant>,
     ask: Option<u64>,
+    watch: ReplyWatch,
+    call_quiet: Option<CallQuiet>,
+    model_turn_open: bool,
+    log: Log,
+}
+
+/// The page's `callQuiet`: the model's speech goes unplayed after a request closed with the hand-off phrase or a near sound of it.
+struct CallQuiet {
+    /// When it ends unless a hand-off is held or awaits the hub, checked once.
+    check_at: Option<Instant>,
+    unheard: usize,
+    /// Why it ends once the model's turn in progress ends.
+    ending: Option<&'static str>,
 }
 
 /// A hand-off waiting for the speech to finish its thought.
@@ -316,6 +381,7 @@ impl Hub {
         trace.calls.failed(id);
         tracing::warn!("hub request {id} failed: {message}");
         let voice = self.voice(id).map(str::to_owned);
+        self.release_call_quiet("hub failed");
         self.out.push(speak(voice.as_deref(), FAILED));
     }
 
@@ -329,6 +395,8 @@ impl Hub {
             self.interrupt("barge-in");
         }
         if has_word(delta) {
+            self.watch.missed("user spoke", now, &mut self.log);
+            self.end_call_quiet("user spoke");
             self.unanswered = (!self.waiting.is_empty() && !self.sleeping).then_some(now + UNANSWERED);
             self.heard_at = Some(now);
             if let Some(held) = &mut self.held {
@@ -338,9 +406,48 @@ impl Hub {
             }
         }
         self.request_end = (trace.ends_request() && !self.sleeping).then_some(now + UNANSWERED);
+        if self.call_quiet.is_none() && !self.sleeping && has_word(delta) && trace.before_name_call().is_some_and(|request| !request.is_empty() || self.held.is_some() || !self.waiting.is_empty()) {
+            self.call_quiet = Some(CallQuiet { check_at: Some(now + UNANSWERED), unheard: 0, ending: None });
+            self.log.record("hand-off-quiet", json!({ "on": true }));
+        }
     }
 
-    pub fn spoke(&mut self) {
+    /// The page's `quietAfterCall`: after a request closes with the hand-off phrase or a near sound of it, none of the model's speech is played until the hub's reply reaches it and the model's turn then in progress ends, since this model hears the phrase as an order to go quiet. Relaying is unchanged.
+    pub fn silenced(&self) -> bool {
+        self.call_quiet.is_some()
+    }
+
+    /// Counts the model's speech while it goes unplayed; true when it did. Unplayed speech still answers the turn, as played speech does.
+    pub fn unheard(&mut self, delta: &str) -> bool {
+        let Some(quiet) = &mut self.call_quiet else { return false };
+        quiet.unheard += delta.chars().count();
+        self.unanswered = None;
+        true
+    }
+
+    /// A model turn started or ended.
+    pub fn model_turn(&mut self, open: bool) {
+        self.model_turn_open = open;
+        if let Some(reason) = self.call_quiet.as_ref().and_then(|quiet| quiet.ending).filter(|_| !open) {
+            self.end_call_quiet(reason);
+        }
+    }
+
+    fn release_call_quiet(&mut self, reason: &'static str) {
+        match &mut self.call_quiet {
+            Some(quiet) if self.model_turn_open => quiet.ending = Some(reason),
+            _ => self.end_call_quiet(reason),
+        }
+    }
+
+    pub fn end_call_quiet(&mut self, reason: &'static str) {
+        if let Some(quiet) = self.call_quiet.take() {
+            self.log.record("hand-off-quiet", json!({ "on": false, "reason": reason, "unheard_chars": quiet.unheard }));
+        }
+    }
+
+    pub fn spoke(&mut self, now: Instant) {
+        self.watch.spoke(now, &mut self.log);
         self.unanswered = None;
         self.show_cued();
         if matches!(self.turn, Some(Turn::Awaiting(_))) {
@@ -363,6 +470,8 @@ impl Hub {
 
     /// The session is over: words heard since the last delegation go to the hub as one `ended` frame, which no voice answers.
     pub fn ended(&mut self, trace: &Trace, now: Instant) {
+        self.watch.missed("session ended", now, &mut self.log);
+        self.end_call_quiet("session ended");
         let unrelayed = trace.pending(now);
         if has_word(&unrelayed.text) {
             self.out.push(Command::Frame("ended", json!({ "text": unrelayed.text, "context": unrelayed.context, "duration_ms": unrelayed.duration_ms })));
@@ -392,7 +501,7 @@ impl Hub {
         }
         let instructions = reply.instructions.clone();
         if !self.renewing && reply.first && self.turn.is_some() && instructions.is_empty() && matches!(self.pending_standing, Standing::None) {
-            self.present(reply, trace);
+            self.present(reply, trace, now);
         } else {
             self.replies.push_back(reply);
             self.play(trace, now);
@@ -410,7 +519,7 @@ impl Hub {
     }
 
     /// Appends a reply's commentary and cues its display for when the model speaks it; true when Live was told something to speak.
-    fn present(&mut self, mut reply: Reply, trace: &mut Trace) -> bool {
+    fn present(&mut self, mut reply: Reply, trace: &mut Trace, now: Instant) -> bool {
         let spoken = !reply.commentary.is_empty() && !self.sleeping;
         if let Some(display) = reply.shown.take() {
             if spoken {
@@ -423,12 +532,14 @@ impl Hub {
             return false;
         }
         self.waiting.remove(&reply.id);
+        self.release_call_quiet("hub reply");
         trace.hub_replied();
         if !spoken {
             return false;
         }
         let voice = self.voice(&reply.id).map(str::to_owned);
         self.reply_unspoken = true;
+        self.watch.handed(&reply.id, now, &mut self.log);
         for content in &reply.commentary {
             self.out.push(speak(voice.as_deref(), content));
         }
@@ -442,7 +553,7 @@ impl Hub {
         }
         while let Some(reply) = self.replies.pop_front() {
             self.turn = Some(Turn::Awaiting(now + TURN_START));
-            if self.present(reply, trace) {
+            if self.present(reply, trace, now) {
                 return;
             }
         }
@@ -482,12 +593,13 @@ impl Hub {
     /// A call opened: replies to the previous call's delegations go to the session.
     pub fn opened(&mut self) {
         self.renewing = false;
+        self.model_turn_open = false;
         self.owned.clear();
         self.joined.clear();
     }
 
     pub fn renewable(&self) -> bool {
-        !self.renewing && !self.sleeping && !self.reply_unspoken
+        !self.renewing && !self.sleeping && !self.reply_unspoken && self.call_quiet.is_none()
             && matches!(self.pending_standing, Standing::None)
             && self.turn.is_none() && self.replies.is_empty()
             && self.waiting.is_empty() && self.held.is_none()
@@ -503,6 +615,11 @@ impl Hub {
 
     /// Advances the waits: `quiet` is whether playback has been quiet for `TURN_QUIET` since the last `take_listen`.
     pub fn step(&mut self, trace: &mut Trace, now: Instant, quiet: bool) {
+        self.watch.overdue(now, &mut self.log);
+        let checked = self.call_quiet.as_mut().is_some_and(|quiet| quiet.check_at.take_if(|at| now >= *at).is_some());
+        if checked && self.held.is_none() && self.waiting.is_empty() && !trace.ends_request() {
+            self.end_call_quiet("no request");
+        }
         if quiet {
             if let Standing::Settling(instructions) = &mut self.pending_standing {
                 let instructions = std::mem::take(instructions);
@@ -581,9 +698,13 @@ mod tests {
             self.hub.heard(delta, &self.trace, self.now);
             self.collect();
         }
+        /// The model speaks, as `voice.rs` hands it on: unplayed speech reaches neither the trace nor the hub's waits.
         fn speak(&mut self, delta: &str) {
+            if self.hub.unheard(delta) {
+                return self.collect();
+            }
             self.trace.spoke(delta);
-            self.hub.spoke();
+            self.hub.spoke(self.now);
             self.collect();
         }
         /// Live delegates; a fixture that answers every ask lets the quiet that precedes the judgement pass.
@@ -806,6 +927,94 @@ mod tests {
         f.reply(reply("later", "o5", &["Later answer."]));
         assert_eq!(f.told()[4..], [speakable(Value::Null, "Later answer.")]);
         assert_eq!(f.frames("hub-ack").iter().map(|ack| ack["stamp"].as_str().unwrap().to_owned()).collect::<Vec<_>>(), ["o1", "o2", "o3", "o4", "o5"]);
+    }
+
+    #[test]
+    fn each_reply_handed_to_the_model_is_recorded_with_whether_speech_followed_and_when_never_its_words() {
+        let mut f = Fixture::new();
+        f.speak("Hello.");
+        f.reply(reply("a", "a", &["Reply A."]));
+        f.wait(Duration::from_millis(700), false);
+        f.speak("Reply A.");
+        f.speak("More.");
+        f.wait(TURN_START, true);
+        f.reply(reply("b", "b", &["Reply B."]));
+        f.wait(Duration::from_millis(300), false);
+        f.hear("Wait.");
+        f.wait(TURN_START, true);
+        f.reply(reply("c", "c", &["Reply C."]));
+        f.wait(TURN_START, false);
+        f.reply(reply("d", "d", &["Reply D."]));
+        f.hub.ended(&f.trace, f.now);
+        assert_eq!(f.hub.log.records, [
+            ("hub-reply-handed", json!({ "id": "a" })),
+            ("hub-reply-spoken", json!({ "id": "a", "after_ms": 700 })),
+            ("hub-reply-handed", json!({ "id": "b" })),
+            ("hub-reply-unspoken", json!({ "id": "b", "after_ms": 300, "reason": "user spoke" })),
+            ("hub-reply-handed", json!({ "id": "c" })),
+            ("hub-reply-unspoken", json!({ "id": "c", "after_ms": 20000, "reason": "no speech" })),
+            ("hub-reply-handed", json!({ "id": "d" })),
+            ("hub-reply-unspoken", json!({ "id": "d", "after_ms": 0, "reason": "session ended" })),
+        ]);
+    }
+
+    #[test]
+    fn after_a_request_closes_with_the_hand_off_phrase_or_a_near_sound_nothing_the_model_says_plays_until_the_reply_reaches_it_and_its_turn_ends() {
+        let mut f = Fixture::new();
+        f.hear("Hey, Corvus");
+        f.speak("Hello.");
+        f.hear("Is the printer busy?");
+        f.delegate("item_printer");
+        f.speak("Sure, checking.");
+        assert!(!f.hub.silenced(), "a greeting calls the name with no hand-off");
+        f.hear("Quiet, Corvus.");
+        assert!(f.hub.silenced());
+        f.hub.model_turn(true);
+        f.speak("Understood, staying quiet.");
+        f.reply(reply("item_printer", "printer", &["The printer is idle."]));
+        f.speak(" I will hold it.");
+        assert!(f.hub.silenced(), "the turn in progress when the reply arrived stays unplayed");
+        f.hub.model_turn(false);
+        assert!(!f.hub.silenced());
+        f.speak("The printer is idle.");
+        f.hear("Thanks, Corvus.");
+        assert!(!f.hub.silenced());
+        f.hear("And the backup? Fly, Corvus.");
+        f.delegate("item_backup");
+        assert!(f.hub.silenced());
+        f.speak("Got it, I will hold.");
+        f.hear("Never mind.");
+        assert!(!f.hub.silenced());
+        f.reply(reply("item_backup", "backup", &["The backup finished."]));
+        f.hear("Check the printer. Quiet, Corvus.");
+        assert!(f.hub.silenced());
+        f.speak("Okay.");
+        f.wait(UNANSWERED, false);
+        assert!(!f.hub.silenced(), "with nothing held or awaiting the hub the quiet ends");
+        let quiet: Vec<_> = f.hub.log.records.iter().filter(|(name, _)| *name == "hand-off-quiet").map(|(_, detail)| detail.clone()).collect();
+        assert_eq!(quiet, [
+            json!({ "on": true }),
+            json!({ "on": false, "reason": "hub reply", "unheard_chars": 42 }),
+            json!({ "on": true }),
+            json!({ "on": false, "reason": "user spoke", "unheard_chars": 20 }),
+            json!({ "on": true }),
+            json!({ "on": false, "reason": "no request", "unheard_chars": 5 }),
+        ]);
+        let replies: Vec<_> = f.hub.log.records.iter().filter(|(name, _)| name.starts_with("hub-reply-")).map(|(name, detail)| (*name, detail["id"].clone())).collect();
+        assert_eq!(replies, [("hub-reply-handed", json!("item_printer")), ("hub-reply-spoken", json!("item_printer")), ("hub-reply-handed", json!("item_backup")), ("hub-reply-unspoken", json!("item_backup"))]);
+    }
+
+    #[test]
+    fn the_quiet_after_the_hand_off_phrase_outlasts_its_three_seconds_when_the_hub_hands_the_request_off_itself() {
+        let mut f = Fixture::new();
+        f.hear("Check the printer. Fly, Corvus.");
+        f.speak("Okay, staying quiet.");
+        f.wait(UNANSWERED, false);
+        assert_eq!(f.frames("delegate").len(), 1);
+        assert!(f.hub.silenced());
+        f.hear("What time is my flight, Corvus?");
+        f.speak("Your flight leaves at noon.");
+        assert!(!f.hub.silenced(), "a question that ends with the name is no hand-off");
     }
 
     #[test]

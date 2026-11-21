@@ -24,7 +24,15 @@ export async function rigSpeech(outDir, speechFile, spoken) {
   return speech;
 }
 
-export async function runRig({ outDir, speech, page, extra = {} }, scenario) {
+// A telemetry batch with its events on the capture's clock; a batch cut short by the capture's size limit is marked unread.
+function telemetryBatch(text, t0) {
+  try {
+    const { batch_id, events } = JSON.parse(text.slice(text.indexOf('\n') + 1));
+    return { id: batch_id, events: events.map((event) => ({ ...event, at: event.at - t0 })) };
+  } catch { return { id: null, events: [], unread: true }; }
+}
+
+export async function runRig({ outDir, speech, page, extra = {}, captureFile = 'capture.json' }, scenario) {
   const t0 = Date.now();
   const now = () => Date.now() - t0;
   const say = (...parts) => console.log(`${(now() / 1000).toFixed(1).padStart(7)} ${parts.join(' ')}`);
@@ -34,10 +42,10 @@ export async function runRig({ outDir, speech, page, extra = {} }, scenario) {
   const commit = execFileSync('git', ['describe', '--always', '--dirty', '--exclude=*', '--abbrev=40'], { cwd: root }).toString().trim();
   const config = developmentConfig();
   const sourceHashes = { 'test/fixtures/wake-reply/botq_dash_wasm.js': sha256(relayFixture) };
-  const capture = { rt: [], frames: [], heard: [], marks: [] };
+  const capture = { rt: [], frames: [], heard: [], marks: [], levels: [] };
   const consoleErrors = [];
   let server, pageUrl, chrome;
-  const record = () => writeFile(path.join(outDir, 'capture.json'), JSON.stringify({ ...extra, commit, page: pageUrl, sourceHashes, capture, consoleErrors }, null, 2));
+  const record = () => writeFile(path.join(outDir, captureFile), JSON.stringify({ ...extra, commit, page: pageUrl, sourceHashes, capture, consoleErrors }, null, 2));
   let drain = async () => {};
 
   async function run() {
@@ -67,6 +75,24 @@ export async function runRig({ outDir, speech, page, extra = {} }, scenario) {
   globalThis.__rt = [];
   globalThis.__frames ??= [];
   globalThis.__heard = [];
+  globalThis.__levels = [];
+  const srcObject = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'srcObject');
+  Object.defineProperty(HTMLMediaElement.prototype, 'srcObject', { ...srcObject, set(stream) {
+    srcObject.set.call(this, stream);
+    if (this.id !== 'speaker' || !stream) return;
+    const context = new AudioContext();
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 2048;
+    context.createMediaStreamSource(stream).connect(analyser);
+    const data = new Float32Array(analyser.fftSize);
+    const timer = setInterval(() => {
+      if (this.srcObject !== stream) { clearInterval(timer); context.close(); return; }
+      analyser.getFloatTimeDomainData(data);
+      let sum = 0;
+      for (const value of data) sum += value * value;
+      __levels.push({ at: Date.now(), rms: Math.sqrt(sum / data.length) });
+    }, 50);
+  } });
   globalThis.__speech = ${JSON.stringify(Object.fromEntries(Object.entries(speech).map(([k, v]) => [k, v.audio])))};
   const microphone = new AudioContext();
   const destination = microphone.createMediaStreamDestination();
@@ -107,9 +133,10 @@ export async function runRig({ outDir, speech, page, extra = {} }, scenario) {
     const state = () => evaluate("JSON.stringify({ pressed: document.querySelector('#puppet')?.getAttribute('aria-pressed'), status: document.querySelector('#status')?.textContent })").then(JSON.parse);
     const until = async (expr, ms, what) => { const dl = Date.now() + ms; while (Date.now() < dl) { try { if (await evaluate(expr)) return true; } catch {} await sleep(100); } throw new Error(`timeout: ${what}`); };
     drain = async () => {
-      const got = JSON.parse(await evaluate('JSON.stringify({ rt: __rt.splice(0), frames: __frames.splice(0), heard: __heard.splice(0) })'));
+      const got = JSON.parse(await evaluate('JSON.stringify({ rt: __rt.splice(0), frames: __frames.splice(0), heard: __heard.splice(0), levels: __levels.splice(0) })'));
       for (const it of got.rt) { let event; try { event = JSON.parse(it.data); } catch { event = { raw: it.data }; } capture.rt.push({ at: it.at - t0, ch: it.ch, dir: it.dir, event }); }
-      capture.frames.push(...got.frames.map((frame) => ({ ...frame, at: frame.at - t0 })));
+      capture.frames.push(...got.frames.map((frame) => ({ ...frame, at: frame.at - t0, ...(frame.verb === 'telemetry' ? { batch: telemetryBatch(frame.text, t0) } : {}) })));
+      capture.levels.push(...got.levels.map((level) => ({ ...level, at: level.at - t0 })));
       capture.heard.push(...got.heard.map((message) => ({ ...message, at: message.at - t0 })));
     };
     const mark = (kind, data = {}) => { const at = now(); capture.marks.push({ at, kind, ...data }); say(kind, JSON.stringify(data).slice(0, 200)); return at; };
@@ -121,11 +148,12 @@ export async function runRig({ outDir, speech, page, extra = {} }, scenario) {
     const waitPressed = async (want, ms) => { const dl = Date.now() + ms; while (Date.now() < dl) { await drain(); if ((await pressed()) === want) return true; await sleep(150); } return false; };
 
     async function load(url) {
+      const ready = readyCount();
       await call('Page.navigate', { url });
       await until("document.querySelector('#puppet')?.getAttribute('aria-disabled')==='false'", 240000, 'page ready');
       mark('page-ready');
       const dl = Date.now() + 300000;
-      while (readyCount() < 1) { await drain(); const failure = capture.heard.find((m) => m.error); if (failure) throw new Error(`spotter: ${failure.error}`); if (Date.now() > dl) throw new Error('spotter never ready'); await sleep(200); }
+      while (readyCount() <= ready) { await drain(); const failure = capture.heard.find((m) => m.error); if (failure) throw new Error(`spotter: ${failure.error}`); if (Date.now() > dl) throw new Error('spotter never ready'); await sleep(200); }
       mark('spotter-ready', { n: readyCount() });
     }
     const wakes = () => capture.heard.filter((m) => m.wake).length;
@@ -188,8 +216,12 @@ export async function runRig({ outDir, speech, page, extra = {} }, scenario) {
       await drain();
       await record();
     }
+    async function forget() {
+      await evaluate('sessionStorage.clear()');
+      await load(pageUrl);
+    }
     await load(pageUrl);
-    await scenario({ capture, now, say, sleep, mark, evaluate, drain, settle, quietRelay, wake, tap, ask, askToSleep });
+    await scenario({ capture, now, say, sleep, mark, evaluate, drain, settle, quietRelay, wake, tap, ask, askToSleep, forget });
   }
 
   try {

@@ -1,6 +1,6 @@
 import { Microphone } from './microphone.js';
 import wbgInit, { init as wasmInit, connect, send_only, recv } from './relay/botq_dash_wasm.js';
-import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, SessionClock, TranscriptBatcher, contextEvent, errorEvent, includesPhrase, modelToolFields, formatElapsed, formatStartError, isOfferFor, shareFrame, usageLimit } from './live.js';
+import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, ReplyWatch, SessionClock, TranscriptBatcher, contextEvent, errorEvent, includesPhrase, modelToolFields, formatElapsed, formatStartError, isOfferFor, shareFrame, usageLimit } from './live.js';
 import { PuppetChannel } from './puppet-client.js';
 import { TranscriptActionDriver, webGpuAdapter } from './puppet-drivers.js';
 import { StageTrace, traceStages } from './stage-trace.js';
@@ -71,6 +71,8 @@ let inactivity;
 let renewal;
 let unanswered;
 let requestEnd;
+let callQuiet = null;
+let modelTurnOpen = false;
 const startSpotter = globalThis.__voiceStartSpotter ?? startWakeSpotter;
 const speaker = globalThis.__voiceSpeaker ?? { learnVoice, prepareSpeaker, startSpeakerGate };
 const turns = globalThis.__voiceTurn ?? { judgeTurn, listenForTurns, prepareTurn };
@@ -83,6 +85,7 @@ const hold = new HandOffHold({
   }),
   log: (name, detail) => { if (name === 'released') recordSession('turn-hold-released', JSON.stringify(detail)); },
 });
+const replyWatch = new ReplyWatch({ record: (name, detail) => recordSession(name, JSON.stringify(detail)), limitMs: HUB_TURN_START_MS });
 const VOICEPRINT = `${config.storageKey}.voiceprint`;
 let learning;
 const shareWaiters = new Map();
@@ -889,7 +892,7 @@ function stayAwake() {
   renewal = setTimeout(renew, RENEW_QUIET_MS);
 }
 function renewable(current) {
-  return conversation === current && !starting && !current.sleeping && !current.replyUnspoken && !current.settling && !current.pendingStanding && !hubTurn && !hubReplies.length && !hubWaiting.size && !hold.held;
+  return conversation === current && !starting && !callQuiet && !current.sleeping && !current.replyUnspoken && !current.settling && !current.pendingStanding && !hubTurn && !hubReplies.length && !hubWaiting.size && !hold.held;
 }
 async function renew() {
   const current = conversation;
@@ -995,6 +998,11 @@ function onLiveEvent(message, source) {
     return;
   }
   const owner = source === starting?.channel ? starting : conversation?.audioOwner;
+  if (event.type === 'session.started') modelTurnOpen = false;
+  if (event.turn?.role === 'assistant' && ['turn.created', 'turn.done'].includes(event.type)) {
+    modelTurnOpen = event.type === 'turn.created';
+    if (!modelTurnOpen && callQuiet?.ending) endCallQuiet(callQuiet.ending);
+  }
   if (event.type === 'delegation.created') delegate(event.item?.id, owner);
   else if (event.type === 'input_transcript.added') {
     const delta = event.item?.text ?? '';
@@ -1009,9 +1017,13 @@ function onLiveEvent(message, source) {
     conversation?.transcript?.add('user', delta);
     if (/[\p{L}\p{N}]/u.test(delta)) {
       clearTimeout(unanswered);
+      replyWatch.missed('user spoke');
+      endCallQuiet('user spoke');
       hold.heard();
       if (hubWaiting.size && !conversation?.sleeping) unanswered = setTimeout(() => { unanswered = undefined; hold.due(`turn_${crypto.randomUUID()}`, false); }, UNANSWERED_MS);
     }
+    const request = /[\p{L}\p{N}]/u.test(delta) ? trace.beforeNameCall() : null;
+    if (request !== null && (request || hold.held || hubWaiting.size) && !conversation?.sleeping) quietAfterCall(owner);
   }
   else if (event.type === 'output_transcript.added') presentTranscript({ delta: event.item?.text ?? '', start_ms: event.start_ms, end_ms: event.end_ms });
   else if (event.type === 'session.usage.updated') {
@@ -1036,29 +1048,57 @@ function liveClosed(payload) {
     cancelStarting();
   }
 }
+// After a request closes with the hand-off phrase or a near sound of it, none of the model's speech is played until the hub's reply reaches it and the model's turn then in progress ends: this model hears the phrase as an order to go quiet and says so. Relaying is unchanged.
+function quietAfterCall(owner) {
+  if (callQuiet || !owner?.playback) return;
+  const quiet = callQuiet = { owner, unheard: 0, ending: null };
+  quiet.timer = setTimeout(() => { if (callQuiet === quiet && !hold.held && !hubWaiting.size && !trace.endsRequest()) endCallQuiet('no request'); }, UNANSWERED_MS);
+  owner.playback.silence(true);
+  recordSession('hand-off-quiet', JSON.stringify({ on: true }));
+}
+function releaseCallQuiet(reason) {
+  if (callQuiet && modelTurnOpen) callQuiet.ending = reason;
+  else endCallQuiet(reason);
+}
+function endCallQuiet(reason) {
+  if (!callQuiet) return;
+  const { owner, unheard, timer } = callQuiet;
+  callQuiet = null;
+  clearTimeout(timer);
+  owner.playback?.silence(false);
+  recordSession('hand-off-quiet', JSON.stringify({ on: false, reason, unheard_chars: unheard }));
+}
 function presentTranscript(event) {
     clearTimeout(unanswered);
     stayAwake();
+    const delta = event.delta ?? '';
+    const said = (conversation?.said ?? '') + delta;
+    if (conversation) conversation.said = said.slice(-4 * SIGN_OFF.length);
+    const signedOff = includesPhrase(said, SIGN_OFF);
+    if (signedOff) endCallQuiet('sign-off');
+    if (callQuiet) {
+      callQuiet.unheard += [...delta].length;
+      conversation?.transcript?.add('model', delta);
+      return;
+    }
     showCuedDisplay();
     hubTurn?.spoke();
+    replyWatch.spoke();
     const audioNow = $('speaker').currentTime * 1000;
     const delay = Math.max(0, (event.start_ms ?? audioNow) - audioNow);
     stageTrace?.outputTranscript(delay);
     const playAt = performance.now() + delay;
-    const delta = event.delta ?? '';
     actionDriver.push(delta, playAt);
     trace.spoke(delta, event.start_ms, event.end_ms);
     puppetRuntime?.speak(delta, playAt);
     conversation?.transcript?.add('model', delta);
-    const said = (conversation?.said ?? '') + delta;
-    if (conversation) conversation.said = said.slice(-4 * SIGN_OFF.length);
     if (conversation) conversation.replyUnspoken = false;
     if (conversation?.pendingStanding && !conversation.settling) {
       const current = conversation;
       current.settling = true;
       current.audioOwner.playback.quiet(HUB_TURN_QUIET_MS).then(() => { current.settling = false; applyStanding(); });
     }
-    if (includesPhrase(said, SIGN_OFF)) fallAsleep();
+    if (signedOff) fallAsleep();
 }
 function tell(owner, channel, content, delegationItemId = null) {
   if (owner?.channel?.readyState === 'open') owner.channel.send(JSON.stringify(contextEvent(channel, content, delegationItemId)));
@@ -1095,6 +1135,7 @@ function hubFailed(id, message) {
   stageTrace?.hubReplied(id, String(message).slice(0, 256) || 'failed');
   const voiced = joined.get(id) ?? id;
   const owner = starting?.delegations.has(voiced) ? starting : conversation?.audioOwner;
+  releaseCallQuiet('hub failed');
   tell(owner, 'speakable', 'The hub request failed.', owner?.delegations.has(voiced) ? voiced : null);
 }
 function fallAsleep() {
@@ -1139,6 +1180,7 @@ function presentHubReply({ result, image }) {
   }
   if (!result.commentary.length && !result.instructions.length) return null;
   finishHubWait(result.id);
+  releaseCallQuiet('hub reply');
   trace.hub(result.id, result.commentary, result.timing_ms);
   stageTrace?.hubReplied(result.id);
   if (!spoken) return null;
@@ -1146,6 +1188,7 @@ function presentHubReply({ result, image }) {
   const voiced = joined.get(result.id) ?? result.id;
   const delegation = owner.delegations.has(voiced) ? voiced : null;
   current.replyUnspoken = true;
+  replyWatch.handed(result.id);
   result.commentary.forEach((content) => tell(owner, 'speakable', content, delegation));
   return owner;
 }
@@ -1372,6 +1415,8 @@ function stopConversation(reason = '') {
   if (starting) cancelStarting();
   const current = conversation;
   if (!current) return;
+  replyWatch.missed('session ended');
+  endCallQuiet('session ended');
   conversation = null;
   recorderFlush = Promise.all([recorderFlush, release(current.audioOwner)]).then(() => {});
   recordSession('close', reason, current.id);

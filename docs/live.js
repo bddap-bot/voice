@@ -1,4 +1,4 @@
-import { HAND_OFF_PHRASE, RENEWED } from './identity.js';
+import { HAND_OFF_PHRASE, HAND_OFF_SOUNDS, NAME, RENEWED } from './identity.js';
 
 export function modelToolFields(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
@@ -51,6 +51,15 @@ const phraseKey = (text) => text.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 
 export function includesPhrase(text, phrase) {
   return phraseKey(text).includes(phraseKey(phrase));
+}
+
+const NAME_SOUNDS = [phraseKey(NAME), phraseKey(NAME).replace(/^c/, 'k')];
+const CALL_SOUNDS = [withoutTrailingPhrase(HAND_OFF_PHRASE, NAME), ...HAND_OFF_SOUNDS.split(', ')].map(phraseKey);
+
+// Text that ends with the hand-off phrase or a near sound of it, said as its own phrase and not asked, without the phrase; otherwise null.
+export function beforeNameCall(text) {
+  const call = /(?:^|[.,!?;:\n])[ \t]*([\p{L}\p{N}']+)[^\p{L}\p{N}']+([\p{L}\p{N}']+)[^\p{L}\p{N}'?]*$/du.exec(text);
+  return call && CALL_SOUNDS.includes(phraseKey(call[1])) && NAME_SOUNDS.includes(phraseKey(call[2])) ? text.slice(0, call.indices[1][0]).replace(/[\s,]+$/u, '') : null;
 }
 
 export function withoutTrailingPhrase(text, phrase) {
@@ -450,6 +459,9 @@ export class ConversationTrace {
     const sent = heardText(this.pendingTurns);
     return withoutTrailingPhrase(sent, HAND_OFF_PHRASE) !== sent;
   }
+  beforeNameCall() {
+    return beforeNameCall(heardText(this.pendingTurns));
+  }
   pending(now = Date.now()) {
     const heard = heardText(this.pendingTurns);
     return { sent: withoutTrailingPhrase(heard, HAND_OFF_PHRASE) || heard, context: this.context(this.pendingEntries), duration_ms: this.heardAt ? now - this.heardAt : 0 };
@@ -516,5 +528,31 @@ export class ConversationTrace {
     if (Number.isFinite(endMs)) this.lastOutputEnd = Math.max(this.lastOutputEnd ?? endMs, endMs);
     this.onChange(this.entries);
     return entry;
+  }
+}
+
+// Whether speech followed a hub reply handed to the model, as events and times without its words.
+export class ReplyWatch {
+  constructor({ record, limitMs, now = () => Date.now(), later = (...args) => globalThis.setTimeout(...args), cancel = (timer) => globalThis.clearTimeout(timer) }) {
+    Object.assign(this, { record, limitMs, now, later, cancel, pending: null });
+  }
+  handed(id) {
+    this.missed('another reply');
+    const pending = this.pending = { id, at: this.now(), timer: null };
+    pending.timer = this.later(() => { if (this.pending === pending) this.missed('no speech'); }, this.limitMs);
+    this.record('hub-reply-handed', { id });
+  }
+  spoke() {
+    this.settle('hub-reply-spoken', {});
+  }
+  missed(reason) {
+    this.settle('hub-reply-unspoken', { reason });
+  }
+  settle(name, detail) {
+    const pending = this.pending;
+    if (!pending) return;
+    this.pending = null;
+    this.cancel(pending.timer);
+    this.record(name, { id: pending.id, after_ms: this.now() - pending.at, ...detail });
   }
 }

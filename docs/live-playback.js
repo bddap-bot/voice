@@ -49,6 +49,9 @@ export class LivePlayback {
   interrupt() {
     this.node?.port.postMessage({ type: 'clear' });
   }
+  silence(on) {
+    this.node?.port.postMessage({ type: 'silence', on });
+  }
   quiet(ms = 2000) {
     if (!this.node || this.closed) return Promise.resolve();
     return new Promise((resolve) => {

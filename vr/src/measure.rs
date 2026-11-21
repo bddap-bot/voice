@@ -8,7 +8,8 @@ use crate::vulkan::Gpu;
 use crate::{dressed, fetch_aside, preview, HEIGHT, QUAD};
 
 /// Picks each appearance of the catalog the host started with, or of `--catalog <file>`, as the host's library does: fetched aside, then dressed on this thread as the frame loop dresses it.
-/// Prints one JSON line per pick: whether it was shown, the seconds from the pick to shown, how long the frame loop was held, and the error of one not shown.
+/// Prints one JSON line per pick: whether it was shown, the seconds from the pick to shown, how long the frame loop was held, and the error of one not shown;
+/// for an appearance the catalog serves an exporter file for, whether the relay fetched that file with the catalog's hash.
 /// With `--previews` it runs the library's preview thread instead and prints when each image arrived.
 pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
     let usage = "usage: voice-vr load [--previews] [--catalog <file>] [<catalog id>...]";
@@ -40,8 +41,8 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
     let mut renderer = Renderer::for_window(gpu, QUAD, HEIGHT / PAGE_HEIGHT)?;
     for avatar in startup.avatars.iter().filter(|avatar| wanted(&avatar.id)) {
         let started = Instant::now();
-        let (token, cache) = (token.clone(), cache.clone());
-        let fetched = fetch_aside(move || Relay::connect(&token, &cache), &avatar.id);
+        let (aside, aside_cache) = (token.clone(), cache.clone());
+        let fetched = fetch_aside(move || Relay::connect(&aside, &aside_cache), &avatar.id);
         let mut waiting = Duration::ZERO;
         let arrived = loop {
             let polled = Instant::now();
@@ -55,7 +56,15 @@ pub fn run(token: &Token, state: &Path, args: &[String]) -> Result<(), String> {
         let dressing = Instant::now();
         let shown = arrived.and_then(|fetched| dressed(fetched.model, fetched.clips, &avatar.id, &mut renderer, &Default::default()));
         let blocked = dressing.elapsed() + waiting;
-        println!("{}", serde_json::json!({"id": avatar.id, "shown": shown.is_ok(), "seconds": started.elapsed().as_secs_f64(), "blocked": blocked.as_secs_f64(), "error": shown.err()}));
+        let mut pick = serde_json::json!({"id": avatar.id, "shown": shown.is_ok(), "seconds": started.elapsed().as_secs_f64(), "blocked": blocked.as_secs_f64(), "error": shown.err()});
+        if let Some(exporter) = &avatar.exporter {
+            let fetched = Relay::connect(token, &cache).and_then(|mut relay| relay.exporter(avatar)).and_then(|bytes| {
+                let hash = crate::relay::sha256(&bytes);
+                if hash == exporter.content_hash { Ok(()) } else { Err(format!("the exporter file arrived as {hash}, not the catalog's {}", exporter.content_hash)) }
+            });
+            pick["exporter"] = serde_json::json!({"fetched": fetched.is_ok(), "error": fetched.err()});
+        }
+        println!("{pick}");
     }
     Ok(())
 }

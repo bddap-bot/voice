@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -326,6 +327,116 @@ class Publishing(unittest.TestCase):
             publisher.measure = measure
         installed = self.catalog.read_bytes()
         self.assertEqual(publisher.document(installed)['extensions'][publisher.ARMS]['body'], body(installed))
+
+
+EXPORT = {
+    'asset': {'version': '2.0'},
+    'extensionsUsed': ['AW_avatar'],
+    'nodes': [{'name': 'Root', 'children': [1, 2, 3]}, {'name': 'Body', 'mesh': 0}, {'name': 'Hair'}, {'name': 'Tip'}],
+    'extensions': {'AW_avatar': {
+        'renderers': [{'node': 1, 'enabled': True, 'materials': [0]}],
+        'physbones': [{'node': 0, 'root': 2}],
+        'parameters': [{'name': 'Hue', 'default': {'float': 0}, 'saved': True, 'synced': True}],
+        'menu': {'controls': [{'name': 'Look', 'kind': {'type': 'subMenu', 'value': 1, 'subMenu': {'controls': [
+            {'name': 'Hue', 'kind': {'type': 'radialPuppet', 'value': 1, 'parameter': None, 'subParameter': 'Hue'}}]}}}]},
+    }},
+}
+
+
+class PublishingExports(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(dir=Path.cwd())
+        self.root = Path(self.directory.name)
+        (self.root / 'avatar.vrm').write_bytes(glb(AVATAR))
+        self.catalog = self.root / 'avatar.glb'
+        self.catalog.write_bytes(glb(EXPORT))
+        self.read = []
+        self.core_read, publisher.core_read = publisher.core_read, lambda path, core: self.read.append(Path(path).read_bytes()) or None
+
+    def tearDown(self):
+        publisher.core_read = self.core_read
+        self.directory.cleanup()
+
+    def candidate(self, change):
+        doc = copy.deepcopy(EXPORT)
+        change(doc)
+        path = self.root / 'new.glb'
+        path.write_bytes(glb(doc))
+        return path
+
+    def test_a_file_avatar_core_cannot_read_is_refused(self):
+        before = self.catalog.read_bytes()
+        publisher.core_read = lambda path, core: 'AW_avatar: renderers[0].node 9 is not a node'
+        with self.assertRaises(SystemExit) as refused:
+            publisher.publish_export(self.candidate(lambda doc: None), self.catalog, REPO)
+        self.assertIn('renderers[0].node 9 is not a node', str(refused.exception))
+        self.assertEqual(self.catalog.read_bytes(), before)
+
+    def test_a_lost_node_renderer_physbone_parameter_or_menu_control_is_refused(self):
+        x = lambda doc: doc['extensions']['AW_avatar']
+        for change, part in [
+            (lambda doc: doc['nodes'].pop(), 'node:Tip'),
+            (lambda doc: x(doc).update(renderers=[]), 'renderer:Body'),
+            (lambda doc: x(doc).update(physbones=[]), 'physbone:Root:Hair'),
+            (lambda doc: x(doc).update(parameters=[{'name': 'Hue', 'default': {'int': 0}, 'saved': True, 'synced': True}]), 'parameter:Hue:float'),
+            (lambda doc: x(doc)['menu']['controls'][0]['kind']['subMenu'].update(controls=[]), 'menu:/Look/Hue:radialPuppet:,Hue'),
+            (lambda doc: x(doc)['menu']['controls'][0]['kind']['subMenu']['controls'][0]['kind'].update(subParameter='Tone'), 'menu:/Look/Hue:radialPuppet:,Hue'),
+        ]:
+            before = self.catalog.read_bytes()
+            with self.assertRaises(SystemExit) as refused:
+                publisher.publish_export(self.candidate(change), self.catalog, REPO)
+            self.assertIn(part, str(refused.exception))
+            self.assertEqual(self.catalog.read_bytes(), before)
+        publisher.publish_export(self.candidate(lambda doc: x(doc).update(physbones=[])), self.catalog, REPO, ['physbone:Root:Hair'])
+
+    def test_a_superset_installs_as_read_and_keeps_the_replaced_file(self):
+        before = self.catalog.read_bytes()
+        new = self.candidate(lambda doc: doc['nodes'].append({'name': 'Extra'}))
+        digest = publisher.publish_export(new, self.catalog, REPO)
+        self.assertEqual(self.catalog.read_bytes(), new.read_bytes())
+        self.assertEqual(self.read, [new.read_bytes()])
+        self.assertEqual(digest, hashlib.sha256(new.read_bytes()).hexdigest())
+        self.assertEqual((self.root / '.previous' / 'avatar.glb').read_bytes(), before)
+
+    def test_a_first_exporter_file_installs_beside_its_figure_only(self):
+        self.catalog.unlink()
+        new = self.candidate(lambda doc: None)
+        publisher.publish_export(new, self.catalog, REPO)
+        self.assertEqual(self.catalog.read_bytes(), new.read_bytes())
+        with self.assertRaises(SystemExit) as refused:
+            publisher.publish_export(new, self.root / 'stray.glb', REPO)
+        self.assertIn('stray.vrm', str(refused.exception))
+        self.assertFalse((self.root / 'stray.glb').exists())
+
+    def test_avatar_core_reads_the_bytes_installed_even_if_the_new_file_changes_after(self):
+        new = self.candidate(lambda doc: doc['nodes'].append({'name': 'Extra'}))
+        data = new.read_bytes()
+        publisher.core_read = lambda path, core: new.write_bytes(b'changed') and self.read.append(Path(path).read_bytes())
+        publisher.publish_export(new, self.catalog, REPO)
+        self.assertEqual(self.read, [data])
+        self.assertEqual(self.catalog.read_bytes(), data)
+        self.assertEqual(self.catalog.stat().st_mode & 0o777, 0o644)
+
+    def test_only_a_landed_avatar_core_reads_it(self):
+        new = self.candidate(lambda doc: None)
+        with self.assertRaises(SystemExit) as refused:
+            publisher.publish_export(new, self.catalog, None)
+        self.assertIn('--core', str(refused.exception))
+        git('checkout', '--quiet', UNLANDED)
+        try:
+            with self.assertRaises(SystemExit) as refused:
+                publisher.publish_export(new, self.catalog, REPO)
+        finally:
+            git('checkout', '--quiet', LANDED)
+        self.assertIn('landed avatar-core', str(refused.exception))
+        (REPO / 'build.rs').write_text('')
+        try:
+            with self.assertRaises(SystemExit) as refused:
+                publisher.publish_export(new, self.catalog, REPO)
+        finally:
+            (REPO / 'build.rs').unlink()
+        self.assertIn('landed avatar-core', str(refused.exception))
+        self.assertEqual(self.read, [])
 
 
 if __name__ == '__main__':

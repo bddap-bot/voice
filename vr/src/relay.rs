@@ -14,6 +14,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_FRAME: usize = 32 << 20;
 const MAX_ASSET: usize = 256 << 20;
+/// An avatar's exporter file, sent as stored, runs to a gigabyte.
+const MAX_STORED: usize = 2 << 30;
 const STOP_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Deserialize)]
@@ -35,6 +37,37 @@ pub struct Avatar {
     pub id: String,
     #[serde(rename = "contentHash")]
     pub content_hash: String,
+    #[serde(default)]
+    pub exporter: Option<Exporter>,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct Exporter {
+    #[serde(rename = "contentHash")]
+    pub content_hash: String,
+}
+
+/// How the server sends a file: gzipped, or as stored, which the hash it names can check.
+#[derive(Clone, Copy, PartialEq)]
+enum Sent {
+    Gzip,
+    AsStored,
+}
+
+impl Sent {
+    fn name(self) -> &'static str {
+        match self {
+            Sent::Gzip => "gzip",
+            Sent::AsStored => "identity",
+        }
+    }
+
+    fn max(self) -> usize {
+        match self {
+            Sent::Gzip => MAX_ASSET,
+            Sent::AsStored => MAX_STORED,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -250,14 +283,19 @@ impl Relay {
     }
 
     pub fn puppet(&mut self, avatar: &Avatar) -> Result<Vec<u8>, String> {
-        self.transfer("puppet", &avatar.id, &avatar.content_hash, "vrm", json!({}))
+        self.transfer("puppet", &avatar.id, &avatar.content_hash, "vrm", Sent::Gzip, json!({}))
+    }
+
+    pub fn exporter(&mut self, avatar: &Avatar) -> Result<Vec<u8>, String> {
+        let exporter = avatar.exporter.as_ref().ok_or_else(|| format!("exporter {}: the catalog serves no exporter file for it", avatar.id))?;
+        self.transfer("exporter", &avatar.id, &exporter.content_hash, "glb", Sent::AsStored, json!({}))
     }
 
     pub fn motion(&mut self, clip: &ClipEntry) -> Result<Vec<u8>, String> {
-        self.transfer("motion", &clip.name, &clip.content_hash, "motion", json!({ "clipHash": clip.content_hash }))
+        self.transfer("motion", &clip.name, &clip.content_hash, "motion", Sent::Gzip, json!({ "clipHash": clip.content_hash }))
     }
 
-    fn transfer(&mut self, kind: &str, id: &str, content_hash: &str, extension: &str, mut fields: Value) -> Result<Vec<u8>, String> {
+    fn transfer(&mut self, kind: &str, id: &str, content_hash: &str, extension: &str, sent: Sent, mut fields: Value) -> Result<Vec<u8>, String> {
         if !hex(content_hash) {
             return Err(format!("{kind} {id}: the catalog's content hash is not hex"));
         }
@@ -265,9 +303,9 @@ impl Relay {
             return Ok(bytes);
         }
         fields["id"] = id.into();
-        fields["encodings"] = json!(["gzip"]);
+        fields["encodings"] = json!([sent.name()]);
         self.send(format!("{kind}\n{fields}").as_bytes())?;
-        let received = self.receive(kind, id, extension);
+        let received = self.receive(kind, id, extension, sent);
         // The server streams a transfer to its end once started, so a reader that stops early leaves its frames ahead of every later reply.
         if received.as_ref().is_err_and(|(finished, _)| !finished) {
             self.broken = true;
@@ -277,7 +315,7 @@ impl Relay {
 
     /// The transfer of `id` the server answers with, which is the file it holds now: a catalog read before a republish names an older hash.
     /// Its error says whether the server ended the transfer.
-    fn receive(&mut self, kind: &str, id: &str, extension: &str) -> Result<Vec<u8>, (bool, String)> {
+    fn receive(&mut self, kind: &str, id: &str, extension: &str, sent: Sent) -> Result<Vec<u8>, (bool, String)> {
         let mut deadline = Instant::now() + TRANSFER_TIMEOUT;
         let mut start: Option<Start> = None;
         let mut compressed = Vec::new();
@@ -291,7 +329,7 @@ impl Relay {
                     if value.id != id {
                         continue;
                     }
-                    if start.is_some() || !hex(&value.content_hash) || value.encoding != "gzip" || value.size == 0 || value.original_size == 0 || value.size > MAX_ASSET || value.original_size > MAX_ASSET {
+                    if start.is_some() || !hex(&value.content_hash) || value.encoding != sent.name() || value.size == 0 || value.original_size == 0 || value.size > sent.max() || value.original_size > sent.max() {
                         return Err((false, format!("{kind} {id}: invalid transfer")));
                     }
                     compressed.reserve(value.size);
@@ -317,8 +355,20 @@ impl Relay {
                     if compressed.len() != start.size {
                         return Err((true, format!("{kind} {id}: incomplete transfer")));
                     }
-                    let mut bytes = Vec::with_capacity(start.original_size);
-                    flate2::read::GzDecoder::new(compressed.as_slice()).take(start.original_size as u64 + 1).read_to_end(&mut bytes).map_err(|error| (true, format!("{kind} {id}: {error}")))?;
+                    let bytes = match sent {
+                        Sent::Gzip => {
+                            let mut bytes = Vec::with_capacity(start.original_size);
+                            flate2::read::GzDecoder::new(compressed.as_slice()).take(start.original_size as u64 + 1).read_to_end(&mut bytes).map_err(|error| (true, format!("{kind} {id}: {error}")))?;
+                            bytes
+                        }
+                        Sent::AsStored => {
+                            let bytes = std::mem::take(&mut compressed);
+                            if sha256(&bytes) != start.content_hash {
+                                return Err((true, format!("{kind} {id}: the file sent does not have the hash its start named")));
+                            }
+                            bytes
+                        }
+                    };
                     if bytes.len() != start.original_size {
                         return Err((true, format!("{kind} {id}: invalid decompressed size")));
                     }
@@ -429,12 +479,16 @@ pub fn scripted(cache: &Path, server: impl FnMut(&str, &Value) -> Vec<Vec<u8>> +
     Relay { wire: Box::new(Script { server, queued: Default::default() }), cache: cache.to_owned(), broken: false }
 }
 
+pub fn sha256(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// The frames the server sends `bytes` in as the `kind` transfer of `id`, and their content hash.
 #[cfg(test)]
 pub fn served(kind: &str, id: &str, bytes: &[u8]) -> (String, Vec<Vec<u8>>) {
-    use sha2::Digest;
     use std::io::Write;
-    let hash: String = sha2::Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect();
+    let hash = sha256(bytes);
     let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     gzip.write_all(bytes).unwrap();
     let compressed = gzip.finish().unwrap();
@@ -481,9 +535,46 @@ mod tests {
         let cache = std::env::temp_dir().join(format!("voice-vr-relay-republished-{}", std::process::id()));
         let (hash, frames) = served("puppet", "a", b"republished");
         let mut relay = scripted(&cache, move |verb, _| if verb == "puppet" { frames.clone() } else { Vec::new() });
-        let read_before = Avatar { id: "a".into(), content_hash: "0123abcd".into() };
+        let read_before = Avatar { id: "a".into(), content_hash: "0123abcd".into(), exporter: None };
         assert_eq!(relay.puppet(&read_before).unwrap(), b"republished");
         assert_eq!(std::fs::read(cache.join(format!("{hash}.vrm"))).unwrap(), b"republished", "cached under the hash it was served with");
+        std::fs::remove_dir_all(&cache).unwrap();
+    }
+
+    /// An exporter file comes as stored, in the frames the server streams it in.
+    fn stored(id: &str, bytes: &[u8]) -> Vec<Vec<u8>> {
+        let start = json!({ "id": id, "size": bytes.len(), "originalSize": bytes.len(), "contentHash": sha256(bytes), "encoding": "identity" });
+        let mut frames = vec![format!("exporter-start\n{start}").into_bytes()];
+        frames.extend(bytes.chunks(4).map(|chunk| [format!("exporter-chunk\n{id}\n").as_bytes(), chunk].concat()));
+        frames.push(format!("exporter-end\n{id}").into_bytes());
+        frames
+    }
+
+    #[test]
+    fn an_exporter_file_is_fetched_as_stored_by_its_own_hash_and_cached_apart_from_the_figure() {
+        let cache = std::env::temp_dir().join(format!("voice-vr-relay-exporter-{}", std::process::id()));
+        let hash = sha256(b"exported");
+        let frames = stored("a", b"exported");
+        let mut relay = scripted(&cache, move |verb, request| if verb == "exporter" && request == &json!({ "id": "a", "encodings": ["identity"] }) { frames.clone() } else { Vec::new() });
+        let avatar = Avatar { id: "a".into(), content_hash: "0123abcd".into(), exporter: Some(Exporter { content_hash: hash.clone() }) };
+        assert_eq!(relay.exporter(&avatar).unwrap(), b"exported");
+        assert_eq!(std::fs::read(cache.join(format!("{hash}.glb"))).unwrap(), b"exported");
+        let mut silent = scripted(&cache, |_, _| Vec::new());
+        assert_eq!(silent.exporter(&avatar).unwrap(), b"exported", "a cached file is not fetched again");
+        assert!(silent.exporter(&Avatar { exporter: None, ..avatar }).unwrap_err().contains("no exporter file"));
+        std::fs::remove_dir_all(&cache).unwrap();
+    }
+
+    #[test]
+    fn an_exporter_file_that_does_not_hash_to_its_start_s_hash_is_refused_and_not_cached() {
+        let cache = std::env::temp_dir().join(format!("voice-vr-relay-exporter-changed-{}", std::process::id()));
+        let mut frames = stored("a", b"exported");
+        frames[1] = b"exporter-chunk\na\nEXPO".to_vec();
+        let hash = sha256(b"exported");
+        let mut relay = scripted(&cache, move |_, _| frames.clone());
+        let avatar = Avatar { id: "a".into(), content_hash: "0123abcd".into(), exporter: Some(Exporter { content_hash: hash.clone() }) };
+        assert!(relay.exporter(&avatar).unwrap_err().contains("does not have the hash"));
+        assert!(!cache.join(format!("{hash}.glb")).exists());
         std::fs::remove_dir_all(&cache).unwrap();
     }
 
@@ -515,7 +606,7 @@ other".to_vec());
         let chunks = frames.len() - 3;
         let deadlines = Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut relay = Relay { wire: Box::new(Timed { frames: frames.into(), deadlines: deadlines.clone() }), cache: cache.clone(), broken: false };
-        relay.puppet(&Avatar { id: "a".into(), content_hash: hash }).unwrap();
+        relay.puppet(&Avatar { id: "a".into(), content_hash: hash, exporter: None }).unwrap();
         let deadlines = deadlines.lock().unwrap();
         assert!(chunks >= 2 && deadlines.len() == chunks + 3);
         assert!(deadlines[1] > deadlines[0], "the start waits anew");
@@ -538,8 +629,8 @@ other".to_vec());
                 _ => vec![format!("puppet-error\n{}", json!({ "id": request["id"], "code": "busy", "message": "request rejected; current transfer continues" })).into_bytes()],
             }
         });
-        assert!(relay.puppet(&Avatar { id: "a".into(), content_hash: "00".into() }).unwrap_err().contains("exceeds its advertised size"));
-        assert!(relay.puppet(&Avatar { id: "b".into(), content_hash: "01".into() }).unwrap_err().contains("lost its framing"));
+        assert!(relay.puppet(&Avatar { id: "a".into(), content_hash: "00".into(), exporter: None }).unwrap_err().contains("exceeds its advertised size"));
+        assert!(relay.puppet(&Avatar { id: "b".into(), content_hash: "01".into(), exporter: None }).unwrap_err().contains("lost its framing"));
         assert_eq!(requests.load(Ordering::Relaxed), 1, "nothing is asked of a stream still carrying another transfer");
         std::fs::remove_dir_all(&cache).unwrap();
     }

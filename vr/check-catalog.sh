@@ -18,10 +18,10 @@ if ! XDG_STATE_HOME=$state env -u OTEL_EXPORTER_OTLP_ENDPOINT "$host" load >"$st
 fi
 [ -s "$state/picks.jsonl" ] || { echo "the live catalog served no figure; the host's log: $log" >&2; exit 1; }
 refused=0
-jq -es 'all(.shown)' "$state/picks.jsonl" >/dev/null || refused=$?
+jq -es 'all(.shown and .exporter.fetched != false)' "$state/picks.jsonl" >/dev/null || refused=$?
 if [ "$refused" = 0 ]; then
   rm -r "$state"
-  echo 'every live catalog figure loads'
+  echo 'every live catalog figure loads, and every exporter file it serves arrives'
   exit 0
 fi
 if [ "$refused" != 1 ]; then
@@ -29,5 +29,6 @@ if [ "$refused" != 1 ]; then
   exit 1
 fi
 jq -r 'select(.shown | not) | "\(.id): \(.error)"' "$state/picks.jsonl" >>"$log"
+jq -r 'select(.exporter.fetched == false) | "\(.id) exporter file: \(.exporter.error)"' "$state/picks.jsonl" >>"$log"
 echo "this overlay did not load a live catalog figure; fix the overlay, land the converter that writes what it now needs, or republish the figure through scripts/publish-avatar.py with VOICE_VR=$host. The errors end $log" >&2
 exit 1

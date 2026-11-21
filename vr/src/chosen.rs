@@ -23,7 +23,7 @@ mod tests {
     use crate::board::Board;
 
     fn avatars() -> Vec<Avatar> {
-        ["1", "2"].map(|id| Avatar { id: id.to_owned(), content_hash: "00".to_owned() }).to_vec()
+        ["1", "2"].map(|id| Avatar { id: id.to_owned(), content_hash: "00".to_owned(), exporter: None }).to_vec()
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {

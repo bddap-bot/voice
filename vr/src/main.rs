@@ -1262,7 +1262,7 @@ mod tests {
         let (_, mut relay) = republished(&cache);
         std::fs::write(cache.join("0123abcd.vrm"), b"the copy published before").unwrap();
         let mut renderer = Renderer::new(Rc::new(Gpu::new(None).unwrap()), [64; 2], 1.0).unwrap();
-        let startup = Avatar { id: "a".into(), content_hash: "0123abcd".into() };
+        let startup = Avatar { id: "a".into(), content_hash: "0123abcd".into(), exporter: None };
         let worn = load(&mut relay, &startup.id, &mut renderer, &Default::default());
         std::fs::remove_dir_all(&cache).unwrap();
         assert!(worn.is_ok(), "{:?}", worn.err());

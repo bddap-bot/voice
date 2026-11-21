@@ -1,6 +1,7 @@
-"""Install a converted puppet over the catalog file it replaces, refusing one that carries less.
+"""Install a converted puppet, or a VRChat avatar's exporter file, over the catalog file it replaces, refusing one that carries less.
 
 usage: publish-avatar.py NEW.vrm CATALOG.vrm [--converter DIR] [--drop PREFIX ...] [--unlanded] [--rollback] [--clips DIR] [--out PATH]
+       publish-avatar.py NEW.glb CATALOG.glb --core DIR [--drop PREFIX ...]
 
 Every node, image, morph target, material, spring joint, collider a spring collides with, VRM expression and avatar
 expression part (parameter, layer, menu control, material target, curve, shown node, switched spring or collider,
@@ -15,7 +16,10 @@ converter's repository, contains once fetched, unless --unlanded names it an int
 not be a strict ancestor of the one the catalog file names, or one DIR cannot compare with it, unless --rollback names
 it an intended rollback.
 --clips measures the spread against the clips the server would serve from that clip directory instead, and --out writes
-the result there instead of over CATALOG, so a clip write can re-measure the catalog before it installs its clips."""
+the result there instead of over CATALOG, so a clip write can re-measure the catalog before it installs its clips.
+A .glb is an avatar's exporter file, installed beside the catalog .vrm of the same name: the avatar-core of DIR, an Avatar
+Workshop checkout whose HEAD its origin/main contains once fetched, must read it, and every node, renderer, PhysBone,
+parameter and menu control the replaced exporter file carries must survive into it or match a --drop prefix."""
 import argparse
 from collections import Counter
 import hashlib
@@ -34,9 +38,14 @@ def document(data):
     return json.loads(data[20:20 + size])
 
 
+def namer(doc):
+    nodes = doc.get('nodes', [])
+    return lambda index: nodes[index].get('name', str(index)) if isinstance(index, int) and 0 <= index < len(nodes) else str(index)
+
+
 def inventory(doc):
     nodes = doc.get('nodes', [])
-    name = lambda index: nodes[index].get('name', str(index)) if isinstance(index, int) and 0 <= index < len(nodes) else str(index)
+    name = namer(doc)
     out = Counter()
     out.update('extension:' + e for e in doc.get('extensionsUsed', []))
     out.update('node:' + n.get('name', '') for n in nodes)
@@ -183,6 +192,65 @@ def provenance(new_path, catalog, repo, unlanded_ok, rollback_ok):
         raise SystemExit(f"{repo} cannot tell whether {new_path}'s converter commit {commit} is older than {replaced}, which wrote {catalog}; name an intended rollback with --rollback")
 
 
+def exported(doc):
+    name = namer(doc)
+    model = doc.get('extensions', {}).get('AW_avatar', {})
+    out = Counter('node:' + n.get('name', '') for n in doc.get('nodes', []))
+    out.update('renderer:' + name(r['node']) for r in model.get('renderers', []))
+    out.update(f"physbone:{name(b['node'])}:{name(b['root'])}" for b in model.get('physbones', []))
+    out.update(f"parameter:{p['name']}:{next(iter(p['default']))}" for p in model.get('parameters', []))
+
+    def menu(controls, path):
+        for c in controls:
+            here, kind = f"{path}/{c['name']}", c['kind']
+            driven = [kind.get('parameter'), kind.get('subParameter'), *kind.get('subParameters', [])]
+            out[f"menu:{here}:{kind['type']}:{','.join(p or '' for p in driven)}"] += 1
+            menu((kind.get('subMenu') or {}).get('controls', []), here)
+    menu(model.get('menu', {}).get('controls', []), '')
+    return out
+
+
+def core_read(path, core):
+    run = subprocess.run(['cargo', 'run', '-q', '--locked', '--release', '--manifest-path', str(Path(core) / 'avatar-core/Cargo.toml'), '--example', 'read', '--', '--names', str(path)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    return None if run.returncode == 0 else run.stdout.strip() or f'exit {run.returncode}'
+
+
+def publish_export(new_path, catalog_path, core, drops=()):
+    catalog = Path(catalog_path)
+    if not catalog.with_suffix('.vrm').exists():
+        raise SystemExit(f'{catalog} has no {catalog.with_suffix(".vrm").name} beside it; an exporter file is served only with its catalog figure')
+    if core is None:
+        raise SystemExit(f'name the Avatar Workshop checkout whose avatar-core must read {new_path} with --core')
+    changed = subprocess.run(['git', '-C', str(core), 'status', '--porcelain', '--untracked-files=all'], stdout=subprocess.PIPE, text=True)
+    if git(core, 'fetch', '--quiet', 'origin') or git(core, 'merge-base', '--is-ancestor', 'HEAD', 'origin/main') or changed.returncode or changed.stdout:
+        raise SystemExit(f"{core} is not a clean checkout of a commit its origin/main contains; read with landed avatar-core")
+    data = Path(new_path).read_bytes()
+    with tempfile.TemporaryDirectory() as scratch:
+        read = Path(scratch) / 'avatar.glb'
+        read.write_bytes(data)
+        why = core_read(read, core)
+    if why:
+        raise SystemExit(f"{core}'s avatar-core cannot read {new_path}:\n{why}")
+    install(data, catalog, lambda old: lost(exported(document(old)), exported(document(data)), drops))
+    return hashlib.sha256(data).hexdigest()
+
+
+def install(data, catalog, gone=lambda old: [], keep=True, out_path=None):
+    if catalog.exists():
+        missing = gone(catalog.read_bytes())
+        if missing:
+            raise SystemExit(f'the new file would lose {len(missing)} part(s) {catalog} carries; name intended ones with --drop:\n' + '\n'.join('  ' + k for k in missing))
+        if keep:
+            previous = catalog.parent / '.previous'
+            previous.mkdir(exist_ok=True)
+            shutil.copy2(catalog, previous / catalog.name)
+    target = Path(out_path) if out_path else catalog
+    with tempfile.NamedTemporaryFile(dir=target.parent, prefix='.' + target.name, delete=False) as out:
+        out.write(data)
+    os.chmod(out.name, 0o644)
+    os.replace(out.name, target)
+
+
 def publish(new_path, catalog_path, repo=None, drops=(), unlanded_ok=False, rollback_ok=False, clips=None, out_path=None):
     data = Path(new_path).read_bytes()
     catalog = Path(catalog_path)
@@ -199,19 +267,7 @@ def publish(new_path, catalog_path, repo=None, drops=(), unlanded_ok=False, roll
     # The overlay's JSON parser can read two spellings of one number as different doubles; measure the spelling installed.
     data = with_json(data, document(data))
     data = with_arms(data, measure(Path(new_path).name, data, clips))
-    if catalog.exists():
-        gone = lost(inventory(document(catalog.read_bytes())), inventory(document(data)), drops)
-        if gone:
-            raise SystemExit(f'{new_path} would lose {len(gone)} part(s) {catalog} carries; name intended ones with --drop:\n' + '\n'.join('  ' + k for k in gone))
-        if not in_place:
-            previous = catalog.parent / '.previous'
-            previous.mkdir(exist_ok=True)
-            shutil.copy2(catalog, previous / catalog.name)
-    target = Path(out_path) if out_path else catalog
-    with tempfile.NamedTemporaryFile(dir=target.parent, prefix='.' + target.name, delete=False) as out:
-        out.write(data)
-    os.replace(out.name, target)
-    os.chmod(target, 0o644)
+    install(data, catalog, lambda old: lost(inventory(document(old)), inventory(document(data)), drops), not in_place, out_path)
     return hashlib.sha256(data).hexdigest()
 
 
@@ -225,5 +281,13 @@ if __name__ == '__main__':
     parser.add_argument('--rollback', action='store_true')
     parser.add_argument('--clips')
     parser.add_argument('--out')
+    parser.add_argument('--core')
     args = parser.parse_args()
-    print(publish(args.new, args.catalog, args.converter, args.drop, args.unlanded, args.rollback, args.clips, args.out), args.out or args.catalog)
+    if args.catalog.endswith('.glb'):
+        if args.converter or args.unlanded or args.rollback or args.clips or args.out:
+            parser.error('an exporter file takes only --core and --drop')
+        print(publish_export(args.new, args.catalog, args.core, args.drop), args.catalog)
+    elif args.core:
+        parser.error('--core reads an exporter file, a .glb')
+    else:
+        print(publish(args.new, args.catalog, args.converter, args.drop, args.unlanded, args.rollback, args.clips, args.out), args.out or args.catalog)

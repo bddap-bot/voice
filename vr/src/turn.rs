@@ -31,7 +31,7 @@ pub fn hold() -> Duration {
     Duration::from_millis(constant("holdMs") as u64)
 }
 
-/// The quiet after renewed speech before a held hand-off is judged again.
+/// The quiet after the last word before a held hand-off is judged.
 pub fn judge_quiet() -> Duration {
     Duration::from_millis(constant("quietMs") as u64)
 }
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn the_page_constants_parse() {
-        assert_eq!((hold(), judge_quiet(), constant("complete")), (Duration::from_secs(6), Duration::from_secs(1), 0.5));
+        assert_eq!((hold(), judge_quiet(), constant("complete")), (Duration::from_secs(6), Duration::from_secs(3), 0.5));
     }
 
     #[test]

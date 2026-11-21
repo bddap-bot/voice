@@ -252,7 +252,7 @@ impl Hub {
                 }
             }
             None => {
-                self.held = Some(Held { id, judging: None, judge_at: Some(now), until: self.heard_at.unwrap_or(now) + hold() });
+                self.held = Some(Held { id, judging: None, judge_at: Some(self.heard_at.map_or(now, |at| at + judge_quiet())), until: self.heard_at.unwrap_or(now) + hold() });
                 self.judge(now);
             }
         }
@@ -586,9 +586,13 @@ mod tests {
             self.hub.spoke();
             self.collect();
         }
+        /// Live delegates; a fixture that answers every ask lets the quiet that precedes the judgement pass.
         fn delegate(&mut self, id: &str) {
             self.hub.delegated(id, &mut self.trace, self.now);
             self.collect();
+            if self.verdict.is_some() && self.hub.held.is_some() {
+                self.wait(judge_quiet(), false);
+            }
         }
         fn reply(&mut self, value: Value) {
             self.hub.reply(format!("{value}\n").as_bytes(), &mut self.trace, self.now);
@@ -1005,13 +1009,32 @@ mod tests {
     }
 
     #[test]
-    fn a_finished_thought_goes_once_judged() {
+    fn a_finished_thought_goes_once_judged_after_the_quiet() {
         let mut f = Fixture { verdict: None, ..Fixture::new() };
         f.hear("How big is it?");
         f.delegate("item_size");
+        f.wait(judge_quiet() - Duration::from_millis(1), false);
+        assert!(f.asks.is_empty(), "speech is judged only after a quiet");
+        f.wait(Duration::from_millis(1), false);
         assert!(f.frames("delegate").is_empty(), "nothing goes before the judgement");
         f.judged(true);
-        assert_eq!(f.frames("delegate"), [json!({ "id": "item_size", "text": "How big is it?", "context": [], "duration_ms": 0 })]);
+        assert_eq!(f.frames("delegate"), [json!({ "id": "item_size", "text": "How big is it?", "context": [], "duration_ms": judge_quiet().as_millis() as u64 })]);
+    }
+
+    #[test]
+    fn a_pause_between_sentences_shorter_than_the_quiet_keeps_one_request() {
+        let mut f = Fixture { verdict: None, ..Fixture::new() };
+        f.hear("Check on the backup job.");
+        f.delegate("item_check");
+        f.wait(judge_quiet() - Duration::from_millis(500), false);
+        assert!(f.asks.is_empty(), "the first sentence is not judged within the pause");
+        f.hear(" And tell me when it last finished.");
+        f.delegate("item_when");
+        f.wait(judge_quiet(), false);
+        f.judged(true);
+        let frames = f.frames("delegate");
+        assert_eq!(frames.len(), 1);
+        assert_eq!((frames[0]["id"].as_str(), frames[0]["text"].as_str()), (Some("item_when"), Some("Check on the backup job. And tell me when it last finished.")));
     }
 
     #[test]
@@ -1019,8 +1042,9 @@ mod tests {
         let mut f = Fixture { verdict: None, ..Fixture::new() };
         f.hear("Okay. So");
         f.delegate("item_so");
+        f.wait(judge_quiet(), false);
         f.judged(false);
-        f.wait(Duration::from_secs(4), false);
+        f.wait(hold() - judge_quiet() - Duration::from_secs(1), false);
         f.hear(" I have an idea.");
         f.delegate("item_idea");
         f.wait(judge_quiet() - Duration::from_millis(1), false);
@@ -1037,8 +1061,9 @@ mod tests {
         let mut f = Fixture { verdict: None, ..Fixture::new() };
         f.hear("Just need to figure out");
         f.delegate("item_figure");
+        f.wait(judge_quiet(), false);
         f.judged(false);
-        f.wait(hold() - Duration::from_millis(1), false);
+        f.wait(hold() - judge_quiet() - Duration::from_millis(1), false);
         assert!(f.frames("delegate").is_empty());
         f.wait(Duration::from_millis(1), false);
         assert_eq!(f.frames("delegate")[0]["text"], "Just need to figure out");
@@ -1049,6 +1074,7 @@ mod tests {
         let mut f = Fixture { verdict: None, ..Fixture::new() };
         f.hear("Can you try showing");
         f.delegate("item_showing");
+        f.wait(judge_quiet(), false);
         f.hear(" me the doodad?");
         f.judged(true);
         assert!(f.frames("delegate").is_empty(), "the verdict was on speech that has since continued");
@@ -1064,9 +1090,9 @@ mod tests {
         f.delegate("item_trees");
         f.verdict = None;
         f.hear(" When I pick it back up");
-        f.wait(Duration::from_secs(3), false);
+        f.wait(judge_quiet(), false);
         f.judged(false);
-        f.wait(hold() - Duration::from_secs(3) - Duration::from_millis(1), false);
+        f.wait(hold() - judge_quiet() - Duration::from_millis(1), false);
         assert_eq!(f.frames("delegate").len(), 1);
         f.wait(Duration::from_millis(1), false);
         let frames = f.frames("delegate");

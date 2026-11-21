@@ -314,6 +314,7 @@ globalThis.__voiceStartSpotter = async (stream, heard, model) => {
 };
 globalThis.sentLiveEvents = [];
 import('/live.js').then((live) => { globalThis.checkClientEvent = live.checkedClientEvent; });
+import('/turn.js').then(({ TURN }) => { const quiet = TURN.quietMs; Object.defineProperty(TURN, 'quietMs', { get: () => (globalThis.heldTurns ? quiet : 0) }); });
 window.addEventListener('load', async () => {
   if (localStorage.getItem('voice.token')) return;
   globalThis.statusTextWrites = [];
@@ -1573,11 +1574,13 @@ window.addEventListener('test-ready', async () => {
   hear('Okay. So');
   delegateTurn('item_so');
   counts.push([frames().length, turnJudgements.length]);
+  await wait(3000);
+  counts.push([frames().length, turnJudgements.length]);
   turnJudgements.shift()({ probability: 0.2, ms: 40 });
-  await wait(4000);
+  await wait(2000);
   hear(' I have an idea.');
   delegateTurn('item_idea');
-  await wait(900);
+  await wait(2900);
   counts.push([frames().length, turnJudgements.length]);
   await wait(100);
   counts.push([frames().length, turnJudgements.length]);
@@ -1586,8 +1589,9 @@ window.addEventListener('test-ready', async () => {
   counts.push([frames().length, turnJudgements.length]);
   hear('Just need to figure out');
   delegateTurn('item_figure');
+  await wait(3000);
   turnJudgements.shift()({ probability: 0.1, ms: 40 });
-  await wait(5880);
+  await wait(2880);
   counts.push([frames().length, turnJudgements.length]);
   await wait(120);
   counts.push([frames().length, turnJudgements.length]);
@@ -1601,7 +1605,7 @@ window.addEventListener('test-ready', async () => {
 });
 `, { virtualTime: true });
   assert.ok(result, stderr);
-  assert.deepEqual(result.counts, [[0, 1], [0, 0], [0, 1], [1, 0], [1, 0], [2, 0], [3, 0]]);
+  assert.deepEqual(result.counts, [[0, 0], [0, 1], [0, 0], [0, 1], [1, 0], [1, 0], [2, 0], [3, 0]]);
   assert.deepEqual(result.frames, [
     { id: 'item_idea', text: 'Okay. So I have an idea.' },
     { id: 'item_figure', text: 'Just need to figure out' },

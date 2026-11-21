@@ -2,7 +2,8 @@ export const TURN = {
   url: 'https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/f766f81d3cfdf7737ac64aad813d91bbfd56bf93/smart-turn-v3.2-gpu.onnx',
   sha256: 'ab8dc64b88713f90b571c15b714bd1330e6c883cad8763dacf65c9376dc539be',
   complete: 0.5,
-  quietMs: 1000,
+  // Longer than the pause between the sentences of one spoken request.
+  quietMs: 3000,
   // Past the longest mid-thought pause measured in real sessions, 5.6 s.
   holdMs: 6000,
 };
@@ -92,7 +93,7 @@ export class HandOffHold {
       return;
     }
     const now = this.now();
-    this.held = { id, judging: null, judgeAt: now, until: (this.heardAt ?? now) + TURN.holdMs };
+    this.held = { id, judging: null, judgeAt: this.heardAt === null ? now : this.heardAt + TURN.quietMs, until: (this.heardAt ?? now) + TURN.holdMs };
     this.step();
   }
   heard() {

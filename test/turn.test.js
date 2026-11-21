@@ -51,21 +51,38 @@ function fixture() {
   return f;
 }
 
-test('a finished thought goes once judged', () => {
+test('a finished thought goes once judged after the quiet', () => {
   const f = fixture();
   f.hold.heard();
   f.hold.due('item_size', true);
+  f.wait(TURN.quietMs - 1);
+  assert.equal(f.asks.length, 0, 'speech is judged only after a quiet');
+  f.wait(1);
   assert.deepEqual(f.sent, []);
   f.judged(0.9);
   assert.deepEqual(f.sent, ['item_size']);
+});
+
+test('a pause between sentences shorter than the quiet keeps one request', () => {
+  const f = fixture();
+  f.hold.heard();
+  f.hold.due('item_check', true);
+  f.wait(TURN.quietMs - 500);
+  assert.equal(f.asks.length, 0, 'the first sentence is not judged within the pause');
+  f.hold.heard();
+  f.hold.due('item_when', true);
+  f.wait(TURN.quietMs);
+  f.judged(0.9);
+  assert.deepEqual(f.sent, ['item_when']);
 });
 
 test('an unfinished thought waits for more speech and goes under the newest delegation', () => {
   const f = fixture();
   f.hold.heard();
   f.hold.due('item_so', true);
+  f.wait(TURN.quietMs);
   f.judged(0.1);
-  f.wait(4000);
+  f.wait(TURN.holdMs - TURN.quietMs - 1000);
   f.hold.heard();
   f.hold.due('item_idea', true);
   f.wait(TURN.quietMs - 1);
@@ -79,8 +96,9 @@ test('an unfinished thought goes after the hold of quiet', () => {
   const f = fixture();
   f.hold.heard();
   f.hold.due('item_figure', true);
+  f.wait(TURN.quietMs);
   f.judged(0.2);
-  f.wait(TURN.holdMs - 1);
+  f.wait(TURN.holdMs - TURN.quietMs - 1);
   assert.deepEqual(f.sent, []);
   f.wait(1);
   assert.deepEqual(f.sent, ['item_figure']);
@@ -90,6 +108,7 @@ test('a judgement of speech that went on is dropped', () => {
   const f = fixture();
   f.hold.heard();
   f.hold.due('item_showing', true);
+  f.wait(TURN.quietMs);
   const stale = f.asks.pop();
   f.hold.heard();
   stale(0.9);
@@ -110,10 +129,10 @@ test('the page\'s own turn id never replaces a delegation id, and a failed judge
 test('the hold counts from the last word heard before the hand-off came due', () => {
   const f = fixture();
   f.hold.heard();
-  f.wait(3000);
+  f.wait(TURN.quietMs);
   f.hold.due('turn_late', false);
   f.judged(0.1);
-  f.wait(TURN.holdMs - 3000 - 1);
+  f.wait(TURN.holdMs - TURN.quietMs - 1);
   assert.deepEqual(f.sent, []);
   f.wait(1);
   assert.deepEqual(f.sent, ['turn_late']);

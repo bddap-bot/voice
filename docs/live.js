@@ -1,4 +1,4 @@
-import { HAND_OFF_PHRASE, HAND_OFF_SOUNDS, NAME, RENEWED } from './identity.js';
+import { CLOSINGS, HAND_OFF_PHRASE, HAND_OFF_SOUNDS, NAME, NOISE, PLEASANTRIES, RENEWED, REQUEST_WORDS } from './identity.js';
 
 export function modelToolFields(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
@@ -60,6 +60,36 @@ const CALL_SOUNDS = [withoutTrailingPhrase(HAND_OFF_PHRASE, NAME), ...HAND_OFF_S
 export function beforeNameCall(text) {
   const call = /(?:^|[.,!?;:\n])[ \t]*([\p{L}\p{N}']+)[^\p{L}\p{N}']+([\p{L}\p{N}']+)[^\p{L}\p{N}'?]*$/du.exec(text);
   return call && CALL_SOUNDS.includes(phraseKey(call[1])) && NAME_SOUNDS.includes(phraseKey(call[2])) ? text.slice(0, call.indices[1][0]).replace(/[\s,]+$/u, '') : null;
+}
+
+const wordsOf = (text) => text.toLowerCase().replaceAll('\u2019', "'").match(/[\p{L}\p{N}']+/gu) ?? [];
+const PLEASANTRY_WORDS = PLEASANTRIES.split(', ').map(wordsOf);
+const CLOSING_WORDS = CLOSINGS.split(', ').map(wordsOf);
+const NOISE_WORDS = new Set(NOISE.split(', '));
+
+// The words of a turn by the rule beside PLEASANTRIES, and whether it held a closing.
+function requestWords(text) {
+  const words = wordsOf(text).filter((word) => !NAME_SOUNDS.includes(phraseKey(word)) && !CALL_SOUNDS.includes(phraseKey(word)) && !NOISE_WORDS.has(word));
+  const strip = (phrase) => {
+    let found = false;
+    for (let start; (start = words.findIndex((_, at) => phrase.every((word, offset) => words[at + offset] === word))) >= 0; found = true) words.splice(start, phrase.length);
+    return found;
+  };
+  const closed = CLOSING_WORDS.map(strip).some(Boolean);
+  PLEASANTRY_WORDS.forEach(strip);
+  return { count: words.length, closed };
+}
+
+// Whether the user is signing off: a closing with no more than REQUEST_WORDS words beside it.
+export function closes(text) {
+  const { count, closed } = requestWords(text);
+  return closed && count <= REQUEST_WORDS;
+}
+
+// Whether the page relays a turn to the hub itself; `least` lowers the words a turn needs while the hub owes a reply or a hand-off is held.
+export function forHub(text, least = REQUEST_WORDS) {
+  const { count, closed } = requestWords(text);
+  return closed ? count > REQUEST_WORDS : count >= least;
 }
 
 export function withoutTrailingPhrase(text, phrase) {
@@ -458,6 +488,9 @@ export class ConversationTrace {
   endsRequest() {
     const sent = heardText(this.pendingTurns);
     return withoutTrailingPhrase(sent, HAND_OFF_PHRASE) !== sent;
+  }
+  newestTurn() {
+    return this.pendingTurns.at(-1) ?? '';
   }
   beforeNameCall() {
     return beforeNameCall(heardText(this.pendingTurns));

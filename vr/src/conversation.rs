@@ -149,6 +149,11 @@ impl Trace {
         bounded_text(&heard, MAX_CONTEXT)
     }
 
+    /// The page's `ConversationTrace.newestTurn`: the user's latest turn since the last delegation.
+    pub fn newest_turn(&self) -> &str {
+        (self.pending_from..self.turns.len()).rev().find(|&index| self.turns[index].speaker == Speaker::User).map_or("", |index| self.turns[index].text.as_str())
+    }
+
     /// The page's `ConversationTrace.beforeNameCall`.
     pub fn before_name_call(&self) -> Option<String> {
         before_name_call(&self.heard_text(self.pending_from)).map(str::to_owned)

@@ -216,12 +216,14 @@ export async function runRig({ outDir, speech, page, extra = {}, captureFile = '
       await drain();
       await record();
     }
+    // The page saves its conversation as it unloads, so storage is cleared with saving disabled for the rest of that document.
     async function forget() {
-      await evaluate('sessionStorage.clear()');
+      await evaluate('sessionStorage.clear(); Storage.prototype.setItem = () => {}');
       await load(pageUrl);
+      if (await evaluate('sessionStorage.length')) throw new Error('the page kept a conversation across forget()');
     }
     await load(pageUrl);
-    await scenario({ capture, now, say, sleep, mark, evaluate, drain, settle, quietRelay, wake, tap, ask, askToSleep, forget });
+    await scenario({ capture, now, say, sleep, mark, evaluate, drain, settle, quietRelay, wake, tap, ask, askToSleep, forget, pressed });
   }
 
   try {

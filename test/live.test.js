@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { AckUploader, AudioChunker, ConversationTrace, beforeNameCall, EventBatcher, ReplyWatch, TranscriptBatcher, audioFrame, checkedClientEvent, contextEvent, errorEvent, formatElapsed, formatStartError, includesPhrase, isOfferFor, usageLimit, withoutTrailingPhrase, shareFrame } from '../docs/live.js';
+import { AckUploader, AudioChunker, ConversationTrace, beforeNameCall, EventBatcher, ReplyWatch, TranscriptBatcher, audioFrame, checkedClientEvent, contextEvent, errorEvent, closes, forHub, formatElapsed, formatStartError, includesPhrase, isOfferFor, usageLimit, withoutTrailingPhrase, shareFrame } from '../docs/live.js';
 import { HAND_OFF_PHRASE, SIGN_OFF } from '../docs/identity.js';
 
 test('start errors include their name and first stack frame', () => {
@@ -563,4 +563,29 @@ test('a request closes with the hand-off phrase or a near sound of its first wor
   assert.equal(beforeNameCall('Fly, Corvus'), '');
   assert.equal(beforeNameCall('Alright, fly Corvus.'), 'Alright');
   for (const text of ['Hey Corvus', 'Thanks, Corvus.', 'Good night, Corvus.', 'I was telling her about Corvus.', 'What time is my flight, Corvus?', 'Who won the fight, Corvus.', 'Why so quiet, Corvus?', 'Fly, Corvus?', 'Corvus', 'Corvus, check the printer.', 'Fly, Corvids.', '']) assert.equal(beforeNameCall(text), null, text);
+});
+
+test('pleasantries, closings and stray sounds stay the model\'s and every other turn goes to the hub', () => {
+  for (const text of ['Hi there.', 'Good morning, Corvus.', 'Okay, goodbye.', 'That’ll be all for now.', 'Um.', 'So, uh', 'Yes.', 'Quiet, Corvus. Thanks, Corvus.', 'Okay, that\'s all, thanks.']) assert.equal(forHub(text), false, text);
+  for (const text of ["I'm curious about our compression experiments.", 'Dinner is ready, come wash your hands.', 'Hey, can you check the build?', "Why won't my laptop go to sleep?", 'Remind me to say goodbye to the neighbours.']) assert.equal(forHub(text), true, text);
+  assert.equal(forHub('Yes.', 1), true);
+  assert.equal(forHub('Okay, thanks.', 1), false);
+  assert.equal(forHub('Hm.', 1), false);
+  assert.equal(forHub('Hm.', 0), true);
+  assert.equal(forHub('Goodbye.', 0), false);
+  assert.equal(closes("That'll be all\nfor now."), true);
+  assert.equal(closes('Check the printer and the backup, then goodbye.'), false);
+  assert.equal(closes('for now.'), false);
+});
+
+test('the newest turn is the latest the user said since the last delegation, so short turns the model answered never add up', () => {
+  const trace = new ConversationTrace();
+  assert.equal(trace.newestTurn(), '');
+  trace.heard('Okay.');
+  trace.spoke('Sure.');
+  trace.heard('Right.');
+  assert.equal(trace.newestTurn(), 'Right.');
+  assert.equal(trace.pending().sent, 'Okay.\nRight.');
+  trace.delegated('item_1');
+  assert.equal(trace.newestTurn(), '');
 });

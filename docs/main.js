@@ -1,6 +1,6 @@
 import { Microphone } from './microphone.js';
 import wbgInit, { init as wasmInit, connect, send_only, recv } from './relay/botq_dash_wasm.js';
-import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, ReplyWatch, SessionClock, TranscriptBatcher, contextEvent, errorEvent, includesPhrase, modelToolFields, formatElapsed, formatStartError, isOfferFor, shareFrame, usageLimit } from './live.js';
+import { AckUploader, AudioChunker, ConversationTrace, EventBatcher, ReplyWatch, SessionClock, TranscriptBatcher, closes, contextEvent, errorEvent, forHub, includesPhrase, modelToolFields, formatElapsed, formatStartError, isOfferFor, shareFrame, usageLimit } from './live.js';
 import { PuppetChannel } from './puppet-client.js';
 import { TranscriptActionDriver, webGpuAdapter } from './puppet-drivers.js';
 import { StageTrace, traceStages } from './stage-trace.js';
@@ -8,7 +8,7 @@ import { LivePlayback } from './live-playback.js';
 import { audioDiagnostics } from './audio-diagnostics.js';
 audioDiagnostics();
 import { PuppetRuntime } from './puppet.js';
-import { CLOSING, IDENTITY, INACTIVITY_MS, SIGN_OFF, WAKE_PHRASE, WOKEN } from './identity.js';
+import { CLOSING, IDENTITY, INACTIVITY_MS, SIGN_OFF, UNDELEGATED_REPLY, WAKE_PHRASE, WOKEN } from './identity.js';
 import { loadHead, startWakeSpotter } from './wake.js';
 import { MODEL, learnVoice, prepareSpeaker, startSpeakerGate } from './speaker.js';
 import { HandOffHold, judgeTurn, listenForTurns, prepareTurn } from './turn.js';
@@ -69,10 +69,10 @@ let wakeModelWaiter;
 let listeningModel;
 let inactivity;
 let renewal;
-let unanswered;
 let requestEnd;
 let callQuiet = null;
 let modelTurnOpen = false;
+let nudgeOwner = null;
 const startSpotter = globalThis.__voiceStartSpotter ?? startWakeSpotter;
 const speaker = globalThis.__voiceSpeaker ?? { learnVoice, prepareSpeaker, startSpeakerGate };
 const turns = globalThis.__voiceTurn ?? { judgeTurn, listenForTurns, prepareTurn };
@@ -998,10 +998,14 @@ function onLiveEvent(message, source) {
     return;
   }
   const owner = source === starting?.channel ? starting : conversation?.audioOwner;
-  if (event.type === 'session.started') modelTurnOpen = false;
+  if (event.type === 'session.started') {
+    modelTurnOpen = false;
+    nudgeOwner = null;
+  }
   if (event.turn?.role === 'assistant' && ['turn.created', 'turn.done'].includes(event.type)) {
     modelTurnOpen = event.type === 'turn.created';
     if (!modelTurnOpen && callQuiet?.ending) endCallQuiet(callQuiet.ending);
+    if (!modelTurnOpen) nudgeReply();
   }
   if (event.type === 'delegation.created') delegate(event.item?.id, owner);
   else if (event.type === 'input_transcript.added') {
@@ -1013,17 +1017,16 @@ function onLiveEvent(message, source) {
     stayAwake();
     trace.heard(delta, Date.now(), event.start_ms);
     clearTimeout(requestEnd);
-    if (trace.endsRequest() && !conversation?.sleeping) requestEnd = setTimeout(() => handOff(hold.take() ?? `turn_${crypto.randomUUID()}`), UNANSWERED_MS);
+    // A request already held goes at once; otherwise the model has three seconds to delegate it under its own id.
+    if (trace.endsRequest() && !conversation?.sleeping) requestEnd = setTimeout(() => handOff(hold.take() ?? `turn_${crypto.randomUUID()}`), hold.held ? 0 : UNANSWERED_MS);
     conversation?.transcript?.add('user', delta);
     if (/[\p{L}\p{N}]/u.test(delta)) {
-      clearTimeout(unanswered);
       replyWatch.missed('user spoke');
-      endCallQuiet('user spoke');
+      nudgeOwner = null;
       hold.heard();
-      if (hubWaiting.size && !conversation?.sleeping) unanswered = setTimeout(() => { unanswered = undefined; hold.due(`turn_${crypto.randomUUID()}`, false); }, UNANSWERED_MS);
+      if (conversation?.sleeping) endCallQuiet('user spoke');
+      else relayTurn(owner);
     }
-    const request = /[\p{L}\p{N}]/u.test(delta) ? trace.beforeNameCall() : null;
-    if (request !== null && (request || hold.held || hubWaiting.size) && !conversation?.sleeping) quietAfterCall(owner);
   }
   else if (event.type === 'output_transcript.added') presentTranscript({ delta: event.item?.text ?? '', start_ms: event.start_ms, end_ms: event.end_ms });
   else if (event.type === 'session.usage.updated') {
@@ -1048,10 +1051,25 @@ function liveClosed(payload) {
     cancelStarting();
   }
 }
-// After a request closes with the hand-off phrase or a near sound of it, none of the model's speech is played until the hub's reply reaches it and the model's turn then in progress ends: this model hears the phrase as an order to go quiet and says so. Relaying is unchanged.
-function quietAfterCall(owner) {
-  if (callQuiet || !owner?.playback) return;
-  const quiet = callQuiet = { owner, unheard: 0, ending: null };
+// The page relays every user turn but a pleasantry, a closing or a stray sound, held until the speech finishes its thought: this model answers a turn meant for the hub with a question or advice of its own, whatever it is told. Unless the hub owes a reply, which the model fills the wait for or speaks, none of the model's speech is played meanwhile, until the model delegates the turn itself, or, after a request closed with the hand-off phrase or a near sound of it (which this model hears as an order to go quiet, and says so), until the hub's reply reaches it and the model's turn then in progress ends.
+function relayTurn(owner) {
+  const request = trace.beforeNameCall();
+  if (request !== null && (request || hold.held || hubWaiting.size)) return quietAfter(owner, 'call');
+  // A closing arrives in pieces, so it is judged on everything said since the last hand-off; it drops a hand-off only the page holds.
+  if (closes(trace.pending().sent)) {
+    if (hold.held && !owner?.delegations.has(hold.held.id)) hold.clear();
+    return endCallQuiet('user spoke');
+  }
+  // A turn joining a held hand-off needs no words of its own; while the hub owes a reply, one word is a turn.
+  if (!forHub(trace.newestTurn(), hold.held ? 0 : hubWaiting.size ? 1 : undefined)) return endCallQuiet('user spoke');
+  hold.due(`turn_${crypto.randomUUID()}`, false);
+  if (hubTurn || hubWaiting.size) endCallQuiet('user spoke');
+  else if (!owner?.delegations.has(hold.held?.id)) quietAfter(owner, 'turn');
+}
+function quietAfter(owner, kind) {
+  if (callQuiet) return Object.assign(callQuiet, { kind: callQuiet.kind === 'call' ? 'call' : kind, ending: null });
+  if (!owner?.playback) return;
+  const quiet = callQuiet = { owner, kind, unheard: 0, ending: null };
   quiet.timer = setTimeout(() => { if (callQuiet === quiet && !hold.held && !hubWaiting.size && !trace.endsRequest()) endCallQuiet('no request'); }, UNANSWERED_MS);
   owner.playback.silence(true);
   recordSession('hand-off-quiet', JSON.stringify({ on: true }));
@@ -1069,7 +1087,6 @@ function endCallQuiet(reason) {
   recordSession('hand-off-quiet', JSON.stringify({ on: false, reason, unheard_chars: unheard }));
 }
 function presentTranscript(event) {
-    clearTimeout(unanswered);
     stayAwake();
     const delta = event.delta ?? '';
     const said = (conversation?.said ?? '') + delta;
@@ -1100,21 +1117,22 @@ function presentTranscript(event) {
     }
     if (signedOff) fallAsleep();
 }
+function nudgeReply() {
+  if (nudgeOwner) tell(nudgeOwner, 'commentary', UNDELEGATED_REPLY);
+  nudgeOwner = null;
+}
 function tell(owner, channel, content, delegationItemId = null) {
   if (owner?.channel?.readyState === 'open') owner.channel.send(JSON.stringify(contextEvent(channel, content, delegationItemId)));
 }
 function delegate(id, owner) {
   if (!owner || typeof id !== 'string') return;
   owner.delegations.add(id);
+  if (callQuiet?.kind === 'turn') endCallQuiet('delegated');
   if (trace.endsRequest()) handOff(id);
-  else {
-    clearTimeout(unanswered);
-    hold.due(id, true);
-  }
+  else hold.due(id, true);
 }
 function handOff(id) {
   hold.clear();
-  clearTimeout(unanswered);
   clearTimeout(requestEnd);
   if (!trace.pending().sent && hubWaiting.has(lastHandOff)) {
     joined.set(lastHandOff, id);
@@ -1143,6 +1161,7 @@ function fallAsleep() {
   if (!current || current.sleeping) return;
   current.sleeping = true;
   hold.clear();
+  nudgeOwner = null;
   recordSession('sleep', 'sign-off');
   current.audioOwner.playback.quiet().then(() => { if (conversation === current) stopConversation(); });
 }
@@ -1190,6 +1209,8 @@ function presentHubReply({ result, image }) {
   current.replyUnspoken = true;
   replyWatch.handed(result.id);
   result.commentary.forEach((content) => tell(owner, 'speakable', content, delegation));
+  if (delegation === null) nudgeOwner = owner;
+  if (!modelTurnOpen) nudgeReply();
   return owner;
 }
 async function playHubReplies() {
@@ -1241,7 +1262,7 @@ function paintOff() {
   hubWaiting.clear();
   joined.clear();
   hold.clear();
-  clearTimeout(unanswered);
+  nudgeOwner = null;
   clearTimeout(requestEnd);
   interruptHubReplies('conversation ended');
   cuedDisplay = null;

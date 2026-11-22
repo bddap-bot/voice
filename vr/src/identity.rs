@@ -8,6 +8,8 @@ pub struct Identity {
     pub name: String,
     /// The hand-off phrase's first word and the words it has been heard as, as phrase keys.
     pub call_sounds: Vec<String>,
+    /// The name and how it has been heard, as phrase keys.
+    pub name_sounds: [String; 2],
     pub sign_off: String,
     pub hand_off_phrase: String,
     pub inactivity: Duration,
@@ -15,7 +17,13 @@ pub struct Identity {
     pub closing: String,
     pub woken: String,
     pub renewed: String,
+    pub undelegated_reply: String,
     pub vr_wake_phrase: String,
+    /// Turns Live answers itself, as word sequences, and the sounds no request is made of.
+    pub pleasantries: Vec<Vec<String>>,
+    pub closings: Vec<Vec<String>>,
+    pub noise: Vec<String>,
+    pub request_words: usize,
 }
 
 /// The source text of `export const NAME = …;`: a quoted literal, closed by its own quote, or an expression up to the line's `;`.
@@ -59,9 +67,19 @@ pub fn identity() -> &'static Identity {
             closing: text("CLOSING", &names),
             woken: text("WOKEN", &names),
             renewed: text("RENEWED", &names),
+            undelegated_reply: text("UNDELEGATED_REPLY", &names),
             vr_wake_phrase: text("VR_WAKE_PHRASE", &names),
             inactivity: Duration::from_millis(milliseconds("INACTIVITY_MS")),
             call_sounds: std::iter::once(without_trailing_phrase(&hand_off_phrase, &name)).chain(sounds.split(", ")).map(phrase_key).collect(),
+            pleasantries: text("PLEASANTRIES", &[]).split(", ").map(words).collect(),
+            closings: text("CLOSINGS", &[]).split(", ").map(words).collect(),
+            noise: text("NOISE", &[]).split(", ").map(str::to_owned).collect(),
+            request_words: value("REQUEST_WORDS").parse().expect("identity.js: REQUEST_WORDS is not an integer"),
+            name_sounds: {
+                let called = phrase_key(&name);
+                let heard = called.strip_prefix('c').map_or_else(|| called.clone(), |rest| format!("k{rest}"));
+                [called, heard]
+            },
             name,
             sign_off,
             hand_off_phrase,
@@ -89,9 +107,7 @@ pub fn before_name_call(text: &str) -> Option<&str> {
     let name_end = text.trim_end_matches(|c: char| !word(c));
     let name_start = name_end.trim_end_matches(word).len();
     let name = phrase_key(&name_end[name_start..]);
-    let called = phrase_key(&identity().name);
-    let sounds = [called.clone(), called.strip_prefix('c').map_or_else(|| called.clone(), |rest| format!("k{rest}"))];
-    if !sounds.contains(&name) {
+    if !identity().name_sounds.contains(&name) {
         return None;
     }
     let before = name_end[..name_start].trim_end_matches(|c: char| !word(c));
@@ -103,6 +119,45 @@ pub fn before_name_call(text: &str) -> Option<&str> {
     let own_phrase = preceding.is_empty() || preceding.ends_with(['.', ',', '!', '?', ';', ':', '\n']);
     let asked = text[name_end.len()..].contains('?');
     (own_phrase && !asked && identity().call_sounds.contains(&phrase_key(&before[call_start..]))).then(|| preceding.trim_end_matches(|c: char| c.is_whitespace() || c == ','))
+}
+
+fn words(text: &str) -> Vec<String> {
+    text.to_lowercase().replace('\u{2019}', "'").split(|c: char| !(c.is_alphanumeric() || c == '\'')).filter(|word| !word.is_empty()).map(str::to_owned).collect()
+}
+
+/// The page's `requestWords`: the words of a turn by the rule beside `PLEASANTRIES` in identity.js, and whether it held a closing.
+fn request_words(text: &str) -> (usize, bool) {
+    let identity = identity();
+    let mut words: Vec<String> = words(text).into_iter().filter(|word| !identity.name_sounds.contains(&phrase_key(word)) && !identity.call_sounds.contains(&phrase_key(word)) && !identity.noise.contains(word)).collect();
+    let mut strip = |phrase: &[String]| {
+        let mut found = false;
+        while let Some(start) = (0..words.len()).find(|&start| words[start..].starts_with(phrase)) {
+            words.drain(start..start + phrase.len());
+            found = true;
+        }
+        found
+    };
+    let closed = identity.closings.iter().fold(false, |closed, phrase| strip(phrase) || closed);
+    identity.pleasantries.iter().for_each(|phrase| {
+        strip(phrase);
+    });
+    (words.len(), closed)
+}
+
+/// The page's `closes`: a closing with no more than `REQUEST_WORDS` words beside it.
+pub fn closes(text: &str) -> bool {
+    let (count, closed) = request_words(text);
+    closed && count <= identity().request_words
+}
+
+/// The page's `forHub`: whether the page relays a turn to the hub itself; `least` lowers the words a turn needs while the hub owes a reply or a hand-off is held.
+pub fn for_hub(text: &str, least: Option<usize>) -> bool {
+    let (count, closed) = request_words(text);
+    if closed {
+        count > identity().request_words
+    } else {
+        count >= least.unwrap_or(identity().request_words)
+    }
 }
 
 /// The page's `withoutTrailingPhrase`.
@@ -161,6 +216,24 @@ mod tests {
         for text in ["Hey Corvus", "Thanks, Corvus.", "Good night, Corvus.", "I was telling her about Corvus.", "What time is my flight, Corvus?", "Who won the fight, Corvus.", "Why so quiet, Corvus?", "Fly, Corvus?", "Corvus", "Corvus, check the printer.", "Fly, Corvids.", ""] {
             assert_eq!(before_name_call(text), None, "{text}");
         }
+    }
+
+    #[test]
+    fn pleasantries_closings_and_stray_sounds_stay_lives_and_every_other_turn_goes_to_the_hub() {
+        for text in ["Hi there.", "Good morning, Corvus.", "Okay, goodbye.", "That\u{2019}ll be all for now.", "Um.", "So, uh", "Yes.", "Quiet, Corvus. Thanks, Corvus.", "Okay, that's all, thanks."] {
+            assert!(!for_hub(text, None), "{text}");
+        }
+        for text in ["I'm curious about our compression experiments.", "Dinner is ready, come wash your hands.", "Hey, can you check the build?", "Why won't my laptop go to sleep?", "Remind me to say goodbye to the neighbours."] {
+            assert!(for_hub(text, None), "{text}");
+        }
+        assert!(for_hub("Yes.", Some(1)));
+        assert!(!for_hub("Okay, thanks.", Some(1)));
+        assert!(!for_hub("Hm.", Some(1)));
+        assert!(for_hub("Hm.", Some(0)));
+        assert!(!for_hub("Goodbye.", Some(0)));
+        assert!(closes("That'll be all\nfor now."));
+        assert!(!closes("Check the printer and the backup, then goodbye."));
+        assert!(!closes("for now."));
     }
 
     #[test]

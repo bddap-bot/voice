@@ -12,8 +12,8 @@ const trial = (rt, frames, replyAt = 9000, levels) => scoreTrial({ capture: { rt
 test('a trial is one whole request when one relay carries every turn, and a promise of silence counts from the phrase to the reply', () => {
   const row = trial([said(1000, 'Sure, checking that.'), said(6800, ' Staying quiet.'), said(9500, 'It starts in seventeen minutes.')], [delegated(7400, 'Can you check on the backup job\nAnd tell me when it last finished')]);
   assert.deepEqual(row, {
-    name: 'whole', kind: 'whole', relayed: true, relays: 1, whole: true, clarifying: false, promisedSilence: true, playedSilence: true, audibleAfterSpeechMs: null, replySpoken: true, relayMs: 400,
-    beforeRelay: 'Sure, checking that. Staying quiet.', afterPhrase: 'Staying quiet.', playedAfterPhrase: 'Staying quiet.', delegated: ['Can you check on the backup job\nAnd tell me when it last finished'], afterReply: 'It starts in seventeen minutes.', quietUnpaired: false, records: [],
+    name: 'whole', kind: 'whole', relayed: true, relays: 1, whole: true, clarifying: false, ownAnswer: false, spoke: true, signedOff: false, promisedSilence: true, playedSilence: true, audibleAfterSpeechMs: null, replySpoken: true, relayMs: 400,
+    beforeRelay: 'Sure, checking that. Staying quiet.', playedBeforeRelay: 'Sure, checking that. Staying quiet.', afterPhrase: 'Staying quiet.', playedAfterPhrase: 'Staying quiet.', delegated: ['Can you check on the backup job\nAnd tell me when it last finished'], afterReply: 'It starts in seventeen minutes.', quietUnpaired: false, records: [],
   });
 });
 
@@ -26,6 +26,13 @@ test('a promise before the phrase, a split request and an unspoken reply are eac
   assert.equal(row.replySpoken, false);
   assert.equal(row.relayMs, 600);
   const none = trial([said(6500, 'Standing by.')], [], null);
+  assert.equal(none.ownAnswer, true, 'speech with nothing relayed is the model answering alone');
+  const quizzedUnheard = trial([said(1000, 'Which job?'), said(9500, 'It starts in seventeen minutes.')], [quiet(900, { on: true }), delegated(7400, 'Can you check on the backup job'), quiet(9000, { on: false, reason: 'hub reply', unheard_chars: 10 })]);
+  assert.deepEqual([quizzedUnheard.clarifying, quizzedUnheard.ownAnswer], [true, false], 'a question the page never played is said, not heard');
+  const advice = trial([said(1000, 'A good place to start is the docs, then examples, then a simple install story for new people.')], [delegated(7400, 'Can you check on the backup job')]);
+  assert.deepEqual([advice.clarifying, advice.ownAnswer], [false, true]);
+  const signOff = trial([said(1000, 'My labor here is ended.')], [], null);
+  assert.deepEqual([signOff.spoke, signOff.signedOff], [true, true]);
   assert.deepEqual([none.relayed, none.promisedSilence, none.replySpoken, none.relayMs], [false, true, null, null]);
 });
 
@@ -45,14 +52,14 @@ test("what the model says while the page's records say it plays nothing counts a
 
 test('the summary counts each rate per kind over its trials', () => {
   const rows = [
-    { kind: 'whole', relayed: true, relays: 1, whole: true, clarifying: false, promisedSilence: false, playedSilence: false, audibleAfterSpeechMs: 0, replySpoken: true, relayMs: 400 },
-    { kind: 'whole', relayed: true, relays: 2, whole: false, clarifying: false, promisedSilence: true, playedSilence: true, audibleAfterSpeechMs: 900, replySpoken: false, relayMs: 900 },
-    { kind: 'whole', relayed: false, relays: 0, whole: false, clarifying: true, promisedSilence: false, playedSilence: false, audibleAfterSpeechMs: 200, replySpoken: null, relayMs: null },
-    { kind: 'fragment', relayed: true, relays: 1, whole: true, clarifying: false, promisedSilence: false, playedSilence: false, audibleAfterSpeechMs: null, replySpoken: true, relayMs: 5000 },
+    { kind: 'whole', relayed: true, relays: 1, whole: true, clarifying: false, ownAnswer: false, spoke: true, signedOff: false, promisedSilence: false, playedSilence: false, audibleAfterSpeechMs: 0, replySpoken: true, relayMs: 400 },
+    { kind: 'whole', relayed: true, relays: 2, whole: false, clarifying: false, ownAnswer: false, spoke: true, signedOff: false, promisedSilence: true, playedSilence: true, audibleAfterSpeechMs: 900, replySpoken: false, relayMs: 900 },
+    { kind: 'whole', relayed: false, relays: 0, whole: false, clarifying: true, ownAnswer: true, spoke: true, signedOff: true, promisedSilence: false, playedSilence: false, audibleAfterSpeechMs: 200, replySpoken: null, relayMs: null },
+    { kind: 'fragment', relayed: true, relays: 1, whole: true, clarifying: false, ownAnswer: false, spoke: false, signedOff: false, promisedSilence: false, playedSilence: false, audibleAfterSpeechMs: null, replySpoken: true, relayMs: 5000 },
   ];
   assert.deepEqual(summarize(rows), {
-    whole: { trials: 3, relayed: '2/3', whole: '1/3', fragmented: '1/3', clarifying: '1/3', promisedSilence: '1/3', playedSilence: '1/3', medianAudibleAfterSpeechMs: 200, replySpoken: '1/2', medianRelayMs: 650 },
-    fragment: { trials: 1, relayed: '1/1', whole: '1/1', fragmented: '0/1', clarifying: '0/1', promisedSilence: '0/1', playedSilence: '0/1', medianAudibleAfterSpeechMs: null, replySpoken: '1/1', medianRelayMs: 5000 },
+    whole: { trials: 3, relayed: '2/3', whole: '1/3', fragmented: '1/3', clarifying: '1/3', ownAnswer: '1/3', spoke: '3/3', signedOff: '1/3', promisedSilence: '1/3', playedSilence: '1/3', medianAudibleAfterSpeechMs: 200, replySpoken: '1/2', medianRelayMs: 650 },
+    fragment: { trials: 1, relayed: '1/1', whole: '1/1', fragmented: '0/1', clarifying: '0/1', ownAnswer: '0/1', spoke: '0/1', signedOff: '0/1', promisedSilence: '0/1', playedSilence: '0/1', medianAudibleAfterSpeechMs: null, replySpoken: '1/1', medianRelayMs: 5000 },
   });
 });
 
@@ -60,7 +67,7 @@ test('every hand-off case names a kind, gives each turn words and a reply the sc
   const { cases } = JSON.parse(await readFile(new URL('../scripts/hand-off-cases.json', import.meta.url), 'utf8'));
   assert.equal(new Set(cases.map(({ name }) => name)).size, cases.length);
   for (const { name, kind, turns, reply } of cases) {
-    assert.ok(['vague', 'misheard', 'whole', 'fragment'].includes(kind), name);
+    assert.ok(['vague', 'misheard', 'whole', 'fragment', 'stray'].includes(kind), name);
     assert.ok(turns.length && turns.every((turn) => /\w/.test(turn)), name);
     assert.match(reply, /\bseventeen\b/, name);
   }

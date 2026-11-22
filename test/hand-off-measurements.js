@@ -1,3 +1,5 @@
+import { SIGN_OFF } from '../docs/identity.js';
+import { includesPhrase } from '../docs/live.js';
 import { spokenBetween } from './wake-reply-measurements.js';
 
 export const REPLY_SAID = /\bseventeen\b|\b17\b/i;
@@ -5,6 +7,8 @@ export const SILENCE = /\b(quiet|silent|silence|step(ping)? back|hold(ing)? (off
 const NEAR_PHRASE = /^(corvus|korvus|quiet|fight|flight)$/;
 const words = (text) => text.toLowerCase().replace(/[^a-z' ]+/g, ' ').split(/\s+/).filter(Boolean);
 
+// Played speech before the relay longer than an acknowledgement is the model's own answer.
+const ACKNOWLEDGEMENT_WORDS = 12;
 const AUDIBLE = 0.01;
 const LEVEL_MS = 50;
 
@@ -54,6 +58,8 @@ export function scoreTrial({ capture, ch, item, start, turnAt, speechEnd, replyA
   const playedAfterPhrase = playedBetween(capture, ch, turnAt.at(-1), replyAt ?? end, spans);
   const levels = (capture.levels ?? []).filter(({ at }) => at >= speechEnd && at < (replyAt ?? end));
   const afterReply = replyAt === null ? '' : playedBetween(capture, ch, replyAt, end, spans);
+  const playedBeforeRelay = playedBetween(capture, ch, start, firstRelay ?? end, spans);
+  const played = playedBetween(capture, ch, start, end, spans);
   return {
     name: item.name,
     kind: item.kind,
@@ -61,12 +67,16 @@ export function scoreTrial({ capture, ch, item, start, turnAt, speechEnd, replyA
     relays: sent.length,
     whole: sent.length === 1 && coverage.every((share) => share >= 0.5),
     clarifying: /\?/.test(spokenBetween(capture, ch, start, firstRelay ?? end)),
+    ownAnswer: /\?/.test(playedBeforeRelay) || words(playedBeforeRelay).length > ACKNOWLEDGEMENT_WORDS || (!sent.length && words(played).length > 0),
+    spoke: words(played).length > 0,
+    signedOff: includesPhrase(played, SIGN_OFF),
     promisedSilence: SILENCE.test(afterPhrase),
     playedSilence: SILENCE.test(playedAfterPhrase),
     audibleAfterSpeechMs: levels.length ? levels.filter(({ rms }) => rms > AUDIBLE).length * LEVEL_MS : null,
     replySpoken: replyAt === null ? null : REPLY_SAID.test(afterReply),
     relayMs: sent.length ? sent.at(-1).at - speechEnd : null,
     beforeRelay: spokenBetween(capture, ch, start, firstRelay ?? end),
+    playedBeforeRelay,
     afterPhrase,
     playedAfterPhrase,
     delegated: sent.map(({ text }) => text),
@@ -94,6 +104,9 @@ export function summarize(rows) {
       whole: count(list, (row) => row.whole),
       fragmented: count(list, (row) => row.relays > 1),
       clarifying: count(list, (row) => row.clarifying),
+      ownAnswer: count(list, (row) => row.ownAnswer),
+      spoke: count(list, (row) => row.spoke),
+      signedOff: count(list, (row) => row.signedOff),
       promisedSilence: count(list, (row) => row.promisedSilence),
       playedSilence: count(list, (row) => row.playedSilence),
       medianAudibleAfterSpeechMs: median(list.map((row) => row.audibleAfterSpeechMs)),

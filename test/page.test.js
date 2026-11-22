@@ -3,7 +3,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import test from 'node:test';
 import { gzipSync } from 'node:zlib';
-import { CLOSING, IDENTITY, INACTIVITY_MS, SIGN_OFF, WAKE_PHRASE, WOKEN } from '../docs/identity.js';
+import { CLOSING, IDENTITY, INACTIVITY_MS, SIGN_OFF, UNDELEGATED_REPLY, WAKE_PHRASE, WOKEN } from '../docs/identity.js';
 import { WIDTH, WINDOW } from '../docs/wake.js';
 import { MODEL } from '../docs/speaker.js';
 import { HANG_MS, launchChromium, openPage, renderDom } from '../scripts/chromium.mjs';
@@ -304,7 +304,7 @@ globalThis.turnTaps = [];
 globalThis.__voiceTurn = {
   prepareTurn() {},
   listenForTurns: async (stream) => { const tap = { stream, closed: 0, close() { this.closed++; } }; turnTaps.push(tap); return tap; },
-  judgeTurn: (heard) => (globalThis.heldTurns ? turnJudgements.push(heard) : heard({ probability: 1, ms: 0 })),
+  judgeTurn: (heard) => (globalThis.heldTurns ? turnJudgements.push(heard) : setTimeout(() => heard({ probability: 1, ms: 0 }))),
 };
 globalThis.spotterStarts = [];
 globalThis.__voiceStartSpotter = async (stream, heard, model) => {
@@ -314,7 +314,7 @@ globalThis.__voiceStartSpotter = async (stream, heard, model) => {
 };
 globalThis.sentLiveEvents = [];
 import('/live.js').then((live) => { globalThis.checkClientEvent = live.checkedClientEvent; });
-import('/turn.js').then(({ TURN }) => { const quiet = TURN.quietMs; Object.defineProperty(TURN, 'quietMs', { get: () => (globalThis.heldTurns ? quiet : 0) }); });
+import('/turn.js').then(({ TURN }) => { const quiet = TURN.quietMs; Object.defineProperty(TURN, 'quietMs', { get: () => (globalThis.heldTurns || globalThis.pageQuiet ? quiet : 0) }); });
 window.addEventListener('load', async () => {
   if (localStorage.getItem('voice.token')) return;
   globalThis.statusTextWrites = [];
@@ -335,6 +335,7 @@ const appendEntries = `
 for (let index = 0; index < 10; index++) {
   hear('question ' + index);
   delegateTurn('scroll_' + index);
+  await until(() => globalThis.delegateFrames?.length === index + 1);
 }
 `;
 
@@ -1064,6 +1065,7 @@ window.addEventListener('test-ready', async () => {
   const listening = text();
   hear('Where is the report?');
   delegateTurn('state_1');
+  await until(() => globalThis.delegateFrames?.length);
   const waiting = text();
   replyFromHub('state_1', 'state_stamp', ['On the display.'], 12);
   await until(() => globalThis.hubAcks?.includes('state_stamp'));
@@ -1339,7 +1341,7 @@ window.addEventListener('test-ready', () => {
 
 for (const size of ['720,1280', '1440,900']) test(`the delegation log keeps its newest entry in view at ${size}`, async () => {
   const { result, stderr } = await runPage(`
-window.addEventListener('test-ready', () => {
+window.addEventListener('test-ready', async () => {
   ${appendEntries}
   const log = document.querySelector('#log');
   log.dispatchEvent(new Event('scroll'));
@@ -1352,10 +1354,11 @@ window.addEventListener('test-ready', () => {
 
 test('the delegation log renders every trace kind and delegation field', async () => {
   const { result, stderr } = await runPage(`
-window.addEventListener('test-ready', () => {
+window.addEventListener('test-ready', async () => {
   say('I will inspect the fixture.', 0, 20);
   hear('Check the fixture stream.');
   delegateTurn('fixture');
+  await until(() => globalThis.delegateFrames?.length);
   replyFromHub('fixture', 'fixture', ['The fixture is complete.'], 42);
   until(() => globalThis.hubAcks?.includes('fixture')).then(() => { document.body.dataset.result = JSON.stringify(document.querySelector('#log').innerText); });
 });
@@ -1367,7 +1370,7 @@ window.addEventListener('test-ready', () => {
 
 test('the delegation log does not move when an entry arrives after scrolling to the top', async () => {
   const { result, stderr } = await runPage(`
-window.addEventListener('test-ready', () => {
+window.addEventListener('test-ready', async () => {
   ${appendEntries}
   const log = document.querySelector('#log');
   log.scrollTop = 0;
@@ -1408,6 +1411,7 @@ test('a client delegation hands the hub the exact transcript heard since the las
 window.addEventListener('test-ready', async () => {
   hear('Hello there.');
   delegateTurn('item_first');
+  await until(() => globalThis.delegateFrames?.length === 1);
   say('Hi.', 0, 10);
   hear("What's in ");
   hear('the build ');
@@ -1443,7 +1447,7 @@ window.addEventListener('test-ready', async () => {
     since++;
   };
   for (let index = 0; index < 24; index++) {
-    turn(() => hear('question ' + index));
+    turn(() => hear('goodbye ' + index));
     await wait(500);
     turn(() => say('answer ' + index, 0, 10));
     await wait(6000);
@@ -1462,7 +1466,7 @@ window.addEventListener('test-ready', async () => {
   assert.equal(first.verb, 'offer');
   assert.ok(renewals.length >= 4, JSON.stringify(result.offers));
   assert.ok(renewals.every(({ verb, context, wake }) => verb === 'renew' && context.length === 4 && /continues the conversation/.test(wake)));
-  assert.deepEqual(renewals[0].context, ['question 2', 'answer 2', 'question 3', 'answer 3']);
+  assert.deepEqual(renewals[0].context, ['goodbye 2', 'answer 2', 'goodbye 3', 'answer 3']);
   assert.ok(result.held.every((turns, index) => (index ? 4 : 0) + turns <= 8), JSON.stringify(result.held));
   assert.deepEqual(result.open, [...result.open.slice(0, -1).map(() => 'closed'), 'open']);
   assert.equal(result.pressed, 'true');
@@ -1475,7 +1479,7 @@ window.addEventListener('test-ready', async () => {
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const first = testChannel;
   globalThis.holdAnswer = true;
-  hear('Is the printer busy?');
+  hear('Hello there.');
   await wait(500);
   say('Let me think.', 0, 10);
   await until(() => offers.length === 2);
@@ -1491,7 +1495,7 @@ window.addEventListener('test-ready', async () => {
   assert.ok(result, stderr);
   assert.equal(result.before, 0);
   assert.equal(result.first, 0);
-  assert.deepEqual(result.renewed, [['session.context.append', CLOSING], ['session.context.append', 'The printer is idle.']]);
+  assert.deepEqual(result.renewed, [['session.context.append', CLOSING], ['session.context.append', 'The printer is idle.'], ['session.context.append', UNDELEGATED_REPLY]]);
 });
 
 test('a delegation appends nothing until its hub reply, which reaches Live as speakable context alone, while a display-only push says nothing', async () => {
@@ -1538,6 +1542,7 @@ window.addEventListener('test-ready', async () => {
   const frames = () => (globalThis.delegateFrames ?? []).map(({ id, text }) => ({ id, text }));
   hear('Is the printer');
   delegateTurn('item_printer');
+  await until(() => frames().length === 1);
   hear(' busy right now? Fly, Corvus.');
   await wait(1000);
   delegateTurn('item_complete');
@@ -1545,6 +1550,7 @@ window.addEventListener('test-ready', async () => {
   const byModel = frames().length;
   hear('And the backup');
   delegateTurn('item_backup');
+  await until(() => frames().length === 3);
   hear(' from last night. Fly, Corvus');
   await wait(1000);
   say('Okay.', 0, 10);
@@ -1577,12 +1583,12 @@ window.addEventListener('test-ready', async () => {
   say('Hello.');
   hear('Is the printer busy?');
   delegateTurn('item_printer');
+  await until(() => globalThis.delegateFrames?.length);
   say('Sure, checking.');
   const greeting = [...silences];
   hear('Quiet, Corvus.');
   modelTurn('turn.created');
   say('Understood, staying quiet.');
-  await until(() => globalThis.delegateFrames?.length);
   replyFromHub('item_printer', 'printer', ['The printer is idle.']);
   await until(() => globalThis.hubAcks?.includes('printer'));
   say(' I will hold it.');
@@ -1600,18 +1606,20 @@ window.addEventListener('test-ready', async () => {
   replyFromHub('item_backup', 'backup', ['The backup finished.']);
   await until(() => globalThis.hubAcks?.includes('backup'));
   hear('Thanks.');
-  await until(() => records().length >= 8);
+  await until(() => records().length >= 10);
   document.body.dataset.result = JSON.stringify({ greeting, replyMidTurn, thanks, silences, records: records(), spoken: testPuppet.calls.filter(([name]) => name === 'speak').map(([, text]) => text), sent: globalThis.delegateFrames.map(({ text }) => text), log: document.querySelector('#log').innerText });
 });
 `);
   assert.ok(result, stderr);
-  assert.deepEqual([result.greeting, result.replyMidTurn, result.thanks, result.silences], [[], [true], [true, false], [true, false, true, false]]);
+  assert.deepEqual([result.greeting, result.replyMidTurn, result.thanks, result.silences], [[true, false], [true, false, true], [true, false, true, false], [true, false, true, false, true, false]]);
   assert.deepEqual(result.spoken, ['Hello.', 'Sure, checking.', 'The printer is idle.', 'Okay.']);
   assert.doesNotMatch(result.log, /staying quiet|I will hold/);
-  assert.equal(result.sent.length, 2);
   assert.match(result.sent[1], /And the backup\?$/);
+  assert.equal(result.sent[2], 'Never mind.', 'speech while a request is pending is relayed too');
   const after = ({ after_ms, ...rest }) => (assert.ok(Number.isInteger(after_ms) && after_ms >= 0), rest);
   assert.deepEqual(result.records.map(([name, detail]) => [name, 'after_ms' in detail ? after(detail) : detail]), [
+    ['hand-off-quiet', { on: true }],
+    ['hand-off-quiet', { on: false, reason: 'delegated', unheard_chars: 0 }],
     ['hand-off-quiet', { on: true }],
     ['hub-reply-handed', { id: 'item_printer' }],
     ['hand-off-quiet', { on: false, reason: 'hub reply', unheard_chars: 42 }],
@@ -1722,8 +1730,9 @@ window.addEventListener('test-ready', async () => {
   assert.equal(result.tapped, true);
 });
 
-test('while a delegation is pending, a turn the model ignores for three seconds goes to the hub, and its reply or failure carries a null delegation id', async () => {
+test('while a delegation is pending, each further turn goes to the hub once its speech has been quiet for the hold, and its reply or failure carries a null delegation id', async () => {
   const { result, stderr } = await runPage(`
+globalThis.pageQuiet = true;
 window.addEventListener('test-ready', async () => {
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const frames = () => (globalThis.delegateFrames ?? []).map(({ id, text }) => ({ id, text }));
@@ -1731,6 +1740,7 @@ window.addEventListener('test-ready', async () => {
   await wait(3100);
   const nothingPending = frames().length;
   delegateTurn('item_first');
+  await until(() => frames().length === 1);
   hear(' How are you?');
   await wait(1000);
   say('Fine.', 0, 10);
@@ -1761,12 +1771,13 @@ window.addEventListener('test-ready', async () => {
 });
 `, { virtualTime: true });
   assert.ok(result, stderr);
-  assert.deepEqual([result.nothingPending, result.afterSpeech, result.beforeTimeout, result.afterModelDelegation], [0, 1, 1, 3]);
+  assert.deepEqual([result.nothingPending, result.afterSpeech, result.beforeTimeout, result.afterModelDelegation], [0, 2, 2, 4]);
   assert.deepEqual(result.frames.map(({ id, text }) => [id.startsWith('turn_') ? 'page' : id, text]), [
     ['item_first', 'Hello there.'],
-    ['page', 'How are you?\nAlso, is the printer busy right now?'],
-    ['item_backup', 'And the backup?'],
-    ['page', '?  Is the door locked?'],
+    ['page', 'How are you?'],
+    ['page', 'Also, is the printer busy right now?'],
+    ['item_backup', 'And the backup??'],
+    ['page', 'Is the door locked?'],
   ]);
   assert.deepEqual(result.told, [
     ['session.context.append', 'speakable', null, 'The printer is idle.'],
@@ -1781,6 +1792,7 @@ window.addEventListener('test-ready', async () => {
   const frames = () => (globalThis.delegateFrames ?? []).map(({ id, text }) => ({ id, text }));
   hear('Grow the trees.');
   delegateTurn('item_trees');
+  await until(() => frames().length === 1);
   hear(' Also, is the printer busy?');
   await wait(3100);
   const printer = frames().at(-1).id;
@@ -1823,7 +1835,7 @@ window.addEventListener('test-ready', async () => {
       ['delegation.context.append', 'speakable', 'item_mix', 'Two jobs need attention.'],
       ['delegation.context.append', 'speakable', 'item_mix', 'Both are on the display.'],
     ],
-    share_1: [['session.context.append', 'speakable', null, 'The link is the release notes.']],
+    share_1: [['session.context.append', 'speakable', null, 'The link is the release notes.'], ['session.context.append', 'commentary', null, UNDELEGATED_REPLY]],
   });
 });
 
@@ -3106,7 +3118,7 @@ window.addEventListener('test-ready', async () => {
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const first = testChannel;
   const exchange = async (index, seconds) => {
-    hear('question ' + index);
+    hear('Hello.');
     await wait(500);
     say('answer ' + index, 0, 10);
     emitLive({ type: 'session.usage.updated', usage: { audio_duration_ms: seconds * 1000 } });
@@ -3256,7 +3268,7 @@ test('leaving the app keeps the delegation log and whether Live was awake throug
     const offers = () => evaluate(`count('offer')`);
     const memory = () => evaluate(`JSON.parse(lastOffer.context[0].text.split('\\n').slice(1).join('\\n')).flatMap((conversation) => conversation.turns.map((turn) => turn.text))`);
     await until(`document.body?.dataset.startTest === 'puppet'`);
-    await evaluate(`hear('Where is the beacon?'); say('The beacon is green.'); 0`);
+    await evaluate(`hear('Good morning, Corvus.'); say('Morning, the beacon is green.'); 0`);
     const awake = await state();
     events.length = 0;
     await hide();
@@ -3303,12 +3315,12 @@ test('leaving the app keeps the delegation log and whether Live was awake throug
     const killedInView = { ...(await state()), restores: await restores(), offers: await offers() };
     return { awake, frozen, reopened, asleep, slept, wokenHidden, sleptInView, reloadedInView, killedInView };
   });
-  const log = /^MODEL HEARD\nheard: Where is the beacon\?\nMODEL ALONE\nspoke: The beacon is green\.\nMODEL HEARD\nheard: And the tower\?/;
+  const log = /^MODEL HEARD\nheard: Good morning, Corvus\.\nMODEL ALONE\nspoke: Morning, the beacon is green\.\nMODEL HEARD\nheard: And the tower\?/;
   const withoutUsage = (text) => text.replaceAll(/\nsession: [^\n]*/g, '');
   assert.equal(result.awake.pressed, 'true');
   assert.deepEqual(result.frozen, { ...result.awake, lifecycle: ['hidden', 'freeze', 'resume', 'visible'], navigated: [] });
   assert.match(result.reopened.log, log);
-  assert.deepEqual(result.reopened.memory, ['Where is the beacon?', 'The beacon is green.', 'And the tower?']);
+  assert.deepEqual(result.reopened.memory, ['Good morning, Corvus.', 'Morning, the beacon is green.', 'And the tower?']);
   assert.deepEqual(result.reopened.restores, [true]);
   assert.equal(result.asleep.pressed, 'false');
   assert.deepEqual(result.slept, { log: withoutUsage(result.asleep.log), pressed: 'false', offers: 0 });

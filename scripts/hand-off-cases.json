@@ -22,6 +22,14 @@
     {"name": "restart-printer", "kind": "fragment", "gap_ms": 2500, "turns": ["Could you check if the", "Actually, could you see whether the printer", "is still warming up?"], "reply": "It finished at seventeen past four with no errors."},
     {"name": "pause-long", "kind": "fragment", "gap_ms": 3000, "turns": ["I was wondering whether the backup", "from last night", "actually finished."], "reply": "It finished at seventeen past four with no errors."},
     {"name": "aside-quiet", "kind": "misheard", "gap_ms": 4000, "turns": ["I'm not trying to talk to you right now.", "Quiet, Corvus."], "reply": "It finished at seventeen past four with no errors."},
-    {"name": "aside-fight", "kind": "misheard", "gap_ms": 4000, "turns": ["Please stop chatting and just pass things along.", "Fight, Corvus."], "reply": "It finished at seventeen past four with no errors."}
+    {"name": "aside-fight", "kind": "misheard", "gap_ms": 4000, "turns": ["Please stop chatting and just pass things along.", "Fight, Corvus."], "reply": "It finished at seventeen past four with no errors."},
+    {"name": "stray-hello", "kind": "stray", "turns": ["Hi there."], "reply": "Noted; seventeen items are on the list."},
+    {"name": "stray-morning", "kind": "stray", "turns": ["Good morning, Corvus."], "reply": "Noted; seventeen items are on the list."},
+    {"name": "stray-dinner", "kind": "stray", "turns": ["Dinner is ready, come wash your hands."], "reply": "Noted; seventeen items are on the list."},
+    {"name": "stray-yours", "kind": "stray", "turns": ["No, the blue one is yours."], "reply": "Noted; seventeen items are on the list."},
+    {"name": "stray-um", "kind": "stray", "turns": ["Um."], "reply": "Noted; seventeen items are on the list."},
+    {"name": "stray-half", "kind": "stray", "turns": ["So, uh"], "reply": "Noted; seventeen items are on the list."},
+    {"name": "stray-goodbye", "kind": "stray", "turns": ["Okay, goodbye."], "reply": "Noted; seventeen items are on the list."},
+    {"name": "stray-done", "kind": "stray", "turns": ["That'll be all for now."], "reply": "Noted; seventeen items are on the list."}
   ]
 }

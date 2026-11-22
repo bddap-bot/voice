@@ -29,7 +29,7 @@ const done = new Set((await readRows()).map(({ name, trial }) => `${name}#${tria
 const runs = Array.from({ length: Number(trials) }, (_, trial) => cases.map((item) => ({ ...item, trial }))).flat().filter(({ name, trial }) => !done.has(`${name}#${trial}`));
 
 // Each run keeps its own capture, so a resumed run never overwrites the raw events of the trials before it.
-await runRig({ outDir, speech, page, captureFile: `capture-${Date.now()}.json`, extra: { cases: runs.map(({ name, trial }) => `${name}#${trial}`) } }, async ({ capture, now, say, sleep, mark, evaluate, drain, settle, quietRelay, tap, forget }) => {
+await runRig({ outDir, speech, page, captureFile: `capture-${Date.now()}.json`, extra: { cases: runs.map(({ name, trial }) => `${name}#${trial}`) } }, async ({ capture, now, say, sleep, mark, evaluate, drain, settle, quietRelay, tap, forget, pressed }) => {
   for (const [index, item] of runs.entries()) {
     // Each trial starts from a page with no memory, so one trial's words never steer the next.
     if (index) await forget();
@@ -67,7 +67,8 @@ await runRig({ outDir, speech, page, captureFile: `capture-${Date.now()}.json`, 
     const row = { ...scoreTrial({ capture, ch, item, start, turnAt, speechEnd, replyAt, end }), trial: item.trial };
     say('ROW', JSON.stringify(row));
     await appendFile(rowsFile, JSON.stringify(row) + '\n');
-    await tap(`${item.name}#${item.trial}`, ch, false);
+    // A closing ends the session itself.
+    if (await pressed()) await tap(`${item.name}#${item.trial}`, ch, false);
   }
 });
 const summary = summarize(await readRows());

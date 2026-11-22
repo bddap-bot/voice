@@ -6,9 +6,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::conversation::Trace;
+use crate::identity::{closes, for_hub, identity};
 use crate::turn::{hold, judge_quiet};
 
-/// The page's wait for an ignored turn before the page itself sends it to the hub.
+/// How long after a request closed with the hand-off phrase the page sends it itself, and after any quiet starts it ends with nothing held or awaiting the hub.
 const UNANSWERED: Duration = Duration::from_secs(3);
 /// The page's wait for the model to start speaking a hub reply before the next one goes out.
 const TURN_START: Duration = Duration::from_secs(20);
@@ -228,7 +229,6 @@ pub struct Hub {
     joined: HashMap<String, String>,
     replies: VecDeque<Reply>,
     turn: Option<Turn>,
-    unanswered: Option<Instant>,
     request_end: Option<Instant>,
     pending_standing: Standing,
     standing: Vec<String>,
@@ -244,11 +244,21 @@ pub struct Hub {
     watch: ReplyWatch,
     call_quiet: Option<CallQuiet>,
     model_turn_open: bool,
+    /// A reply to a request the model never delegated awaits the end of the model's turn to be nudged out: the page's `nudgeOwner`.
+    nudge: bool,
     log: Log,
 }
 
-/// The page's `callQuiet`: the model's speech goes unplayed after a request closed with the hand-off phrase or a near sound of it.
+/// What started a quiet: a request closed with the hand-off phrase or a near sound of it, which ends with the hub's reply, or a turn the page relays, which also ends when the model delegates it.
+#[derive(Clone, Copy, PartialEq)]
+enum Quiet {
+    Call,
+    Turn,
+}
+
+/// The page's `callQuiet`: the model's speech goes unplayed while a turn the page relays awaits the model or the hub.
 struct CallQuiet {
+    kind: Quiet,
     /// When it ends unless a hand-off is held or awaits the hub, checked once.
     check_at: Option<Instant>,
     unheard: usize,
@@ -300,6 +310,9 @@ impl Hub {
 
     pub fn delegated(&mut self, id: &str, trace: &mut Trace, now: Instant) {
         self.owned.insert(id.to_owned());
+        if self.call_quiet.as_ref().is_some_and(|quiet| quiet.kind == Quiet::Turn) {
+            self.end_call_quiet("delegated");
+        }
         if trace.ends_request() {
             self.hand_off(id, trace, now);
         } else {
@@ -309,7 +322,6 @@ impl Hub {
 
     /// A hand-off is due: it waits for the speech so far to be judged, and a later one joins a hand-off already held, under Live's newest id.
     fn due(&mut self, id: String, now: Instant) {
-        self.unanswered = None;
         match &mut self.held {
             Some(held) => {
                 if self.owned.contains(&id) {
@@ -353,7 +365,6 @@ impl Hub {
 
     fn hand_off(&mut self, id: &str, trace: &mut Trace, now: Instant) {
         self.held = None;
-        self.unanswered = None;
         self.request_end = None;
         let delegation = trace.delegated(now);
         if let Some(sent) = self.sent.clone().filter(|sent| delegation.text.is_empty() && self.waiting.contains(sent)) {
@@ -396,8 +407,7 @@ impl Hub {
         }
         if has_word(delta) {
             self.watch.missed("user spoke", now, &mut self.log);
-            self.end_call_quiet("user spoke");
-            self.unanswered = (!self.waiting.is_empty() && !self.sleeping).then_some(now + UNANSWERED);
+            self.nudge = false;
             self.heard_at = Some(now);
             if let Some(held) = &mut self.held {
                 held.judging = None;
@@ -405,14 +415,51 @@ impl Hub {
                 held.until = now + hold();
             }
         }
-        self.request_end = (trace.ends_request() && !self.sleeping).then_some(now + UNANSWERED);
-        if self.call_quiet.is_none() && !self.sleeping && has_word(delta) && trace.before_name_call().is_some_and(|request| !request.is_empty() || self.held.is_some() || !self.waiting.is_empty()) {
-            self.call_quiet = Some(CallQuiet { check_at: Some(now + UNANSWERED), unheard: 0, ending: None });
-            self.log.record("hand-off-quiet", json!({ "on": true }));
+        self.request_end = (trace.ends_request() && !self.sleeping).then_some(if self.held.is_some() { now } else { now + UNANSWERED });
+        if !has_word(delta) {
+            return;
+        }
+        if self.sleeping {
+            return self.end_call_quiet("user spoke");
+        }
+        self.relay_turn(trace, now);
+    }
+
+    /// The page's `relayTurn`: every user turn but a pleasantry, a closing or a stray sound goes to the hub, held until the speech finishes its thought, since this model answers a turn meant for the hub with a question or advice of its own whatever it is told. Unless the hub owes a reply, which the model fills the wait for or speaks, none of the model's speech is played meanwhile, until the model delegates the turn itself, or, after a request closed with the hand-off phrase or a near sound of it (which this model hears as an order to go quiet), until the hub's reply reaches it and the model's turn then in progress ends.
+    fn relay_turn(&mut self, trace: &Trace, now: Instant) {
+        if trace.before_name_call().is_some_and(|request| !request.is_empty() || self.held.is_some() || !self.waiting.is_empty()) {
+            return self.quiet_after(Quiet::Call, now);
+        }
+        if closes(&trace.pending(now).text) {
+            if self.held.as_ref().is_some_and(|held| !self.owned.contains(&held.id)) {
+                self.held = None;
+            }
+            return self.end_call_quiet("user spoke");
+        }
+        let least = if self.held.is_some() { Some(0) } else if self.waiting.is_empty() { None } else { Some(1) };
+        if !for_hub(trace.newest_turn(), least) {
+            return self.end_call_quiet("user spoke");
+        }
+        self.due(format!("turn_{}", stamp()), now);
+        if self.turn.is_some() || !self.waiting.is_empty() {
+            self.end_call_quiet("user spoke");
+        } else if !self.held.as_ref().is_some_and(|held| self.owned.contains(&held.id)) {
+            self.quiet_after(Quiet::Turn, now);
         }
     }
 
-    /// The page's `quietAfterCall`: after a request closes with the hand-off phrase or a near sound of it, none of the model's speech is played until the hub's reply reaches it and the model's turn then in progress ends, since this model hears the phrase as an order to go quiet. Relaying is unchanged.
+    fn quiet_after(&mut self, kind: Quiet, now: Instant) {
+        if let Some(quiet) = &mut self.call_quiet {
+            if quiet.kind == Quiet::Turn {
+                quiet.kind = kind;
+            }
+            quiet.ending = None;
+            return;
+        }
+        self.call_quiet = Some(CallQuiet { kind, check_at: Some(now + UNANSWERED), unheard: 0, ending: None });
+        self.log.record("hand-off-quiet", json!({ "on": true }));
+    }
+
     pub fn silenced(&self) -> bool {
         self.call_quiet.is_some()
     }
@@ -421,7 +468,6 @@ impl Hub {
     pub fn unheard(&mut self, delta: &str) -> bool {
         let Some(quiet) = &mut self.call_quiet else { return false };
         quiet.unheard += delta.chars().count();
-        self.unanswered = None;
         true
     }
 
@@ -430,6 +476,9 @@ impl Hub {
         self.model_turn_open = open;
         if let Some(reason) = self.call_quiet.as_ref().and_then(|quiet| quiet.ending).filter(|_| !open) {
             self.end_call_quiet(reason);
+        }
+        if !open {
+            self.nudge_reply();
         }
     }
 
@@ -448,7 +497,6 @@ impl Hub {
 
     pub fn spoke(&mut self, now: Instant) {
         self.watch.spoke(now, &mut self.log);
-        self.unanswered = None;
         self.show_cued();
         if matches!(self.turn, Some(Turn::Awaiting(_))) {
             self.turn = Some(Turn::Speaking);
@@ -466,6 +514,7 @@ impl Hub {
     pub fn sleep(&mut self) {
         self.sleeping = true;
         self.held = None;
+        self.nudge = false;
     }
 
     /// The session is over: words heard since the last delegation go to the hub as one `ended` frame, which no voice answers.
@@ -543,7 +592,17 @@ impl Hub {
         for content in &reply.commentary {
             self.out.push(speak(voice.as_deref(), content));
         }
+        self.nudge |= voice.is_none();
+        if !self.model_turn_open {
+            self.nudge_reply();
+        }
         true
+    }
+
+    fn nudge_reply(&mut self) {
+        if std::mem::take(&mut self.nudge) {
+            self.out.push(Command::Tell(Tell::Session(Channel::Commentary, identity().undelegated_reply.clone())));
+        }
     }
 
     /// The page's `playHubReplies`: one reply at a time, the next once the model has spoken this one and gone quiet.
@@ -594,6 +653,7 @@ impl Hub {
     pub fn opened(&mut self) {
         self.renewing = false;
         self.model_turn_open = false;
+        self.nudge = false;
         self.owned.clear();
         self.joined.clear();
     }
@@ -640,9 +700,6 @@ impl Hub {
         if self.request_end.is_some_and(|at| now >= at) {
             let id = self.held.take().map_or_else(|| format!("turn_{}", stamp()), |held| held.id);
             self.hand_off(&id, trace, now);
-        }
-        if self.unanswered.is_some_and(|at| now >= at) {
-            self.due(format!("turn_{}", stamp()), now);
         }
         self.judge(now);
         if let Some(held) = self.held.as_ref().filter(|held| now >= held.until) {
@@ -731,7 +788,14 @@ mod tests {
             }).collect()
         }
         /// (channel, delegation item id, text) of every append.
+        /// (channel, delegation item id, text) of every append but the nudge after an undelegated reply, which `nudges` counts.
         fn told(&self) -> Vec<(String, Value, String)> {
+            self.appended().into_iter().filter(|told| *told != nudge()).collect()
+        }
+        fn nudges(&self) -> usize {
+            self.appended().into_iter().filter(|told| *told == nudge()).count()
+        }
+        fn appended(&self) -> Vec<(String, Value, String)> {
             self.out.iter().filter_map(|out| match out {
                 Command::Tell(tell) => {
                     let event = tell.event();
@@ -739,6 +803,64 @@ mod tests {
                 }
                 _ => None,
             }).collect()
+        }
+    }
+
+    #[test]
+    fn a_closing_heard_in_pieces_stays_the_models_and_drops_the_hand_off_only_the_page_holds() {
+        let mut f = Fixture::new();
+        f.hear("That'll be");
+        assert!(f.hub.silenced(), "two words are a request until the closing arrives");
+        f.hear(" all");
+        assert!(!f.hub.silenced());
+        f.speak("My labor");
+        f.hear(" for now.");
+        assert!(!f.hub.silenced(), "the rest of a closing after the model began its sign-off");
+        f.wait(hold(), false);
+        assert!(f.frames("delegate").is_empty(), "the page's own hand-off of a closing is dropped");
+    }
+
+    fn nudge() -> (String, Value, String) {
+        ("commentary".into(), Value::Null, identity().undelegated_reply.clone())
+    }
+
+    #[test]
+    fn a_reply_to_a_request_the_model_never_delegated_is_nudged_out_once_the_models_turn_ends() {
+        let mut f = Fixture::new();
+        f.hub.model_turn(true);
+        f.hear("I'm curious about the compression experiments.");
+        f.wait(judge_quiet(), false);
+        let id = f.frames("delegate")[0]["id"].as_str().unwrap().to_owned();
+        f.speak("Which ones do you mean?");
+        f.reply(reply(&id, "compression", &["Seventeen runs finished."]));
+        assert_eq!(f.told(), [speakable(Value::Null, "Seventeen runs finished.")]);
+        assert_eq!(f.nudges(), 0, "not while the model is speaking");
+        f.hub.model_turn(false);
+        f.collect();
+        assert_eq!(f.nudges(), 1);
+        f.hub.model_turn(true);
+        f.hub.model_turn(false);
+        f.collect();
+        assert_eq!(f.nudges(), 1, "once");
+        f.hear("Check the printer.");
+        f.delegate("item_printer");
+        f.reply(reply("item_printer", "printer", &["The printer is idle."]));
+        assert_eq!(f.nudges(), 1, "a reply under the model's own delegation needs none");
+        for end in ["user spoke", "sign-off", "new call"] {
+            let mut f = Fixture::new();
+            f.hub.model_turn(true);
+            f.hear("I'm curious about the compression experiments.");
+            f.wait(judge_quiet(), false);
+            let id = f.frames("delegate")[0]["id"].as_str().unwrap().to_owned();
+            f.reply(reply(&id, "compression", &["Seventeen runs finished."]));
+            match end {
+                "user spoke" => f.hear(" Actually, check the printer instead."),
+                "sign-off" => f.hub.sleep(),
+                _ => f.hub.opened(),
+            }
+            f.hub.model_turn(false);
+            f.collect();
+            assert_eq!(f.nudges(), 0, "{end} drops the nudge");
         }
     }
 
@@ -984,9 +1106,21 @@ mod tests {
         assert!(f.hub.silenced());
         f.speak("Got it, I will hold.");
         f.hear("Never mind.");
-        assert!(!f.hub.silenced());
+        assert!(!f.hub.silenced(), "while the hub owes a reply the model's answer to a new turn is played");
         f.reply(reply("item_backup", "backup", &["The backup finished."]));
         f.hear("Check the printer. Quiet, Corvus.");
+        assert!(f.hub.silenced());
+        f.speak("Okay.");
+        f.wait(UNANSWERED, false);
+        let sent = f.frames("delegate");
+        assert_eq!(sent.last().unwrap()["text"], "Never mind.Check the printer. Quiet, Corvus.");
+        assert!(f.hub.silenced(), "the page relayed the request, so the quiet waits for its reply");
+        let id = sent.last().unwrap()["id"].as_str().unwrap().to_owned();
+        f.wait(TURN_START, false);
+        f.reply(reply(&id, "printer-2", &["Printing."]));
+        assert!(!f.hub.silenced());
+        f.hear("Thanks.");
+        f.hear("Quiet, Corvus.");
         assert!(f.hub.silenced());
         f.speak("Okay.");
         f.wait(UNANSWERED, false);
@@ -994,18 +1128,22 @@ mod tests {
         let quiet: Vec<_> = f.hub.log.records.iter().filter(|(name, _)| *name == "hand-off-quiet").map(|(_, detail)| detail.clone()).collect();
         assert_eq!(quiet, [
             json!({ "on": true }),
+            json!({ "on": false, "reason": "delegated", "unheard_chars": 0 }),
+            json!({ "on": true }),
             json!({ "on": false, "reason": "hub reply", "unheard_chars": 42 }),
             json!({ "on": true }),
             json!({ "on": false, "reason": "user spoke", "unheard_chars": 20 }),
             json!({ "on": true }),
+            json!({ "on": false, "reason": "hub reply", "unheard_chars": 5 }),
+            json!({ "on": true }),
             json!({ "on": false, "reason": "no request", "unheard_chars": 5 }),
         ]);
         let replies: Vec<_> = f.hub.log.records.iter().filter(|(name, _)| name.starts_with("hub-reply-")).map(|(name, detail)| (*name, detail["id"].clone())).collect();
-        assert_eq!(replies, [("hub-reply-handed", json!("item_printer")), ("hub-reply-spoken", json!("item_printer")), ("hub-reply-handed", json!("item_backup")), ("hub-reply-unspoken", json!("item_backup"))]);
+        assert_eq!(replies, [("hub-reply-handed", json!("item_printer")), ("hub-reply-spoken", json!("item_printer")), ("hub-reply-handed", json!("item_backup")), ("hub-reply-unspoken", json!("item_backup")), ("hub-reply-handed", json!(id)), ("hub-reply-unspoken", json!(id))]);
     }
 
     #[test]
-    fn the_quiet_after_the_hand_off_phrase_outlasts_its_three_seconds_when_the_hub_hands_the_request_off_itself() {
+    fn the_quiet_after_the_hand_off_phrase_outlasts_its_three_seconds_when_the_hub_hands_the_request_off_itself_and_a_question_ending_with_the_name_goes_as_its_own_turn() {
         let mut f = Fixture::new();
         f.hear("Check the printer. Fly, Corvus.");
         f.speak("Okay, staying quiet.");
@@ -1014,7 +1152,11 @@ mod tests {
         assert!(f.hub.silenced());
         f.hear("What time is my flight, Corvus?");
         f.speak("Your flight leaves at noon.");
-        assert!(!f.hub.silenced(), "a question that ends with the name is no hand-off");
+        assert!(!f.hub.silenced(), "a question that ends with the name is no hand-off, and while the hub owes a reply the model's answer is played");
+        f.wait(judge_quiet(), false);
+        let frames = f.frames("delegate");
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[1]["text"], "What time is my flight, Corvus?");
     }
 
     #[test]
@@ -1319,20 +1461,17 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_the_model_ignores_while_a_delegation_is_pending_goes_to_the_hub() {
+    fn while_a_delegation_is_pending_each_turn_goes_to_the_hub_whole_once_its_thought_ends_and_a_stray_sound_does_not() {
         let mut f = Fixture::new();
         f.hear("Hello there.");
         f.wait(Duration::from_millis(3100), false);
-        assert_eq!(f.frames("delegate").len(), 0, "nothing pending, nothing forwarded");
+        assert_eq!(f.frames("delegate").len(), 0, "a greeting is the model's own");
         f.delegate("item_first");
-        f.hear(" How are you?");
-        f.wait(Duration::from_secs(1), false);
-        f.speak("Fine.");
-        f.wait(Duration::from_millis(2500), false);
         assert_eq!(f.frames("delegate").len(), 1);
         f.hear(" Also, is the printer");
         f.wait(Duration::from_secs(2), false);
         f.hear(" busy right now?");
+        f.speak("Sure.");
         f.wait(Duration::from_millis(2900), false);
         assert_eq!(f.frames("delegate").len(), 1);
         f.wait(Duration::from_millis(200), false);
@@ -1340,13 +1479,11 @@ mod tests {
         assert_eq!(frames.len(), 2);
         let printer = frames[1]["id"].as_str().unwrap().to_owned();
         assert!(printer.starts_with("turn_"));
-        assert_eq!(frames[1]["text"], "How are you?\nAlso, is the printer busy right now?");
-        f.hear(" And the backup?");
-        f.wait(Duration::from_secs(1), false);
-        f.delegate("item_backup");
+        assert_eq!(frames[1]["text"], "Also, is the printer busy right now?");
+        f.hear(" Hm.");
         f.hear("?");
         f.wait(Duration::from_millis(3100), false);
-        assert_eq!(f.frames("delegate").len(), 3, "punctuation alone forwards nothing");
+        assert_eq!(f.frames("delegate").len(), 2, "a stray sound and punctuation alone forward nothing");
         f.reply(reply(&printer, "printer", &["The printer is idle."]));
         assert_eq!(f.told(), [speakable(Value::Null, "The printer is idle.")]);
     }
@@ -1403,12 +1540,12 @@ mod tests {
             }
             assert_eq!(delegations.len(), 1, "session {session}");
             let delegate = f.frames("delegate");
-            assert_eq!(delegate.len(), 1, "session {session}");
             assert_eq!(delegate[0]["id"], delegations[0].as_str());
+            assert!(delegate[1..].iter().all(|frame| frame["id"].as_str().unwrap().starts_with("turn_")), "session {session}: what the user said after the delegation goes from the page");
             let heard: String = rows.iter().filter(|row| row["ch"] == session && row["event"]["type"] == "input_transcript.added" && row["at"].as_u64() < rows.iter().find(|row| row["ch"] == session && row["event"]["type"] == "delegation.created").unwrap()["at"].as_u64()).map(|row| row["event"]["item"]["text"].as_str().unwrap()).collect();
             assert_eq!(delegate[0]["text"], heard.trim(), "session {session}");
             assert_eq!(f.frames("hub-ack").len(), 1, "session {session}");
-            assert!(f.hub.waiting.is_empty(), "session {session}");
+            assert_eq!(f.hub.waiting.len(), delegate.len() - 1, "session {session}");
         }
     }
 }

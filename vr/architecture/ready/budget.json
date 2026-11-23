@@ -1,0 +1,8 @@
+{
+  "models": [
+    { "name": "reuse", "width": 256, "modules": 8, "chunks": 4 },
+    { "name": "shallow", "width": 256, "modules": 4 },
+    { "name": "narrow", "width": 184, "modules": 8 },
+    { "name": "full", "width": 256, "modules": 8 }
+  ]
+}

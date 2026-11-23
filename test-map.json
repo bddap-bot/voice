@@ -4,12 +4,21 @@
     {
       "paths": [
         "vr/objects.nix",
-        "vr/check-objects.sh"
+        "vr/check-objects.sh",
+        "vr/architecture/**"
       ],
       "tests": [
+        "nix-build vr/architecture -A tests --no-out-link",
         "bash vr/check-objects.sh"
       ],
-      "why": "every object of the pinned wunderkammer-objects builds and loads and runs within its program budget through the overlay host's own object path"
+      "why": "the architecture generator's tests run it on the ready descriptions and on faulty ones and run each object's program against its documented time, pointer and live data; every object of the pinned wunderkammer-objects and every ready architecture object builds and loads and runs within its program budget through the overlay host's own object path"
+    },
+    {
+      "paths": [
+        "vr/*.md"
+      ],
+      "tests": [],
+      "why": "prose"
     },
     {
       "paths": [

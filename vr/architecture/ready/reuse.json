@@ -1,0 +1,5 @@
+{
+  "models": [
+    { "width": 256, "modules": 8, "chunks": 4, "maps": ["mod", { "random": 6 }, "pick"] }
+  ]
+}

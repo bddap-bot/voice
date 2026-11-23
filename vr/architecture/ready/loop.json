@@ -1,0 +1,5 @@
+{
+  "models": [
+    { "width": 256, "modules": 8, "chunks": 5, "maps": [{ "loop": { "ends": 1, "times": 2 } }] }
+  ]
+}

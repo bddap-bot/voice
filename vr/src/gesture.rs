@@ -12,10 +12,18 @@ const SHORTEST: f64 = 0.4;
 const LONGEST: f64 = 10.0;
 const SMOOTHING: f64 = 0.1;
 const NEAR: f32 = 2.0;
+/// The match radius in units of the templates' spread. In a recorded wearer log the farthest of the fast misses that were
+/// summon attempts lay 2.26 spreads out and the nearest fast motion outside any attempt 3.13; this is their midpoint.
+const REACH: f32 = 2.7;
 
 pub type Point = [f32; 6];
 
 #[derive(Deserialize)]
+struct Recorded {
+    peak_speed_min: f32,
+    templates: Vec<Vec<Point>>,
+}
+
 pub struct Templates {
     threshold: f32,
     peak_speed_min: f32,
@@ -24,12 +32,27 @@ pub struct Templates {
 
 impl Templates {
     pub fn parse(bytes: &[u8]) -> Result<Templates, String> {
-        let templates: Templates = serde_json::from_slice(bytes).map_err(|error| format!("invalid gesture templates: {error}"))?;
-        if templates.templates.is_empty() || templates.templates.iter().any(|template| template.len() != POINTS) {
-            return Err(format!("gesture templates must be one or more traces of {POINTS} points"));
+        let Recorded { peak_speed_min, templates } = serde_json::from_slice(bytes).map_err(|error| format!("invalid gesture templates: {error}"))?;
+        if templates.len() < 2 || templates.iter().any(|template| template.len() != POINTS) {
+            return Err(format!("gesture templates must be two or more traces of {POINTS} points"));
         }
-        Ok(templates)
+        let threshold = REACH * spread(&templates);
+        if !(threshold.is_finite() && threshold > 0.0) {
+            return Err(format!("gesture templates must differ from one another, but their spread makes a match radius of {threshold}"));
+        }
+        Ok(Templates { threshold, peak_speed_min, templates })
     }
+
+    pub fn threshold(&self) -> f32 {
+        self.threshold
+    }
+}
+
+/// The farthest any template lies from its nearest other: how much one person's repetitions of the gesture differ.
+fn spread(templates: &[Vec<Point>]) -> f32 {
+    (0..templates.len())
+        .map(|i| (0..templates.len()).filter(|&j| j != i).map(|j| dtw(&templates[i], &templates[j])).fold(f32::INFINITY, f32::min))
+        .fold(0.0, f32::max)
 }
 
 /// Both hands relative to the head, rotated into the head's yaw frame: x right, y up, z back.
@@ -239,7 +262,12 @@ mod tests {
     }
 
     fn file(traces: Vec<Vec<Point>>) -> String {
-        serde_json::json!({ "threshold": 0.14, "peak_speed_min": 2.51, "templates": traces }).to_string()
+        serde_json::json!({ "peak_speed_min": 2.51, "templates": traces }).to_string()
+    }
+
+    /// Two recordings of the loop by someone who never quite repeats its size.
+    fn repetitions() -> Vec<Vec<Point>> {
+        vec![template(&LOOP), template(&Motion { radius: 0.53, ..LOOP })]
     }
 
     fn templates(traces: Vec<Vec<Point>>) -> Templates {
@@ -247,7 +275,7 @@ mod tests {
     }
 
     fn verdicts(motion: &Motion, rate: f64, head: Pose) -> Vec<Verdict> {
-        let mut recognizer = Recognizer::new(templates(vec![template(&LOOP)]));
+        let mut recognizer = Recognizer::new(templates(repetitions()));
         trace(motion, rate, head).into_iter().filter_map(|(t, head, left, right)| recognizer.push(t, &head, left, right)).collect()
     }
 
@@ -292,7 +320,7 @@ mod tests {
     fn a_fast_motion_of_another_shape_does_not_match() {
         let found = verdicts(&Motion { shape: punch, ..LOOP }, 90.0, IDENTITY);
         assert_eq!(found.len(), 1, "{found:?}");
-        assert!(!found[0].matched && found[0].distance > 0.14 && found[0].peak >= 2.51, "{found:?}");
+        assert!(!found[0].matched && found[0].distance > templates(repetitions()).threshold() && found[0].peak >= 2.51, "{found:?}");
     }
 
     #[test]
@@ -303,7 +331,7 @@ mod tests {
 
     #[test]
     fn a_gesture_is_judged_only_after_the_hands_settle() {
-        let mut recognizer = Recognizer::new(templates(vec![template(&LOOP)]));
+        let mut recognizer = Recognizer::new(templates(repetitions()));
         let samples = trace(&LOOP, 90.0, IDENTITY);
         let stopped = samples.iter().rposition(|sample| (sample.0 - 1.0 - LOOP.seconds).abs() < 0.006).unwrap();
         let judged = samples.iter().position(|&(t, head, left, right)| recognizer.push(t, &head, left, right).is_some()).unwrap();
@@ -313,7 +341,7 @@ mod tests {
 
     #[test]
     fn endless_motion_is_never_judged_and_stays_bounded() {
-        let mut recognizer = Recognizer::new(templates(vec![template(&LOOP)]));
+        let mut recognizer = Recognizer::new(templates(repetitions()));
         for k in 0..90 * 60 {
             let t = k as f64 / 90.0;
             let [left, right] = sweep((t / 1.8).fract() as f32, 0.55);
@@ -324,7 +352,7 @@ mod tests {
 
     #[test]
     fn stillness_keeps_only_the_smoothing_window() {
-        let mut recognizer = Recognizer::new(templates(vec![template(&LOOP)]));
+        let mut recognizer = Recognizer::new(templates(repetitions()));
         let hand = IDENTITY.apply([0.0, -0.3, -0.35]);
         for k in 0..900 {
             recognizer.push(k as f64 / 90.0, &IDENTITY, hand, hand);
@@ -334,14 +362,16 @@ mod tests {
 
     #[test]
     fn templates_must_be_traces_of_the_resampled_length() {
-        assert!(Templates::parse(file(vec![vec![[0.0; 6]; POINTS]]).as_bytes()).is_ok());
-        assert!(Templates::parse(file(vec![vec![[0.0; 6]; 16]]).as_bytes()).is_err());
+        assert!(Templates::parse(file(repetitions()).as_bytes()).is_ok());
+        assert!(Templates::parse(file(vec![vec![[0.0; 6]; POINTS]; 2]).as_bytes()).is_err(), "identical templates would match nothing");
+        assert!(Templates::parse(file(vec![vec![[0.0; 6]; POINTS]]).as_bytes()).is_err());
+        assert!(Templates::parse(file(vec![vec![[0.0; 6]; POINTS], vec![[0.0; 6]; 16]]).as_bytes()).is_err());
         assert!(Templates::parse(file(vec![]).as_bytes()).is_err());
     }
 
     #[test]
     fn a_tracking_gap_ends_the_motion_without_a_verdict() {
-        let mut recognizer = Recognizer::new(templates(vec![template(&LOOP)]));
+        let mut recognizer = Recognizer::new(templates(repetitions()));
         let samples = trace(&LOOP, 90.0, IDENTITY);
         let middle = 1.0 + LOOP.seconds / 2.0;
         let found: Vec<Verdict> = samples.iter().filter(|sample| (sample.0 - middle).abs() > 0.2).filter_map(|&(t, head, left, right)| recognizer.push(t, &head, left, right)).collect();
@@ -357,6 +387,16 @@ mod tests {
     #[test]
     fn a_flick_shorter_than_a_gesture_is_not_judged() {
         assert_eq!(verdicts(&Motion { seconds: 0.25, ..LOOP }, 90.0, IDENTITY), vec![]);
+    }
+
+    #[test]
+    fn the_match_radius_scales_with_how_far_the_templates_lie_apart() {
+        let close = templates(repetitions()).threshold();
+        assert!((close - REACH * dtw(&repetitions()[0], &repetitions()[1])).abs() < 1e-6, "{close}");
+        let third = template(&Motion { radius: 0.4, ..LOOP });
+        let outlier = templates(vec![template(&LOOP), template(&Motion { radius: 0.53, ..LOOP }), third.clone()]).threshold();
+        let farthest = REACH * dtw(&third, &template(&Motion { radius: 0.53, ..LOOP })).min(dtw(&third, &template(&LOOP)));
+        assert!((outlier - farthest).abs() < 1e-6, "{outlier} vs {farthest}");
     }
 
     #[test]
@@ -382,7 +422,7 @@ mod tests {
 
     #[test]
     fn a_gesture_whose_hands_then_drop_out_of_tracking_is_still_judged() {
-        let mut recognizer = Recognizer::new(templates(vec![template(&LOOP)]));
+        let mut recognizer = Recognizer::new(templates(repetitions()));
         let stop = 1.0 + LOOP.seconds + 0.1;
         let found: Vec<Verdict> = trace(&LOOP, 90.0, IDENTITY).into_iter().filter(|sample| sample.0 < stop || sample.0 > stop + 0.6).filter_map(|(t, head, left, right)| recognizer.push(t, &head, left, right)).collect();
         assert!(found.len() == 1 && found[0].matched, "{found:?}");

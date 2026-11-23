@@ -446,7 +446,9 @@ fn act(animator: &mut Animator, action: &action::Action) {
 
 fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), String> {
     let gesture_file = state.join("gesture.json");
-    let mut recognizer = Recognizer::new(Templates::parse(&std::fs::read(&gesture_file).map_err(|error| format!("{}: {error}", gesture_file.display()))?)?);
+    let templates = Templates::parse(&std::fs::read(&gesture_file).map_err(|error| format!("{}: {error}", gesture_file.display()))?)?;
+    tracing::info!("gesture matches within distance {:.3}", templates.threshold());
+    let mut recognizer = Recognizer::new(templates);
     let gpu = Rc::new(vulkan::Gpu::new(Some(runtime))?);
     let runtime = gpu.vr.as_ref().expect("the overlay's device was made for SteamVR");
     let mut renderer = Renderer::for_growing_window(gpu.clone(), QUAD, HEIGHT / render::PAGE_HEIGHT)?;
@@ -584,7 +586,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             }
         }
         match &wake_head {
-            Some(model) if !voice.awake() && !voice.muted() => {
+            Some(model) if !voice.awake() => {
                 if spotter.is_none() && started >= spotter_retry {
                     tracing::info!("listening for {:?}", wake::phrase());
                     spotter = Some(wake::Spotter::start(model.clone()));
@@ -611,6 +613,7 @@ fn host(runtime: Runtime, token: &Token, state: &std::path::Path) -> Result<(), 
             voice.summon();
             puppet.gaze = Gaze::default();
             board.reset();
+            board.muted = false;
             card = None;
             objects.clear("summoned");
             pointing.stop();

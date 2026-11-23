@@ -22,6 +22,8 @@ const REOPEN_EVERY: Duration = Duration::from_secs(30);
 /// The open session and what the page tracks alongside it.
 struct Awake {
     session: Session,
+    /// Mute mic's choice, which ends with its session: dormant, nothing is drawn that could show it, and the wake phrase would stay off unseen.
+    muted: bool,
     opened: bool,
     /// Whether the current call opened; a call that never did is not reopened.
     call_opened: bool,
@@ -42,7 +44,6 @@ pub struct Voice {
     token: Token,
     cache: PathBuf,
     trace: Trace,
-    muted: bool,
     awake: Option<Awake>,
     voiceprint: PathBuf,
     stored: Option<Stored>,
@@ -67,7 +68,7 @@ pub fn renewal_due(trace: &Trace, audio_seconds: f64, idle: Duration, quiet: boo
 impl Voice {
     pub fn new(token: Token, cache: PathBuf, voiceprint: PathBuf) -> Voice {
         let stored = Stored::read(&voiceprint);
-        let mut voice = Voice { token, cache, trace: Trace::default(), muted: false, awake: None, voiceprint, stored, learning: None, hearing: Arc::default(), actions: Actions::start(), judge: Judge::start() };
+        let mut voice = Voice { token, cache, trace: Trace::default(), awake: None, voiceprint, stored, learning: None, hearing: Arc::default(), actions: Actions::start(), judge: Judge::start() };
         voice.refilter();
         voice
     }
@@ -107,7 +108,7 @@ impl Voice {
             self.stored = None;
             Stored::write(None, &self.voiceprint);
             tracing::info!("voice forgotten: conversations hear everyone");
-        } else if self.muted {
+        } else if self.muted() {
             tracing::info!("unmute the microphone to learn your voice");
         } else {
             self.learning = Some(0.0);
@@ -159,7 +160,7 @@ impl Voice {
     }
 
     pub fn muted(&self) -> bool {
-        self.muted
+        self.awake.as_ref().is_some_and(|awake| awake.muted)
     }
 
     /// The newest display a hub reply carried this session, once.
@@ -170,8 +171,8 @@ impl Voice {
     pub fn summon(&mut self) {
         tracing::info!("summoned, opening the session");
         self.actions.reset();
-        let session = Session::open(&self.token, &self.cache, self.trace.wake(Instant::now()), self.muted, self.hearing.clone());
-        self.awake = Some(Awake { session, opened: false, call_opened: false, reopened: None, audio_seconds: 0.0, said: String::new(), activity: Instant::now(), mouth: 0.0, hub: Hub::default(), notice: None, failed: None, _span: tracing::info_span!("session") });
+        let session = Session::open(&self.token, &self.cache, self.trace.wake(Instant::now()), false, self.hearing.clone());
+        self.awake = Some(Awake { session, muted: false, opened: false, call_opened: false, reopened: None, audio_seconds: 0.0, said: String::new(), activity: Instant::now(), mouth: 0.0, hub: Hub::default(), notice: None, failed: None, _span: tracing::info_span!("session") });
     }
 
     /// Ends the session and releases the microphone; an opened session hands the hub what it never heard and becomes memory for the next.
@@ -200,17 +201,19 @@ impl Voice {
         tracing::info!("{reason}, dormant");
     }
 
-    /// The microphone stops or starts and nothing else changes; the choice holds across sessions.
+    /// The microphone stops or starts and nothing else changes; the choice holds until the session ends.
     pub fn toggle_mute(&mut self) -> bool {
-        self.muted = !self.muted;
-        tracing::info!(layer = "capture", reason = "mute control", muted = self.muted, "microphone {}", if self.muted { "muted" } else { "unmuted" });
-        if self.muted {
+        let Some(awake) = &mut self.awake else {
+            return false;
+        };
+        awake.muted = !awake.muted;
+        let muted = awake.muted;
+        awake.session.mute(muted);
+        tracing::info!(layer = "capture", reason = "mute control", muted, "microphone {}", if muted { "muted" } else { "unmuted" });
+        if muted {
             self.stop_learning("voice learning stopped");
         }
-        if let Some(awake) = &self.awake {
-            awake.session.mute(self.muted);
-        }
-        self.muted
+        muted
     }
 
     /// As the page's Reset: ends the session and forgets the conversation carried between sessions, here and on the server.
@@ -301,7 +304,7 @@ impl Voice {
                         tracing::info!("reopening the session with the conversation");
                         awake.hub.renewing = true;
                         awake.reopened = Some(Instant::now());
-                        awake.session = Session::open(&self.token, &self.cache, self.trace.continuation(), self.muted, self.hearing.clone());
+                        awake.session = Session::open(&self.token, &self.cache, self.trace.continuation(), awake.muted, self.hearing.clone());
                     } else {
                         ended = Some(format!("session closed: {reason}"));
                     }
@@ -421,6 +424,7 @@ mod tests {
     #[test]
     fn learning_stops_on_its_button_on_mute_and_on_dormancy_and_waits_for_the_microphone() {
         let (mut voice, path) = voice("stop");
+        voice.summon();
         voice.toggle_learning();
         voice.toggle_learning();
         assert_eq!((voice.voice_id().learning, mode(&voice)), (None, Mode::Open));
@@ -438,6 +442,20 @@ mod tests {
         voice.toggle_learning();
         report(&mut voice, Report::Error("the model is missing".into()));
         assert_eq!((voice.voice_id().learning, mode(&voice)), (None, Mode::Open));
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_mute_ends_with_its_session_so_the_wake_phrase_returns_when_dormant() {
+        let (mut voice, path) = voice("mute");
+        voice.summon();
+        assert!(voice.toggle_mute() && voice.muted());
+        voice.dismiss("dismissed");
+        assert!(!voice.awake() && !voice.muted(), "dormant, the spotter's gate is open again");
+        voice.summon();
+        assert!(!voice.muted(), "the next session starts with the microphone open");
+        voice.dismiss("dismissed");
+        assert!(!voice.toggle_mute() && !voice.muted(), "dormant, there is no mute to set");
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

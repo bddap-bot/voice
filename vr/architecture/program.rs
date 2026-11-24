@@ -74,7 +74,7 @@ pub struct Pass {
 const EASE: f32 = 0.07;
 /// Ticks each chunk is lit for while `shared` walks through them.
 const DWELL: u32 = 160;
-/// What the prelude's inbox holds; the host writes every byte it was given an address for.
+/// The longest update read, so that parsing one fits within a tick's instruction budget.
 const ROOM: i32 = 1024;
 
 #[derive(Clone, Copy, PartialEq)]
